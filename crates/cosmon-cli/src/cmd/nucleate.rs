@@ -59,7 +59,7 @@ pub struct Args {
     #[arg(
         long,
         value_name = "PATH",
-        conflicts_with_all = ["formula", "vars", "assign", "kind", "blocks", "blocked_by", "decayed_from", "no_parent", "refines", "refutes", "base"],
+        conflicts_with_all = ["formula", "vars", "var_files", "assign", "kind", "blocks", "blocked_by", "decayed_from", "no_parent", "refines", "refutes", "base"],
     )]
     pub(crate) from: Option<PathBuf>,
 
@@ -165,6 +165,13 @@ pub struct Args {
     /// Set a variable (repeatable: --var key=value)
     #[arg(long = "var", value_name = "KEY=VALUE")]
     pub(crate) vars: Vec<String>,
+
+    /// Read a variable value from a UTF-8 file (repeatable: --var-file key=path).
+    ///
+    /// The file contents are passed verbatim, including trailing newlines.
+    /// Explicit `--var` bindings override a same-named `--var-file` binding.
+    #[arg(long = "var-file", value_name = "KEY=PATH")]
+    pub(crate) var_files: Vec<String>,
 
     /// Path to the formulas directory (default: ./formulas)
     #[arg(long, value_name = "DIR")]
@@ -300,6 +307,24 @@ pub struct Args {
     /// default) stamps nothing and leaves the ambient resolution unchanged.
     #[arg(long, value_name = "BRANCH")]
     pub(crate) base: Option<String>,
+
+    /// Declare a path as protected reference input (repeatable).
+    ///
+    /// Ground truth the work is checked against — expected outputs, golden
+    /// files, a reference dataset — which the worker must read and never
+    /// modify. The path is relative to the repository root and may name a
+    /// file or a directory (a directory protects everything below it).
+    /// Persisted on the molecule and read three times: the worker's brief
+    /// lists the paths as read-only with the reason, `cs tackle` clears their
+    /// write bits in the worktree, and `cs done` refuses the merge
+    /// (`protected_path_modified`, exit 78) when the worker branch changed
+    /// any of them, naming each one. The operator overrides that refusal with
+    /// `cs done --allow-protected-change`.
+    ///
+    /// An absolute path or one containing `..` is refused here, before any
+    /// molecule is created.
+    #[arg(long = "protect", value_name = "PATH")]
+    pub(crate) protect: Vec<String>,
 }
 
 impl Args {
@@ -322,6 +347,7 @@ impl Args {
             class: None,
             assign: None,
             vars: Vec::new(),
+            var_files: Vec::new(),
             formulas_dir: None,
             role: None,
             store_dir: None,
@@ -335,6 +361,7 @@ impl Args {
             require_galaxy: false,
             adapter: None,
             base: None,
+            protect: Vec::new(),
         }
     }
 }
@@ -433,6 +460,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .map(validate_base_at_birth)
         .transpose()?;
 
+    // Validate `--protect` before anything is written, for the same reason:
+    // a protected path that can never match would make the harvest gate pass
+    // vacuously on exactly the molecule that asked for it.
+    let protected_paths = normalize_protect_flags(&args.protect)?;
+
     if let Some(ref from_path) = args.from {
         run_from_declarations(
             ctx,
@@ -450,7 +482,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("formula name is required (or use --from <PATH>)"))?;
         let (blocks, cross_blocks) = parse_link_refs(&args.blocks, "--blocks")?;
         let (blocked_by, cross_blocked_by) = parse_link_refs(&args.blocked_by, "--blocked-by")?;
-        let vars_parsed = parse_vars(&args.vars)?;
+        let mut vars_parsed = parse_var_files(&args.var_files)?;
+        vars_parsed.extend(parse_vars(&args.vars)?);
         let class = args
             .class
             .as_deref()
@@ -486,12 +519,35 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // edge as "operator already wired the lineage".
         let any_explicit_blocks = !blocks.is_empty() || !cross_blocks.is_empty();
         let any_explicit_blocked_by = !blocked_by.is_empty() || !cross_blocked_by.is_empty();
+        let auto_parent_requested =
+            auto_parent_requested(args, any_explicit_blocks, any_explicit_blocked_by);
         let decayed_from = resolve_decayed_from_explicit(
             args,
             any_explicit_blocks,
             any_explicit_blocked_by,
             &read_parent_env,
         )?;
+        // The inherited parent belongs to the worker's source galaxy. It is
+        // not a valid implicit local edge when this invocation targets a
+        // different galaxy; explicit edge flags remain strictly validated.
+        let decayed_from = if auto_parent_requested
+            && decayed_from
+                .as_ref()
+                .is_some_and(|parent| FileStore::new(&store_dir).load_molecule(parent).is_err())
+        {
+            eprintln!("auto-parent not found in this galaxy; skipping implicit DecayProduct link");
+            None
+        } else {
+            if auto_parent_requested {
+                if let Some(parent) = &decayed_from {
+                    eprintln!(
+                        "auto-linked to parent {parent} via DecayProduct \
+                         (pass --no-parent to disable)"
+                    );
+                }
+            }
+            decayed_from
+        };
         // b22c guard: when a worker nucleates from inside a formula step
         // that declares `requires_parent_link = true`, require that the
         // child carry an explicit `--blocks` or `--blocked-by` edge. The
@@ -553,8 +609,23 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             energy_budget_cap,
             args.adapter.as_deref(),
             base_branch,
+            protected_paths,
         )
     }
+}
+
+/// Validate and normalise the `--protect` values, deduplicated in the order
+/// given.
+fn normalize_protect_flags(raw: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for value in raw {
+        let path = cosmon_core::protected_paths::normalize_protected_path(value)
+            .map_err(|e| anyhow::anyhow!("--protect: {e}"))?;
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    Ok(out)
 }
 
 /// Validate a base branch named at nucleation (`--base`, or a declaration's
@@ -615,6 +686,20 @@ fn read_parent_env() -> Option<String> {
     std::env::var("COSMON_PARENT_MOL_ID").ok()
 }
 
+/// Whether the environment is the source of a prospective parent link.
+/// Explicit edge flags deliberately bypass this path and retain strict
+/// unknown-target validation.
+fn auto_parent_requested(
+    args: &Args,
+    any_explicit_blocks: bool,
+    any_explicit_blocked_by: bool,
+) -> bool {
+    !args.no_parent
+        && args.decayed_from.is_none()
+        && !any_explicit_blocks
+        && !any_explicit_blocked_by
+}
+
 /// Resolve the effective `--decayed-from` target for a single-formula
 /// nucleation, applying the auto-parent contract (ADR-037 lineage
 /// conservation). Precedence:
@@ -624,8 +709,8 @@ fn read_parent_env() -> Option<String> {
 /// 3. Any explicit `--blocks` / `--blocked-by` → `None` (the operator
 ///    already declared an edge; the env layer stays silent so we do
 ///    not silently add a second edge on top of an explicit contract).
-/// 4. `COSMON_PARENT_MOL_ID` env var set → parse and return it, and
-///    emit a stderr hint so the operator can see the implicit edge.
+/// 4. `COSMON_PARENT_MOL_ID` env var set → parse and return it. The caller
+///    confirms that it exists in the target galaxy before creating the link.
 /// 5. Otherwise → `None`.
 ///
 /// The parser is passed in so unit tests can stub it; the production
@@ -672,10 +757,6 @@ fn resolve_decayed_from_explicit(
              (pass --no-parent to disable the auto-parent contract)"
         )
     })?;
-    eprintln!(
-        "auto-linked to parent {id} via DecayProduct \
-         (pass --no-parent to disable)"
-    );
     Ok(Some(id))
 }
 
@@ -940,6 +1021,7 @@ fn run_single(
     energy_budget_cap: u32,
     adapter: Option<&str>,
     base_branch: Option<String>,
+    protected_paths: Vec<String>,
 ) -> anyhow::Result<()> {
     let formula = load_formula(formulas_dir, formula_name)?;
     let (result, _path) = nucleate_and_persist(
@@ -966,6 +1048,7 @@ fn run_single(
         energy_budget_cap,
         adapter,
         base_branch,
+        protected_paths,
     )?;
     emit_output(ctx, std::slice::from_ref(&result));
     Ok(())
@@ -1052,6 +1135,8 @@ fn run_from_declarations(
             // Declarations don't carry a per-molecule adapter pin today.
             None,
             base_branch,
+            // Nor protected paths: `--protect` is a flag of the single form.
+            Vec::new(),
         )
         .map_err(|e| anyhow::anyhow!("{}: {e}", decl_path.display()))?;
 
@@ -1187,6 +1272,8 @@ pub(crate) fn nucleate_for_spore(req: SporeNucleation<'_>) -> anyhow::Result<Nuc
         // (ADR-140) left to its own decision. A germinated polymer is aimed
         // at an integration branch by `cs run --resident --base` instead.
         None,
+        // Nor protected paths, for the same sealed-format reason.
+        Vec::new(),
     )?;
     Ok(result)
 }
@@ -1255,6 +1342,7 @@ fn nucleate_and_persist(
     energy_budget_cap: u32,
     adapter: Option<&str>,
     base_branch: Option<String>,
+    protected_paths: Vec<String>,
 ) -> anyhow::Result<(NucleateResult, PathBuf)> {
     // Validate the durable adapter pin's *grammar* up front so a malformed
     // family name fails the nucleation rather than being persisted as an
@@ -1369,6 +1457,8 @@ fn nucleate_and_persist(
         originating_branch: None,
         // Already validated by the caller (`validate_base_at_birth`).
         base_branch,
+        // Already normalised by the caller (`normalize_protect_flags`).
+        protected_paths,
         pending_step: None,
         merged_at: None,
         harvest_reason: None,
@@ -1732,6 +1822,24 @@ fn parse_vars(vars: &[String]) -> anyhow::Result<HashMap<String, String>> {
     Ok(map)
 }
 
+/// Parse `--var-file key=path` flags and read each value as UTF-8.
+///
+/// Reading happens before formula expansion or persistence, so an unreadable
+/// file cannot leave behind a partially nucleated molecule.
+fn parse_var_files(var_files: &[String]) -> anyhow::Result<HashMap<String, String>> {
+    let mut map = HashMap::new();
+    for assignment in var_files {
+        let (key, path) = assignment.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("invalid variable file format (expected key=path): {assignment}")
+        })?;
+        let value = fs::read_to_string(path).map_err(|error| {
+            anyhow::anyhow!("failed to read variable file for key `{key}` at `{path}`: {error}")
+        })?;
+        map.insert(key.to_owned(), value);
+    }
+    Ok(map)
+}
+
 /// Write `briefing.md` into the molecule directory with step descriptions.
 fn write_briefing(
     mol_dir: &std::path::Path,
@@ -1932,6 +2040,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_var_file_preserves_contents_and_explicit_vars_win() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("brief.txt");
+        fs::write(&path, "Énoncé de mission\n").unwrap();
+
+        let from_file = parse_var_files(&[format!("brief={}", path.display())]).unwrap();
+        assert_eq!(from_file["brief"], "Énoncé de mission\n");
+
+        let mut merged = from_file;
+        merged.extend(parse_vars(&["brief=override".to_owned()]).unwrap());
+        assert_eq!(merged["brief"], "override");
+    }
+
+    #[test]
+    fn parse_var_file_reports_invalid_assignment_and_missing_file() {
+        let invalid = parse_var_files(&["brief".to_owned()]).unwrap_err();
+        assert!(invalid.to_string().contains("expected key=path"));
+
+        let missing =
+            parse_var_files(&["brief=/definitely/missing/brief.txt".to_owned()]).unwrap_err();
+        assert!(missing.to_string().contains("failed to read variable file"));
+    }
+
     /// Minimal `Args` builder for the resolver tests — every field is a
     /// CLI flag, but the resolver only inspects a small subset.
     fn empty_args() -> Args {
@@ -1949,6 +2081,7 @@ mod tests {
             class: None,
             assign: None,
             vars: Vec::new(),
+            var_files: Vec::new(),
             formulas_dir: None,
             role: None,
             store_dir: None,
@@ -1962,6 +2095,7 @@ mod tests {
             require_galaxy: false,
             adapter: None,
             base: None,
+            protect: Vec::new(),
         }
     }
 

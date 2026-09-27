@@ -86,6 +86,7 @@ fn seed(
         expiry_policy: None,
         originating_branch: None,
         base_branch: None,
+        protected_paths: Vec::new(),
         pending_step: None,
         merged_at,
         non_integration: None,

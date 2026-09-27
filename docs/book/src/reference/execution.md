@@ -48,7 +48,7 @@ SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).
 * `--no-worktree` — Skip git worktree creation (use current directory)
 * `--dry-run` — Skip tmux session — print the prompt to stdout instead
 * `--permission-mode <PERMISSION_MODE>` — Permission mode for Claude (default: based on molecule kind)
-* `--force` — Reclaim the molecule's tmux session and respawn (instead of reporting the running one). Also thaws a frozen molecule: the respawned worker is live, so the molecule reads `running` again. A session left behind by a dead worker is reclaimed without this flag — there is nothing there to protect
+* `--force` — Boolean flag: reclaim the molecule's live tmux session and respawn the worker. Also thaws a frozen molecule, returning it to `running`. A session left behind by a dead worker is reclaimed without this flag
 * `--name <NAME>` — Override the tmux session name. ASCII alphanumerics and hyphens are kept; everything else is replaced with `-`. Max 50 chars. Default: `{slug}-{shortid}` derived from the molecule topic + id
 * `--bypass-seal` — Override the ADR-085 stress-test seal at dispatch (Layer 1).
 
@@ -58,7 +58,7 @@ SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).
    Free-text but non-empty; the runtime refuses a blank reason because the entire point of the receipt is to surface accountability for the override (ADR-085 §3.5).
 * `--adapter <NAME>` — Worker-Spawn Port Adapter to dispatch (ADR-097 / C6; ADR-108 Q5a chain).
 
-   Resolution order (highest priority first): this flag → formula-step `adapter = "<name>"` pin → `$COSMON_DEFAULT_ADAPTER` env var → per-galaxy `.cosmon/config.toml::[adapters.default]` → global `~/.config/cosmon/config.toml::[adapters.default]` → built-in `"local"` (the Ollama-backed in-process loop). Values are looked up against the registered Adapter table (`claude`, `aider`, `openai`, `anthropic`, `llama-cpp`, `local`, …). An unknown name aborts the dispatch with a typed `AdapterNotFound` carrying the list of available names — no silent fallback. To restore the legacy Claude-Code default pass `--adapter claude`, `export COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters.default] = "claude"` in either config file.
+   Resolution order (highest priority first): this flag → formula-step `adapter = "<name>"` pin → `$COSMON_DEFAULT_ADAPTER` env var → per-galaxy `.cosmon/config.toml::[adapters] default = "…"` → global `~/.config/cosmon/config.toml::[adapters] default = "…"` → built-in `"local"` (the Ollama-backed in-process loop). Values are looked up against the registered Adapter table (`claude`, `aider`, `openai`, `anthropic`, `llama-cpp`, `local`, …). An unknown name aborts the dispatch with a typed `AdapterNotFound` carrying the list of available names — no silent fallback. To restore the legacy Claude-Code default pass `--adapter claude`, `export COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters]` then `default = "claude"` in either config file.
 
    # Capability gate (noogram/cosmon #4)
 
@@ -75,7 +75,7 @@ SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).
 
    **Strong is never inherited.** Every dispatch resolves the model fresh; a strong (frontier) model is reachable only from this flag or a formula-step pin — a positive per-molecule act — never from a config/env *default* that could silently make an entire fleet expensive (the `/model`-hack leak this axis exists to close).
 
-   The id is carried **opaquely**: cosmon does not check that it is legal for the resolved adapter. A recognisable cross-family pair produces a non-blocking advisory, but the Adapter remains the authority because custom endpoints can legitimately serve another family's model. Config `default_model` rows are scoped per adapter because a model id only has meaning inside its adapter.
+   The id is carried **opaquely**: cosmon keeps no model allowlist. When both the resolved adapter and model identify different named provider families, however, the pair is refused before spawn because the stock adapter cannot run it. Self-hosted endpoints and unrecognised model ids remain opaque and pass through. Config `default_model` rows are scoped per adapter because a model id only has meaning inside its adapter.
 * `--role-hint <ROLE>` — Forensic-only role-of-origin hint propagated through to [`EventV2::AdapterSelected`](cosmon_core::event_v2::EventV2::AdapterSelected) (ADR-097 / C6).
 
    Cosmon does not interpret this value — it is the academy-shim's channel for preserving the driver's vocabulary (a `--role researcher` invocation on the driver side becomes `role_hint: "researcher"` on the cosmon event), so the role of origin survives the seam between driver (roles) and cosmon (adapters). Optional; absent for direct operator invocations.
@@ -98,7 +98,7 @@ SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).
 
    `--model` pins *which model* runs; this pins *how it runs*, by handing the pair to the adapter's own override channel:
 
-   - `codex` → one `-c key=value` per entry, e.g. `--harness model_reasoning_effort=high`; - `claude` → `--<key> <value>` per entry, e.g. `--harness effort=xhigh`; - any other adapter → the dispatch **fails at launch, naming the adapter**. A setting is never silently dropped.
+   - `codex` → one `-c key=value` per entry, e.g. `--harness model_reasoning_effort=high`. To pin the service tier for this dispatch, use `--harness service_tier=default` for Standard processing (**Fast off**), or `--harness service_tier=priority` for Fast processing. `fast` is also accepted as the Fast spelling; Fast availability depends on the selected model and account; - `claude` → `--<key> <value>` per entry, e.g. `--harness effort=xhigh`; - any other adapter → the dispatch **fails at launch, naming the adapter**. A setting is never silently dropped.
 
    # cosmon recognises no keys
 
@@ -207,6 +207,9 @@ SEE ALSO: cs complete (state transition only), cs tackle (counterpart).
    By default the `post_merge` hook is **bounded to the trunk**: it fires only when the resolved integration base is the galaxy's reference trunk (`origin/HEAD`, or `main` as a last resort). The hook *deploys* — the canonical `just install` refreshes the on-disk `cs` binary — so running it after a merge into an *older* parked branch would silently rejuvenate the operator's tool, dropping whatever the parked branch predates (task-20260725-b64f). When the merge targets a parked branch the hook is skipped with a warning naming the reason.
 
    This flag is the operator's explicit escape hatch for the rare-but- legitimate case of deploying from a parked branch on purpose. No effect when no `post_merge` hook is configured or when the merge already targets the trunk.
+* `--allow-protected-change` — Merge even though the worker branch changed a path the molecule declared protected (`cs nucleate --protect`, issue #94).
+
+   Without it, `cs done` refuses such a branch (`protected_path_modified`, exit 78) and names each protected path it changed. Protected paths are reference inputs; a branch that rewrites them can make any result "match". Pass this flag only when you, the operator, have read the change and it is intended — for example a reference dataset that was itself wrong. No effect on a molecule that declared no protected path.
 
 
 
@@ -342,6 +345,9 @@ SEE ALSO: cs tackle (single node, no runtime), docs/handbook.md#one-primitive.
    The base twin of `--adapter`, with the same two-rung precedence: every **pin-less** molecule this run dispatches — one with no persisted base — is tackled with `--base <BRANCH>`, which persists the base on the molecule so its `cs done` merges into `<BRANCH>` rather than the ambient HEAD. A molecule that already carries a base (`cs nucleate --base`, an earlier `cs tackle --base`) keeps it: the per-molecule base wins.
 
    This is how a germinated polymer (`cs spore run`, `cs nucleate --from`) is aimed at an integration branch without tackling each node by hand. The branch must exist locally; a dangling base is refused before the loop starts.
+* `--harness <KEY=VALUE>` — **Opt-in run-wide harness-settings directive** (resident mode only, repeatable — ADR-177 / issue #86).
+
+   The harness twin of `--adapter`, but occupying rung 1 of the *harness* chain rather than the adapter chain: `cs tackle --harness k=v`'s rung, applied run-wide. Unlike `--adapter` and `--base` there is no per-molecule pin to defer to — `[steps.harness]` lives on the executing formula step, not the molecule — so this directive is stamped onto **every** dispatch the run makes (static frontier nodes and dynamically-nucleated children alike) as one `--harness k=v` per key, and merged **per key** with the step's own `[steps.harness]` table by the shelled `cs tackle`, the operator's flag winning (ADR-177 Decision 2). Grammar and semantics are exactly `cs tackle --harness`'s: `key=value`, cosmon recognises no keys and carries the pair verbatim to the adapter's native override channel. Absent (the default), no `--harness` flag reaches any dispatch and each step's own `[steps.harness]` pin, if any, is unmasked.
 
 
 

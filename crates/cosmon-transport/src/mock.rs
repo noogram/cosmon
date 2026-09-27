@@ -15,6 +15,15 @@ use cosmon_core::transport::{
 pub enum MockCall {
     Spawn {
         agent_id: String,
+        /// The executable the spawn was asked to run. Recorded because under a
+        /// root demotion it is the privilege-dropping helper, not the adapter
+        /// binary — a test cannot tell the two compositions apart without it.
+        command: String,
+        /// The argv the spawn was asked to pass, recorded so a test can assert
+        /// the worker's launch posture actually reached the port. It used to
+        /// be unobservable here, which is how the empty-argv dispatch of issue
+        /// #75 survived a green suite.
+        args: Vec<String>,
         /// The working directory the spawn was asked to use, recorded so a
         /// test can assert the ADR-079 §5 obligation-3 cwd actually reached
         /// the port rather than merely being computed by the caller.
@@ -141,6 +150,8 @@ impl TransportBackend for MockBackend {
 
         state.calls.push(MockCall::Spawn {
             agent_id: agent.id.to_string(),
+            command: agent.command.clone(),
+            args: agent.args.clone(),
             cwd: agent.cwd.clone(),
         });
 

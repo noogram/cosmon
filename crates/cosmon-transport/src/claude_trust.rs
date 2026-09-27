@@ -392,6 +392,41 @@ pub fn pregrant_startup_consent(
     })
 }
 
+/// Resolve a worker's consent files and pre-grant its startup consent for
+/// `workspace` — the one routine every Claude spawn path calls.
+///
+/// [`consent_paths`] followed by [`pregrant_startup_consent`]. The pair used to
+/// be spelled out at each call site, and the in-process dispatch path (the RPP
+/// API) was written without it: its workers stopped on the folder-trust dialog
+/// on a fresh deployment while `cs tackle`, `cs thaw` and the patrol respawn
+/// pre-granted (issue #81 point 4). One entry point makes that omission a
+/// missing call rather than a missing half.
+///
+/// `config_dir` and `env_lookup` must describe the environment the **worker**
+/// will read, not necessarily the caller's: a server that spawns under a
+/// filtered environment passes that environment, or it pre-grants a file the
+/// worker never opens.
+///
+/// Returns the resolved paths as well as the outcome, because a root
+/// dispatcher that demotes has to hand those files to the demote target (see
+/// `crate::demote_provisioning`).
+///
+/// # Errors
+///
+/// Any [`TrustError`]. Callers **must** treat an error as a spawn refusal.
+pub fn pregrant_worker_consent<F>(
+    config_dir: Option<&str>,
+    env_lookup: F,
+    workspace: &Path,
+) -> Result<(ConsentPaths, ConsentPregrant), TrustError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let paths = consent_paths(config_dir, env_lookup)?;
+    let outcome = pregrant_startup_consent(&paths, workspace)?;
+    Ok((paths, outcome))
+}
+
 /// Assert both `.claude.json` keys — `hasCompletedOnboarding` at the root and
 /// `projects.<workspace_key>.hasTrustDialogAccepted` — in one read-modify-write.
 ///

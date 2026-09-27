@@ -6,6 +6,13 @@ cs 0.6.0 — Cosmon agent orchestrator
 
 Usage: cs [OPTIONS] <COMMAND>
 
+START HERE — nucleate → tackle → peek → whisper/done:
+  cs nucleate task-work --var-file topic=<file>   # long statement, from a file
+  cs tackle <id> --adapter claude                 # spawn a worker
+  cs peek                                         # watch it (or: cs wait <id> &)
+  cs whisper <id> --file fix.md                   # correct it while still open
+  cs done <id>                                    # merge + teardown (required)
+
 Molecule lifecycle:
   spark                Spark — capture a one-line operator intent into the Inbox (ADR-061)
   drop                 Drop — universal Inbox gesture (hotkey / zsh widget / menubar) → `cs spark`
@@ -201,3 +208,4 @@ Registering a service — two métiers, two tools:
 Run 'cs help <command>' for detailed help on a specific command.
 Run 'cs help guide' for the operator handbook.
 Run 'cs help charter' to see the unified visual charter swatch.
+Who does what — you, the pilot, and the workers: docs/book/src/explanation/pilot-and-workers.md (or https://docs.noogram.org/explanation/pilot-and-workers.html).

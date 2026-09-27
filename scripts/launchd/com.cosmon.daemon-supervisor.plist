@@ -24,6 +24,17 @@
   KeepAlive = true: if the supervisor itself crashes, launchd respawns
   it. The 5s throttle window keeps a crash loop from hammering launchd.
 
+  AbandonProcessGroup is deliberately ABSENT here, and that is not the
+  oversight it was in the scheduler plist. The key matters for a
+  ONE-SHOT job that dispatches work meant to outlive it: the scheduler
+  returns in milliseconds and its patrols must survive, so the default
+  group-kill silently destroyed them. This job is the opposite shape —
+  it never exits on purpose, and its children are supervised by pid in
+  its own memory. A child that outlived the supervisor would be an
+  orphan nobody tracks, respawned in duplicate the moment launchd brings
+  the supervisor back. The group-kill is the correct teardown here:
+  supervisor down, children down, clean respawn.
+
   NOT auto-installed. The operator runs:
       scripts/install-daemon-supervisor.sh install
       scripts/install-daemon-supervisor.sh status

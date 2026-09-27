@@ -600,8 +600,18 @@ reason = "durable integration-base pin (issue #69) — names a local git branch 
 
 [[flag_only_in_cs]]
 verb = "nucleate"
+flag = "--protect"
+reason = "protected reference inputs (issue #94) — repository-relative paths the worker must not modify, enforced by `cs done` on the operator's checkout. An RPP tenant sees no repository and does not harvest through cs-thin, so it has no path to name and no merge the protection could refuse."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
 flag = "--assign"
 reason = "explicit worker assignment — local fleet concern."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--var-file"
+reason = "client-side sugar for `--var KEY=<file contents>`: it reads a file on the caller's machine before nucleation, so nothing reaches the POST body that `--var` does not already carry; cs-thin can grow the same sugar without a server change."
 
 [[flag_only_in_cs]]
 verb = "nucleate"

@@ -214,7 +214,10 @@ impl Action {
             // into a worker pane. Pure provenance — it says who wrote to a
             // composer, never that a molecule advanced. The spec transition
             // system must not read a nudge as a lifecycle action.
-            | EventV2::InputInjected { .. } => None,
+            | EventV2::InputInjected { .. }
+            // Issue #40: the observed delivery of that injection. Still
+            // provenance, not a lifecycle action.
+            | EventV2::BriefingDelivery { .. } => None,
         }
     }
 }

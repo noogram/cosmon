@@ -10,12 +10,31 @@ lesson.
 
 ## 0. What you need
 
-Three things beyond `cs` itself, because a cosmon worker is a real terminal
-session doing real git work:
+Two things beyond `cs` itself either way, because a cosmon worker is a real
+terminal session doing real git work:
 
 ```sh
 git --version         # each worker runs on its own branch, in its own worktree
 tmux -V               # each worker lives in a tmux session
+```
+
+Then it forks on what runs the worker:
+
+**You have Claude Code.** One line of config and you are done — no backend to
+stand up:
+
+```sh
+claude --version       # confirm it is on PATH
+```
+
+Dispatch with `cs tackle <id> --adapter claude` below, or set
+`default = "claude"` under `[adapters]` in `.cosmon/config.toml` so you can
+drop the flag. No Ollama, no model to pull, nothing to serve.
+
+**You want a local model instead.** A model backend has to actually be
+running and serving something before you dispatch:
+
+```sh
 ollama serve          # a model backend on localhost:11434 (the default adapter)
 ollama pull qwen3:8b  # …serving a model. `serve` alone serves nothing
 ```
@@ -31,23 +50,28 @@ The local loop needs a model that emits structured `tool_calls` on
 merely *looks* more capable is often the wrong choice —
 `qwen2.5-coder:7b`, for instance, pastes its tool call into the message
 text as raw JSON, which lands in your output verbatim instead of creating
-a file. Other models, and how to switch, are in
-`docs/guides/local-model-selection.md`.
+a file. vLLM and llama-server work the same way, at their own endpoint; both,
+other models, and how to switch, are in `docs/guides/local-model-selection.md`
+(the OpenAI-compatible servers guide).
 
-Missing one? `brew install git tmux` / `apt install git tmux`, and see
-[Set up cosmon](../tutorials/setup.md) for the backend options (a local
-OpenAI-compatible endpoint by default, or `--adapter claude` / `aider` / `codex`
-to pilot a coding-agent CLI you already use).
+Missing `git` or `tmux`? Neither is installed by cosmon, and on a machine with
+no package manager yet there is a step before the install step — see
+[Set up cosmon](../tutorials/setup.md), which spells out how to get `git`,
+`tmux` and Ollama from nothing on macOS and Linux.
 
 ## 1. Install `cs`
 
 ```sh
 curl -fsSL https://noogram.org/cosmon/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"   # skip if the installer did not ask for it
 cs --version
 ```
 
-Homebrew and from-source routes, plus what that script does line by line, are on
-[Install cosmon](./install.md).
+`~/.local/bin` is not on the default `PATH` on a fresh account; without the
+`export` line `cs --version` exits 127. Put it in your shell profile too.
+
+Homebrew and from-source routes, what that script does line by line, and why
+`man cs` is not installed are on [Install cosmon](./install.md).
 
 ## 2. Initialise a project
 
@@ -58,9 +82,14 @@ cd ~/path/to/your/project
 cs init
 ```
 
-That creates `.cosmon/`, the directory holding **all** of cosmon's state: your
-units of work, their event logs, and the canonical recipes. Later commands walk
-up to find it, the way `git` finds `.git/`. Running it twice is safe.
+That creates `.cosmon/`, the directory holding all of cosmon's **project** state:
+your units of work, their event logs, and the canonical recipes. Later commands
+walk up to find it, the way `git` finds `.git/`. Running it twice is safe.
+
+`cs init` also writes three files outside `.cosmon/` — a `.gitleaks.toml` at the
+repository root and two per-user files in your home directory. They are listed,
+with what removes them, in
+[Set up cosmon → what `cs init` writes](../tutorials/setup.md#what-cs-init-writes-and-where).
 
 ## 3. Create a unit of work
 
@@ -76,7 +105,8 @@ state, a current step, and a durable trace on disk.
 id:
 
 ```
-Nucleated task-20260711-a1b2 (task-work): pending
+Nucleated molecule task-20260711-a1b2 from formula task-work
+  Steps: 2
 ```
 
 Yours will differ; substitute it everywhere below.
@@ -86,6 +116,9 @@ Yours will differ; substitute it everywhere below.
 ```sh
 cs tackle task-20260711-a1b2
 ```
+
+If you picked "You have Claude Code" in step 0, add `--adapter claude` (or skip
+the flag if you already set `default = "claude"` in `.cosmon/config.toml`).
 
 **Tackle** creates a git worktree and branch for this molecule, opens a tmux
 session, and launches your agent inside it with the briefing injected. It returns

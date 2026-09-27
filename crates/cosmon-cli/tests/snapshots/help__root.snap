@@ -2,6 +2,13 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
+START HERE — nucleate → tackle → peek → whisper/done:
+  cs nucleate task-work --var-file topic=<file>   # long statement, from a file
+  cs tackle <id> --adapter claude                 # spawn a worker
+  cs peek                                         # watch it (or: cs wait <id> &)
+  cs whisper <id> --file fix.md                   # correct it while still open
+  cs done <id>                                    # merge + teardown (required)
+
 Cosmon keeps a fleet of AI agents on track. Run several on one codebase and a session will crash, or fill its context window and forget what it was doing, and you lose track of which agent was on what — cosmon gives each a durable identity and writes every step to disk, so a dead session resumes where it stopped and you can always see who is doing what. More generally it runs missions you delegate to AI: it breaks a hard problem into typed, ordered steps, executes them, and records every step so the finished work carries an auditable trace — the reasoning matters as much as the result. Nothing in it is code-specific; it aims just as well at research-grade missions, where a technical lock demands long, decomposed, checkable work. It is model-agnostic, sitting above any model, so your context and data stay with you and a mission can run entirely on local models. Cosmon is the kernel of noogram — the open-source substrate for composing, piloting and auditing missions entrusted to AI systems.
 
 PILOT WORKFLOW — the full cycle is nucleate → tackle → wait → done:
@@ -162,7 +169,7 @@ Per-Adapter axes are read from BUILT_IN_AXES at crates/cosmon-core/src/spawn_sea
 ADAPTERS — canonical names and their per-Adapter axes (registry projection, ADR-106 D2/D4):
   claude        (TmuxPane,  External, Vendor)    Claude Code CLI in a tmux pane — vendor cloud.
   aider         (TmuxPane,  External, Vendor)    aider CLI in a tmux pane — non-LLM coding agent.
-  codex         (TmuxPane,  External, Vendor)    OpenAI Codex CLI in a tmux pane — vendor cloud. Interactive steerable TUI by default (whisperable, parity with claude); [adapters.codex].mode = "exec" for the legacy fire-and-forget 'codex exec' batch path.
+  codex         (TmuxPane,  External, Vendor)    OpenAI Codex CLI in a tmux pane — vendor cloud. Interactive steerable TUI by default (whisperable, parity with claude); [adapters.codex].mode = "exec" for the legacy fire-and-forget 'codex exec' batch path. Strips OPENAI_API_KEY/CODEX_API_KEY from the worker by default (a codex login/ChatGPT worker must not be diverted onto a stale key frozen into the tmux server's env); [adapters.codex].pass_api_key = true opts back into pass-through for an installation that bills codex by API key.
   opencode      (TmuxPane,  External, Vendor)    opencode (sst/opencode) CLI in a tmux pane — vendor cloud.
   openai        (InProcess, Cosmon,   Vendor)    OpenAI chat-completions HTTP, in-process loop (cosmon-agent-harness).
   anthropic     (InProcess, Cosmon,   Vendor)    Anthropic messages HTTP, in-process loop (cosmon-agent-harness).
@@ -193,14 +200,14 @@ MODEL SELECTION (per-molecule, ADR-097). A model pin is the sibling of the adapt
   '~/.config/cosmon/config.toml::[adapters.<name>.default_model]'  → global default (only when the per-galaxy config is silent).
   floor 'None'                      → cosmon pins NO model; the adapter's own default applies (byte-identical to no pin — a strong model is unreachable from silence).
 
-The id is carried opaquely. A recognisable cross-family pair prints a non-blocking advisory, but cosmon still dispatches: a custom Adapter endpoint may legitimately serve another family's model, so the Adapter remains authoritative. The claude adapter carries the pin through the ANTHROPIC_MODEL per-session closure-shadow at spawn (no shared-state mutation); the Direct-API adapters take it above their config default_model.
+The id is carried opaquely: cosmon keeps no model allowlist. A decidable mismatch between named adapter/model provider families is refused before spawn; unknown ids and self-hosted endpoints remain opaque and pass through. The claude adapter carries the pin on its launch argv as '--model <ID>', which Claude Code ranks above any inherited ANTHROPIC_MODEL, on both 'cs tackle' and the API dispatch path, and also through the ANTHROPIC_MODEL per-session closure-shadow at spawn (no shared-state mutation); the Direct-API adapters take it above their config default_model.
 
 HARNESS SETTINGS (per-step, how the model runs — ADR-177). The model axis pins WHICH model runs; this pins HOW it runs, by handing an opaque 'key=value' pair to the adapter's own override channel. Cosmon recognises ZERO keys: the pair is carried verbatim and logged verbatim as sent, never normalised, and an unknown key fails in the harness's own parser at launch rather than against a cosmon allowlist nobody can version.
   'cs tackle --harness <KEY>=<VALUE>'  → repeatable; CLI flag wins.
   formula step '[steps.harness]'       → the per-workflow pin a spore carries.
   the harness's own config            → reached by cosmon emitting NO key; it is silence, not a cosmon surface.
 
-Merged PER KEY, never wholesale: overriding one key leaves every sibling the step pinned exactly where it was. Carriers: codex takes one '-c key=value' per entry, claude takes '--<key> <value>'; any other adapter REFUSES a non-empty map at launch, naming itself — a setting is never silently dropped. The '[adapters.<name>.harness]' config level is deferred (it would sit beside the wholesale-replace 'extra_args' on the same node).
+Merged PER KEY, never wholesale: overriding one key leaves every sibling the step pinned exactly where it was. Carriers: codex takes one '-c key=value' per entry (including 'service_tier=default' for Standard / Fast off, and 'service_tier=priority' or 'service_tier=fast' for Fast; Fast availability depends on the selected model and account); claude takes '--<key> <value>'; any other adapter REFUSES a non-empty map at launch, naming itself — a setting is never silently dropped. The '[adapters.<name>.harness]' config level is deferred (it would sit beside the wholesale-replace 'extra_args' on the same node).
 
 Each resolved key mints one 'harness_setting_selected' line carrying { key, value, selection_source (flag|formula), argv_fragment, channel, harness_version?, launch_status }. That receipt is EX-ANTE: read it as DISPATCHED at, never "ran at". Paired with the harness's own echo ('effort_observed', parsed from the harness log and never inferred from the pin), the strongest true sentence is "cosmon requested E through channel C; the harness's own log reported E" — a two-party agreement, not a proof of behaviour.
 

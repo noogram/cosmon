@@ -931,6 +931,87 @@ acceptance = "Done"
     let explicit_links = explicit_state["typed_links"].as_array().unwrap();
     assert_eq!(explicit_links.len(), 1, "only the explicit BlockedBy edge");
     assert_eq!(explicit_links[0]["rel"], "blocked_by");
+
+    // Step 7 — an inherited parent from another galaxy is not a local edge
+    // target. The implicit link is skipped, while explicit unknown targets
+    // still fail under the normal dangling-reference guard.
+    let foreign_parent = "task-20260925-dead";
+    let foreign_out = cosmon_bin()
+        .args([
+            "--json",
+            "nucleate",
+            "auto-parent",
+            "--var",
+            "topic=other-galaxy",
+            "--store-dir",
+            state_dir.to_str().unwrap(),
+            "--formulas-dir",
+            formulas_dir.to_str().unwrap(),
+        ])
+        .env("COSMON_PARENT_MOL_ID", foreign_parent)
+        .output()
+        .expect("nucleate with foreign parent failed");
+    assert!(
+        foreign_out.status.success(),
+        "foreign parent must not block nucleation: {}",
+        String::from_utf8_lossy(&foreign_out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&foreign_out.stderr)
+            .contains("auto-parent not found in this galaxy"),
+        "foreign parent skip should be visible on stderr"
+    );
+    let foreign_id = serde_json::from_str::<serde_json::Value>(
+        String::from_utf8_lossy(&foreign_out.stdout).trim(),
+    )
+    .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let foreign_state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(
+            state_dir
+                .join("fleets/default/molecules")
+                .join(&foreign_id)
+                .join("state.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        foreign_state
+            .get("typed_links")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty),
+        "foreign parent must not create an implicit local link"
+    );
+
+    for flag in ["--blocked-by", "--decayed-from"] {
+        let rejected = cosmon_bin()
+            .args([
+                "nucleate",
+                "auto-parent",
+                "--var",
+                "topic=explicit-unknown",
+                flag,
+                foreign_parent,
+                "--store-dir",
+                state_dir.to_str().unwrap(),
+                "--formulas-dir",
+                formulas_dir.to_str().unwrap(),
+            ])
+            .env("COSMON_PARENT_MOL_ID", foreign_parent)
+            .output()
+            .expect("explicit unknown target command should run");
+        assert!(
+            !rejected.status.success(),
+            "{flag} must retain strict unknown-target validation"
+        );
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("references unknown molecule"),
+            "{flag} should name the dangling reference"
+        );
+    }
 }
 
 /// `cs nucleate --decayed-from <id>` makes the information edge first-class

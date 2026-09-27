@@ -91,11 +91,9 @@ pub struct Args {
     #[arg(long)]
     pub permission_mode: Option<String>,
 
-    /// Reclaim the molecule's tmux session and respawn (instead of
-    /// reporting the running one). Also thaws a frozen molecule: the
-    /// respawned worker is live, so the molecule reads `running` again.
-    /// A session left behind by a dead worker is reclaimed without this
-    /// flag — there is nothing there to protect.
+    /// Boolean flag: reclaim the molecule's live tmux session and respawn
+    /// the worker. Also thaws a frozen molecule, returning it to `running`.
+    /// A session left behind by a dead worker is reclaimed without this flag.
     #[arg(long)]
     pub force: bool,
 
@@ -154,16 +152,16 @@ pub struct Args {
     ///
     /// Resolution order (highest priority first): this flag → formula-step
     /// `adapter = "<name>"` pin → `$COSMON_DEFAULT_ADAPTER` env var →
-    /// per-galaxy `.cosmon/config.toml::[adapters.default]` → global
-    /// `~/.config/cosmon/config.toml::[adapters.default]` → built-in
+    /// per-galaxy `.cosmon/config.toml::[adapters] default = "…"` → global
+    /// `~/.config/cosmon/config.toml::[adapters] default = "…"` → built-in
     /// `"local"` (the Ollama-backed in-process loop).
     /// Values are looked up against the registered Adapter table (`claude`,
     /// `aider`, `openai`, `anthropic`, `llama-cpp`, `local`, …). An unknown
     /// name aborts the dispatch with a typed `AdapterNotFound` carrying the
     /// list of available names — no silent fallback. To restore the legacy
     /// Claude-Code default pass `--adapter claude`, `export
-    /// COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters.default] =
-    /// "claude"` in either config file.
+    /// COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters]` then
+    /// `default = "claude"` in either config file.
     ///
     /// # Capability gate (noogram/cosmon #4)
     ///
@@ -217,12 +215,12 @@ pub struct Args {
     /// config/env *default* that could silently make an entire fleet
     /// expensive (the `/model`-hack leak this axis exists to close).
     ///
-    /// The id is carried **opaquely**: cosmon does not check that it is
-    /// legal for the resolved adapter. A recognisable cross-family pair
-    /// produces a non-blocking advisory, but the Adapter remains the
-    /// authority because custom endpoints can legitimately serve another
-    /// family's model. Config `default_model` rows are scoped per adapter
-    /// because a model id only has meaning inside its adapter.
+    /// The id is carried **opaquely**: cosmon keeps no model allowlist. When
+    /// both the resolved adapter and model identify different named provider
+    /// families, however, the pair is refused before spawn because the stock
+    /// adapter cannot run it. Self-hosted endpoints and unrecognised model ids
+    /// remain opaque and pass through. Config `default_model` rows are scoped
+    /// per adapter because a model id only has meaning inside its adapter.
     #[arg(long, value_name = "MODEL_ID")]
     pub model: Option<String>,
 
@@ -301,7 +299,11 @@ pub struct Args {
     /// the pair to the adapter's own override channel:
     ///
     /// - `codex` → one `-c key=value` per entry, e.g.
-    ///   `--harness model_reasoning_effort=high`;
+    ///   `--harness model_reasoning_effort=high`. To pin the service tier for
+    ///   this dispatch, use `--harness service_tier=default` for Standard
+    ///   processing (**Fast off**), or `--harness service_tier=priority` for
+    ///   Fast processing. `fast` is also accepted as the Fast spelling;
+    ///   Fast availability depends on the selected model and account;
     /// - `claude` → `--<key> <value>` per entry, e.g. `--harness effort=xhigh`;
     /// - any other adapter → the dispatch **fails at launch, naming the
     ///   adapter**. A setting is never silently dropped.
@@ -1008,27 +1010,26 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
-    // 3a''-C5a. Non-blocking (adapter, model) composition advisory.
+    // 3a''-C5a. Fail-closed (adapter, model) composition gate.
     //
-    //     A recognisable cross-family pair is worth naming because a stock
-    //     Adapter may reject it upstream. It is not grounds for refusal:
-    //     Adapters such as codex are configurable open-source clients, and a
-    //     custom base_url can legitimately serve a family that differs from
-    //     the Adapter name. Cosmon therefore warns, forwards the opaque pin,
-    //     and lets the Adapter's own resolution and fallback remain the source
-    //     of truth.
+    //     Everything above resolves each axis. Nothing above asks whether the
+    //     resolved pair can run. Issue #89 reproduced the consequence on a
+    //     force re-tackle: the formula's `claude-*` pin beat model defaults,
+    //     the project's Codex adapter default won the other axis, Codex
+    //     rejected the pair after launch, and the worker sat idle.
     //
-    //     The advisory is DERIVED, never tabulated: the adapter's family comes
+    //     The refusal is DERIVED, never tabulated: the adapter's family comes
     //     from its `base_url` (else its name lineage) and the model's from its
     //     id prefix, through the same resolution the ADR-147 diversity floor
     //     already uses. So a new `gpt-…` or `claude-…` needs no edit here, and
     //     anything not resolvable to a named vendor — a local endpoint, an
     //     undeclared adapter, an unrecognised id — returns `NotChecked` and is
-    //     silent.
+    //     passed through. Refusing unknowns would break self-hosted endpoints;
+    //     refusing a decidable mismatch prevents the known idle-worker state.
     //
-    //     Placed before the C2 attribution event so the operator sees the
-    //     caveat beside dispatch while the normal attribution path remains
-    //     unchanged.
+    //     Placed before the C2 attribution event and every worktree/tmux side
+    //     effect, so a bad pair leaves the molecule re-tacklable and spends no
+    //     worker slot.
     if let Some(model) = preferred_model.as_deref() {
         let composition = cosmon_core::provider_diversity::classify_model_composition(
             project_config.adapters.as_ref(),
@@ -1040,15 +1041,20 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             model_family,
         } = &composition
         {
-            eprintln!(
-                "cs tackle: advisory — model '{model}' looks cross-family for \
-                 adapter '{}': the adapter resolves to '{adapter_family}' and the \
-                 model to '{model_family}'. It may be rejected upstream and fall \
-                 back; cosmon will still dispatch because the Adapter's configured \
-                 endpoint is authoritative. The pin came from {}.",
+            return Err(anyhow::anyhow!(
+                "cs tackle: refusing to dispatch molecule {} — adapter '{}' \
+                 cannot run pinned model '{model}': the adapter resolves to the \
+                 '{adapter_family}' family and the model to '{model_family}'. \
+                 Dispatching would let the adapter reject the model after spawn \
+                 and leave an idle worker. The pin came from {}. Select a \
+                 {adapter_family} model or a {model_family} adapter. Self-hosted \
+                 endpoints remain opaque; declare their base_url under \
+                 [adapters.{}] so provider-family resolution uses the endpoint.",
+                mol_id.as_str(),
                 adapter.as_str(),
                 cosmon_core::tackle_plan::describe_model_source(&model_source),
-            );
+                adapter.as_str(),
+            ));
         }
     }
 
@@ -1115,6 +1121,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             .as_ref()
             .and_then(|cfg| cfg.entry(adapter.as_str()));
         let base_url = resolve_local_base_url(adapter_entry);
+        let api_key = local_api_key(adapter_entry);
         let (effective_model, origin) =
             resolve_local_model_with_origin(preferred_model.as_deref(), adapter_entry);
 
@@ -1131,6 +1138,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             if let Err(e) = preflight_local_adapter_model(
                 &base_url,
                 &effective_model,
+                &api_key,
                 std::time::Duration::from_secs(PREFLIGHT_TIMEOUT_SECS),
             ) {
                 return Err(anyhow::anyhow!(
@@ -1464,6 +1472,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             run_pressure_check(ctx, &store, &repo_root);
         }
         create_worktree(&repo_root, &wt_dir, &branch_name, start_point.as_deref())?;
+        // Issue #94: protected reference inputs are read-only on disk, so an
+        // accidental write fails at once. `cs done` is the enforcement.
+        for failure in
+            cosmon_runtime::tackle_exec::mark_protected_read_only(&wt_dir, &mol.protected_paths)
+        {
+            eprintln!("warning: protected path left writable: {failure}");
+        }
         wt_dir
     };
     tracing::info!(
@@ -3486,6 +3501,7 @@ fn molecule_brief(mol: &MoleculeData) -> cosmon_core::tackle_plan::MoleculeBrief
         current_step: mol.current_step,
         total_steps: mol.total_steps,
         variables: &mol.variables,
+        protected_paths: &mol.protected_paths,
     }
 }
 
@@ -4291,8 +4307,8 @@ pub(super) fn spawn_and_prompt(
     // Adapter-uniform: each arm carries it in its own way — the claude arm
     // through the `ANTHROPIC_MODEL` closure-shadow, the Direct-API arms as
     // the top-priority override above their `[adapters.<name>].default_model`.
-    // The id is opaque. A recognisable cross-family pair is advisory only;
-    // the Adapter's configured endpoint remains authoritative.
+    // The id is opaque after the pre-spawn composition gate has refused every
+    // decidable cross-family mismatch. Unknown/self-hosted pairs pass through.
     preferred_model: Option<&str>,
     // The resolved adapter's strong cost-class set — threaded to the claude
     // branch's probe-fallback layer so a cheap pin never silently escalates
@@ -4423,10 +4439,16 @@ pub(super) fn spawn_and_prompt(
         // fourth external-CLI subprocess adapter. Same tmux-pane shape as
         // codex: spawn `opencode run '<prompt>'` into a pane, then assert
         // liveness through the substrate-agnostic `LiveProbe` contract.
-        "opencode" => {
-            spawn_opencode_and_prompt(backend, wid, session_name, worktree_path, prompt, mol)
-                .map(|()| SpawnOutcome::default())
-        }
+        "opencode" => spawn_opencode_and_prompt(
+            backend,
+            wid,
+            session_name,
+            worktree_path,
+            prompt,
+            mol,
+            preferred_model,
+        )
+        .map(|()| SpawnOutcome::default()),
         "openai" => spawn_openai_session(
             wid,
             session_name,
@@ -4510,8 +4532,9 @@ fn spawn_llama_session(
     Err(anyhow::anyhow!(
         "cs tackle: the in-process `--adapter llama-cpp` loop was removed in \
          the cosmon scope trim (ADR-126); no local llama.cpp adapter ships in \
-         this build. Use `--adapter ollama` for a local OpenAI-compatible \
-         endpoint, or another configured adapter."
+         this build. Run a llama-server as an OpenAI-compatible endpoint and \
+         point `--adapter local` at it with [adapters.local].base_url, or use \
+         another configured adapter."
     ))
 }
 
@@ -4884,27 +4907,23 @@ fn spawn_claude_and_prompt(
     // refuse the dispatch loudly instead of spawning a worker that will stop on
     // a question nobody can answer. A mute hang is worse than a stated refusal
     // — it holds the molecule `running` and reads as healthy.
-    let consent_paths = cosmon_transport::claude_trust::consent_paths(config_dir.as_deref(), |k| {
-        std::env::var(k).ok()
-    })
+    //
+    // The routine is shared with the in-process dispatch path (the RPP API),
+    // which omitted it until issue #81 point 4.
+    let (consent_paths, _) = cosmon_transport::claude_trust::pregrant_worker_consent(
+        config_dir.as_deref(),
+        |k| std::env::var(k).ok(),
+        worktree_path,
+    )
     .map_err(|e| {
         anyhow::anyhow!(
-            "cs tackle: refusing to spawn a claude worker for molecule {}: {e}. \
-             Without this, the worker stops on Claude Code's folder-trust dialog \
-             with nobody to answer it.",
-            mol.id.as_str(),
-        )
-    })?;
-    cosmon_transport::claude_trust::pregrant_startup_consent(&consent_paths, worktree_path)
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "cs tackle: refusing to spawn a claude worker for molecule {}: \
+            "cs tackle: refusing to spawn a claude worker for molecule {}: \
                  cannot pre-grant Claude Code's startup consent: {e}. \
                  Without this, the worker stops on Claude Code's folder-trust dialog \
                  with nobody to answer it.",
-                mol.id.as_str(),
-            )
-        })?;
+            mol.id.as_str(),
+        )
+    })?;
 
     // Model fallback chain (task-20260614-3116). The preferred model
     // (`ANTHROPIC_MODEL`, exported by the rpp-adapter from the `rpp.toml`
@@ -5265,12 +5284,27 @@ fn spawn_claude_and_prompt(
     // therefore not this dispatcher's cost. See
     // [`BriefingSubmitDisposition::ProceedStillPending`].
     let confirm_t0 = std::time::Instant::now();
+    let mut confirm_nudges: u32 = 0;
     let outcome = confirm_briefing_submitted(
         backend,
         wid,
         prompt,
         BRIEFING_SUBMIT_INBAND_CAP,
         &cosmon_cli::injection_provenance::tackle_briefing_submit(&mol.id, mol_state_dir),
+        &mut confirm_nudges,
+    );
+    // The same typed delivery row the codex arm records (issue #40), so a
+    // trace reader can tell a delivered briefing from a stranded one on every
+    // adapter. Claude's disposition below is unchanged.
+    cosmon_state::events::input_injection::emit_briefing_delivery(
+        mol_state_dir,
+        Some(&mol.id),
+        wid,
+        "claude",
+        &cosmon_cli::injection_provenance::tackle_briefing(&mol.id, mol_state_dir),
+        cosmon_cli::briefing_delivery::delivery_outcome(outcome),
+        confirm_nudges,
+        u64::try_from(confirm_t0.elapsed().as_millis()).unwrap_or(u64::MAX),
     );
     // The outcome is named, not inferred from the elapsed time: a dispatch that
     // exits on a receipt and one that exits on the cap are indistinguishable by
@@ -5503,6 +5537,8 @@ fn confirm_briefing_submitted(
     prompt: &str,
     budget: std::time::Duration,
     provenance: &cosmon_core::injection::InjectionProvenance,
+    // Bare submits this confirmation issued, for the delivery row (#40).
+    nudges: &mut u32,
 ) -> BriefingSubmitOutcome {
     use cosmon_transport::tmux::ComposerState;
     let started = std::time::Instant::now();
@@ -5536,6 +5572,7 @@ fn confirm_briefing_submitted(
         // Empty input == a bare submit keystroke (see `send_input`), which is
         // exactly the manual recovery that unstalled these workers.
         &mut || {
+            *nudges = nudges.saturating_add(1);
             let _ = backend.send_input_observed(wid, "", provenance);
         },
         &mut || started.elapsed(),
@@ -5660,13 +5697,14 @@ const MODEL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// codex seats consequently carry `{"model":"claude-opus-5","outcome":
 /// "available"}` in their own trail, for a model codex rejects with an HTTP
 /// 400. The probe was not wrong; it was unlabelled. Naming its scope beside its
-/// verdict is the cheap half of the fix; `run` adds a non-blocking advisory
-/// when the selected pair looks cross-family.
+/// verdict is the cheap half of the fix; `run` refuses a decidable
+/// cross-family mismatch before dispatch while leaving unknown/self-hosted
+/// tuples opaque.
 const PROBE_SCOPE: &str = "`claude -p` under the worker's resolved account: proves the model id \
      resolves and that account can reach it. It does NOT validate the \
      (adapter, model) composition, and it never ran for a non-claude \
      adapter — see provider_diversity::classify_model_composition, which \
-     can produce a non-blocking advisory before dispatch.";
+     classifies a decidable mismatch for refusal before dispatch.";
 
 /// Resolve the effective model for a claude worker by pre-flighting the
 /// fallback chain, or fail fast when no model in the chain answers
@@ -5763,6 +5801,9 @@ fn resolve_worker_model(
                     "probe_scope": PROBE_SCOPE,
                 }),
             );
+            if let Some(refusal) = claude_login_probe_refusal(&no_model.probed, config_dir) {
+                return Err(anyhow::anyhow!("cs tackle: {refusal}"));
+            }
             Err(anyhow::anyhow!(
                 "cs tackle: {no_model}. Refusing to spawn a worker that would \
                  freeze on `model_not_found` (model-fallback fix \
@@ -5773,6 +5814,40 @@ fn resolve_worker_model(
             ))
         }
     }
+}
+
+/// Translate Claude Code's explicit login refusal into a configuration error.
+///
+/// Model probing is intentionally a real `claude -p` request, so it sees the
+/// same configuration root and credential store as the worker.  A missing
+/// configuration selector can make Claude report `Not logged in`; that says
+/// nothing about model availability, and presenting it as fallback exhaustion
+/// sends the operator to the wrong repair.  The probe record remains in the
+/// model-selection trail, while this message names the configuration root and
+/// credential path Claude used.
+fn claude_login_probe_refusal(
+    probed: &[cosmon_core::model_chain::ProbeRecord],
+    config_dir: Option<&str>,
+) -> Option<String> {
+    let login_detail = probed.iter().find_map(|probe| {
+        let detail = probe.detail.to_ascii_lowercase();
+        (detail.contains("not logged in") || detail.contains("run /login"))
+            .then_some(probe.detail.as_str())
+    })?;
+    let location = match config_dir.filter(|dir| !dir.is_empty()) {
+        Some(dir) => format!(
+            "CLAUDE_CONFIG_DIR is set to `{dir}`, so Claude Code used that directory as \
+             its configuration home"
+        ),
+        None => "CLAUDE_CONFIG_DIR is not set, so Claude Code used its default \
+                 configuration home (`$HOME/.claude`, credentials in the macOS Keychain on macOS)"
+            .to_owned(),
+    };
+    Some(format!(
+        "Claude Code could not authenticate while probing the requested model. {location}. \
+         The probe reported: {login_detail}. Log in with that configuration home (`claude auth login`) or set \
+         CLAUDE_CONFIG_DIR to the configured Claude Code home, then retry."
+    ))
 }
 
 /// Persist the model-selection audit trail to the molecule state dir for
@@ -5980,6 +6055,33 @@ fn spawn_aider_and_prompt(
     }
 }
 
+/// Resolve `[adapters.codex].pass_api_key` (default `false`) and invoke
+/// `warn` once per API-key var that is present in the dispatch env and about
+/// to be stripped — an operator on API-key billing who did not opt in sees
+/// why codex asks for login instead of debugging a silent 401.
+///
+/// `warn` is injected so the decision is testable without capturing stderr;
+/// production callers pass [`warn_codex_api_key_stripped`].
+fn resolve_codex_pass_api_key(adapter_entry: Option<&AdapterEntry>, warn: impl Fn(&str)) -> bool {
+    let pass_api_key = adapter_entry.and_then(|e| e.pass_api_key).unwrap_or(false);
+    if !pass_api_key {
+        for var in ["OPENAI_API_KEY", "CODEX_API_KEY"] {
+            if std::env::var_os(var).is_some_and(|v| !v.is_empty()) {
+                warn(var);
+            }
+        }
+    }
+    pass_api_key
+}
+
+/// Production `warn` callback for [`resolve_codex_pass_api_key`].
+fn warn_codex_api_key_stripped(var: &str) {
+    eprintln!(
+        "cs tackle: {var} present in dispatch env, stripped for codex worker \
+         (opt in via [adapters.codex].pass_api_key = true)"
+    );
+}
+
 /// Codex branch of [`spawn_and_prompt`].
 ///
 /// codex is `OpenAI`'s external CLI — a Node.js wrapper around a native
@@ -6079,6 +6181,10 @@ fn spawn_codex_and_prompt(
         .into_iter()
         .collect::<Vec<_>>();
 
+    // Codex-worker API-key posture (observed 2026-09-26): `false` unless the
+    // operator opted in via `[adapters.codex].pass_api_key = true`.
+    let pass_api_key = resolve_codex_pass_api_key(adapter_entry, warn_codex_api_key_stripped);
+
     let config = codex::CodexSessionConfig {
         socket: backend.socket().to_owned(),
         session_name: session_name.to_owned(),
@@ -6093,6 +6199,7 @@ fn spawn_codex_and_prompt(
         git_identity,
         writable_roots,
         harness_args: harness_args.to_vec(),
+        pass_api_key,
     };
 
     codex::spawn_codex_session(&config)
@@ -6135,15 +6242,89 @@ fn spawn_codex_and_prompt(
     // Interactive mode: inject the prompt into the TUI composer, exactly as
     // the claude branch does. `codex exec` already baked the prompt into the
     // command line, so nothing is injected there.
+    //
+    // Then hold the injection to its delivery postcondition (issue #40). A
+    // written briefing is not a submitted one: measured on codex 0.154.0, a
+    // submit sent while codex still reads `model: loading` — which is after
+    // the banner the readiness probe accepts — is dropped and the paste stays
+    // as `[Pasted Content N chars]`. Observe the composer, re-issue the
+    // submit while it holds the briefing, record the outcome, and fail the
+    // spawn rather than report a worker that will never start.
     if mode == codex::CodexMode::Interactive {
-        backend.send_input_observed(
+        use cosmon_cli::briefing_delivery::{deliver_briefing, require_delivered};
+        let writer = cosmon_cli::injection_provenance::tackle_briefing(&mol.id, mol_state_dir);
+        let submit =
+            cosmon_cli::injection_provenance::tackle_briefing_submit(&mol.id, mol_state_dir);
+        let started = std::time::Instant::now();
+        let report = deliver_briefing(
+            backend,
             wid,
             prompt,
-            &cosmon_cli::injection_provenance::tackle_briefing(&mol.id, mol_state_dir),
+            CODEX_BRIEFING_DELIVERY_BUDGET,
+            &writer,
+            &submit,
+            &mut || started.elapsed(),
+            &mut || std::thread::sleep(BRIEFING_SUBMIT_POLL),
         )?;
+        cosmon_state::events::input_injection::emit_briefing_delivery(
+            mol_state_dir,
+            Some(&mol.id),
+            wid,
+            "codex",
+            &writer,
+            report.outcome,
+            report.resubmits,
+            u64::try_from(report.elapsed.as_millis()).unwrap_or(u64::MAX),
+        );
+        if let Err(undelivered) = require_delivered(wid, report) {
+            let _ = backend.terminate(wid);
+            return Err(anyhow::anyhow!(
+                "cs tackle: {undelivered}. Treating as a failed spawn; tearing \
+                 down session {session_name} (issue #40)."
+            ));
+        }
     }
 
     Ok(())
+}
+
+/// How long `cs tackle` observes a codex worker's composer for a submitted
+/// briefing before failing the spawn (issue #40).
+///
+/// Longer than the claude in-band window ([`BRIEFING_SUBMIT_INBAND_CAP`])
+/// because the consequence differs: past this, a codex spawn is torn down, not
+/// handed to a backstop. Measured on codex 0.154.0, a submit dropped during
+/// startup was accepted when re-sent 3 s after the banner; the tmux seam's own
+/// retry loop has usually cleared it before this window opens. The receipt
+/// needs two clear readings one poll apart, so a delivered briefing costs
+/// about two seconds here.
+const CODEX_BRIEFING_DELIVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The session config the opencode arm spawns with.
+///
+/// Pure so the dispatch arm's carriage of the resolved model is testable
+/// without tmux: issue #72 was an arm that recorded `ModelSelected` and then
+/// built a config with no model. opencode is resolved by bare name; the tmux
+/// pane's shell resolves it on PATH at exec time, the same contract
+/// `preflight::adapter_binary` already checks. An absent binary surfaces as
+/// an `[exited]` pane and is caught by the readiness probe.
+fn opencode_session_config(
+    socket: &str,
+    session_name: &str,
+    worktree_path: &std::path::Path,
+    prompt: &str,
+    preferred_model: Option<&str>,
+) -> cosmon_transport::opencode::OpencodeSessionConfig {
+    cosmon_transport::opencode::OpencodeSessionConfig {
+        socket: socket.to_owned(),
+        session_name: session_name.to_owned(),
+        work_dir: worktree_path.to_string_lossy().into_owned(),
+        binary: std::path::PathBuf::from("opencode"),
+        prompt: Some(prompt.to_owned()),
+        model: preferred_model.map(str::to_owned),
+        telemetry: None,
+        pre_existing_worker: None,
+    }
 }
 
 /// opencode branch of [`spawn_and_prompt`].
@@ -6175,23 +6356,18 @@ fn spawn_opencode_and_prompt(
     worktree_path: &std::path::Path,
     prompt: &str,
     _mol: &MoleculeData,
+    preferred_model: Option<&str>,
 ) -> anyhow::Result<()> {
     use cosmon_transport::opencode;
     use cosmon_transport::readiness::LiveProbe as _;
 
-    // opencode is resolved by bare name; the tmux pane's shell resolves it on
-    // PATH at exec time, the same contract `preflight::adapter_binary`
-    // already checks ("opencode" present on PATH). An absent binary surfaces
-    // here as an `[exited]` pane and is caught by the readiness probe below.
-    let config = opencode::OpencodeSessionConfig {
-        socket: backend.socket().to_owned(),
-        session_name: session_name.to_owned(),
-        work_dir: worktree_path.to_string_lossy().into_owned(),
-        binary: std::path::PathBuf::from("opencode"),
-        prompt: Some(prompt.to_owned()),
-        telemetry: None,
-        pre_existing_worker: None,
-    };
+    let config = opencode_session_config(
+        backend.socket(),
+        session_name,
+        worktree_path,
+        prompt,
+        preferred_model,
+    );
 
     opencode::spawn_opencode_session(&config)
         .map_err(|e| anyhow::anyhow!("cs tackle: opencode spawn failed: {e}"))?;
@@ -6453,7 +6629,7 @@ const DEFAULT_LOCAL_MODEL: &str = "qwen3:8b";
 /// would be worse than no preflight at all: it would certify a host the
 /// work never touches.
 fn resolve_local_base_url(adapter_entry: Option<&AdapterEntry>) -> String {
-    adapter_entry
+    let raw = adapter_entry
         .and_then(|e| e.base_url.clone())
         .or_else(|| {
             std::env::var("COSMON_LOCAL_BASE_URL")
@@ -6479,7 +6655,21 @@ fn resolve_local_base_url(adapter_entry: Option<&AdapterEntry>) -> String {
                 .ok()
                 .filter(|s| !s.is_empty())
         })
-        .unwrap_or_else(|| DEFAULT_LOCAL_BASE_URL.to_owned())
+        .unwrap_or_else(|| DEFAULT_LOCAL_BASE_URL.to_owned());
+    normalize_local_base_url(&raw)
+}
+
+/// Normalize the local adapter's host root once, before either the preflight
+/// or the detached worker consumes it.
+///
+/// OpenAI-compatible server documentation commonly presents `…/v1`, while
+/// both local paths append their own versioned route. Keeping the normalized
+/// root at this shared seam prevents the preflight and worker from diverging.
+fn normalize_local_base_url(raw: &str) -> String {
+    raw.trim_end_matches('/')
+        .strip_suffix("/v1")
+        .unwrap_or(raw.trim_end_matches('/'))
+        .to_owned()
 }
 
 /// Normalize an `OLLAMA_HOST` value into a full base URL the HTTP client can
@@ -6654,6 +6844,12 @@ const PREFLIGHT_TIMEOUT_SECS: u64 = 3;
 enum LocalPreflightError {
     /// The backend did not answer. The work never had a chance to run.
     Unreachable { base_url: String, detail: String },
+    /// The server answered but rejected the configured credential. This is
+    /// distinct from connectivity: changing the endpoint cannot repair it.
+    Unauthorized {
+        base_url: String,
+        status: reqwest::StatusCode,
+    },
     /// The backend answered, but does not serve the resolved model.
     /// `available` is what it *does* serve — empty means a bare daemon
     /// with nothing pulled, which is its own distinct diagnosis.
@@ -6667,12 +6863,27 @@ enum LocalPreflightError {
 impl std::fmt::Display for LocalPreflightError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unreachable { base_url, detail } => write!(
+            Self::Unreachable { base_url, detail } => {
+                let claude = claude_fallback_hint();
+                write!(
+                    f,
+                    "refusing to dispatch: the local adapter's backend at {base_url} \
+                     is not reachable ({detail}). If an OpenAI-compatible server is already \
+                     running (for example llama-server or vLLM), point the adapter to it \
+                     with [adapters.local].base_url / COSMON_LOCAL_BASE_URL and configure \
+                     its model and api_key_env as needed; see \
+                     docs/guides/local-model-selection.md; ask the user before starting a \
+                     server or downloading a model: either action can load another copy of \
+                     the weights.{claude} \
+                     The molecule is untouched and still tacklable — nothing was spawned \
+                     and nothing collapsed."
+                )
+            }
+            Self::Unauthorized { base_url, status } => write!(
                 f,
-                "refusing to dispatch: the local adapter's backend at {base_url} \
-                 is not reachable ({detail}). Start it (`ollama serve`) or point \
-                 the adapter elsewhere with [adapters.local].base_url / \
-                 COSMON_LOCAL_BASE_URL. The molecule is untouched and still \
+                "refusing to dispatch: the local adapter's backend at {base_url} rejected \
+                 its credential (HTTP {status}). Check [adapters.local].api_key_env and \
+                 the named environment variable. The molecule is untouched and still \
                  tacklable — nothing was spawned and nothing collapsed."
             ),
             Self::ModelNotServed {
@@ -6681,22 +6892,86 @@ impl std::fmt::Display for LocalPreflightError {
                 available,
             } => {
                 let served = if available.is_empty() {
-                    "it serves no models at all — none have been pulled".to_owned()
+                    "it serves no models at all".to_owned()
                 } else {
                     format!("it serves: {}", available.join(", "))
+                };
+                let repair = if is_ollama_base_url(base_url) {
+                    format!(
+                        "If you choose to use Ollama, ask the user before starting a server \
+                         or downloading a model (`ollama pull {model}`): downloading can load \
+                         another copy of the weights"
+                    )
+                } else if available.is_empty() {
+                    "Check the server's configured model inventory".to_owned()
+                } else {
+                    format!(
+                        "Set COSMON_LOCAL_MODEL={} (one of the served ids: {})",
+                        available[0],
+                        available.join(", ")
+                    )
                 };
                 write!(
                     f,
                     "refusing to dispatch: the local adapter resolved to model \
                      '{model}', but the backend at {base_url} cannot serve it — \
-                     {served}. Pull it (`ollama pull {model}`) or pin one that \
-                     exists via --model / [adapters.local].default_model / \
-                     COSMON_LOCAL_MODEL. The molecule is untouched and still \
+                     {served}. First, if an OpenAI-compatible server is already running \
+                     (for example llama-server or vLLM), point the adapter to it with \
+                     [adapters.local].base_url / COSMON_LOCAL_BASE_URL and configure its \
+                     model and api_key_env as needed; see docs/guides/local-model-selection.md. \
+                     {repair} or pin one that exists via --model / \
+                     [adapters.local].default_model / COSMON_LOCAL_MODEL. \
+                     The molecule is untouched and still \
                      tacklable — nothing was spawned and nothing collapsed."
                 )
             }
         }
     }
+}
+
+/// Whether the endpoint is recognisably the conventional Ollama deployment.
+///
+/// The `local` adapter deliberately supports arbitrary OpenAI-compatible
+/// servers, so Ollama-specific repairs are reserved for its conventional port
+/// or an endpoint whose hostname identifies it.
+fn is_ollama_base_url(base_url: &str) -> bool {
+    let normalized = base_url.to_ascii_lowercase();
+    normalized.contains("ollama")
+        || normalized.contains("localhost:11434")
+        || normalized.contains("127.0.0.1:11434")
+        || normalized.contains("[::1]:11434")
+}
+
+/// Optional recovery hint for installations that already have Claude Code.
+fn claude_fallback_hint() -> &'static str {
+    let available = std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join("claude").is_file()));
+    if available {
+        " Or dispatch with `--adapter claude`."
+    } else {
+        ""
+    }
+}
+
+/// Resolve the configured credential for an OpenAI-compatible local server.
+/// Ollama ignores the sentinel; servers that require authentication receive
+/// the value declared by their adapter row.
+fn local_api_key(adapter_entry: Option<&AdapterEntry>) -> String {
+    local_api_key_from(adapter_entry, |name| std::env::var(name).ok())
+}
+
+/// Apply the local credential policy to a supplied environment lookup.
+/// Keeping the lookup injectable makes the configured binding testable without
+/// mutating the process environment shared by parallel tests.
+fn local_api_key_from<F>(adapter_entry: Option<&AdapterEntry>, lookup: F) -> String
+where
+    F: FnOnce(&str) -> Option<String>,
+{
+    adapter_entry
+        .and_then(|entry| entry.api_key_env.as_deref())
+        .and_then(lookup)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "ollama".to_owned())
 }
 
 /// Ollama's OpenAI-compat `/v1/models` envelope.
@@ -6736,6 +7011,7 @@ struct PreflightModelEntry {
 fn preflight_local_adapter_model(
     base_url: &str,
     model: &str,
+    api_key: &str,
     timeout: std::time::Duration,
 ) -> Result<(), LocalPreflightError> {
     let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
@@ -6752,13 +7028,22 @@ fn preflight_local_adapter_model(
         }
     };
 
-    let resp = client
-        .get(&url)
-        .send()
-        .map_err(|e| LocalPreflightError::Unreachable {
+    let resp = client.get(&url).bearer_auth(api_key).send().map_err(|e| {
+        LocalPreflightError::Unreachable {
             base_url: base_url.to_owned(),
             detail: format!("{e}"),
-        })?;
+        }
+    })?;
+
+    if matches!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        return Err(LocalPreflightError::Unauthorized {
+            base_url: base_url.to_owned(),
+            status: resp.status(),
+        });
+    }
 
     if !resp.status().is_success() {
         return Err(LocalPreflightError::Unreachable {
@@ -7993,9 +8278,12 @@ fn run_local_agent_loop(
     // Sentinel API key — Ollama's OpenAI-compat endpoint ignores the
     // bearer token. The provider redacts it on every Debug/Display
     // site (it is a `Secret`), so the sentinel never leaks to a log.
-    let provider =
-        cosmon_provider::OpenAIProvider::with_base_url("ollama", model.clone(), base_url.clone())
-            .with_timeout(std::time::Duration::from_secs(timeout_secs));
+    let provider = cosmon_provider::OpenAIProvider::with_base_url(
+        local_api_key(adapter_entry),
+        model.clone(),
+        base_url.clone(),
+    )
+    .with_timeout(std::time::Duration::from_secs(timeout_secs));
 
     let invocation_uuid = format!(
         "local-{}",
@@ -9953,6 +10241,44 @@ mod tests {
         }
     }
 
+    /// A Claude login failure is a configuration refusal, not evidence that
+    /// every model in the fallback chain is unavailable.  Scheduler-launched
+    /// residents can lose `CLAUDE_CONFIG_DIR`; the probe then reaches Claude
+    /// Code's default config and reports its missing login as a model failure
+    /// unless this boundary preserves the cause.
+    #[test]
+    fn missing_config_dir_login_failure_is_not_reported_as_model_exhaustion() {
+        let dir = TempDir::new().unwrap();
+        let claude = dir.path().join("claude-login-refusal");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\necho 'Not logged in · Run /login' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let err = resolve_worker_model(
+            Some("claude-sonnet-5"),
+            claude.to_str().expect("temporary paths are UTF-8"),
+            dir.path(),
+            None,
+            &[],
+            cosmon_core::root_spawn_policy::PreflightIdentity::AsIs,
+        )
+        .expect_err("an unauthenticated probe must refuse");
+        let message = err.to_string();
+
+        assert!(
+            message.contains("CLAUDE_CONFIG_DIR is not set"),
+            "{message}"
+        );
+        assert!(message.contains("`$HOME/.claude`"), "{message}");
+        assert!(
+            !message.contains("no model in the fallback chain is available"),
+            "{message}"
+        );
+    }
+
     /// Test helper: thread a name through the TS-0 validator so tests
     /// can call functions that take `&ValidatedAdapterName`. Production
     /// code goes through the same `validate_adapter_name` call from
@@ -10030,6 +10356,7 @@ mod tests {
             expiry_policy: None,
             originating_branch: None,
             base_branch: None,
+            protected_paths: Vec::new(),
             pending_step: None,
             merged_at: None,
             non_integration: None,
@@ -11258,7 +11585,7 @@ mod tests {
         // `ModelNotServed` (pull a model) — not `Unreachable` (start the
         // daemon), which would send the operator to the wrong repair.
         let base = one_shot_http(r#"{"object":"list","data":null}"#, "200 OK");
-        let err = preflight_local_adapter_model(&base, "qwen3:8b", preflight_timeout())
+        let err = preflight_local_adapter_model(&base, "qwen3:8b", "ollama", preflight_timeout())
             .expect_err("an Ollama serving no models must refuse the dispatch");
         match err {
             LocalPreflightError::ModelNotServed {
@@ -11273,6 +11600,9 @@ mod tests {
             unreachable @ LocalPreflightError::Unreachable { .. } => {
                 panic!("expected ModelNotServed, got {unreachable:?}")
             }
+            unauthorized @ LocalPreflightError::Unauthorized { .. } => {
+                panic!("expected ModelNotServed, got {unauthorized:?}")
+            }
         }
     }
 
@@ -11284,7 +11614,9 @@ mod tests {
             r#"{"object":"list","data":[{"id":"qwen3:8b"},{"id":"llama3:8b"}]}"#,
             "200 OK",
         );
-        assert!(preflight_local_adapter_model(&base, "qwen3:8b", preflight_timeout()).is_ok());
+        assert!(
+            preflight_local_adapter_model(&base, "qwen3:8b", "ollama", preflight_timeout()).is_ok()
+        );
     }
 
     #[test]
@@ -11294,7 +11626,7 @@ mod tests {
         // wave this through — and the worker would die exactly as the two
         // collapsed molecules did. The served-model check catches it.
         let base = one_shot_http(r#"{"object":"list","data":[{"id":"llama3:8b"}]}"#, "200 OK");
-        let err = preflight_local_adapter_model(&base, "qwen3:8b", preflight_timeout())
+        let err = preflight_local_adapter_model(&base, "qwen3:8b", "ollama", preflight_timeout())
             .expect_err("a pinned-but-unpulled model must refuse");
         match err {
             LocalPreflightError::ModelNotServed { available, .. } => {
@@ -11302,6 +11634,9 @@ mod tests {
             }
             unreachable @ LocalPreflightError::Unreachable { .. } => {
                 panic!("expected ModelNotServed, got {unreachable:?}")
+            }
+            unauthorized @ LocalPreflightError::Unauthorized { .. } => {
+                panic!("expected ModelNotServed, got {unauthorized:?}")
             }
         }
     }
@@ -11316,6 +11651,7 @@ mod tests {
         let err = preflight_local_adapter_model(
             &format!("http://{addr}"),
             "qwen3:8b",
+            "ollama",
             std::time::Duration::from_millis(500),
         )
         .expect_err("a dead backend must refuse the dispatch");
@@ -11325,8 +11661,38 @@ mod tests {
         );
     }
 
+    /// An OpenAI-compatible server commonly publishes its endpoint as
+    /// `…/v1`.  The local resolver owns stripping that suffix, so both the
+    /// preflight and the worker use the same host root rather than producing
+    /// a `…/v1/v1/models` probe.
     #[test]
-    fn preflight_diagnostics_name_the_repair_and_promise_recoverability() {
+    fn local_base_url_normalizes_a_trailing_v1_before_any_probe() {
+        let entry = AdapterEntry {
+            base_url: Some("http://inference-box:8000/v1/".to_owned()),
+            ..AdapterEntry::default()
+        };
+        assert_eq!(
+            resolve_local_base_url(Some(&entry)),
+            "http://inference-box:8000"
+        );
+    }
+
+    /// Authentication failures are actionable configuration errors, not an
+    /// indication that the configured server cannot be reached.
+    #[test]
+    fn preflight_classifies_unauthorized_responses_separately() {
+        let base = one_shot_http(r#"{"error":"missing bearer token"}"#, "401 Unauthorized");
+        let err =
+            preflight_local_adapter_model(&base, "model", "configured-key", preflight_timeout())
+                .expect_err("an authenticated endpoint must reject an absent key");
+        assert!(
+            matches!(err, LocalPreflightError::Unauthorized { .. }),
+            "401 must be Unauthorized, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn preflight_diagnostics_put_existing_servers_before_destructive_repairs() {
         // The refusal text is the whole operator-facing payload: it must
         // name the fix and state that the molecule survived, because the
         // failure mode being replaced is a SILENT terminal collapse.
@@ -11336,7 +11702,15 @@ mod tests {
             available: Vec::new(),
         }
         .to_string();
-        assert!(empty.contains("ollama pull qwen3:8b"), "{empty}");
+        assert!(
+            empty.contains("ask the user before starting a server or downloading a model"),
+            "{empty}"
+        );
+        assert!(
+            empty.contains("docs/guides/local-model-selection.md"),
+            "{empty}"
+        );
+        assert!(empty.contains("ollama pull qwen3:8b`"), "{empty}");
         assert!(empty.contains("no models at all"), "{empty}");
         assert!(empty.contains("still tacklable"), "{empty}");
 
@@ -11345,8 +11719,47 @@ mod tests {
             detail: "connection refused".to_owned(),
         }
         .to_string();
-        assert!(dead.contains("ollama serve"), "{dead}");
+        assert!(
+            dead.contains("ask the user before starting a server or downloading a model"),
+            "{dead}"
+        );
+        assert!(dead.contains("[adapters.local].base_url"), "{dead}");
+        assert!(
+            dead.contains("docs/guides/local-model-selection.md"),
+            "{dead}"
+        );
         assert!(dead.contains("still tacklable"), "{dead}");
+
+        let custom = LocalPreflightError::ModelNotServed {
+            base_url: "http://inference-box:8000".to_owned(),
+            model: "served-elsewhere".to_owned(),
+            available: vec!["served-here".to_owned()],
+        }
+        .to_string();
+        assert!(
+            custom.contains("COSMON_LOCAL_MODEL=served-here"),
+            "{custom}"
+        );
+        assert!(!custom.contains("ollama"), "{custom}");
+    }
+
+    #[test]
+    fn local_api_key_keeps_the_ollama_sentinel_without_a_configured_binding() {
+        assert_eq!(local_api_key(None), "ollama");
+    }
+
+    #[test]
+    fn local_api_key_reads_the_configured_binding() {
+        let entry = AdapterEntry {
+            api_key_env: Some("LOCAL_INFERENCE_TOKEN".to_owned()),
+            ..AdapterEntry::default()
+        };
+        assert_eq!(
+            local_api_key_from(Some(&entry), |name| {
+                (name == "LOCAL_INFERENCE_TOKEN").then(|| "test-token".to_owned())
+            }),
+            "test-token"
+        );
     }
 
     #[test]
@@ -13004,6 +13417,41 @@ mod tests {
     /// point of the chip, so the terminal-REPL aider co-pilot can be aimed
     /// at Mistral (or any model) without recompiling. Config wins over both
     /// the env tier and the compile-time `kimi-k2.6`.
+    /// Issue #72 falsifier 1: the opencode dispatch arm's config carries the
+    /// resolved pin, and the command it realizes contains `--model <pin>`.
+    /// Asserted on the argv, not on `ModelSelected` — that event was emitted
+    /// before the fix too.
+    #[test]
+    fn opencode_arm_realizes_the_model_pin_on_the_command_line() {
+        let config = opencode_session_config(
+            "cosmon",
+            "polecat-opencode",
+            std::path::Path::new("/tmp/wt"),
+            "go",
+            Some("openai/gpt-5.2"),
+        );
+        let cmd = cosmon_transport::opencode::build_opencode_command(&config);
+        assert!(
+            cmd.contains(" --model openai/gpt-5.2 "),
+            "the pin must reach opencode's argv: {cmd}"
+        );
+    }
+
+    /// Issue #72 falsifier 2: no pin, no model flag — cosmon mints nothing.
+    #[test]
+    fn opencode_arm_without_a_pin_emits_no_model_flag() {
+        let config = opencode_session_config(
+            "cosmon",
+            "polecat-opencode",
+            std::path::Path::new("/tmp/wt"),
+            "go",
+            None,
+        );
+        let cmd = cosmon_transport::opencode::build_opencode_command(&config);
+        assert!(!cmd.contains("--model"), "no pin must add no flag: {cmd}");
+        assert!(!cmd.contains(" -m "), "no pin must add no flag: {cmd}");
+    }
+
     #[test]
     fn aider_model_prefers_config_default_model() {
         let entry = AdapterEntry {
@@ -13890,5 +14338,65 @@ prompt = "Custom fleet prompt."
                 "the stage must be named like every other dispatch phase.\ntrace:\n{trace}"
             );
         }
+    }
+
+    // -- Codex-worker API-key strip (observed 2026-09-26) --
+
+    /// Guards the three tests below, which mutate the same two process-wide
+    /// env vars: `cargo test` runs them concurrently in this binary, and an
+    /// unguarded race would let one test's `set_var` leak into another's
+    /// assertion. Mirrors `codex::tests::_path_lock`.
+    fn api_key_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// No `[adapters.codex]` row and no API-key var in the dispatch env: the
+    /// default posture is `false` (strip) and nothing is warned about.
+    #[test]
+    fn pass_api_key_defaults_to_false_and_warns_only_when_a_key_is_present() {
+        let _guard = api_key_env_lock();
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("CODEX_API_KEY");
+        let warned = std::cell::RefCell::new(Vec::<String>::new());
+        let pass = resolve_codex_pass_api_key(None, |var| warned.borrow_mut().push(var.to_owned()));
+        assert!(!pass);
+        assert!(warned.borrow().is_empty());
+    }
+
+    /// A present `OPENAI_API_KEY` is stripped (default posture) and warned
+    /// about by name.
+    #[test]
+    fn pass_api_key_false_warns_when_openai_api_key_is_present() {
+        let _guard = api_key_env_lock();
+        std::env::set_var("OPENAI_API_KEY", "sk-svcacct-test");
+        std::env::remove_var("CODEX_API_KEY");
+        let warned = std::cell::RefCell::new(Vec::<String>::new());
+        let pass = resolve_codex_pass_api_key(None, |var| warned.borrow_mut().push(var.to_owned()));
+        std::env::remove_var("OPENAI_API_KEY");
+        assert!(!pass);
+        assert_eq!(warned.into_inner(), vec!["OPENAI_API_KEY".to_owned()]);
+    }
+
+    /// `[adapters.codex].pass_api_key = true` opts back into pass-through
+    /// and suppresses the warning even when a key is present.
+    #[test]
+    fn pass_api_key_true_opts_in_and_suppresses_the_warning() {
+        let _guard = api_key_env_lock();
+        std::env::set_var("OPENAI_API_KEY", "sk-svcacct-test");
+        let entry = AdapterEntry {
+            pass_api_key: Some(true),
+            ..Default::default()
+        };
+        let warned = std::cell::RefCell::new(Vec::<String>::new());
+        let pass = resolve_codex_pass_api_key(Some(&entry), |var| {
+            warned.borrow_mut().push(var.to_owned())
+        });
+        std::env::remove_var("OPENAI_API_KEY");
+        assert!(pass);
+        assert!(warned.borrow().is_empty());
     }
 }

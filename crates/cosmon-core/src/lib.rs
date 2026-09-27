@@ -246,6 +246,8 @@ pub mod process;
 #[doc(hidden)]
 pub mod propel;
 #[doc(hidden)]
+pub mod protected_paths;
+#[doc(hidden)]
 pub mod provider_diversity;
 #[doc(hidden)]
 pub mod quality_band;
@@ -264,6 +266,7 @@ pub mod run_state;
 pub mod scope_guard;
 #[doc(hidden)]
 pub mod session;
+pub mod session_reclaim;
 pub mod session_thread;
 #[doc(hidden)]
 pub mod signal;
@@ -275,6 +278,7 @@ pub mod sor;
 pub mod spawn_seam;
 #[doc(hidden)]
 pub mod spec;
+pub mod staleness;
 #[doc(hidden)]
 pub mod tackle;
 #[doc(hidden)]
@@ -287,6 +291,7 @@ pub mod transport;
 pub mod visual;
 #[doc(hidden)]
 pub mod vitality;
+pub mod worker_argv;
 #[doc(hidden)]
 pub mod worktree_reclaim;
 

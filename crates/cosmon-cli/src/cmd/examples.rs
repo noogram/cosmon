@@ -346,19 +346,36 @@ alias will be removed after one release cycle.
 SEE ALSO: cs project (canonical).";
 
 pub const STATUS: &str = "EXAMPLES:
-  cs status                   # pulse: active / pending / blocked / completed
+  cs status                   # pulse + staleness: age, reconcile, unmerged growth
+  cs status --verbose         # the same, as a dashboard with a Backlog section
   cs status --fleet research
-  cs status --json            # includes `galaxies` block (by-kind + nascent)
+  cs status --json            # adds `backlog`, `unmerged`, `galaxies` blocks
   cs status task-20260907-b25f        # one molecule: status/phase/updated_at/terminal
   cs status task-20260907-b25f --json # same four fields, machine-readable
 
+STALENESS: the pulse carries derivatives, not only levels — `oldest 39d · 2 >48h`
+      is the age of the oldest waiting molecule and how many are past the
+      threshold, from the same arithmetic `cs peek` renders in its vitals
+      line. `surfaces ✅ reconciled 2h ago` tells hash-drift from
+      projection age: the tick is about the hashes and has never said
+      anything about when the projection ran. `28🔀 to merge (+8 in 3h)`
+      compares against a sample in `<state>/status-gauge.json`, refreshed at
+      most hourly so the window stays wide enough to show movement.
+
+LEASES: a molecule named by the pilot-lease ledger carries the cockpit
+      between sessions and converges by design never, so it is excluded from
+      every backlog counter and reported on its own (`+1 lease`). Discovered
+      from the ledger, never from an id. In `--json`, `molecules.alive` still
+      counts it; `molecules.alive_excluding_leases` and `backlog.count` do not.
+
 NOTE: with a molecule id the answer is the cheap read — no coupling report,
-      no token totals, no model attribution. `cs observe <id>` is the full
-      one. The id is exact, never a prefix.
+      no token totals, no model attribution, and none of the staleness work
+      above. `cs observe <id>` is the full one. The id is exact, never a prefix.
 
 SEE ALSO: cs observe (full molecule read), cs wait (block until it moves),
-          cs peek (fractal TUI), cs ensemble (full snapshot),
-          cs galaxies list (four-family taxonomy).";
+          cs peek (fractal TUI — same staleness definition),
+          cs reconcile (what the freshness signal asks for),
+          cs ensemble (full snapshot), cs galaxies list (four-family taxonomy).";
 
 pub const GALAXIES: &str = "IMAGE:
   The fleet of repositories is not a flat list — it is four families,
@@ -764,7 +781,10 @@ pub const WHISPER: &str = "EXAMPLES:
 
 Experimental v0. Perturbation port, not a control-plane event.
 Refuses unless the target pane's foreground command is in
-`[whisper] allowed_commands` (default: [\"claude\"]).";
+`[whisper] allowed_commands` (default: [\"claude\"]).
+
+To wait for the worker's answer, follow with `cs wait <mol>`: even on
+a completed molecule it returns only after a new commit on feat/<mol>.";
 
 pub const DONE: &str = "EXAMPLES:
   cs done task-example-0001                      # merge + teardown
@@ -912,11 +932,17 @@ briefing/log/events/synthesis/responses/notes/git tabs.";
 pub const WAIT: &str = "EXAMPLES:
   cs wait <mol>                           # block until terminal
   cs wait <mol> --timeout 600             # 10-minute cap
-  cs wait <mol> --status Completed        # custom target set
+  cs wait <mol> --for completed           # custom target set
   cs wait <mol> &                         # background wait, notified on exit
+  cs whisper <mol> -f fix.md; cs wait <mol>   # wait for the correction
 
 This is kubectl-wait, not kubectl-watch. One molecule, bounded poll,
 exits on target. Never poll `cs observe` in a shell loop.
+
+After a whisper to a molecule already in the target status, the wait
+also covers the worker's answer: it returns once feat/<mol> has moved
+past the HEAD the whisper recorded and the pane is no longer working.
+A whisper answered without a commit ends on --timeout (exit 124).
 
 SEE ALSO: cs observe (snapshot), cs peek (live fleet view).";
 
@@ -1171,9 +1197,10 @@ Deny-by-default. The first time `cs init` runs interactively, this prompt
 fires automatically (once) and the answer is persisted to
 ~/.config/cosmon/consent.toml. No trace in your project's git log.
 
-The French prompt names the encryption (age), the sole recipient
-(the Noogram maintainer), and the no-trace-in-commits guarantee, then asks [o/N].
-Anything but an explicit yes is recorded as a decline.
+The prompt names the encryption (age), the sole recipient (the Noogram
+maintainer), and the no-trace-in-commits guarantee, then asks [y/N].
+Anything but an explicit yes is recorded as a decline; `o`/`oui` are still
+accepted, from when the prompt was French (noogram/cosmon#76).
 
 The question is asked only where an answer can arrive: stdin AND stdout
 must both be terminals. A captured stdout (CI, scripts, `OUT=\"$(cs ...)\"`)

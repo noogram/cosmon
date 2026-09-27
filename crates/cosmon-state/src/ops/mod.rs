@@ -12,7 +12,9 @@
 //! exposed over the §8j RPP boundary:
 //! [`observe`](fn@observe), [`molecule_status`](fn@molecule_status),
 //! [`tag`](fn@tag), [`nucleate`](fn@nucleate),
-//! [`ensemble`](fn@ensemble) / [`collapse`](fn@collapse) / [`freeze`](fn@freeze) / [`thaw`](fn@thaw) / [`stuck`](fn@stuck).
+//! [`ensemble`](fn@ensemble) / [`vitals`](fn@vitals) /
+//! [`collapse`](fn@collapse) / [`freeze`](fn@freeze) / [`thaw`](fn@thaw) /
+//! [`stuck`](fn@stuck).
 //!
 //! Every verb-level error implements [`error::OpsError`] — the wire
 //! contract that lets the cs-cli, the cs-api, and the out-of-process
@@ -37,6 +39,7 @@ pub mod observe;
 pub mod stuck;
 pub mod tag;
 pub mod thaw;
+pub mod vitals;
 
 pub use await_operator::{
     await_operator, AwaitOperatorError, AwaitOperatorJson, AwaitOperatorOutcome,
@@ -61,3 +64,7 @@ pub use observe::{
 pub use stuck::{stuck, StuckError, StuckJson, StuckRequest, StuckView};
 pub use tag::{tag, TagDelta, TagError, TagJson};
 pub use thaw::{thaw, ThawError, ThawJson, ThawRequest, ThawView};
+pub use vitals::{
+    vitals, ObservedHealth, VitalsBacklog, VitalsCounts, VitalsError, VitalsRow, VitalsView,
+    WorkerHealthProbe,
+};

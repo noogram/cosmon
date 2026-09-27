@@ -37,6 +37,10 @@ use cosmon_rpp_adapter::{
 use serde_json::Value;
 use tower::ServiceExt;
 
+/// A fixed instant keeps byte-size assertions about status representations
+/// independent of Chrono's optional fractional-second rendering.
+const FIXTURE_TIMESTAMP: &str = "2026-09-07T12:00:00Z";
+
 struct Fixture {
     oidc: OidcMock,
     tenant: TenantPath,
@@ -179,6 +183,8 @@ fn seed(tenant: &TenantPath, id: &str, status: &str) {
                 "status": status,
                 "assigned_worker": "ruby",
                 "adapter": "claude",
+                "created_at": FIXTURE_TIMESTAMP,
+                "updated_at": FIXTURE_TIMESTAMP,
             }),
         )
         .unwrap();
@@ -209,6 +215,8 @@ async fn the_status_read_is_strictly_cheaper_than_the_full_molecule_read() {
                 "status": "running",
                 "assigned_worker": "ruby",
                 "adapter": "claude",
+                "created_at": FIXTURE_TIMESTAMP,
+                "updated_at": FIXTURE_TIMESTAMP,
                 "variables": {
                     "topic": "a molecule with something to say about itself",
                     "formula": "task-work",
@@ -284,6 +292,45 @@ async fn the_status_read_is_strictly_cheaper_than_the_full_molecule_read() {
     assert!(
         obj["updated_at"].as_str().is_some_and(|s| !s.is_empty()),
         "a poller needs to know WHEN, not only what",
+    );
+}
+
+#[tokio::test]
+async fn full_molecule_read_exposes_the_harvest_token_snapshot_exactly() {
+    let fx = fixture().await;
+    let molecule = cosmon_core::id::MoleculeId::new("task-20260907-0011").unwrap();
+    seed(&fx.tenant, molecule.as_str(), "completed");
+    let sink = fx
+        .tenant
+        .state_dir
+        .join(cosmon_state::token_meter::TOKEN_NDJSON_RELATIVE_PATH);
+    cosmon_state::token_meter::emit_transcript_token_usage_to_path(
+        &sink,
+        &cosmon_core::id::NucleonId::new("a").unwrap(),
+        &molecule,
+        Some(cosmon_core::kind::MoleculeKind::Task),
+        "claude",
+        10,
+        1000,
+        Some(100),
+        7,
+        cosmon_state::token_meter::TokenUsageSource::ClaudeTranscript,
+        3,
+    );
+    let token = read_jwt(&fx, "api-tokens-1");
+    let (status, _, body) = get(&fx, "/v1/molecules/task-20260907-0011", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body["molecule"]["api_tokens"],
+        serde_json::json!({
+            "tokens_in": 10,
+            "cache_read_tokens": 1000,
+            "cache_creation_tokens": 100,
+            "tokens_out": 7,
+            "invocations": 3,
+            "source": "claude_transcript"
+        })
     );
 }
 

@@ -161,7 +161,7 @@ impl FleetSnapshot {
     pub fn energy_for(&self, worker: &WorkerId) -> Result<EnergyBudget> {
         self.workers
             .get(worker)
-            .map(|w| w.energy)
+            .map(|w| w.energy.clone())
             .ok_or_else(|| ObservabilityError::NoWorker(worker.0.clone()))
     }
 }
@@ -198,8 +198,10 @@ mod tests {
             session: "cosmon-mol-1".into(),
             energy: EnergyBudget {
                 input_tokens: 100,
+                cached_input_tokens: 80,
                 output_tokens: 50,
-                cost_usd: 0.0,
+                reasoning_output_tokens: 10,
+                cost: crate::worker::EnergyCost::Unknown,
                 context_window: Some(1_000_000),
             },
             live: "working".into(),

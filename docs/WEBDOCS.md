@@ -44,7 +44,7 @@ file is the source of truth.
   `external-scheduler`
 - **Reference** (generated) — `overview`, `lifecycle`, `fleet`, `execution`,
   `project`, `observability`, `integrity`, `tools`, `formulas`, `exit-codes`
-- **Explanation** — `physics-vocabulary`, `stateless-cli`,
+- **Explanation** — `pilot-and-workers`, `physics-vocabulary`, `stateless-cli`,
   `control-vs-data-plane`, `regimes`, `crash-recovery`, `cosmon-and-noogram`,
   `architecture`, `versioning`
 

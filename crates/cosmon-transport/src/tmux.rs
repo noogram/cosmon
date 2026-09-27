@@ -372,6 +372,20 @@ fn classify_composer(captured: &str, input: &str) -> ComposerState {
     }
 }
 
+/// Classify a pane capture obtained through any transport — the port-level
+/// door to the composer reading.
+///
+/// Exists so a delivery postcondition can run against
+/// [`TransportBackend::capture_output`] (and therefore against a fake
+/// transport in a test) while deciding with exactly the same classifier the
+/// tmux submit loop uses. Two classifiers would be two receipts that drift.
+///
+/// An empty capture is [`ComposerState::Unobservable`], never `Clear`.
+#[must_use]
+pub fn classify_composer_capture(captured: &str, input: &str) -> ComposerState {
+    classify_composer(captured, input)
+}
+
 /// Squash a run of composer lines into the text the user would see if the
 /// terminal were infinitely wide: no whitespace, no box-drawing, no prompt
 /// glyphs.
@@ -429,9 +443,24 @@ fn composer_indicates_pending(captured: &str, input: &str) -> bool {
 
     // Pair the final closing border with the nearest preceding opening border.
     // An unmatched `╭` below a real composer must not hide that composer.
+    //
+    // A closed box is only *the composer* when no glyph composer line follows
+    // it. Codex 0.15x draws its startup banner as a closed box and its composer
+    // as a `›` line underneath (issue #40): returning the banner's verdict here
+    // read every stuck codex paste as `Clear`, so the submit loop stopped
+    // pressing after one poll. With a glyph line below the box, the glyph
+    // composer is the one that decides.
     if let Some(end) = lines.iter().rposition(|line| line.starts_with('╰')) {
+        let glyph_below = lines[end + 1..]
+            .iter()
+            .any(|line| matches!(line.chars().next(), Some('›' | '❯')));
         if let Some(start) = lines[..end].iter().rposition(|line| line.starts_with('╭')) {
-            return region_pending(&lines[start..=end]);
+            if region_pending(&lines[start..=end]) {
+                return true;
+            }
+            if !glyph_below {
+                return false;
+            }
         }
     }
 
@@ -1559,6 +1588,57 @@ mod tests {
             pane,
             "brief line 0 of the bootstrap prompt\nbrief line 59 of the bootstrap prompt"
         ));
+    }
+
+    /// The pane codex 0.154.0 shows when a tackle briefing was pasted during
+    /// its startup and the submit keystroke was swallowed (issue #40). Captured
+    /// live by task-20260914-a8b3; only the working-directory path is
+    /// shortened. The startup banner is a *closed* `╭…╰` box, and the composer
+    /// is a `›` glyph line **below** it.
+    const CODEX_0154_STUCK_PASTE: &str = "\
+╭───────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.154.0)                        │
+│                                                   │
+│ model:       loading   /model to change           │
+│ directory:   /tmp/…/codexrepro                    │
+│ permissions: YOLO mode                            │
+╰───────────────────────────────────────────────────╯
+• You have 2 usage limit resets available. Run /usage to use one.
+› [Pasted Content 16030 chars]
+  gpt-6-astra default fast · /tmp/codexrepro
+";
+
+    #[test]
+    fn pending_detects_codex_glyph_composer_below_banner_box() {
+        // Issue #40. The closed-box rule used to return the banner's verdict
+        // ("no placeholder in here") and never look at the `›` composer under
+        // it, so the submit loop read `Clear` on its first poll and stopped
+        // pressing — while the briefing sat unsubmitted.
+        let briefing = "first line of the briefing\nEnd of briefing: reply PONG.";
+        assert!(composer_indicates_pending(CODEX_0154_STUCK_PASTE, briefing));
+        assert_eq!(
+            classify_composer(CODEX_0154_STUCK_PASTE, briefing),
+            ComposerState::Pending
+        );
+    }
+
+    #[test]
+    fn codex_composer_below_banner_reads_clear_after_submit() {
+        // The same layout once the submit landed: the echo sits in the
+        // transcript and the composer shows codex's idle hint. A fix that
+        // made every codex pane "pending" would press Enter forever.
+        let pane = "\
+╭───────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.154.0)                        │
+╰───────────────────────────────────────────────────╯
+  filler line for size padding
+  End of briefing: reply PONG.
+• PONG
+› Ask Codex to do anything
+  gpt-6-astra high fast · /tmp/codexrepro
+";
+        let briefing = "first line of the briefing\nEnd of briefing: reply PONG.";
+        assert_eq!(classify_composer(pane, briefing), ComposerState::Clear);
     }
 
     #[test]

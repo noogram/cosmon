@@ -243,6 +243,9 @@ SEE ALSO: cs tackle (launch a worker on the molecule you just nucleated).
    `stress-test` opts the molecule into the two-layer pre-commitment seal at dispatch (Layer 1 runtime precondition + Layer 2 witness-quorum, ADR-085 §2-§3) and out of autopilot drain. The remaining classes are gate-equivalent to the legacy default; this flag is a marker, not a runtime mode.
 * `--assign <ASSIGN>` — Assign a worker to the new molecule
 * `--var <KEY=VALUE>` — Set a variable (repeatable: --var key=value)
+* `--var-file <KEY=PATH>` — Read a variable value from a UTF-8 file (repeatable: --var-file key=path).
+
+   The file contents are passed verbatim, including trailing newlines. Explicit `--var` bindings override a same-named `--var-file` binding.
 * `--formulas-dir <DIR>` — Path to the formulas directory (default: ./formulas)
 * `--role <ROLE>` — Agent role for the worker that will tackle this molecule.
 
@@ -286,6 +289,11 @@ SEE ALSO: cs tackle (launch a worker on the molecule you just nucleated).
    Persisted to [`MoleculeData::base_branch`](cosmon_state::MoleculeData::base_branch) at birth, beside the adapter pin, so the base is a property of the molecule rather than of whichever session later dispatches it: a bare `cs tackle <id>` resolves to it, and a `cs run --resident --base <X>` directive does not overwrite it (the per-molecule base wins, as the adapter pin does). `cs tackle <id> --base <Y>` still overrides it.
 
    The branch must exist locally: a base naming no branch is refused here, with the branch named, and no molecule is created — otherwise the mistake would surface only at `cs done`, hours later. `None` (the default) stamps nothing and leaves the ambient resolution unchanged.
+* `--protect <PATH>` — Declare a path as protected reference input (repeatable).
+
+   Ground truth the work is checked against — expected outputs, golden files, a reference dataset — which the worker must read and never modify. The path is relative to the repository root and may name a file or a directory (a directory protects everything below it). Persisted on the molecule and read three times: the worker's brief lists the paths as read-only with the reason, `cs tackle` clears their write bits in the worktree, and `cs done` refuses the merge (`protected_path_modified`, exit 78) when the worker branch changed any of them, naming each one. The operator overrides that refusal with `cs done --allow-protected-change`.
+
+   An absolute path or one containing `..` is refused here, before any molecule is created.
 
 
 

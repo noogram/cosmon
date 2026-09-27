@@ -91,6 +91,16 @@ pub struct OpencodeSessionConfig {
     pub binary: PathBuf,
     /// Optional prompt forwarded as the positional message to `opencode run`.
     pub prompt: Option<String>,
+    /// Optional model pin resolved by the common Incarnation selector.
+    ///
+    /// Carried verbatim as opencode's native `--model` flag (`-m, --model`,
+    /// "model to use in the format of provider/model"). Without this field
+    /// the pin was resolved and recorded as `ModelSelected` but never reached
+    /// the process (issue #72). `None` emits no flag, so opencode's own
+    /// default applies and cosmon mints nothing. The value is not rewritten:
+    /// cosmon holds no provider mapping, so a bare id is passed as given and
+    /// opencode's own resolution decides whether it names a model.
+    pub model: Option<String>,
     /// Optional IFBDD telemetry context.
     pub telemetry: Option<AdapterTelemetry>,
     /// Optional pre-existing worker the spawn path detected.
@@ -112,12 +122,7 @@ pub struct OpencodeSessionConfig {
 /// Returns [`OpencodeError::SpawnFailed`] when the tmux session cannot be
 /// created.
 pub fn spawn_opencode_session(config: &OpencodeSessionConfig) -> Result<(), OpencodeError> {
-    let mut cmd = shell_escape(&config.binary.to_string_lossy());
-    cmd.push_str(" run");
-    if let Some(ref prompt) = config.prompt {
-        let escaped = prompt.replace('\'', "'\\''");
-        let _ = write!(cmd, " '{escaped}'");
-    }
+    let cmd = build_opencode_command(config);
 
     if let Some(t) = &config.telemetry {
         emit_worker_spawn_attempted(
@@ -136,6 +141,28 @@ pub fn spawn_opencode_session(config: &OpencodeSessionConfig) -> Result<(), Open
     backend
         .spawn_worker(&config.session_name, &config.work_dir, &cmd)
         .map_err(|e| OpencodeError::SpawnFailed(e.to_string()))
+}
+
+/// Build the shell command line [`spawn_opencode_session`] hands to tmux.
+///
+/// Shape: `opencode run [--model <model>] ['<prompt>']`. Split out as a pure
+/// function so the realized argv — not the `ModelSelected` event, which is
+/// emitted whether or not the process was told — is what a test asserts.
+/// The model flag precedes the positional message so a prompt starting with
+/// `-` can never be parsed as the flag's value.
+#[must_use]
+pub fn build_opencode_command(config: &OpencodeSessionConfig) -> String {
+    let mut cmd = shell_escape(&config.binary.to_string_lossy());
+    cmd.push_str(" run");
+    if let Some(ref model) = config.model {
+        cmd.push_str(" --model ");
+        cmd.push_str(&shell_escape(model));
+    }
+    if let Some(ref prompt) = config.prompt {
+        let escaped = prompt.replace('\'', "'\\''");
+        let _ = write!(cmd, " '{escaped}'");
+    }
+    cmd
 }
 
 /// Kill an opencode session by tmux session name.
@@ -328,12 +355,44 @@ mod tests {
             work_dir: "/tmp/wt".into(),
             binary: PathBuf::from("opencode"),
             prompt: Some("hello".into()),
+            model: None,
             telemetry: None,
             pre_existing_worker: None,
         };
         let c = cfg.clone();
         assert_eq!(c.session_name, "polecat-opencode");
         assert_eq!(c.prompt.as_deref(), Some("hello"));
+    }
+
+    fn command_config(model: Option<&str>) -> OpencodeSessionConfig {
+        OpencodeSessionConfig {
+            socket: "cosmon".into(),
+            session_name: "polecat-opencode".into(),
+            work_dir: "/tmp/wt".into(),
+            binary: PathBuf::from("opencode"),
+            prompt: Some("do it".into()),
+            model: model.map(str::to_owned),
+            telemetry: None,
+            pre_existing_worker: None,
+        }
+    }
+
+    /// Issue #72: a resolved pin reaches opencode's command line as
+    /// `--model <provider/model>`, ahead of the positional message.
+    #[test]
+    fn a_model_pin_reaches_the_opencode_command_line() {
+        let cmd = build_opencode_command(&command_config(Some("anthropic/claude-sonnet-5")));
+        assert_eq!(
+            cmd,
+            "opencode run --model anthropic/claude-sonnet-5 'do it'"
+        );
+    }
+
+    /// No pin, no flag: opencode's own default applies.
+    #[test]
+    fn no_model_pin_emits_no_model_flag() {
+        let cmd = build_opencode_command(&command_config(None));
+        assert_eq!(cmd, "opencode run 'do it'");
     }
 
     /// `consume_briefing` emits the same WS-4 envelope shape as

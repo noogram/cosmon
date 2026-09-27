@@ -7,10 +7,30 @@
 //!
 //! - **`dispatch = "detached"`** (default): spawn the child, redirect its
 //!   stdout/stderr to the patrol's (or scheduler-wide) log file, do
-//!   **not** `wait()`. When the scheduler process exits seconds later,
-//!   the child is reparented to `init` (launchd on macOS) and keeps
-//!   running. Exit code is recorded as `None`; operators read the log
-//!   file for per-run outcome.
+//!   **not** `wait()`. When the scheduler process exits milliseconds
+//!   later, the child is reparented to `init` (launchd on macOS) and
+//!   keeps running. Exit code is recorded as `None`; operators read the
+//!   log file for per-run outcome.
+//!
+//!   **Reparenting alone is not survival — the job's plist must carry
+//!   `AbandonProcessGroup`.** Not waiting is sufficient for the *parent*
+//!   to go away without harming the child, and that is all this module
+//!   controls. But `cosmon-scheduler tick` is a one-shot launchd job,
+//!   and launchd `SIGKILL`s the whole process group the moment such a
+//!   job's main process exits. The dispatched child is in that group. It
+//!   is therefore killed by launchd — not by us, not by reparenting —
+//!   before it has produced anything, and nothing in this crate can see
+//!   it happen: the dispatch succeeded, the pid was real, the log line
+//!   said `FIRE`. Measured on one 60-second patrol over a 48-hour
+//!   window: 7276 fires recorded against 114 starts reaching the
+//!   patrol's own log and a handful of complete runs (the ticks that
+//!   happened to run long enough to cover the child's work). `nohup` and
+//!   `trap '' HUP` do not help — the signal is addressed to the group,
+//!   not the process. The fix lives in
+//!   `scripts/launchd/com.cosmon.scheduler.plist`
+//!   (`AbandonProcessGroup = true`) and is enforced at install time by
+//!   `scripts/install-scheduler.sh`. Full write-up:
+//!   `docs/diagnostic/2026-08-19-launchd-group-kill-silences-detached-patrols.md`.
 //! - **`dispatch = "wait"`**: spawn + block until the child exits, then
 //!   record exit code in state. Intended for very short patrols where
 //!   the scheduler tick can reasonably afford the blocking wait (e.g.
@@ -255,6 +275,10 @@ fn spawn_detached(cmd: &mut Command, name: &str) -> Result<DispatchOutcome, Disp
     // Intentionally drop the Child without waiting — on Unix this does
     // not signal or reap the process; it simply releases the handle.
     // On macOS the child gets reparented to launchd once we exit.
+    //
+    // That is necessary but NOT sufficient: the child inherits our
+    // process group, and launchd group-kills a one-shot job on exit
+    // unless the plist sets `AbandonProcessGroup`. See the module docs.
     drop_detached(child);
     Ok(DispatchOutcome {
         pid: Some(pid),

@@ -4,32 +4,61 @@
 //!
 //! This test is the CI gate for invariant
 //! [`§8p` — *API surface ⊊ CLI surface*](../../../docs/architectural-invariants.md#8p-api-surface-cli-surface-proposed--adr-080).
-//! It mechanically enforces three rules on every CI run:
+//! It mechanically enforces four rules on every CI run:
 //!
 //! 1. Every user-facing `cs` verb has a row in
 //!    `docs/guides/api-cli-coverage.md`. A new verb landing without a
 //!    row fails the test.
-//! 2. Every row marked `Exposed = V0` corresponds to an axum route in
-//!    `cosmon-rpp-adapter::routes`. A registry that promises a V0
-//!    route the adapter does not implement fails the test.
-//! 3. Every axum route exposed by `cosmon-rpp-adapter` has a row in
-//!    the registry, and that row's *Exposed* column is at or below
-//!    the current version. A route added without updating the
-//!    registry fails the test.
+//! 2. Every row that claims a *shipped* exposure (`V0`, `V1`, `V2`,
+//!    `PARTIAL` — anything without a `TBD` qualifier) names an API
+//!    path, and every path it names is live on the adapter. A registry
+//!    that promises a route the adapter does not serve fails the test.
+//! 3. Every live route that belongs to the `cs` alphabet is named by
+//!    such a row. A route added without updating the registry fails.
+//! 4. No row whose *Exposed* column starts with `NO` names a live
+//!    route. That is the §8p breach the registry exists to catch.
 //!
-//! The pre-V0 state of the codebase (V0 lands week 5–9 May 2026 per
-//! ADR-080 §10.1) is encoded by [`list_axum_routes`] returning an
-//! empty slice. Once `cosmon-rpp-adapter` lands, that function grows
-//! a re-export from the adapter crate without changing the test
-//! structure.
+//! # Where the route set comes from
+//!
+//! [`live_routes`] folds `crates/cosmon-rpp-adapter/data/surface_events.txt`
+//! — the append-only canon that `cosmon-rpp-adapter/build.rs` folds into
+//! `frozen_api_surface()` and the router itself is built from. Reading
+//! the canon rather than the adapter crate keeps this test a cheap
+//! `cosmon-cli` integration test (the parser, `cosmon-surface-canon`, is
+//! a dev-dependency with no runtime deps) while comparing against the
+//! *same* bytes the server mounts.
+//!
+//! It did not always. Until 2026-09-22 the route set was a hand-written
+//! array of three entries standing for a surface of forty-two, and the
+//! reverse check fired only for rows marked `V0` — so the gate was green
+//! over eight rows that named a path nobody served or denied a route that
+//! had been live for months. An instrument that compares 3/42 of a
+//! surface reads present and is not.
+//!
+//! # What the gate deliberately does not compare
+//!
+//! * `Exposure::AdapterOnly` routes (artifact I/O, the Claude PKCE flow,
+//!   SSE, discovery, the operator admin plane) have **no** `cs` verb by
+//!   construction, so the registry — a `cs`-verb registry — carries no
+//!   row for them. Requiring one would mean inventing verbs.
+//! * [`TENANT_VERB_ROUTES_OUTSIDE_THE_CS_ALPHABET`] names the six
+//!   avatar-canal routes that are tenant verbs of the *thin* client
+//!   (`cosmon-remote`) and deliberately have no `cs` counterpart —
+//!   « avatar est un mot de doctrine, jamais un nom d'API ». They are
+//!   listed one by one, with the reason, rather than skipped by a
+//!   wildcard: a blind spot somebody had to write down is one a reviewer
+//!   can see.
 //!
 //! See [ADR-080 §4 (§8p)](../../../docs/adr/080-remote-pilot-port-https-oidc.md)
 //! for the governing decision and
 //! [docs/guides/api-cli-coverage.md](../../../docs/guides/api-cli-coverage.md)
 //! for the registry itself.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use cosmon_surface_canon::{fold_live, normalise_path, parse_canon, Exposure};
 
 /// Path to the registry guide, resolved against the workspace root.
 fn registry_path() -> PathBuf {
@@ -113,22 +142,43 @@ struct RegistryRow {
     exposed: String,
     /// The *API path* column, empty for un-exposed verbs.
     api_path: String,
+    /// Every `METHOD /path` token found in the *API path* column,
+    /// normalised to the `:placeholder` form so a registry cell written
+    /// `GET /v1/molecules/{id}` and a canon line written
+    /// `GET /v1/molecules/:id` compare equal.
+    ///
+    /// A cell may name more than one route, or none: `cs wait`'s cell
+    /// names the status route it polls while exposing nothing itself.
+    /// Parsing the cell rather than trusting a hand-kept verb mapping is
+    /// what lets the gate catch a row pointing at a path the adapter
+    /// never served (`POST /v1/molecules/:id/transitions`, on the
+    /// `tackle` and `collapse` rows for four months).
+    api_routes: Vec<String>,
 }
 
 impl RegistryRow {
-    /// Whether the row's *Exposed* column promises an axum route at
-    /// V0 (i.e. the adapter MUST implement this route today).
-    fn is_v0(&self) -> bool {
-        self.exposed.trim() == "V0"
+    /// Whether the row claims a *shipped* exposure — a version marker
+    /// with no `TBD` qualifier on it.
+    ///
+    /// `V0` was once the only shipped version, and the round-trip check
+    /// read `exposed == "V0"` accordingly. It stayed that way through
+    /// the V1 cut, so every `V1`, `V2` and `PARTIAL` row was exempt from
+    /// both directions of the gate — which is most of the live surface.
+    /// A `TBD` qualifier is what marks a row as a *plan*; everything
+    /// else is a claim about today, and the adapter must back it.
+    fn claims_shipped(&self) -> bool {
+        let exposed = self.exposed.trim();
+        if exposed.contains("TBD") {
+            return false;
+        }
+        matches!(exposed, "V0" | "V1" | "V2" | "PARTIAL")
     }
 
-    /// Whether the row promises an axum route at the current shipped
-    /// version. Used to gate the route ↔ registry round-trip: a route
-    /// in `list_axum_routes()` whose registry row is `V1 (TBD)` is a
-    /// drift (route landed before the version it was promised at).
-    fn is_currently_exposed(&self) -> bool {
-        // V0 is the only currently-shipped version.
-        self.exposed.trim() == "V0"
+    /// Whether the row *denies* exposure: its verdict begins with `NO`
+    /// (`NO`, `NO (NEVER)`, `NO (V2 TBD)`, …). Such a row naming a live
+    /// route is the §8p breach the registry exists to catch.
+    fn denies_exposure(&self) -> bool {
+        self.exposed.trim().starts_with("NO")
     }
 }
 
@@ -207,10 +257,12 @@ fn parse_registry() -> Vec<RegistryRow> {
             continue;
         }
 
+        let api_routes = extract_routes(&api_path);
         rows.push(RegistryRow {
             verb,
             exposed,
             api_path,
+            api_routes,
         });
     }
 
@@ -235,51 +287,104 @@ fn strip_inline_md(cell: &str) -> String {
     cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// One axum route exposed by `cosmon-rpp-adapter`, surfaced for the
-/// drift test.
+/// Extract every `METHOD /path` token from an *API path* cell,
+/// normalised to the `:placeholder` form.
 ///
-/// In the pre-V0 state of the codebase, `list_axum_routes` returns
-/// an empty slice. Once `cosmon-rpp-adapter` lands its first route
-/// (`GET /v1/molecules/:id` per ADR-080 §10.1), this struct is
-/// re-exported from the adapter and the function returns the real
-/// route table.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RouteInfo {
-    /// HTTP method, uppercased (`GET`, `POST`, …).
-    method: &'static str,
-    /// Path with axum-style placeholders (e.g. `/v1/molecules/:id`).
-    path: &'static str,
-    /// The user-facing `cs` verb this route is a strict subset of.
-    /// Matched against `RegistryRow::verb` for the round-trip check.
-    cs_verb: &'static str,
+/// The cell is prose, not a field: it may carry a qualifier
+/// (`(TBD) GET /v1/molecules/:id/peek`), a parenthesised body hint
+/// (`POST /v1/molecules/:id/tags`), a dash for "none", or a sentence
+/// naming the route a client-side verb polls. Scanning it for
+/// method-then-path pairs is tolerant of all four and needs no
+/// reformatting of a 350-line guide.
+fn extract_routes(cell: &str) -> Vec<String> {
+    const METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH"];
+    let tokens: Vec<&str> = cell.split_whitespace().collect();
+    let mut out = Vec::new();
+    for pair in tokens.windows(2) {
+        let (method, path) = (pair[0], pair[1]);
+        if !METHODS.contains(&method) {
+            continue;
+        }
+        // Trim trailing punctuation the prose leaves attached to a path
+        // (`GET /v1/molecules/:id,` at the end of a clause).
+        let path = path.trim_end_matches([',', '.', ';', ')', '`']);
+        if !path.starts_with('/') {
+            continue;
+        }
+        out.push(format!("{method} {}", normalise_path(path)));
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
-/// Return the list of axum routes exposed by `cosmon-rpp-adapter`.
-///
-/// V0 surface — kept hand-wired here (the adapter does not currently
-/// re-export a typed route table; the freeze surface
-/// `cosmon_rpp_adapter::frozen_api_surface()` carries strings, not
-/// (verb, path) pairs). When the adapter grows a typed `list_routes()`,
-/// this function reads from it.
-fn list_axum_routes() -> &'static [RouteInfo] {
-    &[
-        RouteInfo {
-            method: "GET",
-            path: "/v1/molecules/:id",
-            cs_verb: "observe",
-        },
-        RouteInfo {
-            method: "POST",
-            path: "/v1/molecules",
-            cs_verb: "nucleate",
-        },
-        RouteInfo {
-            method: "POST",
-            path: "/v1/molecules/:id/run",
-            cs_verb: "run",
-        },
-    ]
+/// One route live on the adapter today, folded out of the §8p canon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveRoute {
+    /// `"METHOD /path"` with `:placeholder` segments — the join key
+    /// against [`RegistryRow::api_routes`].
+    key: String,
+    /// §8p classification carried by the canon line that mounted it.
+    exposure: Exposure,
 }
+
+/// Path to the append-only §8p surface canon.
+fn canon_path() -> PathBuf {
+    workspace_root().join("crates/cosmon-rpp-adapter/data/surface_events.txt")
+}
+
+/// Fold the §8p canon into the set of routes the adapter serves today.
+///
+/// This is the *same* file `cosmon-rpp-adapter/build.rs` folds into
+/// `SURFACE_ROUTES` / `frozen_api_surface()`, and the router is built
+/// from that fold — so the set compared here is the set mounted, not a
+/// second copy of it. [`fold_live`] subtracts `withdrawn` events, so a
+/// route taken back (issue #51 retired `POST /v1/molecules/:id/land`)
+/// is absent here exactly as it is absent from the server.
+fn live_routes() -> Vec<LiveRoute> {
+    let path = canon_path();
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+    let logged = parse_canon(&raw, &path.display().to_string())
+        .unwrap_or_else(|err| panic!("parse {}: {err}", path.display()));
+    let live = fold_live(&logged).unwrap_or_else(|err| panic!("fold {}: {err}", path.display()));
+    live.iter()
+        .map(|ev| {
+            let (method, route) = ev
+                .method_path
+                .split_once(' ')
+                .unwrap_or_else(|| panic!("canon entry {:?} is not `METHOD PATH`", ev.method_path));
+            LiveRoute {
+                key: format!("{method} {}", normalise_path(route)),
+                exposure: ev.exposure,
+            }
+        })
+        .collect()
+}
+
+/// Tenant-verb routes that deliberately have **no** `cs` counterpart,
+/// and therefore no row in a registry whose alphabet is `cs` verbs.
+///
+/// These six are the D-AVATAR canals (ADR-0020) — `converse` plus the
+/// five instance-lifecycle routes. They are tenant
+/// verbs of the *thin* client — `cosmon-remote` carries them, and
+/// `cosmon-thin-cli::verbs` declares their `#[verb]` stubs — but `cs`
+/// has no `avatar` subcommand and will not grow one: « avatar est un
+/// mot de doctrine, jamais un nom d'API » (tenant guide §12.2), and the
+/// top-level client verb is `converse`, not `avatar converse`.
+///
+/// They are enumerated route by route rather than skipped by a
+/// `/v1/avatar/` prefix rule. A wildcard would silently absorb the next
+/// avatar route somebody mounts; a list makes adding one a line in this
+/// file that a reviewer reads.
+const TENANT_VERB_ROUTES_OUTSIDE_THE_CS_ALPHABET: &[&str] = &[
+    "POST /v1/avatar/converse",
+    "GET /v1/avatar/:instance_id/status",
+    "POST /v1/avatar/:instance_id/incarnate",
+    "POST /v1/avatar/:instance_id/grant",
+    "GET /v1/avatar/:instance_id/audit",
+    "GET /v1/avatar/:instance_id/mould-info",
+];
 
 /// Verbs the registry MUST mark as `**NO (NEVER)**` (or equivalent
 /// hard-NEVER form) per ADR-080 §5.1. The audit gate refuses to admit
@@ -400,55 +505,136 @@ fn never_verbs_carry_a_hard_no_marker() {
 }
 
 #[test]
-fn axum_routes_round_trip_with_registry() {
-    let registry = parse_registry();
-    let routes = list_axum_routes();
-
-    // 1. Every axum route has a matching registry row marked at-or-before
-    //    the current version.
-    for route in routes {
-        let row = registry
-            .iter()
-            .find(|r| r.verb == route.cs_verb)
-            .unwrap_or_else(|| {
-                panic!(
-                    "axum route {} {} (cs_verb=`{}`) has no row in \
-                     docs/guides/api-cli-coverage.md — add one or remove \
-                     the route",
-                    route.method, route.path, route.cs_verb
-                )
-            });
-        assert!(
-            row.is_currently_exposed(),
-            "axum route {} {} is exposed by cosmon-rpp-adapter, but the \
-             registry says `Exposed = {}` (must be V0 to ship today)",
-            route.method,
-            route.path,
-            row.exposed,
-        );
-        assert!(
-            !NEVER_VERBS.contains(&route.cs_verb),
-            "axum route {} {} maps to NEVER verb `cs {}` — this is a \
-             §8p breach (ADR-080 §5.1). File a bead, do not patch the \
-             adapter.",
-            route.method,
-            route.path,
-            route.cs_verb,
-        );
+fn exemption_list_names_only_live_tenant_verb_routes() {
+    // The exemption list is a blind spot written down. It must stay one:
+    // an entry for a route that was withdrawn, reclassified adapter-only,
+    // or never existed would silently widen the hole it documents.
+    let live: BTreeMap<String, Exposure> = live_routes()
+        .into_iter()
+        .map(|r| (r.key, r.exposure))
+        .collect();
+    let mut stale = Vec::new();
+    for exempt in TENANT_VERB_ROUTES_OUTSIDE_THE_CS_ALPHABET {
+        match live.get(*exempt) {
+            Some(Exposure::TenantVerb) => {}
+            Some(other) => stale.push(format!("{exempt} is `{other}`, not a tenant verb")),
+            None => stale.push(format!("{exempt} is not a live route")),
+        }
     }
+    assert!(
+        stale.is_empty(),
+        "TENANT_VERB_ROUTES_OUTSIDE_THE_CS_ALPHABET has rotted — remove \
+         the entries that no longer describe a live tenant-verb route:\n  {}",
+        stale.join("\n  ")
+    );
+}
 
-    // 2. Every registry row marked `V0` has a corresponding axum route.
+#[test]
+fn every_shipped_row_names_a_live_route() {
+    let registry = parse_registry();
+    let live: Vec<String> = live_routes().into_iter().map(|r| r.key).collect();
+
+    let mut violations = Vec::new();
     for row in &registry {
-        if !row.is_v0() {
+        if !row.claims_shipped() {
             continue;
         }
-        let implemented = routes.iter().any(|r| r.cs_verb == row.verb);
-        assert!(
-            implemented,
-            "registry promises `cs {}` at V0 (path: {}) but no \
-             matching axum route is listed in \
-             cosmon-rpp-adapter::routes::list_routes()",
-            row.verb, row.api_path,
-        );
+        if row.api_routes.is_empty() {
+            violations.push(format!(
+                "cs {} is marked `{}` but its API path column names no \
+                 route (found {:?})",
+                row.verb, row.exposed, row.api_path
+            ));
+            continue;
+        }
+        for route in &row.api_routes {
+            if !live.contains(route) {
+                violations.push(format!(
+                    "cs {} is marked `{}` and points at `{route}`, which \
+                     the adapter does not serve — correct the path or \
+                     demote the row to `TBD`",
+                    row.verb, row.exposed
+                ));
+            }
+        }
     }
+
+    assert!(
+        violations.is_empty(),
+        "docs/guides/api-cli-coverage.md promises routes that are not on \
+         the §8p surface canon ({}):\n  {}",
+        canon_path().display(),
+        violations.join("\n  ")
+    );
+}
+
+#[test]
+fn every_cs_alphabet_route_is_declared_shipped() {
+    let registry = parse_registry();
+    let mut missing = Vec::new();
+
+    for route in live_routes() {
+        // Adapter-only routes have no `cs` verb by construction — see
+        // the module docs. The exemption list covers the tenant verbs
+        // that are `cosmon-remote`'s alone.
+        if route.exposure != Exposure::TenantVerb
+            || TENANT_VERB_ROUTES_OUTSIDE_THE_CS_ALPHABET.contains(&route.key.as_str())
+        {
+            continue;
+        }
+        let naming: Vec<&RegistryRow> = registry
+            .iter()
+            .filter(|row| row.api_routes.iter().any(|r| *r == route.key))
+            .collect();
+        if naming.iter().any(|row| row.claims_shipped()) {
+            continue;
+        }
+        let seen = if naming.is_empty() {
+            "no row names it".to_string()
+        } else {
+            naming
+                .iter()
+                .map(|row| format!("`cs {}` says `{}`", row.verb, row.exposed))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        missing.push(format!("{} — {seen}", route.key));
+    }
+
+    assert!(
+        missing.is_empty(),
+        "these routes are live on the adapter but docs/guides/\
+         api-cli-coverage.md does not declare them shipped (promote the \
+         row, or withdraw the route in the surface canon):\n  {}",
+        missing.join("\n  ")
+    );
+}
+
+#[test]
+fn no_refused_row_names_a_live_route() {
+    let registry = parse_registry();
+    let live: Vec<String> = live_routes().into_iter().map(|r| r.key).collect();
+
+    let mut breaches = Vec::new();
+    for row in &registry {
+        if !row.denies_exposure() {
+            continue;
+        }
+        for route in &row.api_routes {
+            if live.contains(route) {
+                breaches.push(format!(
+                    "cs {} is marked `{}` yet `{route}` is live",
+                    row.verb, row.exposed
+                ));
+            }
+        }
+    }
+
+    assert!(
+        breaches.is_empty(),
+        "§8p breach — the registry refuses a verb the adapter serves. \
+         File a bead, do not patch the registry to make the breach \
+         pass:\n  {}",
+        breaches.join("\n  ")
+    );
 }

@@ -68,6 +68,7 @@ pub mod auth;
 pub mod auth_claude;
 pub mod backend_health;
 pub mod config;
+pub mod delivery;
 pub mod deny_list;
 pub mod drain;
 pub mod error;
@@ -76,6 +77,7 @@ pub mod harvest_effect;
 pub mod image_init;
 pub mod jwks_fetch;
 pub mod jwt;
+pub mod launch;
 pub mod metrics;
 pub mod nucleon_map;
 pub mod oauth_discovery;
@@ -421,6 +423,7 @@ pub fn router(state: AppState) -> Router {
     let shared = Arc::new(state);
     Router::new()
         .route("/v1/molecules", get(routes::molecules::list_molecules))
+        .route("/v1/vitals", get(routes::vitals::get_vitals))
         .route("/v1/molecules/{id}", get(routes::molecules::get_molecule))
         .route("/v1/molecules", post(routes::molecules::post_molecule))
         .route(

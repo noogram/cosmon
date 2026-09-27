@@ -90,6 +90,7 @@ fn seed_molecule(store: &dyn StateStore, id: &MoleculeId, freeze: bool) {
         expiry_policy: None,
         originating_branch: None,
         base_branch: None,
+        protected_paths: Vec::new(),
         pending_step: None,
         merged_at: None,
         non_integration: None,

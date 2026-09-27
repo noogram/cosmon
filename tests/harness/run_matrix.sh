@@ -212,12 +212,35 @@ run_row() {
         cd "$scratch" || exit 1
         # Per-row env layer: fault injection + isolated state dir.
         # shellcheck disable=SC2086
+        # Adapter pin: every row's fault injection is expressed as
+        # FAKE_CLAUDE_MODE / fake-tmux env vars, which only matter to the
+        # `claude` adapter's tmux+CLI spawn path. Since the built-in
+        # floor adapter became `local` (Ollama-backed, task-20260531-c99e),
+        # an un-pinned `cs tackle` here resolves to `local` on any machine
+        # or CI runner with no `[adapters.default]` config and no live
+        # Ollama backend — and refuses at the adapter preflight before
+        # touching tmux at all, scoring tuple=00000 exit=1 on every row
+        # regardless of the injected fault (task-20260925-c325). Pinning
+        # `--adapter claude` here restores what this harness actually
+        # measures: the claude-adapter spawn surface, not whichever
+        # adapter happens to be the ambient default.
+        # Credential pin: `cs tackle` spawns the claude adapter as an
+        # interactive TUI respawn (door 3, b0995d34), which refuses before
+        # touching tmux when no usable Claude Code credential is found —
+        # env token, OS keychain, or ~/.claude/.credentials.json. A
+        # developer's own Mac passes this silently via its logged-in
+        # keychain, which is exactly why this was invisible outside CI:
+        # a CI runner (or this isolated $fake_home) has none of the three,
+        # so every row refused here before ever exec'ing fake-claude. The
+        # token is read for presence only (never validated against a real
+        # backend) by fake-claude, so any non-empty value satisfies it.
         env FAKE_TMUX_DIR="$fake_state" \
             FAKE_TMUX_TRACE="$row_dir/fake-tmux.log" \
             COSMON_READINESS_TIMEOUT_SECS=5 \
+            CLAUDE_CODE_OAUTH_TOKEN=matrix-harness-fake-token \
             $tmux_env \
             $claude_env \
-            "$CS_BIN" tackle "$mol_id" \
+            "$CS_BIN" tackle "$mol_id" --adapter claude \
                 > "$row_dir/tackle.stdout" \
                 2> "$row_dir/tackle.stderr"
     )

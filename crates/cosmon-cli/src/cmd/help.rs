@@ -260,6 +260,7 @@ fn print_grouped_reference() {
     let version = env!("CARGO_PKG_VERSION");
     println!("cs {version} — Cosmon agent orchestrator\n");
     println!("Usage: cs [OPTIONS] <COMMAND>\n");
+    println!("{}", crate::root_help::START_HERE);
 
     let root = Cli::command();
     for group in command_group_layout() {
@@ -385,4 +386,9 @@ fn print_grouped_reference() {
     println!("Run 'cs help <command>' for detailed help on a specific command.");
     println!("Run 'cs help guide' for the operator handbook.");
     println!("Run 'cs help charter' to see the unified visual charter swatch.");
+    println!(
+        "Who does what — you, the pilot, and the workers: \
+         docs/book/src/explanation/pilot-and-workers.md (or \
+         https://docs.noogram.org/explanation/pilot-and-workers.html)."
+    );
 }

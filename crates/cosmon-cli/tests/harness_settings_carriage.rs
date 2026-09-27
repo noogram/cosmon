@@ -63,6 +63,7 @@ fn codex_config(harness_args: Vec<String>) -> CodexSessionConfig {
         git_identity: None,
         writable_roots: vec![],
         harness_args,
+        pass_api_key: false,
     }
 }
 
@@ -99,6 +100,24 @@ fn a_step_pin_reaches_the_codex_command_line_as_a_dash_c_override() {
             arg.argv_fragment()
         );
     }
+}
+
+/// A Codex service-tier flag is carried as the native `-c` override.
+///
+/// `default` is the Standard tier, so this is the per-dispatch escape hatch
+/// from a machine-wide Fast default. The command-line receipt is the strongest
+/// claim cosmon can make: dispatch intent, not a claim about execution.
+#[test]
+fn a_codex_service_tier_flag_reaches_the_command_line() {
+    let flag = parse_harness_flags(&["service_tier=default"]).expect("well-formed pair");
+    let resolved = resolve_harness_settings(&flag, None);
+    let args = render_harness_args("codex", &resolved).expect("codex carries the map");
+    let cmd = build_codex_command(&codex_config(argv(&args)));
+
+    assert!(
+        cmd.contains("-c service_tier=default"),
+        "the service tier must reach the command line verbatim: {cmd}"
+    );
 }
 
 /// **Falsifier 2.** `--harness model_reasoning_effort=low` overrides the pin,
@@ -222,9 +241,8 @@ fn a_failed_launch_is_recorded_as_such_rather_than_as_silence() {
 /// naming the adapter — it is never silently dropped.
 ///
 /// opencode is the case that motivates the wording: it is explicitly out of
-/// #65's scope (it drops even the shipped `--model` pin, filed separately), so
-/// a harness map reaching it would be dropped twice over if this refused
-/// quietly.
+/// #65's scope (its `--model` pin was carried separately, issue #72), so a
+/// harness map reaching it would be dropped if this refused quietly.
 #[test]
 fn an_adapter_with_no_channel_refuses_and_names_itself() {
     let flag = parse_harness_flags(&["model_reasoning_effort=high"]).expect("well-formed pair");

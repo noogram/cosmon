@@ -6,6 +6,14 @@
 
 Cosmon — compose, pilot and audit long-haul AI missions where the trace matters.
 
+START HERE — nucleate → tackle → peek → whisper/done:
+  cs nucleate task-work --var-file topic=<file>   # long statement, from a file
+  cs tackle <id> --adapter claude                 # spawn a worker
+  cs peek                                         # watch it (or: cs wait <id> &)
+  cs whisper <id> --file fix.md                   # correct it while still open
+  cs done <id>                                    # merge + teardown (required)
+
+
 ## Global options
 
 These flags are accepted before any subcommand and apply to every command:

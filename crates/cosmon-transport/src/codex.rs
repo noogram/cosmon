@@ -371,6 +371,20 @@ pub struct CodexSessionConfig {
     /// Empty (the absence-default) appends nothing and leaves the command
     /// byte-identical to the pre-#65 shape.
     pub harness_args: Vec<String>,
+
+    /// Whether this worker may inherit `OPENAI_API_KEY` / `CODEX_API_KEY`
+    /// from the dispatching process's environment.
+    ///
+    /// `false` (the default) is the safe posture: [`build_codex_command`]
+    /// prepends `env -u OPENAI_API_KEY -u CODEX_API_KEY` so a codex worker
+    /// authenticated via `codex login` (`ChatGPT`) is never diverted onto a
+    /// stale or unrelated API key frozen into the tmux server's environment
+    /// (observed 2026-09-26). The caller resolves this field from
+    /// `[adapters.codex].pass_api_key` in `.cosmon/config.toml`
+    /// (`cosmon_core::config::AdapterEntry::pass_api_key`, default `false`).
+    /// `true` restores pass-through for an installation that intentionally
+    /// bills codex by API key.
+    pub pass_api_key: bool,
 }
 
 /// An operator git identity — the `(name, email)` pinned into the author and
@@ -449,7 +463,41 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             cmd
         }
     };
+    let cmd = push_api_key_strip(cmd, config.pass_api_key);
     prefix_git_identity_env(config.git_identity.as_ref(), cmd)
+}
+
+/// Env vars codex reads as ambient API-key credentials, stripped by default
+/// (see [`CodexSessionConfig::pass_api_key`]).
+const API_KEY_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "CODEX_API_KEY"];
+
+/// Prepend `env -u OPENAI_API_KEY -u CODEX_API_KEY` onto `cmd` unless
+/// `pass_api_key` opts back into inheriting them.
+///
+/// `env -u NAME` unsets `NAME` for the child it execs, which is what
+/// actually matters here: the tmux **server** froze `OPENAI_API_KEY` into
+/// its own environment at first spawn, and every `new-session` pane
+/// inherits that frozen snapshot regardless of what the dispatching shell
+/// looks like at tackle-time (same mechanics as the `CLAUDE_CONFIG_DIR`
+/// freeze `cosmon_cli::tackle_env` documents). Unsetting in the launched
+/// process's own env — here, at the front of the command the tmux pane
+/// execs — is the point where it actually takes effect; exporting or
+/// unsetting it in the operator's shell before `cs tackle` does nothing to
+/// the frozen server snapshot.
+///
+/// `pass_api_key = true` (the absence-default is `false`) leaves `cmd`
+/// byte-identical — the escape hatch for an installation that
+/// intentionally bills codex by API key.
+fn push_api_key_strip(cmd: String, pass_api_key: bool) -> String {
+    if pass_api_key {
+        return cmd;
+    }
+    let mut prefix = "env".to_owned();
+    for var in API_KEY_ENV_VARS {
+        prefix.push_str(" -u ");
+        prefix.push_str(var);
+    }
+    format!("{prefix} {cmd}")
 }
 
 /// Append [`NO_STARTUP_UPDATE_OVERRIDE`] to an in-flight command string.
@@ -1030,6 +1078,7 @@ mod tests {
             git_identity: None,
             writable_roots: vec![],
             harness_args: vec![],
+            pass_api_key: false,
         }
     }
 
@@ -1040,14 +1089,15 @@ mod tests {
         assert_eq!(c.prompt.as_deref(), Some("hello"));
     }
 
-    /// F3 (delib-20260717-194b): with no `git_identity`, the command is
-    /// byte-identical to the pre-194b shape — no env prefix.
+    /// F3 (delib-20260717-194b): with no `git_identity`, the command carries
+    /// no `GIT_AUTHOR_*` prefix — only the default API-key strip (below) sits
+    /// ahead of `RUST_LOG=`.
     #[test]
     fn build_command_without_identity_is_unprefixed() {
         let c = cfg(CodexMode::Interactive, None, vec![]);
         let cmd = build_codex_command(&c);
         assert!(!cmd.contains("GIT_AUTHOR_"));
-        assert!(cmd.starts_with("RUST_LOG="));
+        assert!(cmd.starts_with("env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG="));
     }
 
     /// F3: a pinned operator identity prefixes all four `GIT_AUTHOR_*` /
@@ -1085,9 +1135,60 @@ mod tests {
         });
         let cmd = build_codex_command(&c);
         // `Op` is safe (unquoted); the email's `@` forces quoting.
-        assert!(cmd.starts_with("GIT_AUTHOR_NAME=Op GIT_AUTHOR_EMAIL='op@example.org'"));
+        assert!(cmd.starts_with(
+            "GIT_AUTHOR_NAME=Op GIT_AUTHOR_EMAIL='op@example.org' \
+             GIT_COMMITTER_NAME=Op GIT_COMMITTER_EMAIL='op@example.org' \
+             env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec"
+        ));
         assert!(cmd.ends_with("'do it'"));
         assert!(cmd.contains(" exec "));
+    }
+
+    // -- Codex-worker API-key strip (observed 2026-09-26) --
+
+    /// Default posture (`pass_api_key: false`): the assembled command strips
+    /// both env vars codex treats as ambient API-key credentials, in both
+    /// launch modes, so a `codex login` (`ChatGPT`) worker is never diverted
+    /// onto a stale key frozen into the tmux server's environment.
+    #[test]
+    fn api_key_is_stripped_by_default_in_both_modes() {
+        for mode in [CodexMode::Interactive, CodexMode::Exec] {
+            let c = cfg(mode, Some("work"), vec![]);
+            let cmd = build_codex_command(&c);
+            assert!(
+                cmd.starts_with("env -u OPENAI_API_KEY -u CODEX_API_KEY "),
+                "default posture must strip the API-key env vars in {mode:?}: {cmd:?}"
+            );
+        }
+    }
+
+    /// `pass_api_key: true` is the explicit opt-in: no strip prefix, command
+    /// byte-identical to the pre-fix shape.
+    #[test]
+    fn pass_api_key_true_restores_pass_through() {
+        let mut c = cfg(CodexMode::Interactive, None, vec![]);
+        c.pass_api_key = true;
+        let cmd = build_codex_command(&c);
+        assert!(!cmd.contains("-u OPENAI_API_KEY"));
+        assert!(!cmd.contains("-u CODEX_API_KEY"));
+        assert!(cmd.starts_with("RUST_LOG="));
+    }
+
+    /// The strip sits between the git-identity prefix and the base command —
+    /// both env mechanisms compose rather than one clobbering the other.
+    #[test]
+    fn api_key_strip_composes_with_git_identity_prefix() {
+        let mut c = cfg(CodexMode::Interactive, None, vec![]);
+        c.git_identity = Some(GitIdentity {
+            name: "Op".to_owned(),
+            email: "op@example.org".to_owned(),
+        });
+        let cmd = build_codex_command(&c);
+        assert!(cmd.starts_with(
+            "GIT_AUTHOR_NAME=Op GIT_AUTHOR_EMAIL='op@example.org' \
+             GIT_COMMITTER_NAME=Op GIT_COMMITTER_EMAIL='op@example.org' \
+             env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG="
+        ));
     }
 
     #[test]
@@ -1116,13 +1217,15 @@ mod tests {
 
     /// Exec mode keeps the legacy `codex exec '<prompt>'` fire-and-forget
     /// shape, now carrying the self-update kill (task-20260718-230a) between
-    /// the subcommand and the prompt.
+    /// the subcommand and the prompt, and the default API-key strip ahead of
+    /// the binary.
     #[test]
     fn build_command_exec_mode_is_unchanged() {
         let c = cfg(CodexMode::Exec, Some("do the thing"), vec![]);
         assert_eq!(
             build_codex_command(&c),
-            "codex exec -c check_for_update_on_startup=false 'do the thing'"
+            "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec \
+             -c check_for_update_on_startup=false 'do the thing'"
         );
     }
 
@@ -1131,7 +1234,8 @@ mod tests {
         let c = cfg(CodexMode::Exec, Some("it's done"), vec![]);
         assert_eq!(
             build_codex_command(&c),
-            "codex exec -c check_for_update_on_startup=false 'it'\\''s done'"
+            "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec \
+             -c check_for_update_on_startup=false 'it'\\''s done'"
         );
     }
 
@@ -1216,7 +1320,8 @@ mod tests {
         let cmd = build_codex_command(&c);
         assert_eq!(
             cmd,
-            "RUST_LOG=error codex -c check_for_update_on_startup=false \
+            "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
+             -c check_for_update_on_startup=false \
              --dangerously-bypass-approvals-and-sandbox --no-alt-screen"
         );
         // The prompt must NOT leak onto the command line in interactive mode.
@@ -1234,7 +1339,8 @@ mod tests {
         );
         assert_eq!(
             build_codex_command(&c),
-            "RUST_LOG=error codex -c check_for_update_on_startup=false -m gpt-5 --no-alt-screen"
+            "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
+             -c check_for_update_on_startup=false -m gpt-5 --no-alt-screen"
         );
     }
 

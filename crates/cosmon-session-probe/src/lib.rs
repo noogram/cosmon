@@ -95,6 +95,7 @@ pub mod reference;
 pub mod repo;
 pub mod selector;
 pub mod stall;
+pub mod usage;
 
 pub use claude::ClaudeProbe;
 pub use codex::CodexProbe;
@@ -110,3 +111,4 @@ pub use reference::{
 pub use repo::{RepoIdentity, RepoKind};
 pub use selector::{NativeSessionId, ProviderName, SessionSelector};
 pub use stall::{last_assistant_api_error, ApiStall};
+pub use usage::{snapshot_usage_for_cwd, TranscriptTokenSource, TranscriptUsageSnapshot};

@@ -113,6 +113,14 @@ pub enum DoorRefusal {
     /// later, from one somebody meant. The seven ADR-176 refusals keep their
     /// labels and their exit codes 70–76 unchanged; this one takes 77.
     MissingReason,
+    /// The worker branch changed a path the molecule declared protected at
+    /// nucleation (`cs nucleate --protect`, issue #94).
+    ///
+    /// Protected paths are reference inputs — ground truth the work is
+    /// checked against. A branch that rewrites them can make any result
+    /// "match", so the door will not integrate it. Nothing was merged; the
+    /// branch and worktree stand. Exit code 78.
+    ProtectedPathModified,
 }
 
 /// Every refusal, in check order. Iterated by the mirror tests and by any
@@ -126,6 +134,7 @@ pub const ALL_REFUSALS: &[DoorRefusal] = &[
     DoorRefusal::BaseNotFastForward,
     DoorRefusal::PreDoneRefused,
     DoorRefusal::MissingReason,
+    DoorRefusal::ProtectedPathModified,
 ];
 
 impl DoorRefusal {
@@ -142,12 +151,13 @@ impl DoorRefusal {
             Self::BaseNotFastForward => "base_not_fast_forward",
             Self::PreDoneRefused => "pre_done_refused",
             Self::MissingReason => "missing_reason",
+            Self::ProtectedPathModified => "protected_path_modified",
         }
     }
 
     /// The stable process exit code of the CLI door.
     ///
-    /// The block 70–76 is unclaimed by every other cosmon refusal
+    /// The block 70–79 is unclaimed by every other cosmon refusal
     /// (`cmd::guard::exit_code` occupies 10–17, `cs run`'s named drain exits
     /// 90–93, and 124 is the timeout convention). A route reads this code to
     /// pick the label rather than parsing stderr, which is why the two must
@@ -163,6 +173,7 @@ impl DoorRefusal {
             Self::BaseNotFastForward => 75,
             Self::PreDoneRefused => 76,
             Self::MissingReason => 77,
+            Self::ProtectedPathModified => 78,
         }
     }
 
@@ -232,6 +243,12 @@ impl DoorRefusal {
                 "the request named no reason for closing this molecule. The reason is \
                  traced trunk-side and is the only account a later reader has; the door \
                  will not invent one. Send `reason` with a sentence a human would write"
+            }
+            Self::ProtectedPathModified => {
+                "the worker branch changes a path this molecule declared protected \
+                 (`cs nucleate --protect`): reference inputs the work is checked against. \
+                 Nothing was merged. Restore the paths on the branch, or, when the change \
+                 is intended, rerun `cs done --allow-protected-change` at the terminal"
             }
         }
     }
@@ -349,7 +366,7 @@ pub enum EffectFailure {
     /// nothing.
     Unavailable,
     /// The effect refused, by name, and says so itself — a `cs` child that
-    /// exited on one of the door's stable codes 70–77, or an in-process
+    /// exited on one of the door's stable codes 70–78, or an in-process
     /// implementation returning its own verdict.
     ///
     /// The door still prefers the trunk-side `non_integration` record for
@@ -617,7 +634,8 @@ mod tests {
     /// The seven ADR-176 refusals keep their exact labels and their exact
     /// exit codes 70–76, pinned literally rather than derived, so a
     /// renumbering that a bijection test would happily accept fails here.
-    /// `missing_reason` is the eighth and takes 77; it displaces nothing.
+    /// `missing_reason` is the eighth and takes 77, `protected_path_modified`
+    /// the ninth and takes 78; neither displaces anything.
     #[test]
     fn the_seven_adr_176_refusals_keep_their_labels_and_codes() {
         let pinned: &[(DoorRefusal, &str, i32)] = &[
@@ -640,6 +658,12 @@ mod tests {
         }
         assert_eq!(DoorRefusal::MissingReason.exit_code(), 77);
         assert_eq!(DoorRefusal::MissingReason.as_str(), "missing_reason");
+        // Issue #94 appends the ninth; it displaces nothing either.
+        assert_eq!(DoorRefusal::ProtectedPathModified.exit_code(), 78);
+        assert_eq!(
+            DoorRefusal::ProtectedPathModified.as_str(),
+            "protected_path_modified"
+        );
         // And the operator-configuration classification of D7 is
         // untouched: exactly one refusal is not charged to the requester.
         let operator_faults: Vec<&str> = ALL_REFUSALS

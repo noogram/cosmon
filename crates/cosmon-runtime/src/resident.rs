@@ -176,14 +176,18 @@ pub struct EnsembleMolecule {
     /// robust to any timestamp shape the CLI emits.
     #[serde(default)]
     pub merged_at: Option<String>,
-    /// Stuck stamp when `status == "frozen"` — the load-bearing discriminant
-    /// between the two Frozen species (convoy-cascade fix). A `cs stuck` freeze
-    /// carries `Some(_)` and MUST hold its dependents; a *delivered* freeze
-    /// (`freeze_on_last_step`) carries `None` and releases them. Mirrors
-    /// `cosmon_state::frontier` (frontier.rs:210). `None` when not stuck (or
-    /// absent from the JSON). See [`Self::merged_at`] for why it is a string.
+    /// Stuck stamp when `status == "frozen"`. Retained in the projection so
+    /// resident observations preserve the distinction between `cs stuck` and
+    /// `cs freeze`. `None` when not stuck (or absent from the JSON). See
+    /// [`Self::merged_at`] for why it is a string.
     #[serde(default)]
     pub stuck_at: Option<String>,
+    /// Whether the formula deliberately parks this molecule after its last
+    /// step. A frozen molecule clears dependencies only when this is `true`
+    /// and [`Self::stuck_at`] is absent; an ordinary `cs freeze` remains a
+    /// pause. Defaults to `false` for older ensemble projections.
+    #[serde(default)]
+    pub freeze_on_last_step: bool,
     /// Adapter chosen before this runtime tick by a directional routing
     /// policy. The runtime carries it through to `cs tackle` unchanged.
     #[serde(default)]
@@ -279,9 +283,9 @@ impl EnsembleSnapshot {
                         .collect()
                 })
                 .unwrap_or_default();
-            // Presence-only reads: the scheduler discriminates the two
-            // terminal-but-gating species (completed→merged_at,
-            // frozen→stuck_at) exactly as `cosmon_state::frontier` does.
+            // Presence-only reads: `merged_at` is the completed-predecessor
+            // gate; `stuck_at` preserves which operator gesture produced a
+            // frozen observation.
             let merged_at = entry
                 .get("merged_at")
                 .and_then(serde_json::Value::as_str)
@@ -290,6 +294,10 @@ impl EnsembleSnapshot {
                 .get("stuck_at")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned);
+            let freeze_on_last_step = entry
+                .get("freeze_on_last_step")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             let adapter = entry
                 .get("adapter")
                 .and_then(serde_json::Value::as_str)
@@ -311,6 +319,7 @@ impl EnsembleSnapshot {
                 blocked_by,
                 merged_at,
                 stuck_at,
+                freeze_on_last_step,
                 adapter,
                 base_branch,
             });
@@ -417,6 +426,20 @@ pub enum Decision {
         /// persisted base, else the run-wide `cs run --base` directive, else
         /// `None` (no flag — `cs tackle` resolves the ambient chain).
         base: Option<String>,
+        /// Run-wide harness-settings directive (`cs run --harness k=v`,
+        /// ADR-177 / issue #86), rendered as one `--harness k=v` on the
+        /// shelled `cs tackle` per key.
+        ///
+        /// Unlike [`Self::Tackle::adapter`] and [`Self::Tackle::base`] there
+        /// is no per-molecule pin to check: `[steps.harness]` lives on the
+        /// *formula step*, not the molecule, and is resolved by the shelled
+        /// `cs tackle` itself (rung 2). This directive occupies rung 1 (the
+        /// operator's `--harness` flag) and is therefore applied to **every**
+        /// dispatch this run makes, unconditionally — the same rung-1 role
+        /// `cs tackle --harness` plays for a single manual dispatch. An empty
+        /// map (no `cs run --harness` given) renders no `--harness` flag at
+        /// all.
+        harness: cosmon_core::harness_settings::HarnessMap,
     },
     /// Shell out `cs done <id>` to merge a completed molecule's branch.
     Done(String),
@@ -447,6 +470,15 @@ impl Decision {
         match self {
             Self::Tackle { base, .. } => base.as_deref(),
             Self::Done(_) => None,
+        }
+    }
+
+    fn harness(&self) -> &cosmon_core::harness_settings::HarnessMap {
+        static EMPTY: std::sync::OnceLock<cosmon_core::harness_settings::HarnessMap> =
+            std::sync::OnceLock::new();
+        match self {
+            Self::Tackle { harness, .. } => harness,
+            Self::Done(_) => EMPTY.get_or_init(cosmon_core::harness_settings::HarnessMap::new),
         }
     }
 }
@@ -534,6 +566,17 @@ pub struct ReadyFrontierScheduler {
     /// eventual `cs done` merges there; a molecule that already carries a base
     /// keeps it. `None` (the default) stamps nothing.
     run_base: Option<String>,
+    /// Explicit, opt-in run-wide harness-settings directive
+    /// (`cs run --harness key=value`, repeatable — ADR-177 / issue #86).
+    ///
+    /// Unlike [`Self::run_adapter`] and [`Self::run_base`] this is rung 1 of
+    /// a per-key merge, not a fallback for a pin-less molecule: there is no
+    /// per-molecule harness pin to check against (`[steps.harness]` lives on
+    /// the formula step and is resolved by the shelled `cs tackle` itself,
+    /// rung 2), so a non-empty directive is rendered onto **every** dispatch
+    /// this run makes. An empty map (the default) renders no `--harness`
+    /// flag at all.
+    run_harness: cosmon_core::harness_settings::HarnessMap,
 }
 
 impl ReadyFrontierScheduler {
@@ -573,27 +616,36 @@ impl ReadyFrontierScheduler {
         self.run_base = run_base;
         self
     }
+
+    /// Set the run-wide harness-settings directive (`cs run --harness
+    /// key=value`, ADR-177 / issue #86). An empty map is the default and
+    /// renders no `--harness` flag on any dispatch.
+    #[must_use]
+    pub fn with_run_harness(
+        mut self,
+        run_harness: cosmon_core::harness_settings::HarnessMap,
+    ) -> Self {
+        self.run_harness = run_harness;
+        self
+    }
 }
 
 impl ResidentScheduler for ReadyFrontierScheduler {
     fn next_decisions(&mut self, snapshot: &EnsembleSnapshot) -> Vec<Decision> {
         // A blocker is *cleared* (no longer gating its dependents) once it
         // reaches a terminal state whose semantics say "successors may run".
-        // This MUST mirror `cosmon_state::frontier::compute_from_molecules`
-        // (frontier.rs:181-220) exactly — the DEFAULT `cs run` path already
-        // routes through that reducer (dag_policy.rs:664), and a coarse
-        // status-string match here is precisely the divergence that
-        // regressed the convoy-cascade fix (F-C11-1): a `cs stuck`'d blocker
-        // ("NE PAS EXÉCUTER") was read as delivered and its successors were
-        // flung at the runtime under `--resident`.
+        // This mirrors the effective DEFAULT `cs run` gate: DagPolicy's plan
+        // and `cosmon_state::frontier::compute_from_molecules` are intersected,
+        // so the plan keeps an ordinary non-terminal `Frozen` predecessor
+        // blocking even if the frontier reducer independently surfaces its
+        // dependent. The explicit `freeze_on_last_step` delivered park is the
+        // sole exception in both paths.
         //
         // - `collapsed` — releases successors unconditionally (the collapse
         //   cascade frees the lateral axis).
-        // - `frozen` — TWO disjoint species that gate oppositely; the
-        //   discriminant is `stuck_at` (frontier.rs:210). A *delivered* freeze
-        //   (`stuck_at == None`, e.g. a mission-plan mission that decomposed)
-        //   releases; a *stuck* freeze (`cs stuck` → `stuck_at.is_some()`,
-        //   "do not execute — hold dependents") stays blocking.
+        // - `frozen` — cleared only for an explicit `freeze_on_last_step`
+        //   delivered park with no `stuck_at` marker. Ordinary `cs freeze` and
+        //   `cs stuck` observations remain blocking pauses.
         // - `completed` — cleared only when its branch is merged
         //   (`merged_at.is_some()`, merge-before-dispatch, frontier.rs:214) so
         //   the dependent's worktree carries the committed output. In the
@@ -606,7 +658,7 @@ impl ResidentScheduler for ReadyFrontierScheduler {
             .iter()
             .filter(|m| match m.status.as_str() {
                 "collapsed" => true,
-                "frozen" => m.stuck_at.is_none(),
+                "frozen" => m.freeze_on_last_step && m.stuck_at.is_none(),
                 "completed" => m.merged_at.is_some(),
                 _ => false,
             })
@@ -689,6 +741,9 @@ impl ResidentScheduler for ReadyFrontierScheduler {
                     // own persisted base wins, the run directive fills in only
                     // where there is none (issue #69).
                     base: m.base_branch.clone().or_else(|| self.run_base.clone()),
+                    // Rung-1 harness directive, unconditional (no per-molecule
+                    // pin to check — see the field doc on `run_harness`).
+                    harness: self.run_harness.clone(),
                 });
                 self.tackled.insert(m.id.clone());
             }
@@ -1240,6 +1295,7 @@ impl RuntimeLoop {
                             molecule_id,
                             adapter,
                             base,
+                            harness,
                         },
                         Some(executor),
                     ) => dispatch_via_executor(
@@ -1247,6 +1303,7 @@ impl RuntimeLoop {
                         molecule_id,
                         adapter.as_deref(),
                         base.as_deref(),
+                        harness,
                     ),
                     _ => shell_out(&self.config, &d),
                 };
@@ -1733,6 +1790,7 @@ fn dispatch_via_executor(
     molecule_id: &str,
     adapter: Option<&str>,
     base: Option<&str>,
+    harness: &cosmon_core::harness_settings::HarnessMap,
 ) -> Result<(), ResidentError> {
     let id =
         cosmon_core::id::MoleculeId::new(molecule_id).map_err(|e| ResidentError::CsInvocation {
@@ -1744,6 +1802,7 @@ fn dispatch_via_executor(
         adapter: adapter.map(str::to_owned),
         model: None,
         base_branch: base.map(str::to_owned),
+        harness: harness.clone(),
     };
     executor
         .dispatch_with_pin(&id, &pin)
@@ -1849,6 +1908,9 @@ fn shell_out_args(d: &Decision, runtime_pid: u32) -> Vec<String> {
     }
     if let Some(base) = d.base() {
         args.extend(["--base".to_owned(), base.to_owned()]);
+    }
+    for (key, value) in d.harness() {
+        args.extend(["--harness".to_owned(), format!("{key}={value}")]);
     }
     args
 }
@@ -2202,9 +2264,8 @@ mod tests {
         assert_eq!(teardown_backoff(base, 3), Duration::from_millis(40));
     }
 
-    /// Terse `EnsembleMolecule` for tests: no merge / stuck stamp. The
-    /// discriminant-bearing tests set `merged_at` / `stuck_at` explicitly on
-    /// the returned value.
+    /// Terse `EnsembleMolecule` for tests: no merge / stuck stamp. Tests that
+    /// exercise those projected observations set them explicitly.
     fn mol(id: &str, status: &str, blocked_by: &[&str]) -> EnsembleMolecule {
         EnsembleMolecule {
             id: id.into(),
@@ -2214,6 +2275,7 @@ mod tests {
             blocked_by: blocked_by.iter().map(|s| (*s).into()).collect(),
             merged_at: None,
             stuck_at: None,
+            freeze_on_last_step: false,
             adapter: None,
             base_branch: None,
         }
@@ -2235,9 +2297,9 @@ mod tests {
 
     #[test]
     fn snapshot_parses_merged_and_stuck_stamps() {
-        // The two discriminants must survive the JSON round-trip: a completed
-        // molecule carries `merged_at`, a `cs stuck` frozen one carries
-        // `stuck_at`. The scheduler reads only their presence.
+        // Both observations survive the JSON round-trip: a completed molecule
+        // carries `merged_at`, while a `cs stuck` frozen one carries
+        // `stuck_at` for diagnostics.
         let json = r#"{"molecule_states":[
             {"id":"a","status":"completed","blocked_by":[],"merged_at":"2026-07-12T10:00:00Z"},
             {"id":"b","status":"frozen","blocked_by":[],"stuck_at":"2026-07-12T11:00:00Z"}
@@ -2277,6 +2339,7 @@ mod tests {
                 molecule_id: "task-codex".into(),
                 adapter: Some("codex".into()),
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }]
         );
         assert_eq!(
@@ -2335,6 +2398,7 @@ mod tests {
                 molecule_id: "pinned".into(),
                 adapter: None,
                 base: Some("feat/x".into()),
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }],
             "a molecule's own base must not be overwritten by the run directive"
         );
@@ -2351,6 +2415,94 @@ mod tests {
         let decisions = scheduler.next_decisions(&snapshot);
         assert_eq!(decisions[0].base(), None);
         assert!(!shell_out_args(&decisions[0], 7).contains(&"--base".to_owned()));
+    }
+
+    /// ADR-177 / issue #86: `cs run --harness key=value` is a rung-1 flag
+    /// intent with no per-molecule pin to defer to, so it must reach
+    /// **every** dispatch — unlike `--adapter`/`--base`, which apply only to
+    /// a pin-less molecule.
+    #[test]
+    fn run_harness_directive_applies_to_every_dispatch() {
+        let snapshot = EnsembleSnapshot {
+            molecules: vec![mol("n1", "pending", &[]), mol("n2", "pending", &[])],
+        };
+        let mut harness = cosmon_core::harness_settings::HarnessMap::new();
+        harness.insert("model_reasoning_effort".to_owned(), "high".to_owned());
+        let mut scheduler = ReadyFrontierScheduler::new().with_run_harness(harness);
+
+        let decisions = scheduler.next_decisions(&snapshot);
+        assert_eq!(decisions.len(), 2);
+        for d in &decisions {
+            let args = shell_out_args(d, 7);
+            let at = args
+                .iter()
+                .position(|a| a == "--harness")
+                .expect("--harness rendered");
+            assert_eq!(args[at + 1], "model_reasoning_effort=high", "{d:?}");
+        }
+    }
+
+    /// No `cs run --harness` directive: no `--harness` flag on the shelled
+    /// `cs tackle`, so a step's own `[steps.harness]` pin resolves unmasked.
+    #[test]
+    fn no_harness_directive_renders_no_harness_flag() {
+        let snapshot =
+            EnsembleSnapshot::from_json(r#"{"molecule_states":[{"id":"a","status":"pending"}]}"#)
+                .expect("snapshot parses");
+        let mut scheduler = ReadyFrontierScheduler::new();
+        let decisions = scheduler.next_decisions(&snapshot);
+        assert!(!shell_out_args(&decisions[0], 7).contains(&"--harness".to_owned()));
+    }
+
+    /// A no-op [`crate::Executor`] that only records the [`crate::DispatchPin`]
+    /// it was handed, for asserting what [`dispatch_via_executor`] builds.
+    #[derive(Default)]
+    struct CapturingExecutor {
+        captured: std::sync::Mutex<Option<crate::DispatchPin>>,
+    }
+
+    impl crate::Executor for CapturingExecutor {
+        fn dispatch(&self, id: &cosmon_core::id::MoleculeId) -> Result<(), crate::RuntimeError> {
+            self.dispatch_with_pin(id, &crate::DispatchPin::default())
+        }
+
+        fn dispatch_with_pin(
+            &self,
+            _id: &cosmon_core::id::MoleculeId,
+            pin: &crate::DispatchPin,
+        ) -> Result<(), crate::RuntimeError> {
+            *self.captured.lock().expect("lock") = Some(pin.clone());
+            Ok(())
+        }
+    }
+
+    /// ADR-177 / issue #86, the in-process (`with_tackle_executor`) twin of
+    /// [`run_harness_directive_applies_to_every_dispatch`]: the run-wide
+    /// harness directive must reach the [`crate::DispatchPin`] the injected
+    /// executor sees, not just the shelled-`cs`-argv path.
+    #[test]
+    fn dispatch_via_executor_carries_the_run_wide_harness_directive() {
+        let mut harness = cosmon_core::harness_settings::HarnessMap::new();
+        harness.insert("model_reasoning_effort".to_owned(), "high".to_owned());
+        let executor = CapturingExecutor::default();
+
+        dispatch_via_executor(
+            &executor,
+            "task-20260927-c005",
+            Some("claude"),
+            None,
+            &harness,
+        )
+        .expect("dispatch");
+
+        let captured = executor
+            .captured
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("dispatch_with_pin was called");
+        assert_eq!(captured.harness, harness);
+        assert_eq!(captured.adapter.as_deref(), Some("claude"));
     }
 
     #[test]
@@ -2372,6 +2524,7 @@ mod tests {
                 molecule_id: "task-pinless".into(),
                 adapter: Some("claude".into()),
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }],
             "an explicit run directive must replace the local floor for a pin-less molecule"
         );
@@ -2397,6 +2550,7 @@ mod tests {
                 molecule_id: "task-pinless".into(),
                 adapter: None,
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }],
             "no pin + no run directive must emit no adapter flag (delegate the full chain to cs tackle)"
         );
@@ -2425,6 +2579,7 @@ mod tests {
                 molecule_id: "task-codex".into(),
                 adapter: Some("codex".into()),
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }],
             "a per-molecule pin must beat the run-wide directive"
         );
@@ -2456,6 +2611,7 @@ mod tests {
                 molecule_id: "child".into(),
                 adapter: Some("claude".into()),
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }],
             "a dynamically-nucleated pin-less child must inherit the run directive"
         );
@@ -2488,6 +2644,7 @@ mod tests {
                 // the full canonical chain (COSMON-DEV #21).
                 adapter: None,
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }]
         );
         // Same snapshot → no re-tackle.
@@ -2527,6 +2684,7 @@ mod tests {
                 // Pin-less, directive-less → no flag; child runs the full chain.
                 adapter: None,
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }]
         );
     }
@@ -2624,6 +2782,7 @@ mod tests {
                 molecule_id: "routed".into(),
                 adapter: Some("anthropic".into()),
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }],
             "a snapshot adapter pin must reach the tackle decision unchanged"
         );
@@ -2654,6 +2813,7 @@ mod tests {
                     // Pin-less, directive-less → no flag; child runs the chain.
                     adapter: None,
                     base: None,
+                    harness: cosmon_core::harness_settings::HarnessMap::new(),
                 },
             ]
         );
@@ -2706,6 +2866,7 @@ mod tests {
                 // Pin-less, directive-less → no flag; child runs the chain.
                 adapter: None,
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }),
             "fan-in must chain when one blocker is torn down and the other \
              completed, got {decisions:?}"
@@ -2713,42 +2874,31 @@ mod tests {
     }
 
     #[test]
-    fn ready_frontier_chains_past_frozen_blocker() {
-        // BUG 1 (task-20260604-6056): a *delivered* frozen mission
-        // (`stuck_at == None`, the `freeze_on_last_step` species) must release
-        // its children even though it is neither "completed" nor torn down.
+    fn ready_frontier_holds_dependent_of_frozen_blocker() {
+        // A freeze is a pause, not a terminal transition. The resident must
+        // keep the dependency edge closed across ticks even though an ordinary
+        // `cs freeze` carries no `stuck_at` stamp.
         let mut sched = ReadyFrontierScheduler::new();
         let snap = EnsembleSnapshot {
-            // Default `mol` leaves `stuck_at = None` → delivered freeze.
             molecules: vec![
-                mol("mission", "frozen", &[]),
-                mol("architect", "pending", &["mission"]),
+                mol("blocker", "frozen", &[]),
+                mol("dependent", "pending", &["blocker"]),
             ],
         };
-        let decisions = sched.next_decisions(&snap);
-        assert_eq!(
-            decisions,
-            vec![Decision::Tackle {
-                molecule_id: "architect".into(),
-                // Pin-less, directive-less → no flag; child runs the chain.
-                adapter: None,
-                base: None,
-            }],
-            "child must tackle behind a delivered (stuck_at=None) frozen \
-             mission, got {decisions:?}"
-        );
+        for tick in 1..=2 {
+            let decisions = sched.next_decisions(&snap);
+            assert!(
+                decisions.is_empty(),
+                "tick {tick}: dependent of a frozen blocker must not dispatch, got {decisions:?}"
+            );
+        }
     }
 
     #[test]
     fn ready_frontier_holds_dependent_of_stuck_frozen_blocker() {
-        // F-C11-1 — the convoy-cascade regression this molecule fixes. A
-        // blocker frozen via `cs stuck` ("[IDÉE — NE PAS EXÉCUTER TEL QUEL]")
-        // carries `stuck_at = Some(_)` and has NOT delivered its work. The
-        // resident scheduler used a coarse status-string match that read it as
-        // delivered and flung its successors at the fleet under `--resident` —
-        // the exact class `cosmon_state::frontier` (frontier.rs:210) closed in
-        // the DEFAULT `cs run` path. A blocker that says "do not execute" must
-        // HOLD its dependents. The discriminant is `stuck_at`.
+        // The explicit `cs stuck` species remains covered separately: its
+        // diagnostic stamp cannot make it any less blocking than an ordinary
+        // `cs freeze` pause.
         let mut sched = ReadyFrontierScheduler::new();
         let mut blocker = mol("task-20260710-6174", "frozen", &[]);
         blocker.stuck_at = Some("2026-07-12T10:00:00Z".into());
@@ -2761,8 +2911,29 @@ mod tests {
         let decisions = sched.next_decisions(&snap);
         assert!(
             decisions.is_empty(),
-            "successor of a `cs stuck` (stuck_at=Some) blocker must NOT \
+            "successor of a `cs stuck` (stuck_at=Some) blocker must not \
              dispatch under --resident, got {decisions:?}"
+        );
+    }
+
+    #[test]
+    fn ready_frontier_releases_explicit_delivered_park() {
+        let mut sched = ReadyFrontierScheduler::new();
+        let mut blocker = mol("mission", "frozen", &[]);
+        blocker.freeze_on_last_step = true;
+        let snap = EnsembleSnapshot {
+            molecules: vec![blocker, mol("architect", "pending", &["mission"])],
+        };
+        let decisions = sched.next_decisions(&snap);
+        assert_eq!(
+            decisions,
+            vec![Decision::Tackle {
+                molecule_id: "architect".into(),
+                adapter: None,
+                base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
+            }],
+            "freeze_on_last_step is a delivered park, not an operator pause"
         );
     }
 

@@ -15,6 +15,30 @@ fn cosmon_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cs"))
 }
 
+/// Fail if any word that only the old French consent strings had comes back.
+///
+/// `cs` prints English everywhere else; the consent path was the single
+/// exception, and a newcomer on the published install route met it at the one
+/// prompt asking about their own data (noogram/cosmon#76). Accented letters
+/// are not the test — the acceptance line legitimately contains `→`.
+fn assert_no_french(rendered: &str) {
+    for marker in [
+        "Acceptez",
+        "enregistr",
+        "refus",
+        "chiffr",
+        "aucune trace",
+        "posable",
+        "sortie captur",
+        "[o/N]",
+    ] {
+        assert!(
+            !rendered.contains(marker),
+            "French wording {marker:?} is back on the consent surface:\n{rendered}"
+        );
+    }
+}
+
 #[test]
 fn first_run_without_tty_records_decline() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -33,6 +57,15 @@ fn first_run_without_tty_records_decline() {
         "consent.toml should be created: {}",
         consent_path.display()
     );
+
+    // The rendering is English, like every other string `cs` prints
+    // (noogram/cosmon#76). These three lines are `println!` literals inside
+    // the binary, so this is the only place that can read the real ones.
+    assert!(
+        stdout.contains("declined by default"),
+        "expected the English auto-decline line, got:\n{stdout}"
+    );
+    assert_no_french(&stdout);
 
     let body = fs::read_to_string(&consent_path).expect("read consent.toml");
     assert!(
@@ -78,6 +111,12 @@ fn explicit_accept_persists_accepted_record() {
         "cs opt-in-share --accept failed: {stdout}"
     );
 
+    assert!(
+        stdout.contains("acceptance recorded"),
+        "expected the English acceptance line, got:\n{stdout}"
+    );
+    assert_no_french(&stdout);
+
     let body =
         fs::read_to_string(tmp.path().join("cosmon/consent.toml")).expect("read consent.toml");
     assert!(
@@ -98,6 +137,12 @@ fn second_invocation_is_noop_on_already_decided() {
         .output()
         .expect("spawn cs");
     assert!(first.status.success());
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+    assert!(
+        first_stdout.contains("decline recorded (nothing is shared"),
+        "expected the English decline line, got:\n{first_stdout}"
+    );
+    assert_no_french(&first_stdout);
 
     let path = tmp.path().join("cosmon/consent.toml");
     let first_body = fs::read_to_string(&path).expect("read first");

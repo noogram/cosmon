@@ -343,7 +343,7 @@ stop and ask whether Y already has its own command.
 | `cs done` | Propelled → Inert | Not-the-worker today; holder of `DoneAuthorization` in ADR-172's target contract | Teardown: merge branch, kill tmux, remove worktree, purge fleet, delete branch | **Not worker-internal.** Ordinary harvest is delegable; human-reserved thresholds require a molecule-scoped operator seal. ADR-172 is accepted but its grant surface is not yet implemented. Symmetric to `cs tackle`. |
 | `cs harvest` | Propelled → Inert (bridge) | Transport watchdog / scheduler / human | Check state; exec `cs done` when the molecule is `Completed` with `merged_at = None`; silent no-op otherwise | Hook-friendly bridge that closes the worker-exit → `cs done` gap without violating the "workers cannot self-destroy" spirit: the hook runs in a sibling shell, not inside the worktree. |
 | `cs collapse` | Active → Collapsed | Human | Mark as permanently failed | Terminal, records reason, cannot be reverted by `cs complete`. |
-| `cs freeze` / `cs thaw` | Propelled ↔ Paused | Human | Suspend/resume worker session | Preserves state across preemption. |
+| `cs freeze` / `cs thaw` | Propelled ↔ Paused | Human | Freeze stops the worker's session and frees its name; thaw respawns it under that name and prompts it to resume | Durable state (fleet record, molecule directory, worktree) survives preemption; the transport session does not. |
 | `cs kill` / `cs purge` | infrastructure-only | Human | Terminate worker, remove from fleet | Infrastructure teardown. Does not touch molecule state. |
 | `cs reconcile` | pure projection | Any | Project state onto surfaces | Idempotent by construction (enforced by tests). |
 

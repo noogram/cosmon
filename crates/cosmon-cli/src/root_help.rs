@@ -10,11 +10,42 @@
 //! `cs --help`, `cs help`, and the generated man page all read from
 //! one source.
 
+/// "Start here" — the first thing printed by `cs -h`, `cs --help`, and
+/// `cs help` (see `crate::cmd::help::print_grouped_reference`, private
+/// to that module), ahead of the grouped command list. Before this, the
+/// first command name a
+/// reader hit was `spark` (alphabetically-adjacent-to-first in the
+/// "Molecule lifecycle" group), a niche inbox gesture, not the ordinary
+/// entry point — the wrong anchor for a first read. One source, three
+/// renderings, so the pointer cannot say one thing in the terminal and
+/// another in the man page.
+pub const START_HERE: &str = "START HERE — nucleate → tackle → peek → whisper/done:\n  \
+             cs nucleate task-work --var-file topic=<file>   # long statement, from a file\n  \
+             cs tackle <id> --adapter claude                 # spawn a worker\n  \
+             cs peek                                         # watch it (or: cs wait <id> &)\n  \
+             cs whisper <id> --file fix.md                   # correct it while still open\n  \
+             cs done <id>                                    # merge + teardown (required)\n";
+
+/// Short about, rendered by `cs -h`.
+#[must_use]
+pub fn about() -> String {
+    format!(
+        "Cosmon — compose, pilot and audit long-haul AI missions where the trace matters.\n\n\
+         {START_HERE}"
+    )
+}
+
+/// Long about, rendered by `cs --help` (long form) and by
+/// [`clap_mangen::Man`] for the `DESCRIPTION` section of the man page.
+#[must_use]
+pub fn long_about() -> String {
+    format!("{START_HERE}\n{LONG_ABOUT}")
+}
+
 /// Long about attached to the root `cs` command.
 ///
-/// Rendered verbatim by clap for `cs --help` (long form) and by
-/// [`clap_mangen::Man`] for the `DESCRIPTION` section of the man page.
-pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run several on one \
+/// The narrative body — [`long_about`] prepends [`START_HERE`] to it.
+const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run several on one \
              codebase and a session will crash, or fill its context window and forget what it \
              was doing, and you lose track of which agent was on what — cosmon gives each a \
              durable identity and writes every step to disk, so a dead session resumes where it \
@@ -374,7 +405,11 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              in a tmux pane — vendor cloud. Interactive steerable TUI by \
              default (whisperable, parity with claude); \
              [adapters.codex].mode = \"exec\" for the legacy fire-and-forget \
-             'codex exec' batch path.\n  \
+             'codex exec' batch path. Strips OPENAI_API_KEY/CODEX_API_KEY \
+             from the worker by default (a codex login/ChatGPT worker must \
+             not be diverted onto a stale key frozen into the tmux server's \
+             env); [adapters.codex].pass_api_key = true opts back into \
+             pass-through for an installation that bills codex by API key.\n  \
              opencode      (TmuxPane,  External, Vendor)    opencode \
              (sst/opencode) CLI in a tmux pane — vendor cloud.\n  \
              openai        (InProcess, Cosmon,   Vendor)    OpenAI chat-\
@@ -444,12 +479,15 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              floor 'None'                      → cosmon pins NO model; the \
              adapter's own default applies (byte-identical to no pin — a \
              strong model is unreachable from silence).\n\n\
-             The id is carried opaquely. A recognisable cross-family pair \
-             prints a non-blocking advisory, but cosmon still dispatches: a \
-             custom Adapter endpoint may legitimately serve another family's \
-             model, so the Adapter remains authoritative. \
-             The claude adapter carries the pin through the ANTHROPIC_MODEL \
-             per-session closure-shadow at spawn (no shared-state mutation); \
+             The id is carried opaquely: cosmon keeps no model allowlist. A \
+             decidable mismatch between named adapter/model provider families \
+             is refused before spawn; unknown ids and self-hosted endpoints \
+             remain opaque and pass through. \
+             The claude adapter carries the pin on its launch argv as \
+             '--model <ID>', which Claude Code ranks above any inherited \
+             ANTHROPIC_MODEL, on both 'cs tackle' and the API dispatch path, \
+             and also through the ANTHROPIC_MODEL per-session closure-shadow \
+             at spawn (no shared-state mutation); \
              the Direct-API adapters take it above their config default_model.\n\n\
              HARNESS SETTINGS (per-step, how the model runs — ADR-177). \
              The model axis pins WHICH model runs; this pins HOW it runs, by \
@@ -466,8 +504,12 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              emitting NO key; it is silence, not a cosmon surface.\n\n\
              Merged PER KEY, never wholesale: overriding one key leaves every \
              sibling the step pinned exactly where it was. Carriers: codex \
-             takes one '-c key=value' per entry, claude takes '--<key> \
-             <value>'; any other adapter REFUSES a non-empty map at launch, \
+             takes one '-c key=value' per entry (including \
+             'service_tier=default' for Standard / Fast off, and \
+             'service_tier=priority' or 'service_tier=fast' for Fast; Fast \
+             availability depends on the selected model and account); claude \
+             takes '--<key> <value>'; any other adapter REFUSES a non-empty \
+             map at launch, \
              naming itself — a setting is never silently dropped. The \
              '[adapters.<name>.harness]' config level is deferred (it would \
              sit beside the wholesale-replace 'extra_args' on the same node).\n\n\

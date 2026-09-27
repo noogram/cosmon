@@ -27,12 +27,18 @@
 # pins. The fix for a test poisoned by the policy is to keep the test out of
 # the adapter's environment, never to weaken the adapter.
 #
-# THE LIST BELOW IS NOT THE SOURCE OF TRUTH. `crates/cosmon-core/src/pilot_env.rs`
-# is: `cs tackle` emits every variable through `PilotVar::name()`, so a
-# variable that does not exist there cannot be injected at all. This file is a
-# projection of that enum for the shell, and `pilot_env_boundary.rs` fails if
-# the two ever disagree — which is what stops this list rotting silently, and
-# what covers the pilot variable nobody has invented yet.
+# THE PILOT LIST BELOW IS NOT THE SOURCE OF TRUTH.
+# `crates/cosmon-core/src/pilot_env.rs` is: `cs tackle` emits every variable
+# through `PilotVar::name()`, so a variable that does not exist there cannot be
+# injected at all. This file is a projection of that enum for the shell, and
+# `pilot_env_boundary.rs` fails if the two ever disagree — which is what stops
+# this list rotting silently, and what covers the pilot variable nobody has
+# invented yet.
+#
+# GATE_ONLY_VARS are different: operator controls which are legitimate at
+# runtime but must not steer a test process. A tmux server can retain one long
+# after the shell that set it has gone away. Keep this list small and pin every
+# entry with the same negative-control test as the pilot variables.
 #
 # Usage:  ./scripts/no-pilot-env.sh cargo test --workspace
 set -euo pipefail
@@ -52,9 +58,13 @@ PILOT_VARS=(
     COSMON_ARTIFACT_DIR
 )
 
+GATE_ONLY_VARS=(
+    COSMON_SPAWN_POSTCONDITION_SECS
+)
+
 if [[ $# -eq 0 ]]; then
     printf 'usage: %s <command> [args…]\n' "$0" >&2
-    printf 'strips: %s\n' "${PILOT_VARS[*]}" >&2
+    printf 'strips: %s %s\n' "${PILOT_VARS[*]}" "${GATE_ONLY_VARS[*]}" >&2
     exit 2
 fi
 
@@ -69,6 +79,9 @@ fi
 # by hand so this behaves identically under the post_merge hook's shell.
 unset_args=()
 for var in "${PILOT_VARS[@]}"; do
+    unset_args+=(-u "$var")
+done
+for var in "${GATE_ONLY_VARS[@]}"; do
     unset_args+=(-u "$var")
 done
 

@@ -77,6 +77,36 @@ pub struct CodexTokenUsage {
     pub total_tokens: u64,
 }
 
+/// Subscription-limit observation carried by a Codex `token_count` event.
+///
+/// This is usage of a `ChatGPT` plan allowance, not a monetary charge.  Keeping
+/// it typed separately prevents a subscription-backed run from being rendered
+/// as the numeric dollar value zero.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodexSubscriptionUsage {
+    /// Plan label reported by Codex (for example `pro`).
+    pub plan_type: Option<String>,
+    /// Share of the primary plan window consumed, in percent.
+    pub used_percent: f64,
+    /// Length of the primary limit window, when Codex reports it.
+    pub window_minutes: Option<u64>,
+}
+
+/// Latest cumulative energy observation from one Codex rollout.
+///
+/// All values come from the same append-only `token_count` stream.  Token
+/// subsets remain explicit so observers can display input / cached / output /
+/// reasoning without reconstructing them from a lossy total.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodexEnergySnapshot {
+    /// Cumulative token counters from the latest complete reading.
+    pub usage: CodexTokenUsage,
+    /// Model context-window capacity reported beside the counters.
+    pub model_context_window: Option<u64>,
+    /// `ChatGPT` subscription allowance use, when present in the rollout.
+    pub subscription: Option<CodexSubscriptionUsage>,
+}
+
 impl CodexTokenUsage {
     /// The non-cached portion of the input, billed at the full input rate.
     ///
@@ -149,6 +179,8 @@ enum CodexEventPayload {
 struct CodexTokenCountEvent {
     #[serde(default)]
     info: Option<CodexTokenCountInfo>,
+    #[serde(default)]
+    rate_limits: Option<CodexRateLimits>,
 }
 
 /// The `info` object of a `token_count` event. Only the cumulative
@@ -158,6 +190,25 @@ struct CodexTokenCountEvent {
 struct CodexTokenCountInfo {
     #[serde(default)]
     total_token_usage: Option<CodexTokenUsage>,
+    #[serde(default)]
+    model_context_window: Option<u64>,
+}
+
+/// Subscription metadata nested beside a Codex token reading.
+#[derive(Debug, Deserialize)]
+struct CodexRateLimits {
+    #[serde(default)]
+    primary: Option<CodexRateLimitWindow>,
+    #[serde(default)]
+    plan_type: Option<String>,
+}
+
+/// One plan-limit window reported by Codex.
+#[derive(Debug, Deserialize)]
+struct CodexRateLimitWindow {
+    used_percent: f64,
+    #[serde(default)]
+    window_minutes: Option<u64>,
 }
 
 /// Parse the **session-total** token usage from a codex `rollout-*.jsonl`
@@ -172,22 +223,57 @@ struct CodexTokenCountInfo {
 /// whose energy was never reported shows `—`, it is not fabricated as zero).
 #[must_use]
 pub fn codex_token_usage_from_session(content: &str) -> Option<CodexTokenUsage> {
-    content
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
+    codex_energy_from_session(content).map(|snapshot| snapshot.usage)
+}
+
+/// Parse the latest complete Codex energy observation from rollout JSONL.
+///
+/// Token counters, context capacity, and subscription allowance are folded
+/// independently: a trailing rate-limit-only event may refresh the allowance
+/// without erasing the last real token count.  Malformed and unknown lines are
+/// ignored so an append in progress cannot blank an earlier observation.
+#[must_use]
+pub fn codex_energy_from_session(content: &str) -> Option<CodexEnergySnapshot> {
+    let mut usage = None;
+    let mut model_context_window = None;
+    let mut subscription = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(CodexEnergyLine::EventMsg(holder)) = serde_json::from_str::<CodexEnergyLine>(line)
+        else {
+            continue;
+        };
+        let Some(CodexEventPayload::TokenCount(event)) = holder.payload else {
+            continue;
+        };
+        if let Some(info) = event.info {
+            if let Some(new_usage) = info.total_token_usage {
+                usage = Some(new_usage);
             }
-            match serde_json::from_str::<CodexEnergyLine>(line).ok()? {
-                CodexEnergyLine::EventMsg(holder) => match holder.payload? {
-                    CodexEventPayload::TokenCount(event) => event.info?.total_token_usage,
-                    CodexEventPayload::Other => None,
-                },
-                CodexEnergyLine::Other => None,
+            if info.model_context_window.is_some() {
+                model_context_window = info.model_context_window;
             }
-        })
-        .next_back()
+        }
+        if let Some(limits) = event.rate_limits {
+            if let Some(primary) = limits.primary {
+                subscription = Some(CodexSubscriptionUsage {
+                    plan_type: limits.plan_type,
+                    used_percent: primary.used_percent,
+                    window_minutes: primary.window_minutes,
+                });
+            }
+        }
+    }
+
+    Some(CodexEnergySnapshot {
+        usage: usage?,
+        model_context_window,
+        subscription,
+    })
 }
 
 // ---- Price table -----------------------------------------------------------
@@ -283,12 +369,18 @@ mod tests {
 
     #[test]
     fn parses_real_token_count_line() {
-        let usage = codex_token_usage_from_session(REAL_TOKEN_COUNT_LINE).unwrap();
+        let snapshot = codex_energy_from_session(REAL_TOKEN_COUNT_LINE).unwrap();
+        let usage = snapshot.usage;
         assert_eq!(usage.input_tokens, 2_217_412);
         assert_eq!(usage.cached_input_tokens, 2_139_392);
         assert_eq!(usage.output_tokens, 8_285);
         assert_eq!(usage.reasoning_output_tokens, 2_400);
         assert_eq!(usage.total_tokens, 2_225_697);
+        assert_eq!(snapshot.model_context_window, Some(258_400));
+        let subscription = snapshot.subscription.unwrap();
+        assert_eq!(subscription.plan_type.as_deref(), Some("pro"));
+        assert!((subscription.used_percent - 3.0).abs() < f64::EPSILON);
+        assert_eq!(subscription.window_minutes, Some(10_080));
     }
 
     #[test]
@@ -326,6 +418,18 @@ mod tests {
         );
         let usage = codex_token_usage_from_session(jsonl).unwrap();
         assert_eq!(usage.input_tokens, 100);
+    }
+
+    #[test]
+    fn rate_limit_only_tail_refreshes_subscription_without_erasing_tokens() {
+        let jsonl = concat!(
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"reasoning_output_tokens":4,"total_tokens":110}},"rate_limits":{"primary":{"used_percent":2.0,"window_minutes":10080},"plan_type":"pro"}}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":7.0,"window_minutes":10080},"plan_type":"pro"}}}"#,
+        );
+        let snapshot = codex_energy_from_session(jsonl).unwrap();
+        assert_eq!(snapshot.usage.total_tokens, 110);
+        assert_eq!(snapshot.subscription.unwrap().used_percent, 7.0);
     }
 
     #[test]

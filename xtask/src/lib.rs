@@ -54,6 +54,7 @@ pub fn family(path: &str) -> Result<&'static str, String> {
         | "/v1/events"
         | "/v1/quota"
         | "/v1/noyaux"
+        | "/v1/vitals"
         | "/v1/workers"
         | "/v1/molecules/{id}/logs" => return Ok("observ."),
         _ => {}
@@ -351,6 +352,7 @@ mod tests {
         assert_eq!(family("/v1/molecules/{id}/artifacts").unwrap(), "artifact");
         assert_eq!(family("/v1/auth/claude/start").unwrap(), "auth-claude");
         assert_eq!(family("/v1/auth/me").unwrap(), "observ.");
+        assert_eq!(family("/v1/vitals").unwrap(), "observ.");
         assert_eq!(family("/v1/molecules/{id}/logs").unwrap(), "observ.");
         assert_eq!(family("/v1/avatar/converse").unwrap(), "avatar-canal");
         assert_eq!(family("/v1/admin/habilitations").unwrap(), "admin");

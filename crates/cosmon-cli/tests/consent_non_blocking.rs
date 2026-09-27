@@ -146,7 +146,7 @@ fn consent_with_tty_stdin_and_captured_stdout_does_not_block() {
         "cs opt-in-share should exit 0; stdout={stdout} stderr={stderr}"
     );
     assert!(
-        !stdout.contains("Acceptez-vous"),
+        !stdout.contains("Share diagnostic information"),
         "the question must not be printed into a stdout nobody reads:\n{stdout}"
     );
     // The auto-decline is not silent: stdout was captured, so the trace goes
@@ -195,7 +195,7 @@ fn tackle_never_asks_a_consent_question() {
     let transcript = drain.join().unwrap_or_default();
 
     assert!(
-        !transcript.contains("Acceptez-vous"),
+        !transcript.contains("Share diagnostic information"),
         "cs tackle must not ask the consent question:\n{transcript}"
     );
     assert!(

@@ -124,8 +124,19 @@ real terminal the operator has already read the decision and a second copy is
 noise.
 
 The stdout wording now names which half of the pair was missing:
-`stdin non-tty` (preserved verbatim from before) or `sortie capturée`. The
-old message would have been a lie in the new case.
+`stdin non-tty` or `sortie capturée`. The old message would have been a lie in
+the new case.
+
+> **Postscript, 2026-09-18 (noogram/cosmon#76).** The French strings quoted
+> throughout this ADR — the prompt above and the three outcome lines — were
+> translated to English, because `cs` prints English everywhere else and a
+> newcomer on the published install route met French exactly once, at the one
+> prompt asking about their own data. The transcripts here are left as they
+> were measured; they are the record of a 2026-07-27 run, not the current
+> output. `sortie capturée` is now `stdout captured`. `stdin non-tty` is
+> unchanged: it was already English, and it is the fragment operators grep
+> container logs for. The decision this ADR records — *where* the question may
+> be asked — is untouched; only the wording of the strings changed.
 
 ### D4 — The regression test asserts the property, not the artefact
 

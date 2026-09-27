@@ -396,23 +396,90 @@ pub fn infer_project_name(project_root: &Path) -> String {
     )
 }
 
-/// Generate the cosmon section content for `CLAUDE.md`.
+/// Canonical orchestration body — the one source text rendered into
+/// **two** callers: the `CLAUDE.md` / `AGENTS.md` cosmon section
+/// (`generate_cosmon_section`, private to this module) and the Claude
+/// Code skill file ([`generate_cosmon_skill_md`]). Edit this constant only; both
+/// renderings pick it up, so the pointer a human reads and the skill
+/// an agent loads cannot drift apart (the #75 lesson — two texts
+/// written separately about the same surface rot at different rates).
 ///
-/// This is the portable convention genome — minimal pointers to the
-/// authoritative references (`cs help`, `cs help guide`, `man cs`).
-/// No paraphrasing of commands, workflows, or gates — the agent reads
-/// `cs help` at runtime. Maximum entropy per line, zero drift.
+/// Kept short on purpose (Leeloo invariant: maximum entropy per line).
+/// It names the four gestures an agent needs on the first turn —
+/// nucleate with a file-backed statement, tackle with an explicit
+/// adapter, watch or block, whisper a correction, done to merge — and
+/// defers everything else to `cs help`, so it cannot drift when the
+/// CLI surface grows.
+///
+/// Issue #96 — the body closes with a one-line division of labor (who
+/// decides the mission vs. who drives the cycle) plus a link to the
+/// full breakdown at
+/// `docs/book/src/explanation/pilot-and-workers.md`, so a first-time
+/// reader of `CLAUDE.md`/`AGENTS.md` finds the answer to "what am I
+/// supposed to do, and what is the agent doing without me" without
+/// leaving the pointer block.
+pub const COSMON_ORCHESTRATION_BODY: &str = "\
+Run `cs help` for the full command reference, `cs help guide` for the operator handbook, \
+and `man cs` for the manual page.\n\
+\n\
+Source of truth: `.cosmon/state/` (JSON). Surfaces are projections — never edit directly.\n\
+\n\
+The normal cycle for one unit of work:\n\
+```\n\
+cs nucleate task-work --var-file topic=<file>   # a long statement goes in a file, not a flag\n\
+cs tackle <id> --adapter claude                 # spawn a worker; omit --adapter for the project default\n\
+cs peek                                         # watch it work, or `cs wait <id>` to block\n\
+cs whisper <id> --file correction.md            # send a correction while the worker is still open\n\
+cs done <id>                                    # merge to the base branch + teardown (required)\n\
+```\n\
+Use `cs tackle`, not `cs run`, when you intend to read the result before merging: `cs run` \
+walks a whole DAG and calls `cs done` on completion itself, closing the review window.\n\
+\n\
+Stopping early is not the end of a mission: the work sits on `feat/<id>` in `.worktrees/<id>` \
+until you run `cs done <id>` (keep the partial work) or `cs collapse <id> --reason \"…\"` \
+(drop it). `cs status` lists what is still waiting on one of the two.\n\
+\n\
+Who does what — you decide the mission and protected inputs (`cs nucleate --protect`) and \
+accept or drop each result; the pilot drives the cycle above; workers do the work. Full \
+breakdown: https://docs.noogram.org/explanation/pilot-and-workers.html\n";
+
+/// Generate the cosmon section content for `CLAUDE.md` / `AGENTS.md`.
+///
+/// Wraps [`COSMON_ORCHESTRATION_BODY`] in the section markers `cs init`
+/// looks for on `--upgrade`. No paraphrasing of commands beyond that
+/// body — the agent reads `cs help` at runtime for everything else.
 fn generate_cosmon_section(_project_root: &Path) -> String {
+    format!("{COSMON_SECTION_START}\n## Cosmon — Orchestration\n\n{COSMON_ORCHESTRATION_BODY}{COSMON_SECTION_END}\n")
+}
+
+/// Generate the Claude Code skill file (`SKILL.md`) for `/cosmon`.
+///
+/// Same [`COSMON_ORCHESTRATION_BODY`] as `generate_cosmon_section`
+/// (private to this module), wrapped in skill frontmatter instead of
+/// `CLAUDE.md` markers. Shipped at `tools/cosmon-skill/SKILL.md` in this
+/// repository — same layout as the existing `tools/cmb-skill/` (regenerate
+/// with `SKILL_UPDATE=1 cargo test -p cosmon-filestore skill_md`); a user
+/// installs it with `tools/cosmon-skill/install.sh`, which copies it into
+/// `~/.claude/skills/cosmon/` (user-level — loads in every repository, no
+/// `cs init` required). See
+/// `docs/book/src/how-to/pilot-in-natural-language.md`.
+#[must_use]
+pub fn generate_cosmon_skill_md() -> String {
     format!(
-        "{COSMON_SECTION_START}\n\
-         ## Cosmon\n\
+        "---\n\
+         name: cosmon\n\
+         description: Pilot cosmon (the `cs` CLI) by natural language — nucleate, tackle, watch, \
+         correct, and merge a unit of work. Use when the user wants to delegate a task to an AI \
+         agent through cosmon, or mentions `cs`, nucleate, tackle, molecule, whisper, or a cosmon \
+         project.\n\
+         user_invocable: true\n\
+         allowed_tools:\n\
+         \x20\x20- Bash\n\
+         ---\n\
          \n\
-         Run `cs help` for the full command reference.\n\
-         Run `cs help guide` for the operator handbook.\n\
-         Run `man cs` for the manual page.\n\
+         # Cosmon\n\
          \n\
-         Source of truth: `.cosmon/state/` (JSON). Surfaces are projections — never edit directly.\n\
-         {COSMON_SECTION_END}\n"
+         {COSMON_ORCHESTRATION_BODY}"
     )
 }
 
@@ -1115,4 +1182,100 @@ pub fn seed_registry(registry_path: &Path) -> Result<(), UpgradeError> {
     )
     .map_err(|e| UpgradeError::Registry(format!("failed to seed referents: {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod orchestration_source_tests {
+    use super::{generate_cosmon_skill_md, COSMON_ORCHESTRATION_BODY};
+    use std::path::PathBuf;
+
+    /// The two renderings (CLAUDE.md/AGENTS.md section and the Claude
+    /// Code skill) must carry the same source text, byte for byte —
+    /// not just similar prose. This is the operator's falsifier for
+    /// "one source, two callers".
+    #[test]
+    fn claude_md_section_and_skill_render_the_same_body() {
+        let section = super::generate_cosmon_section(std::path::Path::new("."));
+        let skill = generate_cosmon_skill_md();
+        assert!(
+            section.contains(COSMON_ORCHESTRATION_BODY),
+            "CLAUDE.md/AGENTS.md section must contain the canonical orchestration body"
+        );
+        assert!(
+            skill.contains(COSMON_ORCHESTRATION_BODY),
+            "SKILL.md must contain the canonical orchestration body"
+        );
+    }
+
+    /// Issue #95 — the first-contact text must tell an agent (and the
+    /// human reading `CLAUDE.md`/`AGENTS.md`) that a mission is not over
+    /// until `cs done` or `cs collapse` has run, so a mid-mission stop
+    /// never leaves work silently stranded on a branch. Before this,
+    /// [`COSMON_ORCHESTRATION_BODY`] named `cs done` only as the normal
+    /// end of a healthy cycle and never mentioned `cs collapse` at all —
+    /// an agent told to give up had no gesture named for it here.
+    #[test]
+    fn orchestration_body_covers_stopping_early() {
+        assert!(
+            COSMON_ORCHESTRATION_BODY.contains("cs collapse"),
+            "must name the drop-it verb for a mission stopped early"
+        );
+        assert!(
+            COSMON_ORCHESTRATION_BODY.contains("cs done"),
+            "must name the keep-it verb for a mission stopped early"
+        );
+        assert!(
+            COSMON_ORCHESTRATION_BODY
+                .to_lowercase()
+                .contains("stopping early")
+                || COSMON_ORCHESTRATION_BODY
+                    .to_lowercase()
+                    .contains("stop early"),
+            "must address stopping a mission early explicitly, not just the happy path"
+        );
+    }
+
+    /// Issue #96 — a new user finished a mission and still could not say
+    /// "what is the agent supposed to do, and what must I do myself, and
+    /// when". [`COSMON_ORCHESTRATION_BODY`] described commands, not the
+    /// division of labor. The fix names the divide inline (one line) and
+    /// points at the book page that answers it in full, from the exact
+    /// pointer block every project's `CLAUDE.md`/`AGENTS.md` carries.
+    #[test]
+    fn orchestration_body_links_pilot_and_workers_page() {
+        assert!(
+            COSMON_ORCHESTRATION_BODY.contains("cs nucleate --protect"),
+            "must name the human-only protected-inputs decision inline"
+        );
+        assert!(
+            COSMON_ORCHESTRATION_BODY.contains("pilot-and-workers.html"),
+            "must link to the full who-does-what breakdown in the book"
+        );
+    }
+
+    fn skill_md_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/cosmon-skill/SKILL.md")
+    }
+
+    /// Golden test for the committed `tools/cosmon-skill/SKILL.md`,
+    /// mirroring the `man/cs.1` / `docs/book/src/reference/*` pattern: the
+    /// file is generated, never hand-edited. Regenerate with
+    /// `SKILL_UPDATE=1 cargo test -p cosmon-filestore skill_md`.
+    #[test]
+    fn skill_md_matches_generated_source() {
+        let generated = generate_cosmon_skill_md();
+        let path = skill_md_path();
+
+        if std::env::var("SKILL_UPDATE").is_ok() {
+            std::fs::write(&path, &generated).expect("write tools/cosmon-skill/SKILL.md");
+            return;
+        }
+
+        let committed = std::fs::read_to_string(&path).expect("read tools/cosmon-skill/SKILL.md");
+        assert_eq!(
+            generated, committed,
+            "tools/cosmon-skill/SKILL.md is stale — regenerate with \
+             `SKILL_UPDATE=1 cargo test -p cosmon-filestore skill_md`"
+        );
+    }
 }

@@ -486,14 +486,12 @@ fn delegated_targets(key_root: &Path, primary: &[PathBuf], surface_text: &str) -
     resolved.into_iter().map(|(_, p)| p).collect()
 }
 
-/// BLAKE3 hex of the repository's *shell surface*: `.cosmon/config.toml`, every
-/// `.cosmon/formulas/*.toml`, **and every delegated target file** those two
-/// reference (scripts of any language, plus implicit `make`/`just` defaults),
-/// in a deterministic order. This is the complete set of bytes that can inject
-/// a `sh -c` string. Missing files are skipped (a repo with no config/formulas
-/// hashes to a stable empty-surface digest); unreadable files fold a distinct
-/// fail-closed sentinel (see [`fold_file`]).
-fn surface_hash(key_root: &Path) -> String {
+/// The **primary** shell-surface files of `key_root`: `.cosmon/config.toml`
+/// and every `.cosmon/formulas/*.toml`, in the deterministic order both
+/// [`surface_hash`] and [`surface_paths`] fold them. One source for both, so
+/// the paths an operator is told to review can never drift from the bytes the
+/// grant actually pins.
+fn primary_surface_files(key_root: &Path) -> Vec<PathBuf> {
     let cosmon = key_root.join(".cosmon");
     let mut primary: Vec<PathBuf> = Vec::new();
 
@@ -513,6 +511,60 @@ fn surface_hash(key_root: &Path) -> String {
             primary.extend(formula_files);
         }
     }
+    primary
+}
+
+/// Repo-relative paths of every file the shell surface of the repository
+/// containing `start` currently comprises — the primary files plus every
+/// delegated target — sorted and deduplicated.
+///
+/// # Why this exists
+///
+/// A grant is a hash, and a hash cannot tell an operator *what* to re-review
+/// when it goes stale. `cs done` intersects this set with a merge's diff to
+/// name the shell-surface paths a molecule branch changes (issue #74), so the
+/// operator reviews those files instead of guessing. It walks exactly the
+/// files `surface_hash` folds, via the same helpers.
+#[must_use]
+pub fn surface_paths(start: &Path) -> Vec<String> {
+    let key_root = key_root_or_fallback(start);
+    let root_canon = key_root.canonicalize().unwrap_or_else(|_| key_root.clone());
+    let primary = primary_surface_files(&key_root);
+    let mut surface_text = String::new();
+    for f in &primary {
+        if let Ok(bytes) = std::fs::read(f) {
+            surface_text.push_str(&shell_bearing_text(&String::from_utf8_lossy(&bytes)));
+            surface_text.push('\n');
+        }
+    }
+    let delegated = delegated_targets(&key_root, &primary, &surface_text);
+    let relative = |p: &Path| -> String {
+        let canon = p.canonicalize().unwrap_or_else(|_| p.to_owned());
+        canon
+            .strip_prefix(&root_canon)
+            .unwrap_or(&canon)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let mut out: Vec<String> = primary
+        .iter()
+        .chain(delegated.iter())
+        .map(|p| relative(p))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// BLAKE3 hex of the repository's *shell surface*: `.cosmon/config.toml`, every
+/// `.cosmon/formulas/*.toml`, **and every delegated target file** those two
+/// reference (scripts of any language, plus implicit `make`/`just` defaults),
+/// in a deterministic order. This is the complete set of bytes that can inject
+/// a `sh -c` string. Missing files are skipped (a repo with no config/formulas
+/// hashes to a stable empty-surface digest); unreadable files fold a distinct
+/// fail-closed sentinel (see [`fold_file`]).
+fn surface_hash(key_root: &Path) -> String {
+    let primary = primary_surface_files(key_root);
 
     // Read the primary files once: their bytes feed the hash directly and their
     // text is scanned for delegated targets.
@@ -685,6 +737,25 @@ mod tests {
             format!("[hooks]\npost_merge = '{hook}'\n"),
         )
         .unwrap();
+    }
+
+    /// `surface_paths` lists the primary files and the delegated script they
+    /// reference, repo-relative, and nothing else — the set `cs done` names
+    /// for review when a merge invalidates trust (issue #74).
+    #[test]
+    fn surface_paths_lists_primary_and_delegated_files() {
+        let repo = tempfile::tempdir().unwrap();
+        make_repo(repo.path(), "sh scripts/deploy.sh");
+        std::fs::create_dir_all(repo.path().join("scripts")).unwrap();
+        std::fs::write(repo.path().join("scripts/deploy.sh"), "exit 0\n").unwrap();
+        std::fs::write(repo.path().join("README.md"), "not surface\n").unwrap();
+        assert_eq!(
+            surface_paths(repo.path()),
+            vec![
+                ".cosmon/config.toml".to_owned(),
+                "scripts/deploy.sh".to_owned()
+            ]
+        );
     }
 
     #[test]

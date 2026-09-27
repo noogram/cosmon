@@ -104,7 +104,10 @@ issues filed there are read by people, not only by machines.
 
 ## Install
 
-Cosmon ships a single binary, `cs`. Three routes, in order of preference.
+Cosmon is a single command, `cs`. Three routes, in order of preference. The
+first two also place `cosmon-remote` — the connector for driving a remote cosmon
+service — beside it; `cs` is the whole product, the second file is inert until
+you point it at a remote.
 
 ### Native install script (recommended)
 
@@ -114,8 +117,13 @@ published `SHA256SUMS`:
 
 ```bash
 curl -fsSL https://noogram.org/cosmon/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"   # skip if the installer did not ask for it
 cs --version
 ```
+
+`~/.local/bin` is not on the default `PATH` on a fresh macOS or Linux account.
+The installer detects that and prints the `export` line; without it `cs --version`
+exits 127. Add the same line to your shell profile so the next terminal finds it.
 
 ### Homebrew
 

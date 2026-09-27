@@ -68,6 +68,11 @@ SEE ALSO: cs freeze (graceful + state preservation), cs teardown
    Enumerates `readdir(.worktrees/) ∪ git worktree list --porcelain` — the filesystem and Git's own registry, not the worker roster, which is keyed by molecule and could not see a directory that has none. Reports every candidate: the reclaimable derived output on one side, and on the other every worktree withheld **with its reason**.
 
    Reclamation is opt-in and one tier deep. On its own this flag removes nothing; `--allow-unharvested` — the same gesture the sweep already uses, not a second one — executes the derived half. Durable content is never removed by any path in this command, whatever the flags (ADR-178): the eligibility verdict is advisory and is printed, not acted on.
+* `--sessions` — Also run the tmux session reclamation pass (ADR-179).
+
+   Enumerates the galaxy's tmux socket — `list-panes -a`, not the worker roster. The roster is precisely what cannot see this population: the sweep above removes a terminal molecule's worker entry and the session it named lives on, unattributable, holding an agent process and its whole heap for as long as the machine is up. Each session is attributed by computing every known molecule's session name *forward* and matching, never by parsing a molecule id back out of a session name.
+
+   Reclamation is opt-in exactly as `--worktrees` is: on its own this flag kills nothing, and `--allow-unharvested` — the same gesture, not a second one — executes it. A session is reclaimed only when its molecule is terminal, no client is attached, and its scrollback has been captured to that molecule's directory first.
 * `--dry-run` — Report what would change and change nothing.
 
    Applies to the whole command: no fleet entry is removed, no molecule is collapsed, no event is emitted and no byte is reclaimed. The `--worktrees` pass is dry by default and stays dry here.
@@ -313,11 +318,17 @@ Wait — block until a molecule reaches a terminal (or requested) status
 EXAMPLES:
   cs wait <mol>                           # block until terminal
   cs wait <mol> --timeout 600             # 10-minute cap
-  cs wait <mol> --status Completed        # custom target set
+  cs wait <mol> --for completed           # custom target set
   cs wait <mol> &                         # background wait, notified on exit
+  cs whisper <mol> -f fix.md; cs wait <mol>   # wait for the correction
 
 This is kubectl-wait, not kubectl-watch. One molecule, bounded poll,
 exits on target. Never poll `cs observe` in a shell loop.
+
+After a whisper to a molecule already in the target status, the wait
+also covers the worker's answer: it returns once feat/<mol> has moved
+past the HEAD the whisper recorded and the pane is no longer working.
+A whisper answered without a commit ends on --timeout (exit 124).
 
 SEE ALSO: cs observe (snapshot), cs peek (live fleet view).
 

@@ -77,7 +77,7 @@ const DEFAULT_LOCAL_ARTIFACT_EXAMPLE: &str = "result.md";
 /// dependency graph: the plan cannot take `cosmon_state::MoleculeData`, and
 /// taking the whole record would also overstate what the decision depends
 /// on. The caller (CLI today, adapter after U6) reads the molecule through
-/// its state port and projects these six fields.
+/// its state port and projects these seven fields.
 #[derive(Debug, Clone, Copy)]
 pub struct MoleculeBrief<'a> {
     /// The molecule being tackled.
@@ -92,6 +92,9 @@ pub struct MoleculeBrief<'a> {
     pub total_steps: usize,
     /// The molecule's variables (topic, mission text, …).
     pub variables: &'a HashMap<String, String>,
+    /// Paths declared read-only ground truth at nucleation (issue #94),
+    /// listed in the brief so the worker knows before it writes anything.
+    pub protected_paths: &'a [String],
 }
 
 /// Inputs to [`resolve_selection`] — everything the adapter + model chains
@@ -776,11 +779,11 @@ pub fn adapter_strong_set(
 
 /// Name where a model pin came from, in words an operator can act on.
 ///
-/// The composition advisory is only useful if it says which knob to turn:
+/// The composition refusal is only useful if it says which knob to turn:
 /// "the pin came from `$ANTHROPIC_MODEL`" points at the shell, "from
 /// `--model`" points at the command line, and the two remedies are
 /// different. [`ModelSelectionSource`] carries the origin for the audit
-/// trail; this renders it for a human reading the advisory.
+/// trail; this renders it for a human reading the refusal.
 #[must_use]
 pub fn describe_model_source(source: &ModelSelectionSource) -> String {
     match source {
@@ -1078,6 +1081,14 @@ pub fn build_prompt(
         if !briefing.is_empty() {
             let _ = writeln!(out, "## Briefing\n\n{briefing}\n");
         }
+    }
+
+    // ── PROTECTED INPUTS (issue #94) ────────────────────────────
+    // Stated after the mission and briefing, so the constraint is the last
+    // word on the task and not buried before it. Absent when the molecule
+    // declared nothing.
+    if let Some(section) = crate::protected_paths::brief_section(mol.protected_paths) {
+        out.push_str(&section);
     }
 
     // ── ARTIFACT PATHS ──────────────────────────────────────────
@@ -1555,6 +1566,7 @@ mod tests {
             current_step: 0,
             total_steps: 2,
             variables,
+            protected_paths: &[],
         }
     }
 
@@ -1619,6 +1631,37 @@ mod tests {
         assert!(plan.prompt.contains("make the tackle plan pure"));
         assert!(plan.prompt.contains("Extract the pure half."));
         assert!(plan.prompt.contains("cs complete task-20260904-f4c6"));
+    }
+
+    /// Issue #94: a molecule born with `--protect` tells its worker, in the
+    /// brief, which inputs are ground truth — and one without says nothing.
+    #[test]
+    fn the_brief_lists_protected_paths_only_when_declared() {
+        let id = MoleculeId::new("task-20260927-b10d").unwrap();
+        let formula_id = FormulaId::new("task-work").unwrap();
+        let variables = HashMap::new();
+        let config = ProjectConfig::default();
+        let protected = vec!["ref".to_owned()];
+        let render = |protected_paths: &[String]| {
+            let mut molecule = brief(&id, &formula_id, &variables);
+            molecule.protected_paths = protected_paths;
+            build_prompt(
+                &molecule,
+                None,
+                None,
+                &config,
+                Path::new("/galaxy/.cosmon/state/molecules/task-20260927-b10d"),
+                "claude",
+                None,
+            )
+        };
+
+        let with = render(&protected);
+        assert!(with.contains("## Protected inputs — read-only ground truth"));
+        assert!(with.contains("- `ref`"));
+
+        let without = render(&[]);
+        assert!(!without.contains("Protected inputs"));
     }
 
     /// An unknown adapter is refused before any plan exists — same typed

@@ -38,6 +38,67 @@ security:
   - bearerAuth: []
 
 paths:
+  /v1/vitals:
+    get:
+      operationId: getVitals
+      summary: Read observed fleet health for the caller's tenant.
+      description: |
+        Returns one row per non-terminal molecule in the caller's noyau.
+        Durable lifecycle `status` and observed transport `health` are
+        separate fields: a recorded process that no longer exists is
+        `orphaned`, while a confirmed session is `live`. Probe failures are
+        `unknown`; molecules without a process record are `unassigned`.
+
+        Counts, rows, operator-wait declarations, and backlog age are folded
+        once by `cosmon_state::ops::vitals`. Backlog staleness uses the same
+        `cosmon_core::staleness` threshold as `cs status` and `cs peek`.
+
+        This is an adapter-only tenant view, not the operator-wide `cs peek`
+        raster. It does not inspect panes or transcripts for mute hangs.
+
+        ## Required scope
+
+        `cosmon:molecule:read` OR `cosmon:molecule:write` (write implies
+        visibility).
+      tags: [molecules]
+      responses:
+        "200":
+          description: Tenant fleet vitals (possibly with no rows).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VitalsEnvelope"
+        "401":
+          description: Missing, malformed, or rejected JWT.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: JWT valid but lacks molecule read scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: The bound tenant workspace does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Per-`sub` rate limit exhausted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: State store unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
   /v1/molecules:
     get:
       operationId: listMolecules
@@ -753,13 +814,18 @@ paths:
             step is an execution kind the library executor does not
             cover (gate / native / query / llm). The body names the
             step kind; the refusal is typed, never a silent fallback.
+
+            `tackle_unsupported_model` — the dispatch resolved a model
+            pin the resolved adapter cannot receive through the library
+            executor (today: `opencode`). Refused before any effect
+            rather than spawned with the pin dropped (issue #72).
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "503":
           description: |
-            One of four stable labels. The first two are
+            One of the stable labels below. The first two are
             **preconditions**: refused before any effect, so the
             molecule is untouched and still tacklable.
 
@@ -775,6 +841,12 @@ paths:
 
             `subprocess_spawn_failed` — the worker process could not be
             started. The dispatch ledger has been rolled back.
+
+            `startup_consent_refused` — the worker's Claude Code config
+            could not be written to pre-grant folder trust for its
+            worktree, so the worker would have stopped on the trust
+            dialog. Nothing was recorded and the worktree was removed.
+            Repair: make the worker's `HOME` (or config dir) writable.
 
             `tackle_unavailable` — stable generic fallback for any
             other dispatch failure (store fault, git fault, unknown
@@ -1735,7 +1807,7 @@ paths:
               schema:
                 "$ref": "#/components/schemas/ApiError"
         "409":
-          description: "not_completed or merge_conflict."
+          description: "not_completed, merge_conflict or protected_path_modified."
           content:
             application/json:
               schema:
@@ -3185,6 +3257,87 @@ components:
             shape: `{ molecules: [MoleculeView, ...] }` with the same
             field set as `cs --json ensemble`.
 
+    VitalsEnvelope:
+      type: object
+      required: [request_id, vitals]
+      properties:
+        request_id:
+          type: string
+        vitals:
+          $ref: "#/components/schemas/VitalsView"
+
+    VitalsView:
+      type: object
+      required: [molecules, counts, backlog, observed_at]
+      properties:
+        molecules:
+          type: array
+          description: Exactly one row per non-terminal molecule.
+          items:
+            $ref: "#/components/schemas/VitalsRow"
+        counts:
+          $ref: "#/components/schemas/VitalsCounts"
+        backlog:
+          $ref: "#/components/schemas/VitalsBacklog"
+        observed_at:
+          type: string
+          format: date-time
+
+    VitalsRow:
+      type: object
+      required:
+        [id, status, current_step, total_steps, health,
+         awaiting_operator, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+        current_step:
+          type: integer
+          minimum: 0
+        total_steps:
+          type: integer
+          minimum: 0
+        worker:
+          type: string
+        health:
+          type: string
+          enum: [unassigned, live, orphaned, unknown]
+        awaiting_operator:
+          type: boolean
+          description: True only for the declared `temp:awaiting-op` tag.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    VitalsCounts:
+      type: object
+      required: [molecules, live, orphaned, unknown, unassigned, awaiting_operator]
+      properties:
+        molecules: { type: integer, minimum: 0 }
+        live: { type: integer, minimum: 0 }
+        orphaned: { type: integer, minimum: 0 }
+        unknown: { type: integer, minimum: 0 }
+        unassigned: { type: integer, minimum: 0 }
+        awaiting_operator: { type: integer, minimum: 0 }
+
+    VitalsBacklog:
+      type: object
+      required: [count, stale, oldest_age_seconds, oldest_id, leases_excluded]
+      properties:
+        count: { type: integer, minimum: 0 }
+        stale: { type: integer, minimum: 0 }
+        oldest_age_seconds:
+          type: [integer, "null"]
+          minimum: 0
+        oldest_id:
+          type: [string, "null"]
+        leases_excluded: { type: integer, minimum: 0 }
+
     TagEnvelope:
       type: object
       required: [request_id, tag]
@@ -3373,6 +3526,46 @@ components:
           description: |
             Lifecycle status — `pending`, `active`, `running`,
             `completed`, `collapsed`, `frozen`, etc.
+        api_tokens:
+          type: object
+          description: |
+            Harvest-time lower-bound token snapshot observed in the worker's
+            provider transcript. Declarative telemetry only: the worker shares
+            the adapter uid, so this is not billing or quota evidence. Absent
+            before harvest and whenever no attributable transcript was found;
+            absence is never represented as a zero total.
+          required: [tokens_in, tokens_out, invocations]
+          properties:
+            tokens_in:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Fresh input tokens, excluding cache reads and creation.
+            cache_read_tokens:
+              type: integer
+              format: int64
+              minimum: 0
+            cache_creation_tokens:
+              type: integer
+              format: int64
+              minimum: 0
+            tokens_out:
+              type: integer
+              format: int64
+              minimum: 0
+            invocations:
+              type: integer
+              format: int64
+              minimum: 1
+              description: Distinct recorded assistant turns.
+            source:
+              type: string
+              enum: [claude_transcript, codex_rollout]
+            cost_micros_estimated:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Optional legacy estimate; harvest snapshots omit it.
         last_5_events:
           type: array
           maxItems: 5

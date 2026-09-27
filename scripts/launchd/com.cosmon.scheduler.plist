@@ -19,6 +19,25 @@
   layer. Changing this cadence is a design decision (see ADR from
   task-20260417-e162), not a config tweak.
 
+  AbandonProcessGroup = true is LOAD-BEARING, not hygiene. This is a
+  one-shot job: `cosmon-scheduler tick` returns in milliseconds. By
+  default launchd SIGKILLs the whole process group the instant a job's
+  main process exits — so every patrol dispatched in `dispatch =
+  "detached"` mode died before producing anything, while the scheduler
+  had already logged `FIRE <patrol> (pid=... detached)`. Neither `nohup`
+  nor `trap '' HUP` helps: the signal is addressed to the group, not to
+  the child. Measured on one 60-second patrol over a 48-hour window:
+  7276 fires recorded by the scheduler, 114 starts reached the patrol's
+  own log, a handful of runs completed — the ticks that happened to last
+  long enough to cover the child's work. The index that patrol feeds sat
+  frozen about 18 hours with nothing in any log saying so. Remove this
+  key and the whole patrol layer goes back to firing into the void,
+  silently.
+
+  If you install a new one-shot LaunchAgent that dispatches detached
+  work, it needs this key too. `scripts/check-abandon-process-group.sh`
+  enumerates the installed candidates.
+
   NOT auto-installed. The operator runs:
       scripts/install-scheduler.sh install
       scripts/install-scheduler.sh status
@@ -37,6 +56,10 @@
 
     <key>StartInterval</key>
     <integer>60</integer>
+
+    <!-- Do not remove: see the AbandonProcessGroup paragraph above. -->
+    <key>AbandonProcessGroup</key>
+    <true/>
 
     <key>StandardOutPath</key>
     <string>__HOME__/.cosmon/logs/cosmon-scheduler.out</string>

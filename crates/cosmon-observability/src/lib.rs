@@ -47,7 +47,7 @@ pub use event::Event;
 pub use molecule::{Molecule, MoleculeId, MoleculeStatus};
 pub use sensorium::{HeartbeatKind, Sensorium, HEARTBEAT_WINDOW};
 pub use session::{HeartbeatTier, Session, SessionFilter};
-pub use worker::{EnergyBudget, Worker, WorkerId};
+pub use worker::{EnergyBudget, EnergyCost, Worker, WorkerId};
 
 use thiserror::Error;
 

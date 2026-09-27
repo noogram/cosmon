@@ -76,8 +76,9 @@ pub use resident::{
     TEARDOWN_ATTEMPT_CEILING, TEARDOWN_BACKOFF_BASE, TEARDOWN_BACKOFF_CAP,
 };
 pub use tackle_exec::{
-    LibraryExecutor, PreflightContext, PreflightRefusal, SpawnPreflight, TackleExecError,
-    TackleReceipt, TenantPaths,
+    BriefingDelivery, BriefingDeliveryContext, BriefingDeliveryReport, LaunchContext,
+    LaunchPosture, LibraryExecutor, PreflightContext, PreflightRefusal, SpawnPreflight,
+    TackleExecError, TackleReceipt, TenantPaths, WorkerLaunchPolicy,
 };
 pub use witness::{
     canonical_attestation_record, compute_attestation_b3, refuse_if_same_session,
@@ -261,6 +262,19 @@ pub struct DispatchPin {
     /// molecule that already carries a persisted base keeps it; the executor
     /// stamps this value only onto a molecule that has none.
     pub base_branch: Option<String>,
+    /// The run-wide harness-settings directive (`cs run --harness key=value`,
+    /// ADR-177 / issue #86), rung 1 of the three-level harness chain.
+    ///
+    /// Independent of [`Self::is_pinned`] for the same reason as
+    /// [`Self::base_branch`]: it is not a record of a prior dispatch but a
+    /// per-key override the operator asked for *this run*, so it applies to a
+    /// first dispatch too and is merged over the executing formula step's
+    /// `[steps.harness]` pin (rung 2) exactly as
+    /// [`cosmon_core::harness_settings::resolve_harness_settings`] merges a
+    /// `cs tackle --harness` flag over it. Empty (the default) carries
+    /// nothing, so a dispatch with no directive resolves the step pin
+    /// unmasked.
+    pub harness: cosmon_core::harness_settings::HarnessMap,
 }
 
 impl DispatchPin {
@@ -277,6 +291,10 @@ impl DispatchPin {
                 // The persisted base is read back by `cs tackle` itself; the
                 // pin need not repeat it.
                 base_branch: None,
+                // No molecule-level harness record exists to echo back
+                // (`[steps.harness]` lives on the formula step); the caller
+                // sets this directly when it holds a run-wide directive.
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             },
             None => Self::default(),
         }
@@ -1942,6 +1960,7 @@ mod tests {
             expiry_policy: None,
             originating_branch: None,
             base_branch: None,
+            protected_paths: Vec::new(),
             pending_step: None,
             merged_at: None,
             non_integration: None,
@@ -2175,6 +2194,7 @@ mod tests {
             expiry_policy: None,
             originating_branch: None,
             base_branch: None,
+            protected_paths: Vec::new(),
             pending_step: None,
             merged_at: None,
             non_integration: None,
@@ -2662,6 +2682,7 @@ mod tests {
             expiry_policy: None,
             originating_branch: None,
             base_branch: None,
+            protected_paths: Vec::new(),
             pending_step: None,
             merged_at: None,
             non_integration: None,

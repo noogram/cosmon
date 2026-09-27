@@ -241,6 +241,26 @@ pub struct Args {
     /// loop starts.
     #[arg(long, value_name = "BRANCH", requires = "resident")]
     pub base: Option<String>,
+
+    /// **Opt-in run-wide harness-settings directive** (resident mode only,
+    /// repeatable — ADR-177 / issue #86).
+    ///
+    /// The harness twin of `--adapter`, but occupying rung 1 of the *harness*
+    /// chain rather than the adapter chain: `cs tackle --harness k=v`'s rung,
+    /// applied run-wide. Unlike `--adapter` and `--base` there is no
+    /// per-molecule pin to defer to — `[steps.harness]` lives on the
+    /// executing formula step, not the molecule — so this directive is
+    /// stamped onto **every** dispatch the run makes (static frontier nodes
+    /// and dynamically-nucleated children alike) as one `--harness k=v` per
+    /// key, and merged **per key** with the step's own `[steps.harness]`
+    /// table by the shelled `cs tackle`, the operator's flag winning
+    /// (ADR-177 Decision 2). Grammar and semantics are exactly
+    /// `cs tackle --harness`'s: `key=value`, cosmon recognises no keys and
+    /// carries the pair verbatim to the adapter's native override channel.
+    /// Absent (the default), no `--harness` flag reaches any dispatch and
+    /// each step's own `[steps.harness]` pin, if any, is unmasked.
+    #[arg(long = "harness", value_name = "KEY=VALUE", requires = "resident")]
+    pub harness: Vec<String>,
 }
 
 /// Execute the `run` command.
@@ -812,6 +832,21 @@ fn resolve_run_base(
         .transpose()
 }
 
+/// Parse the repeated `cs run --harness key=value` directive (ADR-177 /
+/// issue #86) into the map the resident scheduler stamps onto every
+/// dispatch.
+///
+/// Reuses `cs tackle --harness`'s own grammar and parser
+/// ([`cosmon_core::harness_settings::parse_harness_flags`]) so a malformed
+/// pair is refused here, before the loop starts, with the identical message
+/// `cs tackle` would give — rather than being carried, tick after tick, to a
+/// harness that would reject it far less legibly.
+fn resolve_run_harness(
+    flags: &[String],
+) -> anyhow::Result<cosmon_core::harness_settings::HarnessMap> {
+    cosmon_core::harness_settings::parse_harness_flags(flags).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 /// **ADR-095** — Resident Runtime entry point.
 ///
 /// Distinct from the legacy [`run`] body: instantiates the
@@ -871,10 +906,15 @@ fn run_resident(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // for every dispatch path, resident included.
     let run_adapter = resolve_run_adapter(args.adapter.as_deref());
     let run_base = resolve_run_base(&cwd, args.base.as_deref())?;
+    // Opt-in run-wide harness directive (ADR-177 / issue #86), the harness
+    // twin of `run_adapter` above: parsed and validated before the loop
+    // starts, then stamped onto every dispatch the scheduler makes.
+    let run_harness = resolve_run_harness(&args.harness)?;
     let scheduler: Box<dyn ResidentScheduler> = Box::new(
         ReadyFrontierScheduler::new()
             .with_run_adapter(run_adapter)
-            .with_run_base(run_base),
+            .with_run_base(run_base)
+            .with_run_harness(run_harness),
     );
     let mut runtime = RuntimeLoop::new(config, scheduler);
     let trace_path = runtime.trace_path().to_path_buf();
@@ -1096,6 +1136,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_harness_directive_parses_repeated_flags() {
+        let flags = vec![
+            "model_reasoning_effort=high".to_owned(),
+            "fallback-model=sonnet".to_owned(),
+        ];
+        let resolved = resolve_run_harness(&flags).expect("valid pairs parse");
+        assert_eq!(
+            resolved.get("model_reasoning_effort").map(String::as_str),
+            Some("high")
+        );
+        assert_eq!(
+            resolved.get("fallback-model").map(String::as_str),
+            Some("sonnet")
+        );
+    }
+
+    #[test]
+    fn run_harness_directive_absent_resolves_empty() {
+        assert!(resolve_run_harness(&[])
+            .expect("no flags parses")
+            .is_empty());
+    }
+
+    #[test]
+    fn run_harness_directive_refuses_a_malformed_pair() {
+        let err = resolve_run_harness(&["not-a-pair".to_owned()])
+            .expect_err("a flag with no `=` must be refused before the loop starts");
+        assert!(err.to_string().contains("expects `key=value`"), "{err}");
+    }
+
     fn make_store() -> (TempDir, FileStore) {
         let tmp = TempDir::new().unwrap();
         let store = FileStore::new(tmp.path());
@@ -1135,6 +1206,7 @@ mod tests {
             expiry_policy: None,
             originating_branch: None,
             base_branch: None,
+            protected_paths: Vec::new(),
             pending_step: None,
             merged_at: None,
             non_integration: None,

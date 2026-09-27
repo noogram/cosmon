@@ -113,7 +113,8 @@ pub struct MoleculeView {
     /// molecule (omit-if-none). This is **distinct** from `metrics.energy`:
     /// the coupling-report energy reads the legacy `log/energy.jsonl`,
     /// while this reads the IFBDD token-meter that carries `molecule_id`
-    /// on every event (the source the RPP "Dave" instance writes to).
+    /// on every event. The RPP adapter writes a lower-bound transcript
+    /// snapshot immediately before its harvest effect tears the worker down.
     pub api_tokens: Option<crate::token_meter::MoleculeTokenTotals>,
     /// Model attribution for this molecule (delib-20260704-b476 C3),
     /// projected from the latest `ModelSelected` event on `events.jsonl`.
@@ -669,6 +670,7 @@ mod tests {
             expiry_policy: None,
             originating_branch: None,
             base_branch: None,
+            protected_paths: Vec::new(),
             pending_step: None,
             merged_at: None,
             non_integration: None,

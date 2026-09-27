@@ -131,10 +131,15 @@ fn render_per_molecule(molecule: &str, events: &[TokenUsage], json: bool) -> any
     for ev in events.iter().filter(|e| e.molecule_id.as_str() == molecule) {
         totals.tokens_in = totals.tokens_in.saturating_add(ev.tokens_in);
         totals.tokens_out = totals.tokens_out.saturating_add(ev.tokens_out);
-        totals.cost_micros_estimated = totals
-            .cost_micros_estimated
-            .saturating_add(ev.cost_micros_estimated);
-        invocations = invocations.saturating_add(1);
+        if let Some(cost) = ev.cost_micros_estimated {
+            totals.cost_micros_estimated = Some(
+                totals
+                    .cost_micros_estimated
+                    .unwrap_or(0)
+                    .saturating_add(cost),
+            );
+        }
+        invocations = invocations.saturating_add(ev.invocations);
     }
     totals.invocations = invocations;
 
@@ -144,7 +149,7 @@ fn render_per_molecule(molecule: &str, events: &[TokenUsage], json: bool) -> any
             invocations: totals.invocations,
             tokens_in: totals.tokens_in,
             tokens_out: totals.tokens_out,
-            cost_micros_estimated: totals.cost_micros_estimated,
+            cost_micros_estimated: totals.cost_micros_estimated.unwrap_or(0),
         };
         let mut out = std::io::stdout().lock();
         writeln!(out, "{}", serde_json::to_string(&row)?)?;
@@ -169,7 +174,7 @@ fn render_per_molecule(molecule: &str, events: &[TokenUsage], json: bool) -> any
         totals.tokens_in,
         totals.tokens_out,
         totals.total_tokens(),
-        totals.cost_micros_estimated
+        totals.cost_micros_estimated.unwrap_or(0)
     )?;
     Ok(())
 }
@@ -186,10 +191,10 @@ fn render_top_tenants(events: &[TokenUsage], top: usize, json: bool) -> anyhow::
                 tokens_out: 0,
                 cost_micros_estimated: 0,
             });
-        entry.invocations += 1;
+        entry.invocations += ev.invocations;
         entry.tokens_in += ev.tokens_in;
         entry.tokens_out += ev.tokens_out;
-        entry.cost_micros_estimated += ev.cost_micros_estimated;
+        entry.cost_micros_estimated += ev.cost_micros_estimated.unwrap_or(0);
     }
     let mut rows: Vec<TenantRow> = by_tenant.into_values().collect();
     rows.sort_by(|a, b| {
@@ -241,10 +246,10 @@ fn render_per_kind(tenant: &str, events: &[TokenUsage], json: bool) -> anyhow::R
             tokens_out: 0,
             cost_micros_estimated: 0,
         });
-        entry.invocations += 1;
+        entry.invocations += ev.invocations;
         entry.tokens_in += ev.tokens_in;
         entry.tokens_out += ev.tokens_out;
-        entry.cost_micros_estimated += ev.cost_micros_estimated;
+        entry.cost_micros_estimated += ev.cost_micros_estimated.unwrap_or(0);
     }
     let mut rows: Vec<KindRow> = by_kind.into_values().collect();
     rows.sort_by_key(|x| std::cmp::Reverse(x.invocations));

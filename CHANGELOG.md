@@ -19,7 +19,41 @@ this stage.
 
 ## [Unreleased]
 
+### Added
+
+- **`cs run --resident --harness <KEY>=<VALUE>`** (GitHub issue #86, repeatable).
+  A run-wide harness-settings directive, the harness twin of `--adapter` and
+  `--base`: it is stamped onto every dispatch the run makes — static frontier
+  nodes and dynamically-nucleated children alike — and merged **per key** with
+  each executing step's own `[steps.harness]` pin (ADR-177 Decision 2), the
+  flag winning. Before this, `cs run --resident` had no way to carry an
+  operator's in-the-moment harness override to a shelled `cs tackle`; only the
+  formula step's own pin reached the dispatch. The in-process executor
+  (`cosmon_runtime::tackle_exec::LibraryExecutor`, used by the RPP tenant
+  route) grew the matching `DispatchPin::harness` field for embedders that
+  hold a run-wide directive of their own.
+
 ### Changed
+
+- **The consent path speaks the same language as the rest of `cs`** (GitHub
+  issue #76). `cs opt-in-share` — and the once-per-user question `cs init`
+  fires on a fresh machine — printed four French strings on an otherwise
+  entirely English CLI: the prompt itself, and the acceptance, decline and
+  auto-decline result lines. They were a leftover from the onboarding brief
+  they were first written for, and the published-install-route walk found them
+  the hard way: a newcomer on an English substrate met French exactly once, at
+  the one moment `cs` asks them to decide something about their own data. They
+  are now English. The prompt asks `[y/N]` rather than `[o/N]`, and `o`/`oui`
+  are still accepted, so an answer somebody learned against the old prompt is
+  not silently turned into a decline.
+
+  One string is deliberately unchanged: `stdin non-tty`, the half of the
+  auto-decline reason that names a POSIX condition rather than reading as
+  prose, and the fragment operators grep container logs for. Its sibling
+  `sortie capturée` — the case ADR-163 added — is now `stdout captured`. The
+  ADR keeps its 2026-07-27 transcripts verbatim, because those are a
+  measurement record and not current output, and carries a postscript saying
+  so.
 
 - **A default cosmon project keeps its archive, and the ignore rule that
   tracks it now works** (GitHub issue #60). `[archive] enabled` defaults to
@@ -55,6 +89,17 @@ this stage.
   into a chain of rules that ignored and re-included each other.
 
 ### Added
+
+- **Protected reference inputs** (GitHub issue #94). `cs nucleate --protect
+  <path>` (repeatable; a file or a directory, relative to the repository root)
+  declares ground truth the worker must read and never modify. The worker's
+  brief lists the paths as read-only with the reason, `cs tackle` clears their
+  write bits in the worktree, and `cs done` refuses a branch that changed any
+  of them with a ninth door refusal, `protected_path_modified` (exit code 78,
+  HTTP 409), naming each path. The operator overrides at the terminal with
+  `cs done --allow-protected-change`; the override has no wire counterpart.
+  The `task-work` verify step now says outright that expected outputs, golden
+  files and reference data are never edited to make a result match.
 
 - **`cs doctor gitignore`** — asks real git whether `.cosmon/.gitignore`
   still tracks the archive subtree it claims to track, and names the rule
@@ -120,6 +165,47 @@ change that made a stranded merge visible instead of silent, and the actual
 defect issue #51 first reported — is independent of all this and is unchanged.
 
 ### Fixed
+
+- **API-dispatched Claude workers no longer stop on the folder-trust dialog**
+  (GitHub issue #81, point 4). `cs tackle`, `cs thaw` and the patrol respawn
+  pre-grant Claude Code's onboarding, folder trust and bypass disclaimer before
+  every spawn; the in-process executor behind `POST /v1/molecules/{id}/tackle`
+  and the drain did not, so the first worker on a fresh deployment waited on
+  *"Is this a project you created or one you trust?"* with nobody attached.
+  All paths now call one routine, `claude_trust::pregrant_worker_consent`, and
+  the API path resolves the config files from the worker's enveloped
+  environment rather than the server's. A config that cannot be written
+  refuses the dispatch with `503 startup_consent_refused` before anything is
+  recorded or spawned.
+
+- **Detached patrols survive the tick that dispatched them.** The
+  `com.cosmon.scheduler` LaunchAgent template did not declare
+  `AbandonProcessGroup`, and launchd SIGKILLs a one-shot job's whole process
+  group the instant the job exits. Since `cosmon-scheduler tick` returns in
+  milliseconds, every patrol dispatched in `dispatch = "detached"` mode was
+  killed before producing anything — while the scheduler had already logged
+  `FIRE <patrol> (pid=… detached)`. Measured on one 60-second patrol over a
+  48-hour window: 7276 recorded fires, 114 starts reaching the patrol's own
+  log, a handful of complete runs; the index it feeds sat frozen ~18 h with
+  no log saying so. `nohup` and `trap '' HUP` do not help — the signal goes
+  to the group. The template now carries the key,
+  `scripts/install-scheduler.sh` refuses to install a rendered plist without
+  it and reports the drift on `status`, and
+  `scripts/check-abandon-process-group.sh` enumerates other one-shot agents
+  missing it. `com.cosmon.daemon-supervisor` is deliberately left without the
+  key: it is a long-running supervisor that owns its children by pid, so
+  group-kill is its correct teardown. Write-up in
+  `docs/diagnostic/2026-08-19-launchd-group-kill-silences-detached-patrols.md`.
+
+- **`cs tackle --model X --adapter opencode` now tells opencode** (GitHub
+  issue #72). The pin was resolved and recorded as `ModelSelected`, then
+  `opencode run` was spawned with no model, so the audit trail claimed a pin
+  the process never received. The opencode arm now emits `--model <pin>`
+  verbatim (opencode expects `provider/model`; cosmon adds no prefix), and
+  no pin still emits no flag. The in-process executor behind the RPP tackle
+  route has no channel for the flag, so a pinned opencode dispatch there is
+  refused before any effect (`501 tackle_unsupported_model`) instead of
+  spawned with the pin dropped.
 
 - **A harvest that no operator grant covers is refused by name.** The ADR-172
   effect boundary answered an anonymous error for every outcome, so an armed

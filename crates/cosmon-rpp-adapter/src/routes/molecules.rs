@@ -695,7 +695,7 @@ fn ops_error_label<E: OpsError>(_err: &E) -> &'static str {
 /// — but only when `sub` is empty (which the JWT validator already
 /// rejects). The fallback exists so the path is total without raising
 /// a panic.
-fn subject_for_jwt(jwt: &ValidatedJwt) -> Subject {
+pub(crate) fn subject_for_jwt(jwt: &ValidatedJwt) -> Subject {
     let claims = JwtClaims {
         sub: jwt.sub.clone(),
         scopes: jwt.scopes.clone(),
@@ -1579,7 +1579,15 @@ pub async fn tackle_molecule(
     let executor = LibraryExecutor::new(&tenant_root, backend)
         .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root))
         .with_tackled_by(cosmon_core::tackle::TackledBy::Human)
-        .with_preflight(preflight);
+        .with_preflight(preflight)
+        // COSMON-DEV #75: the environment-dependent half of the worker's
+        // launch posture. Without it the dispatch still carries its permission
+        // mode and its guards — what the policy adds is the briefing receipt
+        // and the contract-20A privilege drop.
+        .with_launch_policy(tenant_launch_policy(&envelope))
+        // Issue #81: wait for the worker's composer before pasting, and
+        // re-press submit until the briefing leaves it.
+        .with_briefing_delivery(tenant_briefing_delivery());
     let dispatch_id = molecule_id.clone();
     // `Box` the typed error across the join so clippy's large-Err bound
     // holds; unboxed again at the match below.
@@ -1679,6 +1687,23 @@ fn tenant_preflight(
     ))
 }
 
+/// The worker launch policy both dispatch seams install (COSMON-DEV #75).
+///
+/// Resolved per route call rather than cached on [`AppState`]: it reads the
+/// process's own uid and `PATH`, which do not change, but it is also cheap,
+/// and a value on `AppState` would have to be built before the adapter knows
+/// whether it will ever dispatch.
+fn tenant_launch_policy(
+    envelope: &WorkerEnvelope,
+) -> std::sync::Arc<crate::launch::RppWorkerLaunch> {
+    std::sync::Arc::new(crate::launch::RppWorkerLaunch::resolve(envelope))
+}
+
+/// The briefing delivery both dispatch routes install (issue #81).
+fn tenant_briefing_delivery() -> std::sync::Arc<crate::delivery::RppBriefingDelivery> {
+    std::sync::Arc::new(crate::delivery::RppBriefingDelivery::default())
+}
+
 /// Map a library-dispatch failure onto the wire.
 ///
 /// Every outcome is a stable label; no store/git/transport detail
@@ -1716,6 +1741,15 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             label: "tackle_unsupported_harness",
             request_id: Some(request_id.to_owned()),
         },
+        // Issue #72: a model pin the resolved adapter cannot receive on the
+        // in-process seam. Its own label, for the same reason as the harness
+        // one: the remedy (drop the pin, change adapter, or use `cs tackle`)
+        // is not the remedy for either sibling.
+        TackleExecError::UnsupportedModelCarrier { .. } => ApiError {
+            status: StatusCode::NOT_IMPLEMENTED,
+            label: "tackle_unsupported_model",
+            request_id: Some(request_id.to_owned()),
+        },
         // The precondition refusals carry their own contract label
         // (issue #48): `worker_credential_missing` /
         // `adapter_backend_unreachable`. The detail and the remedy stay
@@ -1729,6 +1763,25 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
         TackleExecError::Spawn { .. } => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "subprocess_spawn_failed",
+            request_id: Some(request_id.to_owned()),
+        },
+        // contract-20A outcome 2: the dispatcher is root and cannot demote, so
+        // no worker was created. Its own label, because the remedy is an
+        // operator provisioning gesture on the host — not a retry, and not the
+        // credential fix `worker_credential_missing` asks for. The typed
+        // reason stays in the server log (turing G9).
+        TackleExecError::RootSpawnRefused { .. } => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: "root_spawn_refused",
+            request_id: Some(request_id.to_owned()),
+        },
+        // Issue #81 point 4: the worker's Claude config could not be written
+        // to pre-grant folder trust, so the worker would have stopped on the
+        // trust dialog. Its own label, because the remedy is the config dir
+        // (HOME / permissions on the instance), not a credential or a retry.
+        TackleExecError::StartupConsentRefused { .. } => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: "startup_consent_refused",
             request_id: Some(request_id.to_owned()),
         },
 
@@ -1934,7 +1987,15 @@ pub async fn run_molecule(
     // that store too.
     let executor = LibraryExecutor::new(&tenant_root, backend)
         .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root))
-        .with_preflight(preflight);
+        .with_preflight(preflight)
+        // The same launch policy as the tackle route, for the same reason the
+        // preflight is installed on both: a posture installed on one seam and
+        // not the other reproduces the defect one layer down, in a DAG full of
+        // workers that each read as healthy.
+        .with_launch_policy(tenant_launch_policy(&envelope))
+        // Issue #81: wait for the worker's composer before pasting, and
+        // re-press submit until the briefing leaves it.
+        .with_briefing_delivery(tenant_briefing_delivery());
     spawn_resident_drain(
         Arc::clone(&state),
         tenant_root,
@@ -2243,6 +2304,7 @@ pub async fn done_molecule(
     let (outcome, non_integration) = run_harvest_effect(
         &state,
         &tenant_root,
+        &spark.noyau,
         &molecule_id,
         &options,
         &spark.request_id,
@@ -2302,6 +2364,7 @@ fn harvest_success_body(
 async fn run_harvest_effect(
     state: &Arc<AppState>,
     tenant_root: &std::path::Path,
+    tenant: &crate::nucleon_map::Noyau,
     molecule_id: &MoleculeId,
     options: &HarvestOptions,
     request_id: &str,
@@ -2309,6 +2372,7 @@ async fn run_harvest_effect(
     let effect = Arc::clone(&state.harvest_effect);
     let root = tenant_root.to_path_buf();
     let id = molecule_id.clone();
+    let tenant = tenant.clone();
     let opts = options.clone();
     let state_dir = tenant_root.join(".cosmon").join("state");
     let config_path = tenant_root.join(".cosmon").join("config.toml");
@@ -2324,6 +2388,24 @@ async fn run_harvest_effect(
     };
 
     let joined = tokio::task::spawn_blocking(move || {
+        match crate::harvest_effect::snapshot_api_tokens(&root, &tenant, &id) {
+            Ok(crate::harvest_effect::TokenSnapshotOutcome::CwdOutsideTenant) => {
+                tracing::warn!(
+                    molecule_id = %id,
+                    tenant = %tenant,
+                    "recorded worker cwd escaped the tenant root; token snapshot rejected"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    molecule_id = %id,
+                    tenant = %tenant,
+                    error = %error,
+                    "token snapshot unavailable; continuing harvest without api_tokens"
+                );
+            }
+            Ok(_) => {}
+        }
         let store = FileStore::new(&state_dir);
         let cfg = cosmon_filestore::load_project_config(&config_path)
             .unwrap_or_else(|_| cosmon_core::config::ProjectConfig::default());
@@ -2505,7 +2587,12 @@ fn door_refusal_to_api_error(
         DoorRefusal::NotAuthorized | DoorRefusal::ReservationRequiresSeal => StatusCode::FORBIDDEN,
         // State conflicts: the work is not landable *right now*, and the
         // requester can tell from the label what would change that.
-        DoorRefusal::NotCompleted | DoorRefusal::MergeConflict => StatusCode::CONFLICT,
+        // A protected path changed on the branch (issue #94) is the same
+        // shape: restoring the path on the branch makes it landable, and the
+        // override stays with the operator at the terminal.
+        DoorRefusal::NotCompleted
+        | DoorRefusal::MergeConflict
+        | DoorRefusal::ProtectedPathModified => StatusCode::CONFLICT,
         // A bounded queue at its bound. 429 rather than 409 because the
         // honest reading is "later, not never" — and because the ceiling is
         // an operator's quantity, which is what 429 means everywhere else on

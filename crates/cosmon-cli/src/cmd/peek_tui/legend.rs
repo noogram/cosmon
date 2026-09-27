@@ -592,7 +592,14 @@ mod tests {
             (90, Some(100)),
             (10, None),
         ] {
-            let cell = super::super::format_energy(total, 0, 0.0, cw);
+            let cell = super::super::format_energy(
+                total,
+                0,
+                0,
+                0,
+                cw,
+                &cosmon_observability::EnergyCost::Unknown,
+            );
             let bar: String = cell.trim_start().chars().take(1).collect();
             out.push((SectionId::Energy, "format_energy (ENERGY)", bar));
         }

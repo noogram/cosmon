@@ -3,15 +3,23 @@
 #
 # Wraps `launchctl` so the operator has a single, reversible verb-door for
 # the unified patrol scheduler. The template lives at
-#   scripts/launchd/com.noogram.cosmon-scheduler.plist
+#   scripts/launchd/com.cosmon.scheduler.plist
 # and is rendered into
-#   ~/Library/LaunchAgents/com.noogram.cosmon-scheduler.plist
+#   ~/Library/LaunchAgents/com.cosmon.scheduler.plist
 # with `__HOME__` substituted for the current user's home directory.
 #
 # See the governing plan at
 #   .cosmon/state/fleets/default/molecules/idea-20260417-b52d/plan.md
 # and the scheduler architecture at
 #   crates/cosmon-scheduler/src/lib.rs
+#
+# AbandonProcessGroup: the rendered plist MUST carry it. `tick` is a
+# one-shot that returns in milliseconds, and without the key launchd
+# SIGKILLs the whole process group on exit — killing every patrol
+# dispatched in `detached` mode before it produces anything, while the
+# scheduler log still reads `FIRE <patrol> (pid=... detached)`. This
+# script refuses to install a plist that lacks it, and `status` reports
+# when an ALREADY-INSTALLED plist predates the fix (repair: `reload`).
 #
 # Usage:
 #   scripts/install-scheduler.sh install      — render + load the agent
@@ -35,7 +43,7 @@ TARGET="${TARGET_DIR}/${LABEL}.plist"
 LOG_DIR="${HOME}/.cosmon/logs"
 
 usage() {
-    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
@@ -50,6 +58,19 @@ render() {
     # or redirect as they see fit.
     [[ -f "$TEMPLATE" ]] || die "template not found: $TEMPLATE"
     sed "s|__HOME__|${HOME}|g" "$TEMPLATE"
+}
+
+require_abandon_process_group() {
+    # The key is what keeps detached patrols alive past the tick (see the
+    # header). A template edit that drops it would be silent — every
+    # patrol would keep logging FIRE and producing nothing — so verify the
+    # RENDERED bytes rather than trusting the template.
+    local plist="$1"
+    if ! /usr/bin/plutil -extract AbandonProcessGroup raw -o - -- "$plist" \
+        2>/dev/null | grep -qx 'true'; then
+        die "rendered plist lacks AbandonProcessGroup=true — detached patrols would be
+                    SIGKILLed on every tick. Restore the key in $TEMPLATE."
+    fi
 }
 
 loaded() {
@@ -67,7 +88,11 @@ cmd_install() {
         return 0
     fi
 
-    render > "$TARGET"
+    local staged
+    staged="$(mktemp -t install-scheduler)"
+    render > "$staged"
+    require_abandon_process_group "$staged"
+    mv -f "$staged" "$TARGET"
     echo "install-scheduler: rendered $TARGET"
 
     if launchctl load "$TARGET"; then
@@ -104,6 +129,14 @@ cmd_reload() {
 cmd_status() {
     if [[ -f "$TARGET" ]]; then
         echo "plist:   $TARGET"
+        if /usr/bin/plutil -extract AbandonProcessGroup raw -o - -- "$TARGET" \
+            2>/dev/null | grep -qx 'true'; then
+            echo "abandon: yes (detached patrols survive the tick)"
+        else
+            echo "abandon: NO — this installed plist predates the fix."
+            echo "         Every detached patrol is SIGKILLed when the tick exits."
+            echo "         Repair: $0 reload"
+        fi
     else
         echo "plist:   (not installed)"
     fi

@@ -28,7 +28,9 @@
 
 pub mod aider;
 pub mod beads;
+pub mod briefing_delivery;
 pub mod briefing_receipt;
+pub mod briefing_submit;
 pub mod claude;
 pub mod claude_login;
 pub mod claude_trust;

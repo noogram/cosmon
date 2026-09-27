@@ -174,9 +174,32 @@ install-mac-pilot:
 # the total — so pulling it out is what makes an edit-and-verify loop possible
 # at all. Run this after every edit; run `just gates` once before merging.
 #
-# `doc` is here and is not redundant: check compiles code without ever
+# `doc` is here and is not redundant: clippy compiles code without ever
 # resolving a doc link, and clippy is not rustdoc. A broken intra-doc link
 # passes every other gate and fails only in CI on the trunk.
+#
+# There is no standalone `cargo check --workspace` step: on the default
+# target set both it and clippy compile, and clippy's `-D warnings` is
+# strictly the stronger gate (rustc's own errors plus every clippy lint).
+# Measured (task-20260925-fd07 §2, B→C): dropping it costs no coverage and
+# saves ~27 s cold. Verified again here (task-20260926-70fa) with two
+# deliberate compile errors: one in a test-only target
+# (`crates/cosmon-hash/tests/*.rs`, scratch), one behind the non-default
+# `neurion-fallback` feature (`cosmon-registry/src/neurion_backend.rs`,
+# scratch) — `cargo check -p <crate> --locked` and this recipe's
+# `cargo clippy -p <crate> --locked -- -D warnings` both missed both errors
+# identically (default targets, default features, before and after this
+# change), so there is nothing here that check alone was catching. Both
+# gaps are pre-existing and orthogonal to this change: the test-only error
+# is caught downstream by `cargo test --workspace` in `gates`; the
+# non-default-feature error is not built by any gate today (no gate passes
+# `--features neurion-fallback`) and stays that way — widening clippy to
+# `--all-targets` would catch the first case, but it also turns on
+# clippy's `test`-cfg lint pass over every existing test file, and one such
+# file already fails it (`clippy::doc_markdown` in
+# `crates/cosmon-daemon-supervisor/tests/signal_cascade.rs`, pre-existing,
+# unrelated to this change) — fixing workspace-wide test-lint debt is a
+# separate, unbounded change and is deliberately not folded in here.
 #
 # Every gate EXCEPT the test suite. ~90 s.
 #
@@ -187,11 +210,18 @@ install-mac-pilot:
 # verdicts and killed one healthy molecule (task-20260804-2bbb, 2026-08-06).
 # The list is a projection of cosmon_core::pilot_env::PilotVar and the parity
 # is pinned by a test — see the script's header.
+#
+# `CARGO_INCREMENTAL=0` on the compile steps only (not `fmt`, not the
+# non-cargo scripts): a one-shot gate run never revisits its own artifacts,
+# so the incremental cache is pure write-and-discard cost. Measured
+# (task-20260925-fd07 §2, D→E): −9.6 GB per worktree, wall time unchanged.
+# Scoped to this recipe's own `env` invocations so a developer's normal
+# edit-and-rerun `cargo check`/`cargo test` loop outside `just` keeps its
+# incremental cache.
 quick:
     ./scripts/no-pilot-env.sh cargo fmt --all -- --check
-    ./scripts/no-pilot-env.sh cargo check --workspace --locked
-    ./scripts/no-pilot-env.sh cargo clippy --workspace --locked -- -D warnings
-    ./scripts/no-pilot-env.sh env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+    ./scripts/no-pilot-env.sh env CARGO_INCREMENTAL=0 cargo clippy --workspace --locked -- -D warnings
+    ./scripts/no-pilot-env.sh env CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
     ./scripts/no-pilot-env.sh python3 scripts/spdx-headers.py --check
     ./scripts/no-pilot-env.sh ./scripts/publish.sh --check
     # Tracked files are publish.sh's surface; commit messages are not in any
@@ -199,23 +229,65 @@ quick:
     # came from. Judges what this branch adds (main..HEAD locally), so a clean
     # trunk stays clean and history is never rewritten to satisfy it.
     ./scripts/no-pilot-env.sh ./scripts/check-no-session-ids.sh
+    # The rest of this recipe closes the `just gates`/CI gap found on
+    # 2026-09-26: main went red in CI on `check-docs-one-gate.sh` — a
+    # `/<tool>/install.sh` path in docs/book/src — while `just gates` was
+    # green locally, because that script (like ~20 others below) ran only
+    # from .github/workflows/*.yml. Every check added here is pure
+    # bash/python over the tracked tree: no network, no container, no
+    # secret, no PR-event context, each measured well under a second on
+    # this machine. See AGENTS.md §Verification for the full CI-vs-local
+    # inventory and the reasons the remaining ~20 checks stay CI-only.
+    ./scripts/no-pilot-env.sh ./scripts/sovereignty-gate.sh
+    ./scripts/no-pilot-env.sh ./scripts/confidentiality-banlist.sh
+    ./scripts/no-pilot-env.sh ./scripts/confidentiality-banlist.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-workflow-yaml.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-workflow-yaml.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-docs-one-gate.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-docs-one-gate.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-book-links.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-book-links.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/source-provenance.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/install-hooks.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-fixture-independence.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-fixture-independence.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/license-table.sh --check
+    ./scripts/no-pilot-env.sh python3 scripts/artifact-map-audit.py
+    # `main HEAD` pins the fast local scope (what this branch adds). The
+    # script's own no-args fallback walks every merge since 2026-04-19 on
+    # the *real* history — 40 s+ and climbing — which belongs to CI's
+    # PR-scoped invocation, not this loop.
+    ./scripts/no-pilot-env.sh ./scripts/check-provenance.sh main HEAD
+    ./scripts/no-pilot-env.sh ./tests/harness/provenance-gate-test.sh
+    ./scripts/no-pilot-env.sh ./tests/harness/provenance-residence-test.sh
+    ./scripts/no-pilot-env.sh ./tests/harness/session-id-gate-test.sh
+    # install-lint.yml's `installer` job self-test — no extra binary beyond
+    # `sh` (its `shellcheck` step stays CI-only: this repo assumes only the
+    # Rust toolchain + python3 locally, and shellcheck is not one of them).
+    ./scripts/no-pilot-env.sh sh -n infra/install/install.sh
+    ./scripts/no-pilot-env.sh sh infra/install/install.sh --self-test
+    # install-lint.yml's `triples` job self-tests (offline red-path proofs;
+    # the job's own cross-surface diff needs no separate script here).
+    ./scripts/no-pilot-env.sh ./scripts/release/render-brew-formula.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/release/render-tap-from-artifacts.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/release/check-install-drift.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/release/docs-deploy.test.sh
 
 # `--no-fail-fast` is deliberate: cargo stops at the first red target by
 # default, which hides every later failure at identical wall-clock. A run that
 # dies early has not told you the suite is broken in one place, only that it is
 # broken in at least one.
 #
-# The `cargo build --bin cs` below makes a prerequisite explicit. Tests that
-# exec the real binary (cs ↔ cs-thin parity, the cosmon-api smoke suite)
-# resolve it explicitly and fail with a named missing-prerequisite error
+# Tests that exec the real binary (cs ↔ cs-thin parity, the cosmon-api smoke
+# suite) resolve it explicitly and fail with a named missing-prerequisite error
 # rather than building it themselves: a nested `cargo build` inside a test
 # races the parallel runner and can block on cargo's own build lock.
 #
-# Measured 2026-08-03: `cargo test --workspace` builds sibling bin and example
-# targets on its own, so this step is not load-bearing for the workspace run —
-# it is here because it is the same step `ci.yml` runs, and because a
-# prerequisite that holds by accident of cargo's default target selection is
-# one nobody notices losing.
+# `cargo test --workspace` builds `cs` before it executes those tests because
+# cosmon-cli's integration tests use `CARGO_BIN_EXE_cs`. A separate
+# `cargo build --bin cs` is therefore not a prerequisite: measured on a fresh
+# target it compiled a second feature world, cost 53 s / 2.6 GB, and its binary
+# was replaced by the test build before any test executed it.
 #
 # The full contract from CLAUDE.md — the fast loop plus the slow half. ~8 min.
 # `RUSTFLAGS=-Dwarnings` mirrors the CI workflow's job-level env. Without it
@@ -226,8 +298,7 @@ quick:
 # `clippy` above already carries `-D warnings` as an argument; this covers the
 # rustc pass that `cargo test` performs.
 gates: quick
-    ./scripts/no-pilot-env.sh env RUSTFLAGS=-Dwarnings cargo build --bin cs -p cosmon-cli --locked
-    ./scripts/no-pilot-env.sh env RUSTFLAGS=-Dwarnings cargo test --workspace --locked --no-fail-fast
+    ./scripts/no-pilot-env.sh env CARGO_INCREMENTAL=0 RUSTFLAGS=-Dwarnings cargo test --workspace --locked --no-fail-fast
     ./scripts/no-pilot-env.sh ./scripts/release/crossing.test.sh
 
 # It used to run four of the seven gates and was named as if it ran them all —

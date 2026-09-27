@@ -108,6 +108,7 @@ fn pending_molecule(id: &str) -> MoleculeData {
         expiry_policy: None,
         originating_branch: None,
         base_branch: None,
+        protected_paths: Vec::new(),
         pending_step: None,
         merged_at: None,
         non_integration: None,
@@ -284,7 +285,9 @@ fn runtime_loop_dispatches_through_the_library_executor_with_no_cs_on_path() {
     let spawn_cwd = calls
         .iter()
         .find_map(|c| match c {
-            MockCall::Spawn { agent_id, cwd } if agent_id == mol.id.as_str() => Some(cwd.clone()),
+            MockCall::Spawn { agent_id, cwd, .. } if agent_id == mol.id.as_str() => {
+                Some(cwd.clone())
+            }
             _ => None,
         })
         .expect("the spawn call must be recorded");
@@ -326,6 +329,7 @@ fn library_executor_honours_the_dispatch_pin() {
         adapter: Some("claude".to_owned()),
         model: None,
         base_branch: None,
+        harness: cosmon_core::harness_settings::HarnessMap::new(),
     };
     executor
         .dispatch_with_pin(&mol.id, &pin)
@@ -656,5 +660,180 @@ fn a_drain_stops_on_a_precondition_refusal_rather_than_retrying_it() {
         "a precondition refusal must be the non-retryable class, or the \
          drain spins until max_runtime and reports a timeout it knew the \
          cause of at the first tick: {err:?}"
+    );
+}
+
+/// Issue #72 falsifier 3: the in-process executor spawns through the
+/// agent-definition seam, which has no channel for a model flag. A pinned
+/// opencode dispatch must therefore refuse with a named error — before any
+/// effect and before `ModelSelected` claims the pin — rather than spawn
+/// `opencode` with the pin silently dropped.
+#[test]
+fn a_pinned_opencode_dispatch_refuses_rather_than_dropping_the_model() {
+    shadow_env();
+    let (_dir, project, store, mol) = fixture("task-20260914-d84c");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+
+    let pin = DispatchPin {
+        adapter: Some("opencode".to_owned()),
+        model: Some("openai/gpt-5.2".to_owned()),
+        base_branch: None,
+        harness: cosmon_core::harness_settings::HarnessMap::new(),
+    };
+    let err = executor
+        .tackle(&mol.id, &pin)
+        .expect_err("a pinned opencode dispatch must not spawn without its model");
+    assert!(
+        matches!(
+            err,
+            cosmon_runtime::tackle_exec::TackleExecError::UnsupportedModelCarrier { .. }
+        ),
+        "the refusal must be the named model-carrier error: {err}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("opencode") && text.contains("openai/gpt-5.2"),
+        "the refusal must name the adapter and the dropped pin: {text}"
+    );
+    assert!(
+        backend.calls().is_empty(),
+        "nothing may be spawned: {:?}",
+        backend.calls()
+    );
+    assert!(store
+        .load_molecule(&mol.id)
+        .expect("re-read")
+        .process
+        .is_none());
+    assert!(
+        !events_text(store.state_root()).contains("model_selected"),
+        "a refused dispatch must not record a ModelSelected claiming the pin"
+    );
+}
+
+/// The refusal is scoped to the pin: an unpinned opencode dispatch still
+/// goes through (opencode's own default applies, nothing is dropped).
+#[test]
+fn an_unpinned_opencode_dispatch_is_not_refused() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260914-d84d");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+
+    let pin = DispatchPin {
+        adapter: Some("opencode".to_owned()),
+        model: None,
+        base_branch: None,
+        harness: cosmon_core::harness_settings::HarnessMap::new(),
+    };
+    executor
+        .tackle(&mol.id, &pin)
+        .expect("an unpinned opencode dispatch carries nothing to drop");
+    assert!(!backend.calls().is_empty(), "the worker must be spawned");
+}
+
+/// The `(flag, value)` pairs of a recorded spawn's argv, for asserting that a
+/// flag carries a given value regardless of where the builder placed it.
+fn spawned_args(backend: &MockBackend) -> Vec<String> {
+    backend
+        .calls()
+        .into_iter()
+        .find_map(|call| match call {
+            MockCall::Spawn { args, .. } => Some(args),
+            _ => None,
+        })
+        .expect("the worker must be spawned")
+}
+
+/// Whether `args` carries `--model <model>` as two adjacent tokens.
+fn carries_model(args: &[String], model: &str) -> bool {
+    args.windows(2)
+        .any(|pair| pair[0] == "--model" && pair[1] == model)
+}
+
+/// Issue #81 point 2: the model the selection chain resolved is the model the
+/// worker is launched with.
+///
+/// Measured on the bench: `ModelSelected` reported `claude-sonnet-5` from the
+/// tenant galaxy's `[adapters.claude] default_model`, while the worker's argv
+/// carried no `--model` and it ran on whatever `ANTHROPIC_MODEL` the envelope
+/// happened to set. The selection was recorded and then dropped at the spawn.
+#[test]
+fn the_configured_default_model_reaches_the_worker_argv() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260925-a468");
+    std::fs::write(
+        project.join(".cosmon").join("config.toml"),
+        "[adapters]\ndefault = \"claude\"\n\n[adapters.claude]\ndefault_model = \"claude-sonnet-5\"\n",
+    )
+    .expect("galaxy config");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+
+    executor
+        .tackle(&mol.id, &DispatchPin::default())
+        .expect("the dispatch must succeed");
+
+    let args = spawned_args(&backend);
+    assert!(
+        carries_model(&args, "claude-sonnet-5"),
+        "the selected model must reach the worker argv as `--model \
+         claude-sonnet-5`; argv was {args:?}"
+    );
+}
+
+/// The per-dispatch pin — the flag rung — reaches the argv the same way.
+#[test]
+fn a_pinned_claude_model_reaches_the_worker_argv() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260925-b468");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+
+    let pin = DispatchPin {
+        adapter: Some("claude".to_owned()),
+        model: Some("claude-opus-5-5".to_owned()),
+        base_branch: None,
+        harness: cosmon_core::harness_settings::HarnessMap::new(),
+    };
+    executor
+        .tackle(&mol.id, &pin)
+        .expect("the pinned dispatch must succeed");
+
+    let args = spawned_args(&backend);
+    assert!(
+        carries_model(&args, "claude-opus-5-5"),
+        "the pinned model must reach the worker argv; argv was {args:?}"
+    );
+}
+
+/// No pin, no config: the worker launches with no `--model`, so the
+/// deployment's own default applies — cosmon adds no model of its own.
+#[test]
+fn an_unpinned_claude_dispatch_carries_no_model_flag() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260925-c468");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+
+    let pin = DispatchPin {
+        adapter: Some("claude".to_owned()),
+        model: None,
+        base_branch: None,
+        harness: cosmon_core::harness_settings::HarnessMap::new(),
+    };
+    executor
+        .tackle(&mol.id, &pin)
+        .expect("the dispatch must succeed");
+
+    let args = spawned_args(&backend);
+    assert!(
+        args.iter().any(|a| a == "--permission-mode"),
+        "the spawn must be the claude launch; argv was {args:?}"
+    );
+    assert!(
+        !args.iter().any(|a| a == "--model"),
+        "an unpinned dispatch must not invent a model; argv was {args:?}"
     );
 }
