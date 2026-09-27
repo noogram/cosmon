@@ -233,13 +233,17 @@ pub struct Args {
 
     /// Dialogue-scan: capture each running worker's pane and classify any
     /// blocking dialogue sitting in it (tool-permission prompt vs. the Claude
-    /// Code spend-/usage-limit dialog). The motivating incident: ten
-    /// synthetic workers blocked on the spend-limit dialog with no
-    /// human to press Enter. Per the be1e discipline (ADR-137 §2) pane text is
-    /// read only to **surface** a finding — a `money_stake` class **always**
-    /// pages the operator via `cs notify` and is **never** auto-confirmed; an
-    /// `unknown` block alerts too; a safe `permission` prompt is
-    /// auto-confirmed **only** when `--auto-confirm-safe` is also passed.
+    /// Code spend-/usage-limit dialog vs. a codex interactive dialog — update
+    /// prompt, reasoning-level picker, rate-limit "switch model" menu; issue
+    /// #85). The motivating incident: ten synthetic workers blocked on the
+    /// spend-limit dialog with no human to press Enter. Per the be1e
+    /// discipline (ADR-137 §2) pane text is read only to **surface** a
+    /// finding — a `money_stake` class **always** pages the operator via `cs
+    /// notify` and is **never** auto-confirmed; an `unknown` block alerts
+    /// too; a safe `permission` prompt is auto-confirmed **only** when
+    /// `--auto-confirm-safe` is also passed. A recognised codex dialog is
+    /// reported alongside its `class` (`codex_dialog` in `--json`) so the
+    /// finding says *why* the worker is blocked, not only how severe.
     /// Report-only by default (no keystroke) so it is safe to schedule.
     #[arg(long)]
     pub dialogue_scan: bool,
@@ -1058,6 +1062,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                         "action": f.action.as_str(),
                         "blocked_seconds": f.blocked_seconds,
                         "evidence": f.evidence,
+                        "codex_dialog": f.codex_kind.map(cosmon_core::dialogue::CodexDialogKind::as_str),
                     }))
                     .collect::<Vec<_>>(),
             });
@@ -3153,6 +3158,10 @@ pub(crate) struct DialogueFinding {
     pub action: DialogueAction,
     pub blocked_seconds: Option<u64>,
     pub evidence: Option<String>,
+    /// The specific codex dialog recognised in the pane, if any (issue #85):
+    /// distinguishes *why* the worker is blocked (update prompt, reasoning
+    /// picker, rate-limit switch) beyond the coarse severity `class`.
+    pub codex_kind: Option<cosmon_core::dialogue::CodexDialogKind>,
 }
 
 /// Aggregate dialogue-scan output.
@@ -3220,7 +3229,7 @@ pub(crate) fn dialogue_scan_sweep(
     opts: &DialogueScanOpts,
     now: chrono::DateTime<Utc>,
 ) -> DialogueScanReport {
-    use cosmon_core::dialogue::{classify_pane, DialogueClass};
+    use cosmon_core::dialogue::{classify_codex_dialog, classify_pane, DialogueClass};
 
     let running: Vec<&MoleculeData> = molecules
         .iter()
@@ -3251,6 +3260,7 @@ pub(crate) fn dialogue_scan_sweep(
         if scan.class == DialogueClass::None {
             continue;
         }
+        let codex_kind = classify_codex_dialog(&pane);
 
         // Blocked duration from the progress proxy (last_progress_at, else
         // updated_at). Saturating: a clock skew that makes it negative reads
@@ -3320,6 +3330,7 @@ pub(crate) fn dialogue_scan_sweep(
             action,
             blocked_seconds,
             evidence: scan.evidence,
+            codex_kind,
         });
     }
     report
@@ -3403,8 +3414,12 @@ fn print_dialogue_report(report: &DialogueScanReport) {
             DialogueAction::AutoConfirmed => "auto-confirmed".green().bold(),
             DialogueAction::Reported => "reported".dimmed(),
         };
+        let kind_suffix = f
+            .codex_kind
+            .map(|k| format!(" ({})", k.as_str()))
+            .unwrap_or_default();
         println!(
-            "    ⧉ {mol} [{class}] blocked {blocked} → {action}",
+            "    ⧉ {mol} [{class}]{kind_suffix} blocked {blocked} → {action}",
             mol = f.molecule_id,
             class = f.class.as_str(),
         );
@@ -5515,6 +5530,47 @@ mod tests {
             .iter()
             .any(|c| matches!(c, cosmon_transport::mock::MockCall::SendInput { .. }));
         assert!(!sent_enter, "must not act when auto-confirm is off");
+    }
+
+    #[test]
+    fn dialogue_sweep_reports_codex_rate_limit_switch_with_kind() {
+        // issue #85: the sweep must not only alert on the codex rate-limit
+        // "switch model" menu (MoneyStake), it must name *which* codex
+        // dialog it is so a human reading the finding knows why.
+        std::env::set_var("COSMON_NOTIFY_DRY_RUN", "1");
+        let (tmp, store) = make_store();
+        let mol = make_molecule("task-20260704-codexrl", MoleculeStatus::Running, Some("w1"));
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let molecules = store.list_molecules(&MoleculeFilter::default()).unwrap();
+
+        let pane = "Approaching rate limits. Switch to gpt-5.6-luna for lower \
+                    credit usage?\n  1) Switch model\n  2) Keep current model";
+        let backend = mock_with_worker("w1", pane);
+
+        let report = dialogue_scan_sweep(
+            &store,
+            tmp.path(),
+            &molecules,
+            Some(&backend as &dyn TransportBackend),
+            &opts(true),
+            Utc::now(),
+        );
+
+        assert_eq!(report.findings.len(), 1);
+        let f = &report.findings[0];
+        assert_eq!(f.class, DialogueClass::MoneyStake);
+        assert_eq!(
+            f.codex_kind,
+            Some(cosmon_core::dialogue::CodexDialogKind::RateLimitSwitch)
+        );
+        let sent_enter = backend
+            .calls()
+            .iter()
+            .any(|c| matches!(c, cosmon_transport::mock::MockCall::SendInput { .. }));
+        assert!(
+            !sent_enter,
+            "rate-limit switch must never be auto-confirmed"
+        );
     }
 
     #[test]

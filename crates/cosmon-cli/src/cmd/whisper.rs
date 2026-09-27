@@ -67,6 +67,16 @@ pub enum WhisperError {
         last_ts: DateTime<Utc>,
         min_gap_secs: i64,
     },
+    /// The target pane is showing a blocking dialogue whose class is not
+    /// safe to type into (issue #85): text pasted while a codex rate-limit
+    /// "switch model" menu, an update prompt, or a reasoning-level picker is
+    /// open can select an option and silently change the worker's behavior.
+    /// Exit 5.
+    DialogueBlocked {
+        class: cosmon_core::dialogue::DialogueClass,
+        codex_kind: Option<cosmon_core::dialogue::CodexDialogKind>,
+        evidence: Option<String>,
+    },
 }
 
 impl std::fmt::Display for WhisperError {
@@ -91,6 +101,26 @@ impl std::fmt::Display for WhisperError {
                 f,
                 "rate-limited: last whisper at {last_ts} (min gap {min_gap_secs}s)"
             ),
+            Self::DialogueBlocked {
+                class,
+                codex_kind,
+                evidence,
+            } => {
+                let kind = codex_kind
+                    .map(|k| format!(" ({})", k.as_str()))
+                    .unwrap_or_default();
+                let ev = evidence
+                    .as_deref()
+                    .map(|e| format!(" — “{e}”"))
+                    .unwrap_or_default();
+                write!(
+                    f,
+                    "target pane shows a blocking dialogue [{}]{kind}{ev}; refusing to paste \
+                     (it could select a menu option). Resolve the dialog first, e.g. `cs patrol \
+                     --dialogue-scan`.",
+                    class.as_str()
+                )
+            }
         }
     }
 }
@@ -105,6 +135,7 @@ impl WhisperError {
             Self::MessageTooLarge { .. } => 2,
             Self::SessionMismatch { .. } => 3,
             Self::RateLimited { .. } => 4,
+            Self::DialogueBlocked { .. } => 5,
         }
     }
 }
@@ -268,6 +299,10 @@ fn run_to_molecule(
         return fail(ctx, &e);
     }
 
+    if let Err(e) = check_pane_not_blocked(&socket, &session_name) {
+        return fail(ctx, &e);
+    }
+
     let sha256 = sha256_hex(payload);
     let ts = Utc::now();
     let ts_str = ts.format("%Y%m%dT%H%M%S%.3fZ").to_string();
@@ -345,6 +380,7 @@ fn fail(ctx: &Context, err: &WhisperError) -> anyhow::Result<()> {
         WhisperError::MessageTooLarge { .. } => "message_too_large",
         WhisperError::SessionMismatch { .. } => "session_mismatch",
         WhisperError::RateLimited { .. } => "rate_limited",
+        WhisperError::DialogueBlocked { .. } => "dialogue_blocked",
     };
     if ctx.json {
         let out = serde_json::json!({
@@ -485,6 +521,47 @@ fn check_pane_signature(
             allowed: allowed_commands,
         })
     }
+}
+
+/// Number of pane lines to capture for the dialogue check — enough to catch
+/// a menu rendered near the bottom of the pane without pulling scrollback.
+const DIALOGUE_CHECK_LINES: usize = 40;
+
+/// Refuse the whisper if the target pane is currently showing a blocking
+/// dialogue that is not safe to type into (issue #85): the codex rate-limit
+/// "switch model" menu, its update prompt, or its reasoning-level picker all
+/// react to arbitrary pasted text as menu-navigation keystrokes, so a whisper
+/// payload can silently pick an option instead of being read by the worker.
+/// `MoneyStake` and `Unknown` classes refuse; `Permission` and `None` do not
+/// — a routine tool-permission prompt is not one of these steal-the-paste
+/// menus, and blocking every permission prompt would make `cs whisper`
+/// useless on an ordinarily busy worker.
+///
+/// Best-effort: a capture failure (dead pane, socket gone) is not this
+/// check's job to report — [`check_pane_signature`] already covers pane
+/// liveness, so a capture error here is treated as "nothing to refuse on".
+fn check_pane_not_blocked(socket: &str, session_name: &str) -> Result<(), WhisperError> {
+    use cosmon_core::dialogue::{classify_codex_dialog, classify_pane, DialogueClass};
+
+    let Ok(worker_id) = WorkerId::new(session_name) else {
+        return Ok(());
+    };
+    let backend = cosmon_transport::TmuxBackend::new(socket);
+    let Ok(pane) = backend.capture_output(&worker_id, DIALOGUE_CHECK_LINES) else {
+        return Ok(());
+    };
+    let scan = classify_pane(&pane);
+    if matches!(
+        scan.class,
+        DialogueClass::MoneyStake | DialogueClass::Unknown
+    ) {
+        return Err(WhisperError::DialogueBlocked {
+            class: scan.class,
+            codex_kind: classify_codex_dialog(&pane),
+            evidence: scan.evidence,
+        });
+    }
+    Ok(())
 }
 
 /// A single line in `whispers.jsonl` — fact only, no payload body.
@@ -775,6 +852,22 @@ mod tests {
         assert_eq!(err.exit_code(), 2);
         let msg = err.to_string();
         assert!(msg.contains("9000"));
+    }
+
+    #[test]
+    fn dialogue_blocked_reports_exit_code_and_kind() {
+        // issue #85: a whisper refused because the pane shows a codex
+        // rate-limit "switch model" menu must exit 5 and name the dialog.
+        let err = WhisperError::DialogueBlocked {
+            class: cosmon_core::dialogue::DialogueClass::MoneyStake,
+            codex_kind: Some(cosmon_core::dialogue::CodexDialogKind::RateLimitSwitch),
+            evidence: Some("Approaching rate limits.".to_owned()),
+        };
+        assert_eq!(err.exit_code(), 5);
+        let msg = err.to_string();
+        assert!(msg.contains("money_stake"), "{msg}");
+        assert!(msg.contains("rate_limit_switch"), "{msg}");
+        assert!(msg.contains("Approaching rate limits."), "{msg}");
     }
 
     #[test]
