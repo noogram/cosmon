@@ -2587,7 +2587,12 @@ fn door_refusal_to_api_error(
         DoorRefusal::NotAuthorized | DoorRefusal::ReservationRequiresSeal => StatusCode::FORBIDDEN,
         // State conflicts: the work is not landable *right now*, and the
         // requester can tell from the label what would change that.
-        DoorRefusal::NotCompleted | DoorRefusal::MergeConflict => StatusCode::CONFLICT,
+        // A protected path changed on the branch (issue #94) is the same
+        // shape: restoring the path on the branch makes it landable, and the
+        // override stays with the operator at the terminal.
+        DoorRefusal::NotCompleted
+        | DoorRefusal::MergeConflict
+        | DoorRefusal::ProtectedPathModified => StatusCode::CONFLICT,
         // A bounded queue at its bound. 429 rather than 409 because the
         // honest reading is "later, not never" — and because the ceiling is
         // an operator's quantity, which is what 429 means everywhere else on

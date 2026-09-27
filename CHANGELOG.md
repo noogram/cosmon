@@ -90,6 +90,17 @@ this stage.
 
 ### Added
 
+- **Protected reference inputs** (GitHub issue #94). `cs nucleate --protect
+  <path>` (repeatable; a file or a directory, relative to the repository root)
+  declares ground truth the worker must read and never modify. The worker's
+  brief lists the paths as read-only with the reason, `cs tackle` clears their
+  write bits in the worktree, and `cs done` refuses a branch that changed any
+  of them with a ninth door refusal, `protected_path_modified` (exit code 78,
+  HTTP 409), naming each path. The operator overrides at the terminal with
+  `cs done --allow-protected-change`; the override has no wire counterpart.
+  The `task-work` verify step now says outright that expected outputs, golden
+  files and reference data are never edited to make a result match.
+
 - **`cs doctor gitignore`** — asks real git whether `.cosmon/.gitignore`
   still tracks the archive subtree it claims to track, and names the rule
   responsible when it does not. Warning-level: an un-versioned archive is a

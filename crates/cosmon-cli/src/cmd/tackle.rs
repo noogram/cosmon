@@ -1468,6 +1468,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             run_pressure_check(ctx, &store, &repo_root);
         }
         create_worktree(&repo_root, &wt_dir, &branch_name, start_point.as_deref())?;
+        // Issue #94: protected reference inputs are read-only on disk, so an
+        // accidental write fails at once. `cs done` is the enforcement.
+        for failure in
+            cosmon_runtime::tackle_exec::mark_protected_read_only(&wt_dir, &mol.protected_paths)
+        {
+            eprintln!("warning: protected path left writable: {failure}");
+        }
         wt_dir
     };
     tracing::info!(
@@ -3490,6 +3497,7 @@ fn molecule_brief(mol: &MoleculeData) -> cosmon_core::tackle_plan::MoleculeBrief
         current_step: mol.current_step,
         total_steps: mol.total_steps,
         variables: &mol.variables,
+        protected_paths: &mol.protected_paths,
     }
 }
 
@@ -10335,6 +10343,7 @@ mod tests {
             expiry_policy: None,
             originating_branch: None,
             base_branch: None,
+            protected_paths: Vec::new(),
             pending_step: None,
             merged_at: None,
             non_integration: None,

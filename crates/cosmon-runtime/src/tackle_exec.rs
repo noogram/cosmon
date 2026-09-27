@@ -1294,6 +1294,9 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             &plan.branch_name,
             plan.base_branch.as_deref(),
         )?;
+        for failure in mark_protected_read_only(&worktree_path, &mol.protected_paths) {
+            eprintln!("warning: protected path left writable: {failure}");
+        }
 
         match self.dispatch_in_worktree(store, state_dir, repo_root, mol, plan, &worktree_path) {
             Ok(receipt) => Ok(receipt),
@@ -1732,6 +1735,45 @@ fn stamp_run_base(
     Ok(())
 }
 
+/// Clear the write bits of every file under the molecule's protected paths
+/// in a freshly created worktree (issue #94).
+///
+/// The harvest gate is what enforces the protection; this makes an
+/// accidental write fail at the moment it happens, where the worker can see
+/// it, instead of at `cs done`. Only regular files are touched — a read-only
+/// directory would stop `cs done` from removing the worktree. A path absent
+/// from the worktree is skipped: the brief and the gate still name it.
+///
+/// Best effort by design: returns one line per file it could not mark, for
+/// the caller to report, and never fails the dispatch — the gate does not
+/// depend on it.
+#[must_use]
+pub fn mark_protected_read_only(worktree_path: &Path, protected: &[String]) -> Vec<String> {
+    fn visit(path: &Path, failures: &mut Vec<String>) {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return;
+        };
+        if meta.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    visit(&entry.path(), failures);
+                }
+            }
+        } else if meta.is_file() {
+            let mut perms = meta.permissions();
+            perms.set_readonly(true);
+            if let Err(e) = std::fs::set_permissions(path, perms) {
+                failures.push(format!("{}: {e}", path.display()));
+            }
+        }
+    }
+    let mut failures = Vec::new();
+    for rel in protected {
+        visit(&worktree_path.join(rel), &mut failures);
+    }
+    failures
+}
+
 /// Create the worker's isolation worktree and its `feat/<mol>` branch.
 ///
 /// Moved verbatim from `cs tackle` (issue #54 / U5) so the CLI and the
@@ -2079,7 +2121,7 @@ fn git_repo_root(cwd: &Path) -> Result<PathBuf, TackleExecError> {
     Ok(PathBuf::from(root))
 }
 
-/// Project the molecule record onto the six fields the tackle decision
+/// Project the molecule record onto the seven fields the tackle decision
 /// reads — the same borrowed projection the CLI builds.
 fn molecule_brief(mol: &MoleculeData) -> MoleculeBrief<'_> {
     MoleculeBrief {
@@ -2089,6 +2131,7 @@ fn molecule_brief(mol: &MoleculeData) -> MoleculeBrief<'_> {
         current_step: mol.current_step,
         total_steps: mol.total_steps,
         variables: &mol.variables,
+        protected_paths: &mol.protected_paths,
     }
 }
 

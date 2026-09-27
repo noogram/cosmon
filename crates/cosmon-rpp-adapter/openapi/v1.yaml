@@ -1807,7 +1807,7 @@ paths:
               schema:
                 "$ref": "#/components/schemas/ApiError"
         "409":
-          description: "not_completed or merge_conflict."
+          description: "not_completed, merge_conflict or protected_path_modified."
           content:
             application/json:
               schema:
