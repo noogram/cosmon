@@ -102,6 +102,24 @@ fn a_step_pin_reaches_the_codex_command_line_as_a_dash_c_override() {
     }
 }
 
+/// A Codex service-tier flag is carried as the native `-c` override.
+///
+/// `default` is the Standard tier, so this is the per-dispatch escape hatch
+/// from a machine-wide Fast default. The command-line receipt is the strongest
+/// claim cosmon can make: dispatch intent, not a claim about execution.
+#[test]
+fn a_codex_service_tier_flag_reaches_the_command_line() {
+    let flag = parse_harness_flags(&["service_tier=default"]).expect("well-formed pair");
+    let resolved = resolve_harness_settings(&flag, None);
+    let args = render_harness_args("codex", &resolved).expect("codex carries the map");
+    let cmd = build_codex_command(&codex_config(argv(&args)));
+
+    assert!(
+        cmd.contains("-c service_tier=default"),
+        "the service tier must reach the command line verbatim: {cmd}"
+    );
+}
+
 /// **Falsifier 2.** `--harness model_reasoning_effort=low` overrides the pin,
 /// and the *second* key on the pin survives the override.
 ///
