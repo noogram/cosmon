@@ -142,12 +142,12 @@ Two honest, drift-proof options — do **not** invent a client model allowlist:
    the full bundled catalog — including the `codex-*` / sol/terra/luna family —
    valid, at which point a model pin resolves.
 
-At dispatch, cosmon emits a soft advisory when the model id looks
-cross-family for the codex Adapter. It still forwards the opaque pin: codex is
-configurable, its endpoint may legitimately serve that family, and only the
-Adapter can resolve its actual capability. Under a stock ChatGPT account the
-advisory is a prompt to omit `--model` or use API-key auth; it is never a
-hardcoded block because the valid set is server-owned.
+At dispatch, cosmon refuses a model id whose named provider family conflicts
+with the codex Adapter before a worker is spawned. This is derived from the
+adapter/model families, not a model allowlist: unknown ids and self-hosted
+endpoints remain opaque and pass through. Under a stock ChatGPT account, omit
+`--model` or use API-key auth; for a custom endpoint, declare its `base_url` so
+the family is derived from that endpoint rather than the adapter label.
 
 ---
 

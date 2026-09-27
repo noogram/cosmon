@@ -779,11 +779,11 @@ pub fn adapter_strong_set(
 
 /// Name where a model pin came from, in words an operator can act on.
 ///
-/// The composition advisory is only useful if it says which knob to turn:
+/// The composition refusal is only useful if it says which knob to turn:
 /// "the pin came from `$ANTHROPIC_MODEL`" points at the shell, "from
 /// `--model`" points at the command line, and the two remedies are
 /// different. [`ModelSelectionSource`] carries the origin for the audit
-/// trail; this renders it for a human reading the advisory.
+/// trail; this renders it for a human reading the refusal.
 #[must_use]
 pub fn describe_model_source(source: &ModelSelectionSource) -> String {
     match source {

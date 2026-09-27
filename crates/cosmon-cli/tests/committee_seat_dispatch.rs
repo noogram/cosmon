@@ -13,8 +13,8 @@
 //! *before the first regeneration*, and nothing asked whether it survived the
 //! verb every seat ENDS with. And
 //! `classify_model_composition`'s siblings in `provider_diversity` all pass
-//! their own tests while no production path surfaced a suspicious
-//! `(adapter, model)` pair. A check that is only
+//! their own tests while an incoherent `(adapter, model)` pair was still
+//! dispatched. A check that is only
 //! ever exercised in isolation measures the property next to the one that
 //! matters, so these tests run the binary.
 //!
@@ -117,6 +117,68 @@ acceptance = "Done"
         format!("[project]\nproject_id = \"seat-test-a1a1\"\n\n{adapters_block}"),
     )
     .expect("write config");
+
+    (tmp, state_dir, mol_id)
+}
+
+/// A project that reproduces issue #89: the executing formula step pins a
+/// Claude model while the galaxy-wide adapter default is Codex.
+///
+/// The recipe is installed in the mission registry as well as passed to
+/// nucleation. `cs tackle` resolves the former on every invocation; omitting
+/// that copy would exercise the unresolvable-formula fallback instead of the
+/// re-tackle path under test.
+fn setup_formula_model_pin() -> (tempfile::TempDir, std::path::PathBuf, String) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let cosmon_dir = tmp.path().join(".cosmon");
+    let formulas_dir = cosmon_dir.join("formulas");
+    fs::create_dir_all(&formulas_dir).expect("formulas dir");
+
+    let formula = r#"
+formula = "force-model-pin-test"
+version = 1
+description = "One-step formula pinning a Claude model"
+id_prefix = "fmp"
+
+[[steps]]
+id = "step-1"
+title = "Step 1"
+description = "The worker would execute this step."
+acceptance = "Done"
+model = "claude-opus-5"
+"#;
+    fs::write(
+        formulas_dir.join("force-model-pin-test.formula.toml"),
+        formula,
+    )
+    .expect("write formula");
+    fs::write(
+        cosmon_dir.join("config.toml"),
+        "[project]\nproject_id = \"force-model-pin-test-8989\"\n\n[adapters]\ndefault = \"codex\"\n",
+    )
+    .expect("write config");
+
+    let out = cosmon_bin_in(tmp.path())
+        .args([
+            "--json",
+            "nucleate",
+            "force-model-pin-test",
+            "--store-dir",
+            state_dir.to_str().expect("utf-8 state dir"),
+            "--formulas-dir",
+            formulas_dir.to_str().expect("utf-8 formulas dir"),
+        ])
+        .output()
+        .expect("nucleate spawned");
+    assert!(
+        out.status.success(),
+        "nucleate failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).expect("nucleate json");
+    let mol_id = json["id"].as_str().expect("nucleate id").to_owned();
 
     (tmp, state_dir, mol_id)
 }
@@ -545,14 +607,45 @@ fn complete_does_not_author_the_posture_file_it_points_at() {
     );
 }
 
-// ── F6 — a cross-family pair is visible without overriding the Adapter ──
+// ── F6 — adapter/model composition is refused before spawn ──
+
+/// Issue #89 RED: a force re-tackle without `--adapter` resolves the formula's
+/// Claude model pin against the project's Codex default. The stock Codex
+/// adapter refuses that model after launch, leaving an idle worker; `cs`
+/// therefore has to refuse the decidably incoherent pair before spawning.
+#[test]
+fn force_retackle_refuses_project_default_that_cannot_run_formula_model_pin() {
+    let (tmp, state_dir, mol_id) = setup_formula_model_pin();
+    let first = tackle_dry_run(tmp.path(), &state_dir, &mol_id, &["--adapter", "claude"]);
+    assert!(
+        first.status.success(),
+        "precondition: the first tackle's coherent Claude incarnation must resolve; stderr:\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let out = tackle_dry_run(tmp.path(), &state_dir, &mol_id, &["--force"]);
+
+    assert!(
+        !out.status.success(),
+        "an incoherent formula-pinned re-tackle must fail before spawn; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("codex") && err.contains("claude-opus-5"),
+        "the refusal must name the resolved adapter and pinned model; got:\n{err}"
+    );
+    assert!(
+        err.contains("formula-step pin `force-model-pin-test` / `step-1`"),
+        "the refusal must name the formula-step source that beat model defaults; got:\n{err}"
+    );
+}
 
 /// The measured incident, reproduced through the command: `--adapter codex`
-/// with a `claude-*` model may be rejected by the stock provider. Cosmon names
-/// that risk but must still dispatch because a custom codex endpoint may serve
-/// the requested family legitimately.
+/// with a `claude-*` model is decidably incoherent and must be refused before
+/// the stock provider rejects it after launch.
 #[test]
-fn tackle_advises_but_accepts_a_cross_family_adapter_model_pair() {
+fn tackle_refuses_a_cross_family_adapter_model_pair() {
     let (tmp, state_dir, mol_id) = setup("");
     let out = tackle_dry_run(
         tmp.path(),
@@ -561,32 +654,32 @@ fn tackle_advises_but_accepts_a_cross_family_adapter_model_pair() {
         &["--adapter", "codex", "--model", "claude-opus-5"],
     );
     assert!(
-        out.status.success(),
-        "a cross-family pin is advisory, not a refusal; stderr:\n{}",
+        !out.status.success(),
+        "a decidably cross-family pin must be refused; stderr:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("advisory") && err.contains("cross-family"),
-        "the warning must be explicitly non-blocking and name the risk; got:\n{err}"
+        err.contains("refusing to dispatch") && err.contains("cannot run pinned model"),
+        "the refusal must name the incompatible launch bundle; got:\n{err}"
     );
     assert!(
         err.contains("openai") && err.contains("anthropic"),
-        "the advisory must name BOTH resolved families so the operator knows \
+        "the refusal must name BOTH resolved families so the operator knows \
          which side to move; got:\n{err}"
     );
     assert!(
         err.contains("--model"),
-        "the advisory must name the knob the pin came from; got:\n{err}"
+        "the refusal must name the knob the pin came from; got:\n{err}"
     );
 }
 
 /// The same variable that produced the incident — an inherited
-/// `$ANTHROPIC_MODEL` in the dispatching shell — must be advised too. This
+/// `$ANTHROPIC_MODEL` in the dispatching shell — must be refused too. This
 /// is the case a `--model`-only guard would miss, and it is the one that
 /// actually happened: nobody typed the model at all.
 #[test]
-fn tackle_advises_but_accepts_a_cross_family_pin_from_the_environment() {
+fn tackle_refuses_a_cross_family_pin_from_the_environment() {
     let (tmp, state_dir, mol_id) = setup("");
     let mut cmd = cosmon_bin_in(tmp.path());
     cmd.args([
@@ -603,14 +696,14 @@ fn tackle_advises_but_accepts_a_cross_family_pin_from_the_environment() {
     let out = cmd.output().expect("tackle spawned");
 
     assert!(
-        out.status.success(),
-        "an env-inherited cross-family pair must remain dispatchable; stderr:\n{}",
+        !out.status.success(),
+        "an env-inherited cross-family pair must be refused; stderr:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("ANTHROPIC_MODEL"),
-        "the advisory must point at the environment variable, since that is \
+        "the refusal must point at the environment variable, since that is \
          the knob to turn; got:\n{err}"
     );
 }

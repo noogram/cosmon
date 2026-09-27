@@ -479,10 +479,10 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              floor 'None'                      → cosmon pins NO model; the \
              adapter's own default applies (byte-identical to no pin — a \
              strong model is unreachable from silence).\n\n\
-             The id is carried opaquely. A recognisable cross-family pair \
-             prints a non-blocking advisory, but cosmon still dispatches: a \
-             custom Adapter endpoint may legitimately serve another family's \
-             model, so the Adapter remains authoritative. \
+             The id is carried opaquely: cosmon keeps no model allowlist. A \
+             decidable mismatch between named adapter/model provider families \
+             is refused before spawn; unknown ids and self-hosted endpoints \
+             remain opaque and pass through. \
              The claude adapter carries the pin on its launch argv as \
              '--model <ID>', which Claude Code ranks above any inherited \
              ANTHROPIC_MODEL, on both 'cs tackle' and the API dispatch path, \
