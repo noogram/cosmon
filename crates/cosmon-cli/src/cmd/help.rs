@@ -386,4 +386,9 @@ fn print_grouped_reference() {
     println!("Run 'cs help <command>' for detailed help on a specific command.");
     println!("Run 'cs help guide' for the operator handbook.");
     println!("Run 'cs help charter' to see the unified visual charter swatch.");
+    println!(
+        "Who does what — you, the pilot, and the workers: \
+         docs/book/src/explanation/pilot-and-workers.md (or \
+         https://docs.noogram.org/explanation/pilot-and-workers.html)."
+    );
 }

@@ -42,6 +42,7 @@
 
 # Explanation
 
+- [Who does what: you, the pilot, and the workers](./explanation/pilot-and-workers.md)
 - [The physics vocabulary](./explanation/physics-vocabulary.md)
 - [Noogram & the Cosmon kernel](./explanation/cosmon-and-noogram.md)
 - [Why a stateless CLI (no daemon)](./explanation/stateless-cli.md)
