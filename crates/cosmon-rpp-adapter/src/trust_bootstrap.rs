@@ -276,6 +276,29 @@ pub struct ConvergeReport {
     pub bindings_unchanged: usize,
     /// Seconds spent waiting for a first handoff (0 = no wait).
     pub waited_secs: u64,
+    /// First binding applied from the sorted handoff declarations.
+    ///
+    /// The server uses this deployment-owned tuple as the default for
+    /// `GET /install.sh`. Keeping it on the convergence receipt ties the
+    /// rendered client profile to the same declaration that actually wrote
+    /// the sealed binding, rather than re-parsing an unrelated config copy.
+    pub primary_binding: Option<AppliedHandoffBinding>,
+}
+
+/// Secret-free deployment tuple projected from an applied handoff binding.
+///
+/// This is the common source for both the sealed authorization binding and
+/// the default client profile rendered into `GET /install.sh`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AppliedHandoffBinding {
+    /// OIDC issuer URL burned into the deployment's tokens.
+    pub issuer: String,
+    /// JWT subject bound to the tenant.
+    pub sub: String,
+    /// JWT audience pinned by the binding.
+    pub audience: String,
+    /// Tenant axis selected by the binding.
+    pub noyau: String,
 }
 
 impl ConvergeReport {
@@ -625,6 +648,14 @@ fn converge_binding(
     } else {
         write_atomically(&binding_path, &rendered)?;
         report.bindings_written.push(nucleon_id);
+    }
+    if report.primary_binding.is_none() {
+        report.primary_binding = Some(AppliedHandoffBinding {
+            issuer: doc.issuer.iss.clone(),
+            sub: binding.sub.clone(),
+            audience: spec.audience,
+            noyau: binding.noyau.clone(),
+        });
     }
     Ok(())
 }

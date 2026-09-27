@@ -310,8 +310,9 @@ pub struct AppState {
     /// at fetch time. Resolves the AWS live-deploy
     /// finding "host seulement, sub/aud/oidc-url devinés par templating
     /// brittle" — the tenant's install lands with the full four-tuple
-    /// persisted, not just the host. Defaults to all empty: install.sh
-    /// then skips `config set` lines for the missing fields.
+    /// persisted, not just the host. Fields omitted from the config are
+    /// derived from the trust-bootstrap binding applied at boot; explicit
+    /// config values win.
     pub install_templating: Arc<config::InstallTemplating>,
     /// In-process pub/sub bus for molecule lifecycle events
     /// (SSE `/v1/events`). Every mutation route

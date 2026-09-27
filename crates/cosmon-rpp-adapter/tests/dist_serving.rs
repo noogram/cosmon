@@ -497,14 +497,15 @@ async fn install_sh_emits_config_set_block_for_configured_deployment() {
     let dist_root = tempfile::tempdir().unwrap();
     let mut state =
         make_state_with_dist_root(security_dir.path(), dist_root.path().to_path_buf()).await;
-    state.install_templating = std::sync::Arc::new(cosmon_rpp_adapter::config::InstallTemplating {
-        sub: "tenant-demo-operator".into(),
-        aud: "cosmon-rpp-tenant".into(),
-        // Use the host placeholder so the per-deployment OIDC URL
-        // rebinds to whichever host the request landed on.
-        oidc_url: "__COSMON_HOST__/oidc".into(),
-        noyau: "tenant-demo".into(),
-    });
+    state.install_templating =
+        std::sync::Arc::new(cosmon_rpp_adapter::config::InstallTemplating::explicit(
+            "tenant-demo-operator",
+            "cosmon-rpp-tenant",
+            // Use the host placeholder so the per-deployment OIDC URL
+            // rebinds to whichever host the request landed on.
+            "__COSMON_HOST__/oidc",
+            "tenant-demo",
+        ));
     let app = router(state);
     // TLS-terminated public deployment: proxy sets X-Forwarded-Proto: https,
     // so the templated oidc-url is https.
@@ -535,6 +536,77 @@ async fn install_sh_emits_config_set_block_for_configured_deployment() {
     // No leftover placeholder in any path.
     assert!(!body.contains("__COSMON_HOST__"));
     assert!(!body.contains("__COSMON_CONFIG_SET_BLOCK__"));
+}
+
+#[tokio::test]
+async fn install_sh_derives_profile_from_handoff_without_templating_section() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let handoff_dir = tempfile::tempdir().unwrap();
+    let config_dir = tempfile::tempdir().unwrap();
+    let dist_root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        handoff_dir.path().join("forgejo-issuer.toml"),
+        r#"schema = "cosmon-issuer-handoff/v1"
+
+[issuer]
+iss = "https://idp.example.test/git"
+jwks_uri = "http://forgejo:3000/login/oauth/keys"
+audiences = ["derived-client-id"]
+
+[binding]
+noyau = "derived-noyau"
+nucleon_id = "derived-operator"
+sub = "derived-subject"
+"#,
+    )
+    .unwrap();
+    let config_path = config_dir.path().join("rpp.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "state_dir = {:?}\n\n[trust_bootstrap]\nhandoff_dir = {:?}\n",
+            state_dir.path(),
+            handoff_dir.path(),
+        ),
+    )
+    .unwrap();
+
+    let cfg = cosmon_rpp_adapter::config::RppConfig::load(&config_path).unwrap();
+    let report =
+        cosmon_rpp_adapter::trust_bootstrap::converge(state_dir.path(), &cfg.trust_bootstrap)
+            .unwrap();
+    let mut state =
+        make_state_with_dist_root(state_dir.path(), dist_root.path().to_path_buf()).await;
+    state.install_templating = std::sync::Arc::new(
+        cfg.install_templating
+            .resolved_from_binding(report.primary_binding.as_ref()),
+    );
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/install.sh")
+                .header("Host", "cosmon.example.test")
+                .header("X-Forwarded-Proto", "https")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+
+    assert!(body.contains("config set sub 'derived-subject'"));
+    assert!(body.contains("config set aud 'derived-client-id'"));
+    assert!(body.contains("config set oidc-url 'https://idp.example.test/git'"));
+    assert!(body.contains("config set noyau 'derived-noyau'"));
 }
 
 #[tokio::test]
@@ -703,12 +775,12 @@ async fn install_sh_no_placeholder_leakage_and_syntax_valid_all_topologies() {
         let mut state2 =
             make_state_with_dist_root(security_dir2.path(), dist_root.path().to_path_buf()).await;
         state2.install_templating =
-            std::sync::Arc::new(cosmon_rpp_adapter::config::InstallTemplating {
-                sub: "tenant-demo-operator".into(),
-                aud: "cosmon-rpp-tenant".into(),
-                oidc_url: "__COSMON_HOST__/oidc".into(),
-                noyau: "tenant-demo".into(),
-            });
+            std::sync::Arc::new(cosmon_rpp_adapter::config::InstallTemplating::explicit(
+                "tenant-demo-operator",
+                "cosmon-rpp-tenant",
+                "__COSMON_HOST__/oidc",
+                "tenant-demo",
+            ));
         let body2 = fetch_install_sh_with_state(state2, host, *fwd_proto).await;
         assert_no_placeholder_leakage(&body2, host, "configured-templating");
         assert_sh_syntax_valid(&body2, host, "configured-templating");

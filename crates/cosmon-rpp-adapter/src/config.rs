@@ -39,7 +39,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::Posture;
 
@@ -139,9 +139,9 @@ pub struct RppConfig {
     /// `~/.config/cosmon-remote/profiles/<host>.toml` — resolving the
     /// "AWS live-deploy test, `COSMON_HOST` seulement" finding by
     /// persisting the full four-tuple instead of just the host.
-    /// Missing fields are emitted as empty strings; install.sh skips
-    /// the corresponding `config set` line rather than writing a
-    /// literal placeholder.
+    /// Fields absent here are derived at boot from the trust-bootstrap
+    /// binding that the deployment applied. Explicit values, including
+    /// empty-string opt-outs, win per field.
     #[serde(default)]
     pub install_templating: InstallTemplating,
     /// Boot-time trust bootstrap (ADR-141): where the server looks for
@@ -195,8 +195,7 @@ pub const DEFAULT_OIDC_URL_TEMPLATE: &str = "__COSMON_HOST__/oidc";
 /// the four-tuple [`crate::routes::dist`] expects (see Phase 1
 /// architectural finding "host seulement, sub/aud/oidc-url devinés
 /// par templating brittle" from the AWS live-deploy test).
-#[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug)]
 pub struct InstallTemplating {
     /// JWT `sub` claim. e.g. `tenant-demo-operator`.
     pub sub: String,
@@ -217,6 +216,68 @@ pub struct InstallTemplating {
     /// the actual noyau from the JWT `sub`; this field is a display
     /// label in the operator's profile.
     pub noyau: String,
+    explicit: ExplicitInstallTemplating,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ExplicitInstallTemplating(u8);
+
+impl ExplicitInstallTemplating {
+    const SUB: u8 = 1 << 0;
+    const AUD: u8 = 1 << 1;
+    const OIDC_URL: u8 = 1 << 2;
+    const NOYAU: u8 = 1 << 3;
+
+    fn contains(self, field: u8) -> bool {
+        self.0 & field != 0
+    }
+
+    fn from_presence([sub, aud, oidc_url, noyau]: [bool; 4]) -> Self {
+        let mut bits = 0;
+        if sub {
+            bits |= Self::SUB;
+        }
+        if aud {
+            bits |= Self::AUD;
+        }
+        if oidc_url {
+            bits |= Self::OIDC_URL;
+        }
+        if noyau {
+            bits |= Self::NOYAU;
+        }
+        Self(bits)
+    }
+}
+
+#[derive(Deserialize)]
+struct InstallTemplatingInput {
+    sub: Option<String>,
+    aud: Option<String>,
+    oidc_url: Option<String>,
+    noyau: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for InstallTemplating {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let input = InstallTemplatingInput::deserialize(deserializer)?;
+        let defaults = Self::default();
+        Ok(Self {
+            sub: input.sub.clone().unwrap_or(defaults.sub),
+            aud: input.aud.clone().unwrap_or(defaults.aud),
+            oidc_url: input.oidc_url.clone().unwrap_or(defaults.oidc_url),
+            noyau: input.noyau.clone().unwrap_or(defaults.noyau),
+            explicit: ExplicitInstallTemplating::from_presence([
+                input.sub.is_some(),
+                input.aud.is_some(),
+                input.oidc_url.is_some(),
+                input.noyau.is_some(),
+            ]),
+        })
+    }
 }
 
 impl Default for InstallTemplating {
@@ -226,6 +287,74 @@ impl Default for InstallTemplating {
             aud: String::new(),
             oidc_url: DEFAULT_OIDC_URL_TEMPLATE.to_owned(),
             noyau: String::new(),
+            explicit: ExplicitInstallTemplating::default(),
+        }
+    }
+}
+
+impl InstallTemplating {
+    /// Construct a fully explicit deployment tuple.
+    ///
+    /// Every supplied value, including an empty string, wins over values
+    /// derived from trust bootstrap. This constructor exists for callers
+    /// that build adapter state directly rather than deserializing TOML.
+    #[must_use]
+    pub fn explicit(
+        sub: impl Into<String>,
+        aud: impl Into<String>,
+        oidc_url: impl Into<String>,
+        noyau: impl Into<String>,
+    ) -> Self {
+        Self {
+            sub: sub.into(),
+            aud: aud.into(),
+            oidc_url: oidc_url.into(),
+            noyau: noyau.into(),
+            explicit: ExplicitInstallTemplating(
+                ExplicitInstallTemplating::SUB
+                    | ExplicitInstallTemplating::AUD
+                    | ExplicitInstallTemplating::OIDC_URL
+                    | ExplicitInstallTemplating::NOYAU,
+            ),
+        }
+    }
+
+    /// Fill fields absent from `[install_templating]` from the binding that
+    /// trust bootstrap actually applied.
+    ///
+    /// Precedence is per field: an explicit TOML value (including `""`)
+    /// wins, then the applied handoff binding, then the historical defaults
+    /// (`__COSMON_HOST__/oidc` for `oidc_url`, empty for the identifiers).
+    #[must_use]
+    pub fn resolved_from_binding(
+        &self,
+        binding: Option<&crate::trust_bootstrap::AppliedHandoffBinding>,
+    ) -> Self {
+        let Some(binding) = binding else {
+            return self.clone();
+        };
+        Self {
+            sub: if self.explicit.contains(ExplicitInstallTemplating::SUB) {
+                self.sub.clone()
+            } else {
+                binding.sub.clone()
+            },
+            aud: if self.explicit.contains(ExplicitInstallTemplating::AUD) {
+                self.aud.clone()
+            } else {
+                binding.audience.clone()
+            },
+            oidc_url: if self.explicit.contains(ExplicitInstallTemplating::OIDC_URL) {
+                self.oidc_url.clone()
+            } else {
+                binding.issuer.clone()
+            },
+            noyau: if self.explicit.contains(ExplicitInstallTemplating::NOYAU) {
+                self.noyau.clone()
+            } else {
+                binding.noyau.clone()
+            },
+            explicit: self.explicit,
         }
     }
 }
@@ -599,5 +728,31 @@ mod tests {
             cfg.install_templating.oidc_url,
             "https://idp.example.com/oidc"
         );
+    }
+
+    #[test]
+    fn install_templating_explicit_fields_win_over_applied_binding() {
+        let cfg: RppConfig = toml::from_str(
+            r#"[install_templating]
+sub = "operator-override"
+aud = ""
+oidc_url = "https://override.example.test/oidc"
+noyau = "override-noyau"
+"#,
+        )
+        .unwrap();
+        let applied = crate::trust_bootstrap::AppliedHandoffBinding {
+            issuer: "https://derived.example.test/git".into(),
+            sub: "derived-subject".into(),
+            audience: "derived-audience".into(),
+            noyau: "derived-noyau".into(),
+        };
+
+        let resolved = cfg.install_templating.resolved_from_binding(Some(&applied));
+
+        assert_eq!(resolved.sub, "operator-override");
+        assert!(resolved.aud.is_empty(), "explicit empty remains an opt-out");
+        assert_eq!(resolved.oidc_url, "https://override.example.test/oidc");
+        assert_eq!(resolved.noyau, "override-noyau");
     }
 }

@@ -192,11 +192,13 @@ fn request_base_url(headers: &HeaderMap) -> String {
 /// the tenant later mints and the Tailscale ACL.
 ///
 /// Phase 1 extends the templating beyond
-/// `__COSMON_HOST__`: when `install_templating` is configured, the
-/// per-deployment four-tuple `(sub, aud, oidc_url, noyau)` lands in the
+/// `__COSMON_HOST__`: the resolved per-deployment four-tuple
+/// `(sub, aud, oidc_url, noyau)` lands in the
 /// served script as a multi-line block of `cosmon-remote config set`
 /// commands so the tenant's profile is persisted ready-to-use after
-/// `install.sh | sh`. Empty fields are skipped server-side — no
+/// `install.sh | sh`. Values omitted from `[install_templating]` are
+/// derived from the trust-bootstrap binding applied at boot; explicit
+/// values still win. Empty fields are skipped server-side — no
 /// `config set` line is emitted at all, avoiding the Phase 0
 /// case-pattern bug where conditional `is_unset` matched the literal
 /// placeholder strings.
