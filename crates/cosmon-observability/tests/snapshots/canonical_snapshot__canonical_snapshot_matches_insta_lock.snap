@@ -1,6 +1,5 @@
 ---
 source: crates/cosmon-observability/tests/canonical_snapshot.rs
-assertion_line: 25
 expression: out
 ---
 COSMON FLEET SNAPSHOT v1                                                                                                
@@ -14,10 +13,10 @@ COSMON FLEET SNAPSHOT v1
   mol-beta                 Beta issue           issue        pending    w-beta             cosmon-beta        0         
                                                                                                                         
 ## WORKERS                                                                                                              
-  WORKER                   MOLECULE                 SESSION              LIVE         TOKENS       COST                 
+  WORKER               MOLECULE             SESSION            LIVE         IN/CACHED/OUT/RSN        COST               
 ------------------------------------------------------------------------------------------------------------------------
-  w-alpha                  mol-alpha                cosmon-alpha         working      1.5K         $0.0000              
-  w-beta                   mol-beta                 cosmon-beta          idle         0            $0.0000              
+  w-alpha              mol-alpha            cosmon-alpha       working      1.0K/800/500/100         -                  
+  w-beta               mol-beta             cosmon-beta        idle         0/0/0/0                  -                  
                                                                                                                         
 ## SESSIONS                                                                                                             
   SESSION                  SOCKET                                     MOLECULE               WORKER                     

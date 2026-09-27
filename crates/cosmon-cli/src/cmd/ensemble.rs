@@ -224,8 +224,10 @@ struct WorkerRow {
     /// calling `RunState::ghost()`. Never persisted.
     ghost: Option<String>,
     input_tokens: u64,
+    cached_input_tokens: u64,
     output_tokens: u64,
-    cost: f64,
+    reasoning_output_tokens: u64,
+    cost: cosmon_observability::EnergyCost,
     /// Resolved model id pinned for this worker's molecule
     /// (delib-20260704-b476 C3), projected from the latest `ModelSelected`
     /// event. `None` at the von-neumann floor (adapter default applies) or
@@ -575,8 +577,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 molecule_health: mol_health.to_string(),
                 ghost,
                 input_tokens: energy.map_or(0, |e| e.input.get()),
+                cached_input_tokens: energy.map_or(0, |e| e.cached_input.get()),
                 output_tokens: energy.map_or(0, |e| e.output.get()),
-                cost: energy.map_or(0.0, |e| e.cost.get()),
+                reasoning_output_tokens: energy.map_or(0, |e| e.reasoning_output.get()),
+                cost: energy.map_or(cosmon_observability::EnergyCost::Unknown, |e| {
+                    e.cost.clone()
+                }),
                 model: model_attr.and_then(|a| a.model.clone()),
                 model_source: model_attr.map(|a| a.source_slug().to_owned()),
                 model_cell: model_attr
@@ -645,8 +651,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let w_live = rows.iter().map(|r| r.live.len()).max().unwrap_or(4).max(4) + 2;
     let w_clear = 10;
     let w_input = 10;
+    let w_cached = 10;
     let w_output = 10;
-    let w_cost = 10;
+    let w_reasoning = 10;
+    let w_cost = 18;
     let total_width = w_name
         + w_role
         + w_desired
@@ -654,14 +662,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         + w_live
         + w_clear
         + w_input
+        + w_cached
         + w_output
+        + w_reasoning
         + w_cost
         + 10;
 
     // Table header. `MH` is the molecule-health glyph (pure overlay from
     // `cosmon_core::reconcile::molecule_health` — never persisted).
     println!(
-        "  {:<w_name$} {:<w_role$} {:<w_desired$} {:<w_effective$} {:<w_live$} {:<w_clear$} {:>w_input$} {:>w_output$} {:>w_cost$} {} {}",
+        "  {:<w_name$} {:<w_role$} {:<w_desired$} {:<w_effective$} {:<w_live$} {:<w_clear$} {:>w_input$} {:>w_cached$} {:>w_output$} {:>w_reasoning$} {:>w_cost$} {} {}",
         "NAME".bold(),
         "ROLE".bold(),
         "DESIRED".bold(),
@@ -669,7 +679,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         "LIVE".bold(),
         "CLEARANCE".bold(),
         "INPUT".bold(),
+        "CACHED".bold(),
         "OUTPUT".bold(),
+        "REASON".bold(),
         "COST".bold(),
         "MH".bold(),
         "MOLECULE".bold(),
@@ -679,10 +691,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // Group by fleet with headers and subtotals.
     let mut current_fleet = String::new();
     let mut fleet_input: u64 = 0;
+    let mut fleet_cached: u64 = 0;
     let mut fleet_output: u64 = 0;
+    let mut fleet_reasoning: u64 = 0;
     let mut fleet_cost: f64 = 0.0;
     let mut grand_input: u64 = 0;
+    let mut grand_cached: u64 = 0;
     let mut grand_output: u64 = 0;
+    let mut grand_reasoning: u64 = 0;
     let mut grand_cost: f64 = 0.0;
 
     // Offset for the subtotal line (skip NAME + ROLE + DESIRED + EFFECTIVE + LIVE + CLEARANCE).
@@ -696,15 +712,19 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         if is_new_fleet && !current_fleet.is_empty() {
             print_fleet_subtotal(
                 subtotal_pad,
-                w_input,
-                w_output,
-                w_cost,
-                fleet_input,
-                fleet_output,
-                fleet_cost,
+                (w_input, w_cached, w_output, w_reasoning, w_cost),
+                (
+                    fleet_input,
+                    fleet_cached,
+                    fleet_output,
+                    fleet_reasoning,
+                    fleet_cost,
+                ),
             );
             fleet_input = 0;
+            fleet_cached = 0;
             fleet_output = 0;
+            fleet_reasoning = 0;
             fleet_cost = 0.0;
             println!();
         }
@@ -718,11 +738,15 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
         // Accumulate fleet and grand totals.
         fleet_input += row.input_tokens;
+        fleet_cached += row.cached_input_tokens;
         fleet_output += row.output_tokens;
-        fleet_cost += row.cost;
+        fleet_reasoning += row.reasoning_output_tokens;
+        fleet_cost += row.cost.reference_usd().unwrap_or(0.0);
         grand_input += row.input_tokens;
+        grand_cached += row.cached_input_tokens;
         grand_output += row.output_tokens;
-        grand_cost += row.cost;
+        grand_reasoning += row.reasoning_output_tokens;
+        grand_cost += row.cost.reference_usd().unwrap_or(0.0);
 
         // Pad BEFORE colorizing — ANSI escape codes break fixed-width formatting.
         let desired_padded = format!("{:<w_desired$}", row.desired);
@@ -732,8 +756,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         let live_padded = format!("{:<w_live$}", row.live);
         let live_colored = colorize_live(&live_padded);
         let input_str = format_tokens(row.input_tokens);
+        let cached_str = format_tokens(row.cached_input_tokens);
         let output_str = format_tokens(row.output_tokens);
-        let cost_str = format_cost(row.cost);
+        let reasoning_str = format_tokens(row.reasoning_output_tokens);
+        let cost_str = format_energy_cost(&row.cost);
         let health_badge = row.row_kind.colorize(row.row_kind.glyph()).to_string();
         // ADR-052 ghost suffix — appended to the molecule column so the
         // eye catches it without a separate, sparsely-populated column.
@@ -750,7 +776,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             None => molecule_cell,
         };
         println!(
-            "  {:<w_name$} {:<w_role$} {} {} {} {:<w_clear$} {:>w_input$} {:>w_output$} {:>w_cost$} {} {}",
+            "  {:<w_name$} {:<w_role$} {} {} {} {:<w_clear$} {:>w_input$} {:>w_cached$} {:>w_output$} {:>w_reasoning$} {:>w_cost$} {} {}",
             row.name,
             row.role,
             desired_colored,
@@ -758,7 +784,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             live_colored,
             row.clearance,
             input_str.dimmed(),
+            cached_str.dimmed(),
             output_str.dimmed(),
+            reasoning_str.dimmed(),
             cost_str.dimmed(),
             health_badge,
             molecule_cell,
@@ -768,19 +796,21 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         if is_last {
             print_fleet_subtotal(
                 subtotal_pad,
-                w_input,
-                w_output,
-                w_cost,
-                fleet_input,
-                fleet_output,
-                fleet_cost,
+                (w_input, w_cached, w_output, w_reasoning, w_cost),
+                (
+                    fleet_input,
+                    fleet_cached,
+                    fleet_output,
+                    fleet_reasoning,
+                    fleet_cost,
+                ),
             );
         }
     }
 
     // Grand total.
     if grand_cost > 0.0 {
-        let rule_width = w_input + w_output + w_cost + 2;
+        let rule_width = w_input + w_cached + w_output + w_reasoning + w_cost + 4;
         println!();
         println!(
             "  {:>subtotal_pad$} {}",
@@ -788,10 +818,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             "━".repeat(rule_width).dimmed(),
         );
         println!(
-            "  {:>subtotal_pad$} {:>w_input$} {:>w_output$} {:>w_cost$}",
+            "  {:>subtotal_pad$} {:>w_input$} {:>w_cached$} {:>w_output$} {:>w_reasoning$} {:>w_cost$}",
             "TOTAL".bold(),
             format_tokens(grand_input).bold(),
+            format_tokens(grand_cached).bold(),
             format_tokens(grand_output).bold(),
+            format_tokens(grand_reasoning).bold(),
             format_cost(grand_cost).yellow().bold(),
         );
     }
@@ -994,26 +1026,41 @@ fn format_cost(cost: f64) -> String {
     }
 }
 
+/// Format the billing basis without conflating unknown/subscription with
+/// numeric zero.  Reference estimates are labelled because they are not the
+/// worker's actual `ChatGPT` bill.
+fn format_energy_cost(cost: &cosmon_observability::EnergyCost) -> String {
+    match cost {
+        cosmon_observability::EnergyCost::Unknown => "—".to_owned(),
+        cosmon_observability::EnergyCost::ReferenceUsd { usd } => {
+            format!("ref ${usd:.2}")
+        }
+        cosmon_observability::EnergyCost::Subscription { used_percent, .. } => {
+            format!("subscription {used_percent:.0}%")
+        }
+    }
+}
+
 /// Print a fleet subtotal line with a thin separator.
 fn print_fleet_subtotal(
     pad: usize,
-    w_input: usize,
-    w_output: usize,
-    w_cost: usize,
-    input: u64,
-    output: u64,
-    cost: f64,
+    widths: (usize, usize, usize, usize, usize),
+    totals: (u64, u64, u64, u64, f64),
 ) {
+    let (w_input, w_cached, w_output, w_reasoning, w_cost) = widths;
+    let (input, cached, output, reasoning, cost) = totals;
     if cost < 0.001 {
         return;
     }
-    let rule_width = w_input + w_output + w_cost + 2;
+    let rule_width = w_input + w_cached + w_output + w_reasoning + w_cost + 4;
     println!("  {:>pad$} {}", "", "─".repeat(rule_width).dimmed());
     println!(
-        "  {:>pad$} {:>w_input$} {:>w_output$} {:>w_cost$}",
+        "  {:>pad$} {:>w_input$} {:>w_cached$} {:>w_output$} {:>w_reasoning$} {:>w_cost$}",
         "fleet total".bold(),
         format_tokens(input),
+        format_tokens(cached),
         format_tokens(output),
+        format_tokens(reasoning),
         format_cost(cost).yellow(),
     );
 }
@@ -2438,8 +2485,10 @@ mod tests {
             molecule_health: "inert".to_owned(),
             ghost: None,
             input_tokens: 0,
+            cached_input_tokens: 0,
             output_tokens: 0,
-            cost: 0.0,
+            reasoning_output_tokens: 0,
+            cost: cosmon_observability::EnergyCost::Unknown,
             model: None,
             model_source: None,
             model_cell: None,

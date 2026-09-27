@@ -20,16 +20,60 @@ impl From<&str> for WorkerId {
     }
 }
 
-/// Token accounting for a worker — projected from `claudion` probes.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+/// How an observer may describe the worker's monetary or subscription cost.
+///
+/// The enum makes the absence of a per-token bill explicit.  In particular,
+/// [`Self::Subscription`] cannot collapse to the numeric value zero and be
+/// mistaken for free work.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EnergyCost {
+    /// No billing or reference-price observation is available.
+    #[default]
+    Unknown,
+    /// A reference estimate at published per-token list prices.
+    ReferenceUsd {
+        /// Estimated US-dollar amount.
+        usd: f64,
+    },
+    /// A `ChatGPT` subscription allowance rather than a per-token bill.
+    Subscription {
+        /// Plan label reported by the adapter, when available.
+        plan_type: Option<String>,
+        /// Share of the primary allowance window consumed, in percent.
+        used_percent: f64,
+        /// Length of that allowance window, when reported.
+        window_minutes: Option<u64>,
+    },
+}
+
+impl EnergyCost {
+    /// Return the reference-price estimate when this observation has one.
+    #[must_use]
+    pub fn reference_usd(&self) -> Option<f64> {
+        match self {
+            Self::ReferenceUsd { usd } => Some(*usd),
+            Self::Unknown | Self::Subscription { .. } => None,
+        }
+    }
+}
+
+/// Token accounting for a worker — projected from adapter session probes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct EnergyBudget {
-    /// Cumulative input tokens observed.
+    /// Cumulative input tokens observed, including the cached subset.
     pub input_tokens: u64,
-    /// Cumulative output tokens observed.
-    pub output_tokens: u64,
-    /// Cumulative cost in USD (from `claudion` pricing model).
+    /// Cached-input subset of [`Self::input_tokens`].
     #[serde(default)]
-    pub cost_usd: f64,
+    pub cached_input_tokens: u64,
+    /// Cumulative output tokens observed, including the reasoning subset.
+    pub output_tokens: u64,
+    /// Reasoning-output subset of [`Self::output_tokens`].
+    #[serde(default)]
+    pub reasoning_output_tokens: u64,
+    /// Billing interpretation for this observation.
+    #[serde(default)]
+    pub cost: EnergyCost,
     /// Context window size, if known.
     pub context_window: Option<u64>,
 }
@@ -53,8 +97,12 @@ impl EnergyBudget {
         let input = metrics.total_input + metrics.total_cache_creation + metrics.total_cache_read;
         Some(Self {
             input_tokens: input.get(),
+            cached_input_tokens: metrics.total_cache_read.get(),
             output_tokens: metrics.total_output.get(),
-            cost_usd: metrics.total_cost.get(),
+            reasoning_output_tokens: 0,
+            cost: EnergyCost::ReferenceUsd {
+                usd: metrics.total_cost.get(),
+            },
             context_window: None,
         })
     }
@@ -108,8 +156,10 @@ mod tests {
     fn energy_total_sums_tokens() {
         let b = EnergyBudget {
             input_tokens: 10,
+            cached_input_tokens: 4,
             output_tokens: 32,
-            cost_usd: 0.0,
+            reasoning_output_tokens: 8,
+            cost: EnergyCost::Unknown,
             context_window: Some(200_000),
         };
         assert_eq!(b.total(), 42);
