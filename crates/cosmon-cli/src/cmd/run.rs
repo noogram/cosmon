@@ -170,6 +170,27 @@ pub struct Args {
     /// - Exits cleanly on SIGTERM / Ctrl-C.
     /// - Drains when the ensemble has no `pending` and no `running`.
     ///
+    /// **Config-honoring dispatch (ADR-016 delib-20260531-c761, refined by
+    /// issue #91).** The loop seals `.cosmon/config.toml` (+ the global
+    /// `~/.config/cosmon/config.toml`) at launch and re-checks it before
+    /// every dispatch. An on-disk edit is then one of:
+    ///
+    /// - **Reloaded** (no halt) — the edit does not touch the `[adapters]`
+    ///   table (e.g. `[worker]`, `[attribution]`, `[hooks]`, comments), or it
+    ///   does but no molecule is currently `running` to be affected. The
+    ///   loop adopts the fresh config for its next dispatch and keeps going;
+    ///   a `config-reloaded` line lands in `runtime-trace.jsonl` and the
+    ///   final summary counts it.
+    /// - **Halted fail-closed** — the `[adapters]` table changed *and* a
+    ///   molecule is currently `running`. The loop refuses to form its next
+    ///   dispatch, emits `EventV2::ConfigDriftDetected`, and exits non-zero
+    ///   (`EX_TEMPFAIL`, 75) so a supervisor relaunches a fresh process that
+    ///   re-derives everything from disk — it never merges the new config
+    ///   into a live process.
+    ///
+    /// The `cs` binary image itself is never sealed (a `cs done` merge
+    /// reinstalls it on every successful drain by design).
+    ///
     /// Does not require `<molecule>` — the loop walks the whole
     /// ensemble. The positional argument is accepted but ignored in
     /// resident mode; pass `_` if you have nothing to name.
@@ -847,6 +868,87 @@ fn resolve_run_harness(
     cosmon_core::harness_settings::parse_harness_flags(flags).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// Print the resident-loop run summary, JSON or human-readable per `ctx.json`
+/// — split out of [`run_resident`] purely to keep that function under the
+/// `too_many_lines` clippy ceiling; carries no logic of its own beyond
+/// formatting `summary`.
+fn print_resident_summary(
+    ctx: &Context,
+    summary: &cosmon_runtime::RunSummary,
+    trace_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    use cosmon_runtime::ExitReason;
+
+    let reason = match summary.exit {
+        ExitReason::Drained => "drained",
+        ExitReason::Shutdown => "shutdown",
+        ExitReason::Deadline => "deadline",
+        ExitReason::ConfigDrift => "config-drift",
+    };
+
+    if ctx.json {
+        let json_out = serde_json::json!({
+            "mode": "resident",
+            "exit": reason,
+            "ticks": summary.ticks,
+            "tackles": summary.tackles,
+            "dones": summary.dones,
+            "reaps": summary.reaps,
+            "permanently_parked": summary.permanently_parked,
+            "teardown_blocked": summary.teardown_blocked,
+            "config_reloads": summary.config_reloads,
+            "trace": trace_path.display().to_string(),
+        });
+        println!("{}", serde_json::to_string_pretty(&json_out)?);
+        return Ok(());
+    }
+
+    // Surface permanently-refused molecules only when non-zero — they are
+    // the exceptional case (an operator has molecules needing a brief
+    // restored, a capable adapter, or a collapse), so a clean run stays
+    // terse (task-20260711-4310). The word is "parked", not "briefless":
+    // the capability gate (noogram/cosmon #4) parks here too, and the
+    // decision trace is where the specific cause is written.
+    let parked = if summary.permanently_parked > 0 {
+        format!(", {} permanently parked", summary.permanently_parked)
+    } else {
+        String::new()
+    };
+    // A blocked harvest is the loudest thing this summary can report: the
+    // molecule is completed, unmerged, and everything downstream of it is
+    // stalled behind a cause only an operator can clear.
+    let blocked = if summary.teardown_blocked > 0 {
+        format!(
+            ", {} blocked on teardown (see `cs peek`)",
+            summary.teardown_blocked
+        )
+    } else {
+        String::new()
+    };
+    // A reload means the loop saw a config edit land mid-run and safely
+    // adopted it (issue #91) instead of halting — worth a mention so an
+    // operator watching the summary knows the on-disk edit already took
+    // effect, without digging into the trace.
+    let reloaded = if summary.config_reloads > 0 {
+        format!(", {} config reload(s)", summary.config_reloads)
+    } else {
+        String::new()
+    };
+    println!(
+        "\n{} {} ticks, {} tackles, {} dones, {} reaps{}{}{} — {}",
+        "Done:".bold(),
+        summary.ticks,
+        summary.tackles,
+        summary.dones,
+        summary.reaps,
+        parked,
+        blocked,
+        reloaded,
+        reason,
+    );
+    Ok(())
+}
+
 /// **ADR-095** — Resident Runtime entry point.
 ///
 /// Distinct from the legacy [`run`] body: instantiates the
@@ -934,62 +1036,7 @@ fn run_resident(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 
     let summary = runtime.run(&shutdown).map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    let reason = match summary.exit {
-        ExitReason::Drained => "drained",
-        ExitReason::Shutdown => "shutdown",
-        ExitReason::Deadline => "deadline",
-        ExitReason::ConfigDrift => "config-drift",
-    };
-
-    if ctx.json {
-        let json_out = serde_json::json!({
-            "mode": "resident",
-            "exit": reason,
-            "ticks": summary.ticks,
-            "tackles": summary.tackles,
-            "dones": summary.dones,
-            "reaps": summary.reaps,
-            "permanently_parked": summary.permanently_parked,
-            "teardown_blocked": summary.teardown_blocked,
-            "trace": trace_path.display().to_string(),
-        });
-        println!("{}", serde_json::to_string_pretty(&json_out)?);
-    } else {
-        // Surface permanently-refused molecules only when non-zero — they are
-        // the exceptional case (an operator has molecules needing a brief
-        // restored, a capable adapter, or a collapse), so a clean run stays
-        // terse (task-20260711-4310). The word is "parked", not "briefless":
-        // the capability gate (noogram/cosmon #4) parks here too, and the
-        // decision trace is where the specific cause is written.
-        let parked = if summary.permanently_parked > 0 {
-            format!(", {} permanently parked", summary.permanently_parked)
-        } else {
-            String::new()
-        };
-        // A blocked harvest is the loudest thing this summary can report: the
-        // molecule is completed, unmerged, and everything downstream of it is
-        // stalled behind a cause only an operator can clear.
-        let blocked = if summary.teardown_blocked > 0 {
-            format!(
-                ", {} blocked on teardown (see `cs peek`)",
-                summary.teardown_blocked
-            )
-        } else {
-            String::new()
-        };
-        println!(
-            "\n{} {} ticks, {} tackles, {} dones, {} reaps{}{} — {}",
-            "Done:".bold(),
-            summary.ticks,
-            summary.tackles,
-            summary.dones,
-            summary.reaps,
-            parked,
-            blocked,
-            reason,
-        );
-    }
+    print_resident_summary(ctx, &summary, &trace_path)?;
 
     if summary.exit == ExitReason::Deadline {
         std::process::exit(124);

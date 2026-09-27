@@ -77,6 +77,12 @@ Options:
           
           - Shells out to `cs ensemble --json`, `cs tackle`, `cs done` exactly as a human operator would (RR-1). - Wakes on FS changes under `.cosmon/state/` (notify backend) plus a `--poll-interval` heartbeat. - Writes an NDJSON trace line per loop iteration to `.cosmon/state/runtime-trace.jsonl` (RR-5). - Exits cleanly on SIGTERM / Ctrl-C. - Drains when the ensemble has no `pending` and no `running`.
           
+          **Config-honoring dispatch (ADR-016 delib-20260531-c761, refined by issue #91).** The loop seals `.cosmon/config.toml` (+ the global `~/.config/cosmon/config.toml`) at launch and re-checks it before every dispatch. An on-disk edit is then one of:
+          
+          - **Reloaded** (no halt) — the edit does not touch the `[adapters]` table (e.g. `[worker]`, `[attribution]`, `[hooks]`, comments), or it does but no molecule is currently `running` to be affected. The loop adopts the fresh config for its next dispatch and keeps going; a `config-reloaded` line lands in `runtime-trace.jsonl` and the final summary counts it. - **Halted fail-closed** — the `[adapters]` table changed *and* a molecule is currently `running`. The loop refuses to form its next dispatch, emits `EventV2::ConfigDriftDetected`, and exits non-zero (`EX_TEMPFAIL`, 75) so a supervisor relaunches a fresh process that re-derives everything from disk — it never merges the new config into a live process.
+          
+          The `cs` binary image itself is never sealed (a `cs done` merge reinstalls it on every successful drain by design).
+          
           Does not require `<molecule>` — the loop walks the whole ensemble. The positional argument is accepted but ignored in resident mode; pass `_` if you have nothing to name.
 
       --affinity
