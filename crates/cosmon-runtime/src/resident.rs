@@ -873,6 +873,14 @@ pub struct RunSummary {
     /// completed molecule cannot be merged and every descendant of it is
     /// stalled behind a cause only an operator can clear.
     pub teardown_blocked: u32,
+    /// Number of times the loop **reloaded** its config seal in place instead
+    /// of halting (issue #91 / delib-20260927-… refinement of
+    /// `config-honoring dispatch`). Counted whenever a detected drift was
+    /// classified as safe — i.e. the on-disk config changed but either the
+    /// `[adapters]` dispatch surface was untouched, or no molecule is
+    /// currently `running` to be affected by it. Each reload is also written
+    /// to the NDJSON trace as a `config-reloaded` line.
+    pub config_reloads: u32,
     /// Why the loop exited.
     pub exit: ExitReason,
 }
@@ -953,6 +961,19 @@ pub struct RuntimeLoop {
     /// sealed binary, tripping the seal on the very next tick after a
     /// successful drain. See [`ExitReason::ConfigDrift`].
     launch_seal: String,
+    /// The **dispatch-relevant** subset of the sealed config — the
+    /// `[adapters]` table (per-galaxy + global), the only `config.toml`
+    /// surface `cs tackle` reads to resolve adapter/model (ADR-097 / C6) —
+    /// captured whenever [`Self::launch_seal`] is (re)computed.
+    ///
+    /// This is the finer-grained witness issue #91 adds on top of the raw
+    /// byte seal: the byte seal alone cannot distinguish "the operator fixed
+    /// a typo in a comment" from "the operator repointed `[adapters].default`
+    /// at a different oracle", so *every* edit halted the loop. Comparing
+    /// this parsed surface against the current one lets the loop tell those
+    /// apart — see [`dispatch_surface`] and the drift-handling arm of
+    /// [`Self::run`].
+    launch_dispatch_surface: DispatchSurface,
     /// Failed-harvest bookkeeping, keyed by molecule id.
     ///
     /// Present only for molecules whose `cs done` has failed at least once and
@@ -994,6 +1015,7 @@ impl RuntimeLoop {
             scheduler,
             trace: TraceWriter::new(trace_path),
             launch_seal: String::new(),
+            launch_dispatch_surface: DispatchSurface::default(),
             teardown_retries: std::collections::HashMap::new(),
             tackle_executor: None,
         }
@@ -1051,6 +1073,7 @@ impl RuntimeLoop {
         // and a runtime that sealed against its own binary could not survive
         // its own success.
         self.launch_seal = config_seal(&self.config);
+        self.launch_dispatch_surface = dispatch_surface(&self.config);
         self.trace.write_tick(
             "launch",
             "config-seal-sealed",
@@ -1068,6 +1091,7 @@ impl RuntimeLoop {
             ticks: 0,
             permanently_parked: 0,
             teardown_blocked: 0,
+            config_reloads: 0,
             exit: ExitReason::Drained,
         };
         // Phantom-running reap gate (task-20260606-21d4, DoD a). Counts
@@ -1232,28 +1256,61 @@ impl RuntimeLoop {
             let mut interrupted = false;
             let mut drifted = false;
             for d in decisions {
-                // Config-honoring dispatch (delib-20260531-c761): re-derive
-                // the seal from the *current* on-disk config and refuse
-                // to FORM the dispatch if it drifted from launch. This is
-                // carnot's irreversibility boundary — we never let the wrong
-                // request exist, rather than catching it after it is sent.
-                // The only sound move on drift is to *stop* and let a fresh
-                // launch re-derive from disk (godel: a running process cannot
-                // prove "I am currently fresh" while still running); we never
-                // reload in place.
+                // Config-honoring dispatch (delib-20260531-c761, refined by
+                // issue #91): re-derive the seal from the *current* on-disk
+                // config before forming the dispatch. A byte-identical seal
+                // means nothing to re-derive — proceed. A drifted seal is
+                // classified by `affects_dispatched_molecules`:
+                //
+                // - **Safe** (reload): the `[adapters]` dispatch surface is
+                //   unchanged (only an unrelated section — comments,
+                //   `[worker]`, `[attribution]`, … — moved), OR no molecule
+                //   is currently `running` to be affected by a changed
+                //   default. The loop adopts the fresh config for *future*
+                //   dispatches and keeps going — carnot's irreversibility
+                //   boundary is respected because nothing that depends on the
+                //   old surface is in flight.
+                // - **Unsafe** (halt): a `running` molecule exists and the
+                //   dispatch surface changed under it. We never let the
+                //   wrong request exist rather than catching it after it is
+                //   sent (godel: a running process cannot prove "I am
+                //   currently fresh" while still running) — refuse to FORM
+                //   the dispatch and let a fresh launch re-derive from disk.
                 let current_seal = config_seal(&self.config);
                 if current_seal != self.launch_seal {
-                    let event = EventV2::ConfigDriftDetected {
-                        launch_seal: self.launch_seal.clone(),
-                        current_seal: current_seal.clone(),
-                        refused_verb: d.verb().to_owned(),
-                        refused_molecule: Some(d.molecule_id().to_owned()),
+                    let current_surface = dispatch_surface(&self.config);
+                    if affects_dispatched_molecules(
+                        &self.launch_dispatch_surface,
+                        &current_surface,
+                        &snapshot,
+                    ) {
+                        let event = EventV2::ConfigDriftDetected {
+                            launch_seal: self.launch_seal.clone(),
+                            current_seal: current_seal.clone(),
+                            refused_verb: d.verb().to_owned(),
+                            refused_molecule: Some(d.molecule_id().to_owned()),
+                        };
+                        self.trace
+                            .write_drift(&self.launch_seal, &current_seal, &event)?;
+                        summary.exit = ExitReason::ConfigDrift;
+                        drifted = true;
+                        break;
+                    }
+                    let basis = if current_surface == self.launch_dispatch_surface {
+                        "config-seal-reload-unaffected-surface"
+                    } else {
+                        "config-seal-reload-no-running-molecules"
                     };
-                    self.trace
-                        .write_drift(&self.launch_seal, &current_seal, &event)?;
-                    summary.exit = ExitReason::ConfigDrift;
-                    drifted = true;
-                    break;
+                    self.trace.write_tick(
+                        "config-reloaded",
+                        basis,
+                        Some(&self.launch_seal),
+                        Some(&current_seal),
+                        None,
+                    )?;
+                    self.launch_seal = current_seal;
+                    self.launch_dispatch_surface = current_surface;
+                    summary.config_reloads = summary.config_reloads.saturating_add(1);
                 }
                 let invocation = invocation_uuid();
                 // Anti-preemption lease (task-20260531-a12f): for a Tackle,
@@ -2054,6 +2111,77 @@ fn global_config_path() -> Option<PathBuf> {
                 .join("cosmon")
                 .join("config.toml")
         })
+}
+
+/// The **dispatch-relevant** subset of `config.toml` — the `[adapters]`
+/// table, per-galaxy and global — used to classify a config-seal drift
+/// (issue #91) as safe-to-reload or halt-worthy.
+///
+/// Everything else in `config.toml` (`[worker]`, `[attribution]`, `[hooks]`,
+/// `[gates]`, comments, …) is invisible here on purpose: `cs tackle`'s
+/// adapter/model resolution (ADR-097 / C6) reads only `[adapters]`, so a
+/// drift confined to any other section can never change what a *future*
+/// dispatch would resolve to — the loop can always reload past that kind of
+/// edit without risk.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DispatchSurface {
+    per_galaxy: cosmon_core::config::AdaptersConfig,
+    global: cosmon_core::config::AdaptersConfig,
+}
+
+/// Parse a `config.toml`'s `[adapters]` table, or the config-undeletable
+/// floor ([`AdaptersConfig::default`]) when the file is absent, unreadable,
+/// or fails to parse. A parse failure here is not this function's problem to
+/// halt on — `cs tackle`'s own resolution will hit and report the same
+/// malformed file when it actually dispatches.
+fn read_adapters(path: &Path) -> cosmon_core::config::AdaptersConfig {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| cosmon_core::config::ProjectConfig::parse(&text).ok())
+        .and_then(|cfg| cfg.adapters)
+        .unwrap_or_default()
+}
+
+/// Capture the current [`DispatchSurface`] from disk, mirroring
+/// [`config_seal`]'s two-tier read order (per-galaxy, then global).
+fn dispatch_surface(config: &RuntimeLoopConfig) -> DispatchSurface {
+    let per_galaxy = read_adapters(&config.cwd.join(".cosmon").join("config.toml"));
+    let global = global_config_path()
+        .map(|p| read_adapters(&p))
+        .unwrap_or_default();
+    DispatchSurface { per_galaxy, global }
+}
+
+/// Classify a detected config-seal drift (issue #91): does it need to halt
+/// the loop, or can the fresh config be adopted in place?
+///
+/// **Halt** iff the `[adapters]` dispatch surface actually changed *and* at
+/// least one molecule is currently `running` — i.e. already dispatched under
+/// the old surface. A running molecule's worker was already spawned with
+/// whatever adapter/model the old surface resolved to baked into its own
+/// session; it cannot be affected by a config edit landing after the fact.
+/// What the halt protects against is *this runtime* forming its next
+/// decision — a `Tackle` for a still-pending sibling, or eventually a
+/// `Done` for the running one — while the fleet is left in a state where a
+/// human reading `.cosmon/config.toml` right now sees a *different* answer
+/// than the one the already-running molecule was actually dispatched under
+/// (the May-25/31 "silently billing the wrong oracle" incident this witness
+/// obligation exists to prevent). Once nothing is `running`, that ambiguity
+/// cannot arise, so reloading and continuing is exactly the "next tick"
+/// resolution the issue asked for.
+///
+/// A drift confined to a section outside `[adapters]` never reaches this
+/// question — [`DispatchSurface`] equality is `true` and the loop reloads
+/// unconditionally, regardless of what is running.
+fn affects_dispatched_molecules(
+    launch: &DispatchSurface,
+    current: &DispatchSurface,
+    snapshot: &EnsembleSnapshot,
+) -> bool {
+    if launch == current {
+        return false;
+    }
+    snapshot.molecules.iter().any(|m| m.status == "running")
 }
 
 fn collect_state(dir: &Path, out: &mut Vec<(PathBuf, u64, i128)>) {

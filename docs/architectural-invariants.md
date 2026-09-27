@@ -234,6 +234,40 @@ closes. Governing ADR: [ADR-016](adr/016-autonomy-regimes-and-resident-runtime.m
 Amendment 2026-05-31. Defense-in-depth backstop (ranked *below* this fix):
 egress fail-closed / netns in `delib-20260530-0877`.
 
+**Amendment (2026-09-27, noogram/cosmon#91) — halt only when a `running`
+molecule is at stake.** A blanket halt on *any* config edit turned out to be
+broader than the original defect required: an unattended fleet stopped on an
+edit that changed nothing any in-flight molecule depended on (e.g. a
+`[worker]` or `[attribution]` tweak, or an `[adapters]` edit while the fleet
+was fully idle), and needed an external watchdog to relaunch it for no
+structural reason. The witness obligation above is refined, not repealed:
+
+1. The seal drops the binary term (`H = BLAKE3(resolved_config)` only —
+   already true since `task-20260608-1c59`; restated here for one place that
+   says the current shape).
+2. On `H' != H`, the runtime narrows *which* config actually matters for
+   dispatch — the `[adapters]` table (per-galaxy + global), the only surface
+   `cs tackle`'s adapter/model resolution (ADR-097 / C6) reads — call it the
+   **dispatch surface**.
+3. **Reload** (adopt `H'` as the new seal, keep running, record a
+   `config-reloaded` trace line) when *either* the dispatch surface is
+   unchanged (the edit was elsewhere), *or* no molecule is currently
+   `running`. Neither case has anything already dispatched that the edit
+   could contradict.
+4. **Halt fail-closed** (unchanged from above: refuse the dispatch, emit
+   `EventV2::ConfigDriftDetected`, `exit(75)`) when the dispatch surface
+   changed *and* a molecule is `running` — that molecule was already
+   dispatched under the surface that just changed underneath it, which is
+   exactly the "silently billing the wrong oracle" shape this witness
+   obligation exists to prevent.
+
+Still never a SIGHUP-style in-place *merge* of arbitrary config: a "safe"
+reload is decided by *whether* anything running depends on the changed
+subset, not by attempting to reconcile old and new state. Implementation:
+`crates/cosmon-runtime/src/resident.rs` — `DispatchSurface`,
+`dispatch_surface`, `affects_dispatched_molecules`; documented at
+`cs run --resident --help`. Governing ADR: ADR-016 Amendment 2026-09-27.
+
 ### Inviolable layering rules
 
 - **Never introduce a daemon in Layer A.** Any core CLI command must remain

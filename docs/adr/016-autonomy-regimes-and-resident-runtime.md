@@ -377,6 +377,59 @@ one-glance observable. Deferred to keep this change minimal; the
 `runtime-trace.jsonl` `launch` + `config-drift-halt` lines already make the
 seal observable.
 
+## Amendment (2026-09-27, noogram/cosmon#91): narrow the halt to drift that affects a `running` molecule
+
+**Context.** The 2026-05-31 amendment fixed the silent-stale-dispatch defect
+by halting on *any* config drift. Operationally this proved broader than the
+defect required: `noogram/cosmon#91` reported that the resident runtime
+halted on *any* `.cosmon/config.toml` edit made while it was running —
+including edits that touched nothing any molecule's dispatch depended on, and
+edits landing while the fleet had nothing `running` at all — turning routine
+maintenance into an outage that needed an external watchdog to relaunch the
+process.
+
+**Decision.** The runtime **may now reload its seal in place** — still never
+merging arbitrary config, but adopting the fresh on-disk bytes as the new
+baseline — when the drift cannot contradict anything already dispatched:
+
+1. Narrow the witness to the **dispatch surface**: the `[adapters]` table
+   (per-galaxy + global), the only part of `config.toml` `cs tackle`'s
+   adapter/model resolution (ADR-097 / C6) reads.
+2. On `H' != H`, **reload** (adopt `H'`, keep running, trace a
+   `config-reloaded` line, count it in the run summary) when the dispatch
+   surface is byte-for-byte unchanged (the edit was elsewhere in the file),
+   **or** no molecule in the current ensemble snapshot has status
+   `running`.
+3. **Halt fail-closed** (unchanged: refuse the dispatch, emit
+   `EventV2::ConfigDriftDetected`, `exit(75)`) only when the dispatch surface
+   *did* change *and* a molecule is `running` — that molecule was dispatched
+   under the surface now changing under it, the exact "billing the wrong
+   oracle" shape the original amendment exists to prevent.
+
+**Why this does not reopen Q2b.** Q2b's argument (architect, godel, carnot —
+§ above) is against a runtime that *merges* newer config into a live
+in-memory model, because merging can half-apply and race its own reload. This
+amendment does not merge: it *replaces* the seal wholesale with a fresh,
+fully-read snapshot, and only in the two cases where nothing already
+dispatched can observe a difference between the old and new snapshot. A
+`running` molecule's worker was already spawned with whatever the *old*
+surface resolved to baked into its own process — reloading past an edit that
+does not touch the dispatch surface, or that lands while nothing is running,
+changes nothing about what any dispatched worker is doing. The godel argument
+("a running process cannot prove it is currently fresh") still holds for the
+one case that keeps halting: a `running` molecule under a changed surface is
+exactly the state the runtime cannot prove is still consistent, so it stops
+rather than guess.
+
+**Implementation.** `crates/cosmon-runtime/src/resident.rs` —
+`DispatchSurface`, `dispatch_surface`, `affects_dispatched_molecules`,
+`RuntimeLoop::launch_dispatch_surface`, `RunSummary::config_reloads`;
+documented at `cs run --resident --help`. Tests:
+`crates/cosmon-runtime/tests/resident_config_drift_halt.rs` —
+`config_drift_with_no_running_molecules_reloads_and_dispatches`,
+`config_drift_while_molecule_running_still_halts_fail_closed`,
+`config_drift_in_unrelated_section_reloads_even_with_running_molecule`.
+
 ## References
 
 - an internal ADR/idea — full feasibility study for `ox-sched`
