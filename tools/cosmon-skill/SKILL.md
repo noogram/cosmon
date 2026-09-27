@@ -21,3 +21,5 @@ cs whisper <id> --file correction.md            # send a correction while the wo
 cs done <id>                                    # merge to the base branch + teardown (required)
 ```
 Use `cs tackle`, not `cs run`, when you intend to read the result before merging: `cs run` walks a whole DAG and calls `cs done` on completion itself, closing the review window.
+
+Stopping early is not the end of a mission: the work sits on `feat/<id>` in `.worktrees/<id>` until you run `cs done <id>` (keep the partial work) or `cs collapse <id> --reason "…"` (drop it). `cs status` lists what is still waiting on one of the two.

@@ -119,6 +119,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         match complete_one(&store, &ops_dir, mol_id, &args.reason) {
             Ok(prev_status) => {
                 let already = prev_status == MoleculeStatus::Completed;
+                let branch = format!("feat/{mol_id}");
                 if ctx.json {
                     results.push(serde_json::json!({
                         "molecule": mol_id.as_str(),
@@ -126,6 +127,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                         "new_status": "completed",
                         "already_completed": already,
                         "reason": args.reason,
+                        "branch": branch,
+                        "harvest_command": format!("cs done {mol_id}"),
                     }));
                 } else if already {
                     println!(
@@ -139,6 +142,15 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                         MoleculeStatus::Completed.emoji(),
                         mol_id,
                         prev_status
+                    );
+                    // issue #95 — a completed molecule is finished work
+                    // sitting only on its branch until harvested. Say
+                    // where it is and how to bring it back, every time,
+                    // so stopping here is never silent.
+                    println!(
+                        "  work is on `{branch}` in `.worktrees/{mol_id}` — run `cs done \
+                         {mol_id}` to merge it, or `cs collapse {mol_id} --reason \"…\"` to \
+                         drop it instead."
                     );
                 }
             }
