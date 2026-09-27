@@ -749,9 +749,9 @@ pub struct Step {
     /// the model resolution chain: it ranks *above* `$COSMON_DEFAULT_MODEL`
     /// and the config `default_model`, but *below* an explicit `--model`
     /// flag (the operator's in-the-moment choice always wins). The pin is
-    /// carried opaquely. A recognisable cross-family pair produces a soft
-    /// advisory, but cosmon still dispatches because the Adapter's configured
-    /// endpoint is authoritative.
+    /// carried opaquely unless both it and the resolved adapter identify
+    /// different named provider families; that decidable mismatch is refused
+    /// before spawn. Unknown ids and self-hosted endpoints remain opaque.
     ///
     /// Only meaningful for worker-spawn steps, and does **not** propagate
     /// across nucleation: a child molecule resolves from its own formula,

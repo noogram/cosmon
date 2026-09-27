@@ -215,12 +215,12 @@ pub struct Args {
     /// config/env *default* that could silently make an entire fleet
     /// expensive (the `/model`-hack leak this axis exists to close).
     ///
-    /// The id is carried **opaquely**: cosmon does not check that it is
-    /// legal for the resolved adapter. A recognisable cross-family pair
-    /// produces a non-blocking advisory, but the Adapter remains the
-    /// authority because custom endpoints can legitimately serve another
-    /// family's model. Config `default_model` rows are scoped per adapter
-    /// because a model id only has meaning inside its adapter.
+    /// The id is carried **opaquely**: cosmon keeps no model allowlist. When
+    /// both the resolved adapter and model identify different named provider
+    /// families, however, the pair is refused before spawn because the stock
+    /// adapter cannot run it. Self-hosted endpoints and unrecognised model ids
+    /// remain opaque and pass through. Config `default_model` rows are scoped
+    /// per adapter because a model id only has meaning inside its adapter.
     #[arg(long, value_name = "MODEL_ID")]
     pub model: Option<String>,
 
@@ -1010,27 +1010,26 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
-    // 3a''-C5a. Non-blocking (adapter, model) composition advisory.
+    // 3a''-C5a. Fail-closed (adapter, model) composition gate.
     //
-    //     A recognisable cross-family pair is worth naming because a stock
-    //     Adapter may reject it upstream. It is not grounds for refusal:
-    //     Adapters such as codex are configurable open-source clients, and a
-    //     custom base_url can legitimately serve a family that differs from
-    //     the Adapter name. Cosmon therefore warns, forwards the opaque pin,
-    //     and lets the Adapter's own resolution and fallback remain the source
-    //     of truth.
+    //     Everything above resolves each axis. Nothing above asks whether the
+    //     resolved pair can run. Issue #89 reproduced the consequence on a
+    //     force re-tackle: the formula's `claude-*` pin beat model defaults,
+    //     the project's Codex adapter default won the other axis, Codex
+    //     rejected the pair after launch, and the worker sat idle.
     //
-    //     The advisory is DERIVED, never tabulated: the adapter's family comes
+    //     The refusal is DERIVED, never tabulated: the adapter's family comes
     //     from its `base_url` (else its name lineage) and the model's from its
     //     id prefix, through the same resolution the ADR-147 diversity floor
     //     already uses. So a new `gpt-…` or `claude-…` needs no edit here, and
     //     anything not resolvable to a named vendor — a local endpoint, an
     //     undeclared adapter, an unrecognised id — returns `NotChecked` and is
-    //     silent.
+    //     passed through. Refusing unknowns would break self-hosted endpoints;
+    //     refusing a decidable mismatch prevents the known idle-worker state.
     //
-    //     Placed before the C2 attribution event so the operator sees the
-    //     caveat beside dispatch while the normal attribution path remains
-    //     unchanged.
+    //     Placed before the C2 attribution event and every worktree/tmux side
+    //     effect, so a bad pair leaves the molecule re-tacklable and spends no
+    //     worker slot.
     if let Some(model) = preferred_model.as_deref() {
         let composition = cosmon_core::provider_diversity::classify_model_composition(
             project_config.adapters.as_ref(),
@@ -1042,15 +1041,20 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             model_family,
         } = &composition
         {
-            eprintln!(
-                "cs tackle: advisory — model '{model}' looks cross-family for \
-                 adapter '{}': the adapter resolves to '{adapter_family}' and the \
-                 model to '{model_family}'. It may be rejected upstream and fall \
-                 back; cosmon will still dispatch because the Adapter's configured \
-                 endpoint is authoritative. The pin came from {}.",
+            return Err(anyhow::anyhow!(
+                "cs tackle: refusing to dispatch molecule {} — adapter '{}' \
+                 cannot run pinned model '{model}': the adapter resolves to the \
+                 '{adapter_family}' family and the model to '{model_family}'. \
+                 Dispatching would let the adapter reject the model after spawn \
+                 and leave an idle worker. The pin came from {}. Select a \
+                 {adapter_family} model or a {model_family} adapter. Self-hosted \
+                 endpoints remain opaque; declare their base_url under \
+                 [adapters.{}] so provider-family resolution uses the endpoint.",
+                mol_id.as_str(),
                 adapter.as_str(),
                 cosmon_core::tackle_plan::describe_model_source(&model_source),
-            );
+                adapter.as_str(),
+            ));
         }
     }
 
@@ -4303,8 +4307,8 @@ pub(super) fn spawn_and_prompt(
     // Adapter-uniform: each arm carries it in its own way — the claude arm
     // through the `ANTHROPIC_MODEL` closure-shadow, the Direct-API arms as
     // the top-priority override above their `[adapters.<name>].default_model`.
-    // The id is opaque. A recognisable cross-family pair is advisory only;
-    // the Adapter's configured endpoint remains authoritative.
+    // The id is opaque after the pre-spawn composition gate has refused every
+    // decidable cross-family mismatch. Unknown/self-hosted pairs pass through.
     preferred_model: Option<&str>,
     // The resolved adapter's strong cost-class set — threaded to the claude
     // branch's probe-fallback layer so a cheap pin never silently escalates
@@ -5693,13 +5697,14 @@ const MODEL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// codex seats consequently carry `{"model":"claude-opus-5","outcome":
 /// "available"}` in their own trail, for a model codex rejects with an HTTP
 /// 400. The probe was not wrong; it was unlabelled. Naming its scope beside its
-/// verdict is the cheap half of the fix; `run` adds a non-blocking advisory
-/// when the selected pair looks cross-family.
+/// verdict is the cheap half of the fix; `run` refuses a decidable
+/// cross-family mismatch before dispatch while leaving unknown/self-hosted
+/// tuples opaque.
 const PROBE_SCOPE: &str = "`claude -p` under the worker's resolved account: proves the model id \
      resolves and that account can reach it. It does NOT validate the \
      (adapter, model) composition, and it never ran for a non-claude \
      adapter — see provider_diversity::classify_model_composition, which \
-     can produce a non-blocking advisory before dispatch.";
+     classifies a decidable mismatch for refusal before dispatch.";
 
 /// Resolve the effective model for a claude worker by pre-flighting the
 /// fallback chain, or fail fast when no model in the chain answers
