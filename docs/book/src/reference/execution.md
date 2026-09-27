@@ -207,6 +207,9 @@ SEE ALSO: cs complete (state transition only), cs tackle (counterpart).
    By default the `post_merge` hook is **bounded to the trunk**: it fires only when the resolved integration base is the galaxy's reference trunk (`origin/HEAD`, or `main` as a last resort). The hook *deploys* — the canonical `just install` refreshes the on-disk `cs` binary — so running it after a merge into an *older* parked branch would silently rejuvenate the operator's tool, dropping whatever the parked branch predates (task-20260725-b64f). When the merge targets a parked branch the hook is skipped with a warning naming the reason.
 
    This flag is the operator's explicit escape hatch for the rare-but- legitimate case of deploying from a parked branch on purpose. No effect when no `post_merge` hook is configured or when the merge already targets the trunk.
+* `--allow-protected-change` — Merge even though the worker branch changed a path the molecule declared protected (`cs nucleate --protect`, issue #94).
+
+   Without it, `cs done` refuses such a branch (`protected_path_modified`, exit 78) and names each protected path it changed. Protected paths are reference inputs; a branch that rewrites them can make any result "match". Pass this flag only when you, the operator, have read the change and it is intended — for example a reference dataset that was itself wrong. No effect on a molecule that declared no protected path.
 
 
 

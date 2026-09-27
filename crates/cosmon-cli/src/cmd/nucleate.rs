@@ -307,6 +307,24 @@ pub struct Args {
     /// default) stamps nothing and leaves the ambient resolution unchanged.
     #[arg(long, value_name = "BRANCH")]
     pub(crate) base: Option<String>,
+
+    /// Declare a path as protected reference input (repeatable).
+    ///
+    /// Ground truth the work is checked against — expected outputs, golden
+    /// files, a reference dataset — which the worker must read and never
+    /// modify. The path is relative to the repository root and may name a
+    /// file or a directory (a directory protects everything below it).
+    /// Persisted on the molecule and read three times: the worker's brief
+    /// lists the paths as read-only with the reason, `cs tackle` clears their
+    /// write bits in the worktree, and `cs done` refuses the merge
+    /// (`protected_path_modified`, exit 78) when the worker branch changed
+    /// any of them, naming each one. The operator overrides that refusal with
+    /// `cs done --allow-protected-change`.
+    ///
+    /// An absolute path or one containing `..` is refused here, before any
+    /// molecule is created.
+    #[arg(long = "protect", value_name = "PATH")]
+    pub(crate) protect: Vec<String>,
 }
 
 impl Args {
@@ -343,6 +361,7 @@ impl Args {
             require_galaxy: false,
             adapter: None,
             base: None,
+            protect: Vec::new(),
         }
     }
 }
@@ -440,6 +459,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .as_deref()
         .map(validate_base_at_birth)
         .transpose()?;
+
+    // Validate `--protect` before anything is written, for the same reason:
+    // a protected path that can never match would make the harvest gate pass
+    // vacuously on exactly the molecule that asked for it.
+    let protected_paths = normalize_protect_flags(&args.protect)?;
 
     if let Some(ref from_path) = args.from {
         run_from_declarations(
@@ -585,8 +609,23 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             energy_budget_cap,
             args.adapter.as_deref(),
             base_branch,
+            protected_paths,
         )
     }
+}
+
+/// Validate and normalise the `--protect` values, deduplicated in the order
+/// given.
+fn normalize_protect_flags(raw: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for value in raw {
+        let path = cosmon_core::protected_paths::normalize_protected_path(value)
+            .map_err(|e| anyhow::anyhow!("--protect: {e}"))?;
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    Ok(out)
 }
 
 /// Validate a base branch named at nucleation (`--base`, or a declaration's
@@ -982,6 +1021,7 @@ fn run_single(
     energy_budget_cap: u32,
     adapter: Option<&str>,
     base_branch: Option<String>,
+    protected_paths: Vec<String>,
 ) -> anyhow::Result<()> {
     let formula = load_formula(formulas_dir, formula_name)?;
     let (result, _path) = nucleate_and_persist(
@@ -1008,6 +1048,7 @@ fn run_single(
         energy_budget_cap,
         adapter,
         base_branch,
+        protected_paths,
     )?;
     emit_output(ctx, std::slice::from_ref(&result));
     Ok(())
@@ -1094,6 +1135,8 @@ fn run_from_declarations(
             // Declarations don't carry a per-molecule adapter pin today.
             None,
             base_branch,
+            // Nor protected paths: `--protect` is a flag of the single form.
+            Vec::new(),
         )
         .map_err(|e| anyhow::anyhow!("{}: {e}", decl_path.display()))?;
 
@@ -1229,6 +1272,8 @@ pub(crate) fn nucleate_for_spore(req: SporeNucleation<'_>) -> anyhow::Result<Nuc
         // (ADR-140) left to its own decision. A germinated polymer is aimed
         // at an integration branch by `cs run --resident --base` instead.
         None,
+        // Nor protected paths, for the same sealed-format reason.
+        Vec::new(),
     )?;
     Ok(result)
 }
@@ -1297,6 +1342,7 @@ fn nucleate_and_persist(
     energy_budget_cap: u32,
     adapter: Option<&str>,
     base_branch: Option<String>,
+    protected_paths: Vec<String>,
 ) -> anyhow::Result<(NucleateResult, PathBuf)> {
     // Validate the durable adapter pin's *grammar* up front so a malformed
     // family name fails the nucleation rather than being persisted as an
@@ -1411,6 +1457,8 @@ fn nucleate_and_persist(
         originating_branch: None,
         // Already validated by the caller (`validate_base_at_birth`).
         base_branch,
+        // Already normalised by the caller (`normalize_protect_flags`).
+        protected_paths,
         pending_step: None,
         merged_at: None,
         harvest_reason: None,
@@ -2047,6 +2095,7 @@ mod tests {
             require_galaxy: false,
             adapter: None,
             base: None,
+            protect: Vec::new(),
         }
     }
 
