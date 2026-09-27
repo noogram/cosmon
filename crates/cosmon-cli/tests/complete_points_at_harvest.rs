@@ -38,6 +38,7 @@ fn running(id: &str) -> MoleculeData {
         kind: None,
         class: cosmon_core::molecule_class::MoleculeClass::default(),
         typed_links: Vec::new(),
+        protected_paths: Vec::new(),
         project_id: None,
         assigned_role: None,
         session_name: None,
