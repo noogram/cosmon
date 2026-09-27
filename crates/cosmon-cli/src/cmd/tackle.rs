@@ -1531,19 +1531,21 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    if session_present {
-        // Reclaim the seat. A live session is only torn down under `--force`
-        // (the branch above returned otherwise); a carcass is torn down
-        // unconditionally, because there is nothing left in it to protect and
-        // leaving it standing is the deadlock itself.
-        if !already_running {
-            eprintln!(
-                "cs tackle: reclaiming dead tmux session `{session_name}` \
-                 (no live pane behind it) before respawning {mol_id}."
-            );
-        }
-        reclaim_tmux_session(&backend, &session_name, &socket)?;
-    }
+    // Reclaim the seat, if one is present. See [`reclaim_session_if_present`]
+    // for why the live case (COSMON #90) needs a lease and the carcass case
+    // does not — that whole decision lives in one place, and is exercised
+    // directly (not re-derived) by
+    // `tests::forced_reclaim_holds_the_lease_across_the_teardown`.
+    let _retackle_lease = reclaim_session_if_present(
+        &backend,
+        session_present,
+        already_running,
+        &session_name,
+        &socket,
+        &mol_id,
+        &store.molecule_dir(&mol_id),
+        || {},
+    )?;
 
     // Compute molecule state directory so the worker can access it without
     // calling `cs observe`. Injected as COSMON_MOL_DIR env var.
@@ -4040,6 +4042,53 @@ fn install_session_hook(worktree_path: &Path, mol_id: &str) {
 /// respawn issued the same millisecond can still collide.
 const SESSION_RECLAIM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// A retackle-in-progress marker held across a forced respawn (COSMON #90).
+///
+/// Acquired right before a live pane is torn down (see `run`, step 8) and
+/// released — the marker file removed — when this guard drops, which
+/// `cs tackle`'s `run` reaches shortly after the new session is confirmed
+/// alive, on every return path including an early error return. The marker
+/// also self-expires ([`cosmon_core::retackle_lease::LEASE_TTL`]) so a
+/// `cs tackle` process that is `kill -9`'d mid-retackle — the one path this
+/// `Drop` cannot run on — does not wedge the molecule out of patrol's reach
+/// forever.
+struct RetackleLease {
+    path: PathBuf,
+}
+
+impl RetackleLease {
+    /// Write the marker into `mol_dir`. Refuses (rather than silently
+    /// proceeding unprotected) when the write fails — the same posture as
+    /// every other pre-flight check in this dispatch: a lease that cannot be
+    /// proven written must not be assumed held.
+    fn acquire(mol_dir: &std::path::Path) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(mol_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "cs tackle: could not create molecule directory `{}` for the \
+                 retackle lease: {e}",
+                mol_dir.display()
+            )
+        })?;
+        let path = cosmon_core::retackle_lease::lease_path(mol_dir);
+        std::fs::write(&path, Utc::now().to_rfc3339()).map_err(|e| {
+            anyhow::anyhow!(
+                "cs tackle: could not write the retackle lease at `{}`: {e}. \
+                 Refusing to tear down the live session unprotected — patrol's \
+                 orphan sweep could freeze or collapse {} mid-retackle.",
+                path.display(),
+                mol_dir.display()
+            )
+        })?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for RetackleLease {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// Tear down the tmux session occupying `session_name` and wait until the
 /// name is genuinely free.
 ///
@@ -4052,12 +4101,10 @@ const SESSION_RECLAIM_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// the process table. Here the collision is either resolved or reported with
 /// both names in hand.
 fn reclaim_tmux_session(
-    backend: &TmuxBackend,
+    backend: &dyn cosmon_core::transport::TransportBackend,
     session_name: &str,
     socket: &str,
 ) -> anyhow::Result<()> {
-    use cosmon_core::transport::TransportBackend as _;
-
     backend.terminate_session(session_name).map_err(|e| {
         anyhow::anyhow!(
             "cs tackle: could not tear down the existing tmux session \
@@ -4081,6 +4128,91 @@ fn reclaim_tmux_session(
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Tear down a *live* session under `--force` while holding the COSMON #90
+/// retackle lease across the whole reclaim.
+///
+/// The lease is acquired **before** the kill and still held when this
+/// returns — the caller (`run`) keeps it alive through the respawn that
+/// follows and lets it drop (removing the marker) once that respawn is
+/// verified alive, or on any error return along the way. `on_teardown` fires
+/// once the old session is confirmed torn down, with the lease still in
+/// force; it exists so a test can observe the marker file at exactly the
+/// moment `cs patrol`'s orphan sweep would otherwise race it (see
+/// `forced_reclaim_holds_the_lease_across_the_teardown` below), and is a
+/// no-op (`|| {}`) at the real call site.
+///
+/// Generic over `cosmon_core::transport::TransportBackend` (not the concrete
+/// `TmuxBackend` `run` otherwise uses) precisely so a test can drive it
+/// against `cosmon_transport::MockBackend` instead of a real tmux server.
+fn reclaim_live_session_under_lease(
+    backend: &dyn cosmon_core::transport::TransportBackend,
+    session_name: &str,
+    socket: &str,
+    mol_dir: &std::path::Path,
+    on_teardown: impl FnOnce(),
+) -> anyhow::Result<RetackleLease> {
+    let lease = RetackleLease::acquire(mol_dir)?;
+    reclaim_tmux_session(backend, session_name, socket)?;
+    on_teardown();
+    Ok(lease)
+}
+
+/// Reclaim the tmux seat `session_name` occupies, if one is present — the
+/// whole decision `run` (step 8) delegates to, so the decision itself is
+/// exercised by a test rather than left inline and untested.
+///
+/// Two cases, and only one needs a lease:
+///
+/// - **A live session** (`already_running`) is only reached under `--force`
+///   (`run` already refused otherwise). Tearing it down here, followed by the
+///   respawn that takes real time (worktree setup, dispatch commit, spawn,
+///   liveness re-check), is exactly the window in which the molecule reads
+///   like a genuine orphan to `cs patrol`'s orphan sweep: `Running`, assigned
+///   worker, dead session. [`reclaim_live_session_under_lease`] holds the
+///   COSMON #90 lease across that whole window so the sweep does not
+///   freeze/collapse the molecule and release its dependents out from under
+///   this retackle.
+/// - **A carcass** (`session_present && !already_running`) is torn down
+///   unconditionally — there is nothing left in it to protect, and leaving it
+///   standing is the COSMON #35 deadlock itself. No lease: the molecule was
+///   never protected by anything before this call, so it needs no new
+///   protection here.
+///
+/// `on_teardown` is forwarded to [`reclaim_live_session_under_lease`] for the
+/// live case (a no-op, `|| {}`, at the real call site); the carcass case
+/// never calls it, since there is no lease window to observe.
+#[allow(clippy::too_many_arguments)]
+fn reclaim_session_if_present(
+    backend: &dyn cosmon_core::transport::TransportBackend,
+    session_present: bool,
+    already_running: bool,
+    session_name: &str,
+    socket: &str,
+    mol_id: &MoleculeId,
+    mol_dir: &std::path::Path,
+    on_teardown: impl FnOnce(),
+) -> anyhow::Result<Option<RetackleLease>> {
+    if !session_present {
+        return Ok(None);
+    }
+    if already_running {
+        Ok(Some(reclaim_live_session_under_lease(
+            backend,
+            session_name,
+            socket,
+            mol_dir,
+            on_teardown,
+        )?))
+    } else {
+        eprintln!(
+            "cs tackle: reclaiming dead tmux session `{session_name}` \
+             (no live pane behind it) before respawning {mol_id}."
+        );
+        reclaim_tmux_session(backend, session_name, socket)?;
+        Ok(None)
     }
 }
 
@@ -9362,6 +9494,142 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// COSMON #90 — the writer half of the retackle lease. `acquire` must
+    /// write a marker `cosmon_core::retackle_lease` reads back as fresh, and
+    /// dropping the guard must remove it — the RAII half that releases the
+    /// lease on every `run` return path, success or error, without each
+    /// return site having to remember to clean up.
+    #[test]
+    fn retackle_lease_writes_a_fresh_marker_and_drop_removes_it() {
+        let tmp = TempDir::new().unwrap();
+        let mol_dir = tmp.path().join("molecules").join("cs-20260927-lea3");
+        let lease_path = cosmon_core::retackle_lease::lease_path(&mol_dir);
+        assert!(!lease_path.exists());
+
+        let before = Utc::now();
+        let lease = RetackleLease::acquire(&mol_dir).unwrap();
+        assert!(lease_path.exists());
+
+        let written_at = std::fs::read_to_string(&lease_path).unwrap();
+        let written_at = chrono::DateTime::parse_from_rfc3339(written_at.trim())
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(written_at >= before);
+        assert!(cosmon_core::retackle_lease::is_fresh(
+            written_at,
+            Utc::now()
+        ));
+
+        drop(lease);
+        assert!(
+            !lease_path.exists(),
+            "dropping the lease guard must remove the marker file"
+        );
+    }
+
+    /// COSMON #90 — the end-to-end shape of the fix: a *live* session torn
+    /// down under `--force` must be protected by a fresh lease for the whole
+    /// width of the teardown, and the lease must be gone once the caller
+    /// (`run`) is done with it.
+    ///
+    /// Drives `reclaim_session_if_present` — the exact function `run` (step
+    /// 8) delegates its whole reclaim decision to, `already_running` included
+    /// — against `MockBackend` (the same injectable transport double
+    /// `cmd::patrol`'s tests already use for `TransportBackend`-generic
+    /// logic) rather than a real tmux server, with a session actually
+    /// registered alive on it first so the reclaim has a live pane to kill.
+    /// The `on_teardown` hook fires from *inside* the reclaim, once the old
+    /// session is confirmed torn down but before the lease is released — the
+    /// exact moment `cs patrol`'s orphan sweep would otherwise race it — so
+    /// this asserts the lease from the same vantage point the race actually
+    /// occurs at, not merely before/after the call. Driving the decision
+    /// function itself (not the inner `reclaim_live_session_under_lease`
+    /// directly) means a mutation to the `already_running` gate — e.g.
+    /// silently disabling it — is a real, non-vacuous test failure here.
+    #[test]
+    fn forced_reclaim_holds_the_lease_across_the_teardown() {
+        use cosmon_core::id::AgentId;
+        use cosmon_core::transport::{AgentDefinition, RuntimeConfig, TransportBackend as _};
+        use cosmon_transport::MockBackend;
+
+        let tmp = TempDir::new().unwrap();
+        let mol_id = MoleculeId::new("cs-20260927-race1").unwrap();
+        let mol_dir = tmp.path().join("molecules").join(mol_id.as_str());
+        let lease_path = cosmon_core::retackle_lease::lease_path(&mol_dir);
+        let session_name = "cs-20260927-race1-w";
+
+        let backend = MockBackend::new();
+        backend
+            .spawn(
+                &AgentDefinition {
+                    id: AgentId::new(session_name).unwrap(),
+                    role: AgentRole::Implementation,
+                    command: "claude".to_owned(),
+                    args: Vec::new(),
+                    cwd: None,
+                },
+                &RuntimeConfig::default(),
+            )
+            .unwrap();
+        assert!(
+            backend
+                .is_alive(&cosmon_core::id::WorkerId::new(session_name).unwrap())
+                .unwrap(),
+            "fixture must start with a live session for the reclaim to kill"
+        );
+
+        let observed_during_teardown = std::cell::Cell::new(None);
+        let lease = reclaim_session_if_present(
+            &backend,
+            true, // session_present
+            true, // already_running — the forced-live-reclaim case
+            session_name,
+            "cosmon-test-socket",
+            &mol_id,
+            &mol_dir,
+            || {
+                let fresh = std::fs::read_to_string(&lease_path).ok().is_some_and(|s| {
+                    chrono::DateTime::parse_from_rfc3339(s.trim())
+                        .ok()
+                        .is_some_and(|written_at| {
+                            cosmon_core::retackle_lease::is_fresh(
+                                written_at.with_timezone(&Utc),
+                                Utc::now(),
+                            )
+                        })
+                });
+                observed_during_teardown.set(Some(fresh));
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            observed_during_teardown.get(),
+            Some(true),
+            "the lease must exist and be fresh at the moment the old session \
+             is confirmed torn down"
+        );
+        assert!(
+            !backend
+                .is_alive(&cosmon_core::id::WorkerId::new(session_name).unwrap())
+                .unwrap(),
+            "the old session must actually be dead by the time the hook fires"
+        );
+        let lease =
+            lease.expect("the live-reclaim case (already_running=true) must return a held lease");
+        assert!(
+            lease_path.exists(),
+            "the lease is still held by the caller after the reclaim returns"
+        );
+
+        drop(lease);
+        assert!(
+            !lease_path.exists(),
+            "the lease must be gone once the caller is done with it (`run` \
+             returning drops it on every path, success or error)"
+        );
+    }
 
     // ── COSMON-DEV #20 defect A2: no live cognition before the refuse ──
     //
