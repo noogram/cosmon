@@ -91,6 +91,9 @@ struct StatusOutput {
     surfaces: SurfaceStatus,
     /// Age of the backlog — the signal a session needs first.
     backlog: BacklogInfo,
+    /// The harvest queue — `Completed`, un-archived molecules whose work
+    /// exists only on `feat/<id>` until `cs done` or `cs collapse` runs.
+    harvestable: HarvestableInfo,
     attention: AttentionInfo,
     /// Four-family taxonomy snapshot.
     /// Keyed by kind token (`infra | project | social-hub | editorial
@@ -147,6 +150,20 @@ struct BacklogInfo {
     oldest_id: Option<String>,
     /// Lease missions skipped by `count`.
     leases_excluded: usize,
+}
+
+/// The harvest queue, as `cs status` emits it — issue #95: a molecule
+/// that is `Completed` and un-archived is un-harvested work, and it must
+/// never be silent. The same predicate `cs peek --phase harvestable` uses
+/// ([`super::peek::PhaseFilter::is_harvestable`]), so the two surfaces
+/// cannot disagree about which molecules are in the queue.
+#[derive(serde::Serialize)]
+struct HarvestableInfo {
+    /// How many `Completed`, un-archived molecules are waiting.
+    count: usize,
+    /// Their ids, oldest first — capped in the rendered line, not here:
+    /// `--json` gives a machine reader the whole list.
+    ids: Vec<String>,
 }
 
 /// Unmerged-branch level and its movement since the last sample.
@@ -266,6 +283,18 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .filter(|m| m.status == MoleculeStatus::Collapsed)
         .count();
 
+    // --- Harvest queue (issue #95) — same predicate `cs peek
+    // --phase harvestable` uses, so the two views cannot disagree.
+    let mut harvestable_mols: Vec<_> = molecules
+        .iter()
+        .filter(|m| super::peek::PhaseFilter::is_harvestable(m.status, m.archived))
+        .collect();
+    harvestable_mols.sort_by_key(|m| m.updated_at);
+    let harvestable = HarvestableInfo {
+        count: harvestable_mols.len(),
+        ids: harvestable_mols.iter().map(|m| m.id.to_string()).collect(),
+    };
+
     // Leases are left out of the kind breakdown for the same reason they are
     // left out of the alive count it sits beside: the two must add up, and a
     // lease is not one of the things the reader is being asked to drain.
@@ -380,6 +409,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 oldest_id: backlog.oldest_id.as_ref().map(ToString::to_string),
                 leases_excluded: backlog.leases_excluded,
             },
+            harvestable,
             attention: AttentionInfo {
                 alive,
                 budget,
@@ -398,6 +428,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         completed,
         collapsed,
         backlog: &backlog,
+        harvestable: &harvestable,
         by_kind: &by_kind,
         active_sessions: &active_sessions,
         zombie_sessions: &zombie_sessions,
@@ -430,6 +461,7 @@ struct Pulse<'a> {
     completed: usize,
     collapsed: usize,
     backlog: &'a BacklogAge,
+    harvestable: &'a HarvestableInfo,
     by_kind: &'a HashMap<MoleculeKind, usize>,
     active_sessions: &'a [SessionInfo],
     zombie_sessions: &'a [SessionInfo],
@@ -487,6 +519,32 @@ fn render_surfaces_token(surfaces: &SurfaceStatus) -> String {
         Some(age) => format!("\u{2705} reconciled {age} ago"),
         None => "\u{2705}".to_owned(),
     }
+}
+
+/// The harvest-queue guidance line — issue #95: a `Completed`, un-archived
+/// molecule is work that exists only on `feat/<id>` until `cs done` or
+/// `cs collapse` runs, and it must never be silent. `None` when the queue
+/// is empty, the same convention [`render_unmerged_token`] uses for a gauge
+/// with nothing to report.
+///
+/// Names at most three ids so the line stays one line; `cs peek --phase
+/// harvestable` is where the rest live.
+fn render_harvestable_line(h: &HarvestableInfo) -> Option<String> {
+    if h.count == 0 {
+        return None;
+    }
+    let shown: Vec<&str> = h.ids.iter().take(3).map(String::as_str).collect();
+    let named = shown.join(", ");
+    let more = if h.count > shown.len() {
+        format!(" (+{} more)", h.count - shown.len())
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "  {}: {named}{more} — `cs done <id>` to keep the work, `cs collapse <id> --reason \
+             …` to drop it",
+        "Harvest".bold()
+    ))
 }
 
 /// The unmerged-branch token, level and movement.
@@ -576,6 +634,15 @@ fn render_compact(p: &Pulse) {
         parts.push(token);
     }
 
+    // Harvest queue — un-harvested work must never be a silent count.
+    if p.harvestable.count > 0 {
+        parts.push(
+            format!("{}\u{1F33E} harvest", p.harvestable.count) // sheaf-of-rice emoji
+                .yellow()
+                .to_string(),
+        );
+    }
+
     // Surfaces
     parts.push(format!("surfaces {}", render_surfaces_token(p.surfaces)));
 
@@ -608,6 +675,11 @@ fn render_compact(p: &Pulse) {
             "Galaxies".bold(),
             render_galaxies_line(p.galaxies)
         );
+    }
+
+    // Harvest queue — un-harvested work is never silent (issue #95).
+    if let Some(line) = render_harvestable_line(p.harvestable) {
+        println!("{}", line.yellow());
     }
 }
 
@@ -672,6 +744,13 @@ fn render_verbose(p: &Pulse) {
         }
     } else {
         println!("  {}: empty", "Backlog".bold());
+    }
+
+    // Harvest queue section — issue #95: work sitting only on `feat/<id>`
+    // must be as visible as the backlog it sits beside.
+    if let Some(line) = render_harvestable_line(p.harvestable) {
+        println!();
+        println!("{}", line.yellow());
     }
 
     // Sessions section
