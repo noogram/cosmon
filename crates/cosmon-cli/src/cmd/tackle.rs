@@ -5784,6 +5784,9 @@ fn resolve_worker_model(
                     "probe_scope": PROBE_SCOPE,
                 }),
             );
+            if let Some(refusal) = claude_login_probe_refusal(&no_model.probed, config_dir) {
+                return Err(anyhow::anyhow!("cs tackle: {refusal}"));
+            }
             Err(anyhow::anyhow!(
                 "cs tackle: {no_model}. Refusing to spawn a worker that would \
                  freeze on `model_not_found` (model-fallback fix \
@@ -5794,6 +5797,40 @@ fn resolve_worker_model(
             ))
         }
     }
+}
+
+/// Translate Claude Code's explicit login refusal into a configuration error.
+///
+/// Model probing is intentionally a real `claude -p` request, so it sees the
+/// same configuration root and credential store as the worker.  A missing
+/// configuration selector can make Claude report `Not logged in`; that says
+/// nothing about model availability, and presenting it as fallback exhaustion
+/// sends the operator to the wrong repair.  The probe record remains in the
+/// model-selection trail, while this message names the configuration root and
+/// credential path Claude used.
+fn claude_login_probe_refusal(
+    probed: &[cosmon_core::model_chain::ProbeRecord],
+    config_dir: Option<&str>,
+) -> Option<String> {
+    let login_detail = probed.iter().find_map(|probe| {
+        let detail = probe.detail.to_ascii_lowercase();
+        (detail.contains("not logged in") || detail.contains("run /login"))
+            .then_some(probe.detail.as_str())
+    })?;
+    let location = match config_dir.filter(|dir| !dir.is_empty()) {
+        Some(dir) => format!(
+            "CLAUDE_CONFIG_DIR is set to `{dir}`, so Claude Code used that directory as \
+             its configuration home"
+        ),
+        None => "CLAUDE_CONFIG_DIR is not set, so Claude Code used its default \
+                 configuration home (`$HOME/.claude`, credentials in the macOS Keychain on macOS)"
+            .to_owned(),
+    };
+    Some(format!(
+        "Claude Code could not authenticate while probing the requested model. {location}. \
+         The probe reported: {login_detail}. Log in with that configuration home (`claude auth login`) or set \
+         CLAUDE_CONFIG_DIR to the configured Claude Code home, then retry."
+    ))
 }
 
 /// Persist the model-selection audit trail to the molecule state dir for
@@ -10177,6 +10214,44 @@ mod tests {
             ProbeOutcome::Unavailable(reason) => assert!(reason.contains("probe spawn failed")),
             ProbeOutcome::Available => panic!("a missing binary cannot be available"),
         }
+    }
+
+    /// A Claude login failure is a configuration refusal, not evidence that
+    /// every model in the fallback chain is unavailable.  Scheduler-launched
+    /// residents can lose `CLAUDE_CONFIG_DIR`; the probe then reaches Claude
+    /// Code's default config and reports its missing login as a model failure
+    /// unless this boundary preserves the cause.
+    #[test]
+    fn missing_config_dir_login_failure_is_not_reported_as_model_exhaustion() {
+        let dir = TempDir::new().unwrap();
+        let claude = dir.path().join("claude-login-refusal");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\necho 'Not logged in · Run /login' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let err = resolve_worker_model(
+            Some("claude-sonnet-5"),
+            claude.to_str().expect("temporary paths are UTF-8"),
+            dir.path(),
+            None,
+            &[],
+            cosmon_core::root_spawn_policy::PreflightIdentity::AsIs,
+        )
+        .expect_err("an unauthenticated probe must refuse");
+        let message = err.to_string();
+
+        assert!(
+            message.contains("CLAUDE_CONFIG_DIR is not set"),
+            "{message}"
+        );
+        assert!(message.contains("`$HOME/.claude`"), "{message}");
+        assert!(
+            !message.contains("no model in the fallback chain is available"),
+            "{message}"
+        );
     }
 
     /// Test helper: thread a name through the TS-0 validator so tests
