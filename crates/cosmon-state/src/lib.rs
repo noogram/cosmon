@@ -417,6 +417,25 @@ pub struct MoleculeData {
     /// `--base`; those keep the exact pre-existing ambient behaviour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_branch: Option<String>,
+    /// Repository-relative paths the worker must never modify — reference
+    /// inputs the work is checked against (issue #94).
+    ///
+    /// Stamped by `cs nucleate --protect <path>` (repeatable), each entry
+    /// normalised by [`cosmon_core::protected_paths::normalize_protected_path`].
+    /// Three readers: the worker's brief lists them as read-only ground
+    /// truth, `cs tackle` clears their write bits in the worktree, and
+    /// `cs done` refuses the merge (`protected_path_modified`, exit 78) when
+    /// the worker branch changed any of them, unless the operator passes
+    /// `--allow-protected-change`.
+    ///
+    /// A typed field rather than a `--var`: variables are free mission text
+    /// rendered into the brief, and a merge gate should read a declared,
+    /// validated list rather than parse prose. No event carries it, so a
+    /// rebuild of a corrupt `state.json` salvages it like `base_branch`.
+    /// Empty for every molecule that declared nothing, which keeps their
+    /// state files byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_paths: Vec<String>,
     /// Durable intent record for an in-flight `cs evolve` transition.
     ///
     /// Written to state.json BEFORE artifact writes (log.md, briefing.md,
@@ -1467,6 +1486,7 @@ mod tests {
             expiry_policy: None,
             originating_branch: None,
             base_branch: None,
+            protected_paths: Vec::new(),
             pending_step: None,
             merged_at: None,
             non_integration: None,
@@ -2309,6 +2329,7 @@ mod tests {
                         expiry_policy: None,
                         originating_branch: None,
                         base_branch: None,
+                        protected_paths: Vec::new(),
                         pending_step: None,
                         merged_at: None,
                         non_integration: None,

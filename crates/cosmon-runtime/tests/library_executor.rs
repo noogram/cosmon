@@ -108,6 +108,7 @@ fn pending_molecule(id: &str) -> MoleculeData {
         expiry_policy: None,
         originating_branch: None,
         base_branch: None,
+        protected_paths: Vec::new(),
         pending_step: None,
         merged_at: None,
         non_integration: None,
@@ -328,6 +329,7 @@ fn library_executor_honours_the_dispatch_pin() {
         adapter: Some("claude".to_owned()),
         model: None,
         base_branch: None,
+        harness: cosmon_core::harness_settings::HarnessMap::new(),
     };
     executor
         .dispatch_with_pin(&mol.id, &pin)
@@ -677,6 +679,7 @@ fn a_pinned_opencode_dispatch_refuses_rather_than_dropping_the_model() {
         adapter: Some("opencode".to_owned()),
         model: Some("openai/gpt-5.2".to_owned()),
         base_branch: None,
+        harness: cosmon_core::harness_settings::HarnessMap::new(),
     };
     let err = executor
         .tackle(&mol.id, &pin)
@@ -722,6 +725,7 @@ fn an_unpinned_opencode_dispatch_is_not_refused() {
         adapter: Some("opencode".to_owned()),
         model: None,
         base_branch: None,
+        harness: cosmon_core::harness_settings::HarnessMap::new(),
     };
     executor
         .tackle(&mol.id, &pin)
@@ -791,6 +795,7 @@ fn a_pinned_claude_model_reaches_the_worker_argv() {
         adapter: Some("claude".to_owned()),
         model: Some("claude-opus-5-5".to_owned()),
         base_branch: None,
+        harness: cosmon_core::harness_settings::HarnessMap::new(),
     };
     executor
         .tackle(&mol.id, &pin)
@@ -816,6 +821,7 @@ fn an_unpinned_claude_dispatch_carries_no_model_flag() {
         adapter: Some("claude".to_owned()),
         model: None,
         base_branch: None,
+        harness: cosmon_core::harness_settings::HarnessMap::new(),
     };
     executor
         .tackle(&mol.id, &pin)

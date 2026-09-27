@@ -111,7 +111,7 @@ Options:
           
           `--model` pins *which model* runs; this pins *how it runs*, by handing the pair to the adapter's own override channel:
           
-          - `codex` → one `-c key=value` per entry, e.g. `--harness model_reasoning_effort=high`; - `claude` → `--<key> <value>` per entry, e.g. `--harness effort=xhigh`; - any other adapter → the dispatch **fails at launch, naming the adapter**. A setting is never silently dropped.
+          - `codex` → one `-c key=value` per entry, e.g. `--harness model_reasoning_effort=high`. To pin the service tier for this dispatch, use `--harness service_tier=default` for Standard processing (**Fast off**), or `--harness service_tier=priority` for Fast processing. `fast` is also accepted as the Fast spelling; Fast availability depends on the selected model and account; - `claude` → `--<key> <value>` per entry, e.g. `--harness effort=xhigh`; - any other adapter → the dispatch **fails at launch, naming the adapter**. A setting is never silently dropped.
           
           # cosmon recognises no keys
           

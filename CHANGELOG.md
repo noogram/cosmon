@@ -19,6 +19,20 @@ this stage.
 
 ## [Unreleased]
 
+### Added
+
+- **`cs run --resident --harness <KEY>=<VALUE>`** (GitHub issue #86, repeatable).
+  A run-wide harness-settings directive, the harness twin of `--adapter` and
+  `--base`: it is stamped onto every dispatch the run makes — static frontier
+  nodes and dynamically-nucleated children alike — and merged **per key** with
+  each executing step's own `[steps.harness]` pin (ADR-177 Decision 2), the
+  flag winning. Before this, `cs run --resident` had no way to carry an
+  operator's in-the-moment harness override to a shelled `cs tackle`; only the
+  formula step's own pin reached the dispatch. The in-process executor
+  (`cosmon_runtime::tackle_exec::LibraryExecutor`, used by the RPP tenant
+  route) grew the matching `DispatchPin::harness` field for embedders that
+  hold a run-wide directive of their own.
+
 ### Changed
 
 - **The consent path speaks the same language as the rest of `cs`** (GitHub
@@ -75,6 +89,17 @@ this stage.
   into a chain of rules that ignored and re-included each other.
 
 ### Added
+
+- **Protected reference inputs** (GitHub issue #94). `cs nucleate --protect
+  <path>` (repeatable; a file or a directory, relative to the repository root)
+  declares ground truth the worker must read and never modify. The worker's
+  brief lists the paths as read-only with the reason, `cs tackle` clears their
+  write bits in the worktree, and `cs done` refuses a branch that changed any
+  of them with a ninth door refusal, `protected_path_modified` (exit code 78,
+  HTTP 409), naming each path. The operator overrides at the terminal with
+  `cs done --allow-protected-change`; the override has no wire counterpart.
+  The `task-work` verify step now says outright that expected outputs, golden
+  files and reference data are never edited to make a result match.
 
 - **`cs doctor gitignore`** — asks real git whether `.cosmon/.gitignore`
   still tracks the archive subtree it claims to track, and names the rule

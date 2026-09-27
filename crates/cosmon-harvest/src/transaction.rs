@@ -209,6 +209,18 @@ pub struct Args {
     /// the trunk.
     #[arg(long)]
     deploy_off_trunk: bool,
+
+    /// Merge even though the worker branch changed a path the molecule
+    /// declared protected (`cs nucleate --protect`, issue #94).
+    ///
+    /// Without it, `cs done` refuses such a branch (`protected_path_modified`,
+    /// exit 78) and names each protected path it changed. Protected paths are
+    /// reference inputs; a branch that rewrites them can make any result
+    /// "match". Pass this flag only when you, the operator, have read the
+    /// change and it is intended — for example a reference dataset that was
+    /// itself wrong. No effect on a molecule that declared no protected path.
+    #[arg(long)]
+    allow_protected_change: bool,
 }
 
 impl Args {
@@ -264,6 +276,12 @@ impl Args {
             max_retries: opts.max_retries,
             skip_pre_done_hook: opts.skip_pre_done_hook,
             deploy_off_trunk: opts.deploy_off_trunk,
+            // No wire counterpart, on purpose: the protection exists against
+            // an agent rewriting its own reference data, and a request over
+            // the wire may come from an agent. Overriding it is a decision
+            // made by the operator at their terminal, with the diff in front
+            // of them — the same reason `--dry-run` stays local.
+            allow_protected_change: false,
         }
     }
 
@@ -1484,6 +1502,67 @@ fn git_diff_names(repo_root: &Path, range: &str) -> Vec<String> {
     }
 }
 
+/// Refuse a branch that changed a protected path (issue #94).
+///
+/// Compares `<base>...<branch>` — what the branch changed since it forked —
+/// so a later change to the reference on the base itself is not charged to
+/// the worker. Renames are listed as a deletion plus an addition
+/// (`--no-renames`), so moving a protected file away is caught under its old
+/// name. Fails closed: when the diff cannot be computed the harvest aborts,
+/// because an empty change list would pass the gate on exactly the molecule
+/// that asked for it.
+fn check_protected_paths(
+    repo_root: &Path,
+    branch: &str,
+    base: &str,
+    protected: &[String],
+) -> anyhow::Result<()> {
+    if protected.is_empty() {
+        return Ok(());
+    }
+    let range = format!("{base}...{branch}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["diff", "--name-only", "--no-renames", &range])
+        .output();
+    let changed: Vec<String> = match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        Ok(o) => {
+            return Err(anyhow::anyhow!(
+                "cs done aborts: cannot list the changes of {range} to check the molecule's \
+                 protected paths ({}): {}",
+                protected.join(", "),
+                String::from_utf8_lossy(&o.stderr).trim()
+            ))
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "cs done aborts: cannot run git to check the molecule's protected paths: {e}"
+            ))
+        }
+    };
+    let touched = cosmon_core::protected_paths::modified_protected_paths(&changed, protected);
+    if touched.is_empty() {
+        return Ok(());
+    }
+    Err(RefusedHarvest {
+        refusal: cosmon_core::harvest_door::DoorRefusal::ProtectedPathModified,
+        detail: Some(format!(
+            "{branch} changes {} protected path(s): {} (declared: {})",
+            touched.len(),
+            touched.join(", "),
+            protected.join(", ")
+        )),
+    }
+    .into())
+}
+
 /// Scope-guard (P3 of `task-20260712-3819`) — surface files the merge would
 /// introduce that fall outside the molecule's declared change-perimeter.
 ///
@@ -2189,6 +2268,23 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         project_cfg.scope_guard.strict,
     )?;
 
+    // 1c'''. Protected paths (issue #94). A molecule born with
+    //        `cs nucleate --protect <path>` declared reference inputs its
+    //        worker must not modify. Refuse, before the trunk lock and the
+    //        merge, a branch that changed any of them — unless the operator
+    //        overrides with `--allow-protected-change`. Unlike the scope guard
+    //        this is never advisory: a rewritten reference turns every later
+    //        validation against it into a tautology. The list is empty for
+    //        every molecule that declared nothing, which keeps this inert.
+    let protected_paths: &[String] = if args.allow_protected_change {
+        &[]
+    } else {
+        &mol.protected_paths
+    };
+    if !args.no_merge && branch_exists(&repo_root, &branch_name) {
+        check_protected_paths(&repo_root, &branch_name, &base_branch, protected_paths)?;
+    }
+
     // 1d. Pre-done gate — the blocking `[hooks] pre_done` hook
     //     (showroom delib-20260701-bfdf, torvalds D1).
     //
@@ -2576,6 +2672,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             args.max_retries,
             args.propel_message.as_deref(),
             &merge_trailers,
+            protected_paths,
         );
         match merge_result {
             Ok(MergeLoopOutcome::Merged) => {
@@ -3941,6 +4038,7 @@ fn try_merge_with_escalation(
     max_retries: u32,
     custom_message: Option<&str>,
     coauthor_trailers: &[String],
+    protected_paths: &[String],
 ) -> anyhow::Result<MergeLoopOutcome> {
     // The most recent set of conflicting files, carried from the first attempt
     // through every escalation retry so the final `Conflict` outcome can list
@@ -4058,6 +4156,11 @@ fn try_merge_with_escalation(
 
         // Sleep with backoff to give the worker time to rebase.
         std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
+
+        // The worker committed during the backoff, so the branch checked
+        // before the first attempt is not the branch about to merge. Check
+        // the protected paths again (issue #94).
+        check_protected_paths(repo_root, branch, base, protected_paths)?;
 
         // Retry the merge.
         match try_merge_branch(repo_root, branch, base, strategy, coauthor_trailers) {
@@ -7356,6 +7459,7 @@ mod tests {
             expiry_policy: None,
             originating_branch: None,
             base_branch: None,
+            protected_paths: Vec::new(),
             pending_step: None,
             merged_at: None,
             non_integration: None,
@@ -7459,6 +7563,7 @@ mod tests {
             max_retries: 3,
             skip_pre_done_hook: false,
             deploy_off_trunk: false,
+            allow_protected_change: false,
         }
     }
 
@@ -10995,6 +11100,7 @@ mod tests {
             3,
             None,
             &[],
+            &[],
         );
 
         match result.expect("conflict is a first-class Ok outcome, not Err") {
@@ -11075,6 +11181,7 @@ mod tests {
             true,
             3,
             None,
+            &[],
             &[],
         );
 
@@ -11159,6 +11266,7 @@ mod tests {
             true, // auto_propel enabled
             0,    // exhaust immediately
             None,
+            &[],
             &[],
         );
 
@@ -11260,6 +11368,7 @@ mod tests {
             3,
             None,
             &[],
+            &[],
         );
 
         assert!(matches!(result.unwrap(), MergeLoopOutcome::AlreadyMerged));
@@ -11296,6 +11405,7 @@ mod tests {
             true,
             3,
             None,
+            &[],
             &[],
         );
 

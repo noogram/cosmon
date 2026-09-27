@@ -307,7 +307,7 @@ fn project_single(id: &MoleculeId, envelopes: &[Envelope]) -> Option<MoleculeDat
 /// The event log can project `status`, step counters, seals, and typed links,
 /// but **not** `variables`, `tags`, `assigned_worker`, `assigned_role`,
 /// `kind`, `class`, `session_name`, `originating_branch`, `base_branch`,
-/// `project_id`, `expires_at`, or `expiry_policy` (see the module table). When a `state.json`
+/// `protected_paths`, `project_id`, `expires_at`, or `expiry_policy` (see the module table). When a `state.json`
 /// is classified `Corrupt`, the strict `MoleculeData` deserialize failed — but
 /// the JSON is frequently *mostly* intact (one field drifted, a trailing
 /// truncation, a type that no longer matches). A lenient `serde_json::Value`
@@ -363,6 +363,10 @@ fn salvage_non_projectable(corrupt_bytes: &[u8], projected: &mut MoleculeData) {
     // ambient `COSMON_BASE_BRANCH`/`origin/HEAD`/`main` chain — i.e. merge the
     // worker's branch onto the wrong trunk after a reconcile.
     salvage!("base_branch" => projected.base_branch, non_empty: |o: &Option<_>| o.is_none());
+    // Protected reference inputs (`cs nucleate --protect`, issue #94). No
+    // event carries them either, and losing them would silently disarm the
+    // `cs done` gate on exactly the molecule that asked for it.
+    salvage!("protected_paths" => projected.protected_paths, non_empty: |v: &Vec<String>| v.is_empty());
     salvage!("project_id" => projected.project_id, non_empty: |o: &Option<_>| o.is_none());
     salvage!("expires_at" => projected.expires_at, non_empty: |o: &Option<_>| o.is_none());
     salvage!("expiry_policy" => projected.expiry_policy, non_empty: |o: &Option<_>| o.is_none());
@@ -616,6 +620,7 @@ fn empty_molecule_data(
         expiry_policy: None,
         originating_branch: None,
         base_branch: None,
+        protected_paths: Vec::new(),
         pending_step: None,
         merged_at: None,
         harvest_reason: None,
@@ -911,6 +916,7 @@ mod tests {
             .insert("surface_path".into(), "STATUS.md".into());
         healthy.session_name = Some("fix-bug-d0d0".into());
         healthy.originating_branch = Some("feat/task-20260509-d0d0".into());
+        healthy.protected_paths = vec!["ref".into()];
 
         // Poison one field's type so the strict `MoleculeData` deserialize
         // fails (→ classified Corrupt) while the rest stays salvageable.
@@ -946,6 +952,11 @@ mod tests {
         assert_eq!(
             data.originating_branch.as_deref(),
             Some("feat/task-20260509-d0d0")
+        );
+        assert_eq!(
+            data.protected_paths,
+            vec!["ref".to_owned()],
+            "a rebuild must not disarm the protected-path gate (issue #94)"
         );
         // Status is re-projected from events — the running molecule stays running.
         assert_eq!(data.status, MoleculeStatus::Running);
@@ -1140,6 +1151,7 @@ mod tests {
             expiry_policy: None,
             originating_branch: None,
             base_branch: None,
+            protected_paths: Vec::new(),
             pending_step: None,
             merged_at: None,
             non_integration: None,
@@ -1269,6 +1281,7 @@ mod tests {
             expiry_policy: None,
             originating_branch: None,
             base_branch: None,
+            protected_paths: Vec::new(),
             pending_step: None,
             merged_at: None,
             non_integration: None,
