@@ -314,17 +314,19 @@ fn ensure_cs_init(root: &Path) -> StepOutcome {
     }
 }
 
-/// Step 2b — `git init` + initial commit in `root` when `.git` is
-/// absent. The identity is set locally (never global, never pushed —
-/// the repo is local-only). `cs tackle` walks up for `.git`; without
-/// it, it refuses to start.
+/// Step 2b — initialise a `main` Git branch and create its initial commit in
+/// `root` when `.git` is absent. The branch is explicit so tenant lifecycle
+/// operations do not depend on the image's Git version or configuration. The
+/// identity is set locally (never global, never pushed — the repo is
+/// local-only). `cs tackle` walks up for `.git`; without it, it refuses to
+/// start.
 fn ensure_git_init(root: &Path, noyau: &Noyau) -> StepOutcome {
     if root.join(".git").is_dir() {
         return StepOutcome::AlreadyPresent;
     }
     let email = format!("cosmon@{}.local", noyau.as_str());
     let steps: [&[&str]; 5] = [
-        &["init", "-q"],
+        &["init", "-q", "-b", "main"],
         &["config", "user.email", &email],
         &["config", "user.name", "cosmon-runtime"],
         &["add", "-A"],
