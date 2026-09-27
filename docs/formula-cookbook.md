@@ -21,6 +21,72 @@ iteration or incremental re-planning as DAG structures.
 
 ---
 
+## Harness settings on worker steps and resident runs
+
+`[steps.harness]` pins how one worker step asks its harness to run. The map is
+opaque to cosmon: keys and values are carried verbatim, rather than being
+recognised or normalised by cosmon. It is meaningful only on a worker-spawn
+step; leaving the table out carries no setting and therefore leaves the
+harness's own default in effect.
+
+```toml
+[[steps]]
+id = "implement"
+title = "Implement"
+description = "Implement the accepted change."
+adapter = "codex"
+
+[steps.harness]
+model_reasoning_effort = "high"
+model_max_output_tokens = "4096"
+```
+
+For a resident run, `--harness key=value` is the run-wide counterpart. It is
+repeatable and applies to every dispatch made by that run, including children
+nucleated while the resident runtime is already running. Detach the resident
+runtime as usual:
+
+```sh
+tmux new-session -d -s cosmon-runtime \
+  'cs run --resident \
+    --harness model_reasoning_effort=medium \
+    --harness service_tier=default'
+```
+
+### Precedence is per key
+
+For each key independently, the order is:
+
+1. `cs tackle --harness key=value`, including a `cs run --resident --harness`
+   directive that the resident runtime passes to each dispatch;
+2. the executing step's `[steps.harness]` table;
+3. the harness's own configuration, reached only when neither cosmon layer
+   supplies that key.
+
+The example run changes `model_reasoning_effort` from the step's `high` to
+`medium`, while the step's `model_max_output_tokens = "4096"` still applies.
+It also adds `service_tier=default` without replacing either step key. This is
+a merge by key, never a wholesale replacement of the step table.
+
+### Carriage and refusal
+
+Cosmon currently carries non-empty maps for these adapters only:
+
+- `codex`: one native `-c key=value` override for each entry;
+- `claude`: one native `--key value` pair for each entry.
+
+Cosmon does not keep an allowlist. A key unknown to either harness reaches that
+harness's parser and is rejected there, loudly. For every other adapter, a
+non-empty harness map refuses the dispatch at launch and names the adapter;
+cosmon never silently drops a setting. An empty map is accepted by all
+adapters and emits no override.
+
+The event receipt records what cosmon dispatched and the native argv fragment.
+It is evidence of dispatch intent, not evidence that a harness executed at the
+requested setting.
+
+---
+
 ## 1. Feedback Loop Pattern
 
 ### Problem
