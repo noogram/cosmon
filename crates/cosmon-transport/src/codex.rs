@@ -246,6 +246,59 @@ pub const INTERACTIVE_LOG_LEVEL: &str = "error";
 /// must never silently re-arm mid-run self-updates.
 pub const NO_STARTUP_UPDATE_OVERRIDE: &[&str] = &["-c", "check_for_update_on_startup=false"];
 
+/// Prefix of the per-worker codex profile an interactive worker launches
+/// with (issue #84). See [`worker_profile_name`].
+pub const WORKER_PROFILE_PREFIX: &str = "cosmon-worker-";
+
+/// Name of the codex profile-v2 overlay an interactive worker launches with
+/// (`codex -p <name>`), derived from its tmux session name.
+///
+/// # Why this exists (issue #84)
+///
+/// codex's TUI persists a setting changed interactively (`/model` → reasoning
+/// level, confirmed as the default) into the **active user config layer**.
+/// Without a profile that layer is the machine-wide `$CODEX_HOME/config.toml`,
+/// so one operator adjustment inside one worker became the default of every
+/// later codex worker, in every project. With `-p <name>`, codex layers
+/// `$CODEX_HOME/<name>.config.toml` on top of that base file and the overlay
+/// becomes the active user layer: the global config is still *read* as the
+/// default, and the worker's changes are *written* to its own overlay.
+/// Measured against codex-cli 0.157.1: the same `/model` change rewrote
+/// `model_reasoning_effort` in `config.toml` without `-p`, and only in the
+/// overlay with it.
+///
+/// `CODEX_HOME` is deliberately left alone: the `ChatGPT` login
+/// (`auth.json`) and the session rollouts the realized-model observer reads
+/// live there, and moving it would mean copying or linking credentials.
+///
+/// The overlay is keyed by the session name, which is per molecule, so a
+/// re-tackle of the same molecule keeps its adjustment; codex creates the
+/// file on the first write and a missing file reads as empty. codex accepts
+/// `[A-Za-z0-9_-]` in a profile name, so every other byte is mapped to `-`.
+#[must_use]
+pub fn worker_profile_name(session_name: &str) -> String {
+    let mut name = WORKER_PROFILE_PREFIX.to_owned();
+    name.extend(session_name.chars().map(|c| {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            c
+        } else {
+            '-'
+        }
+    }));
+    name
+}
+
+/// Whether an operator-supplied argv already selects a codex profile, in
+/// which case the per-worker overlay is not added: codex takes a single
+/// `--profile`, and the operator's explicit choice wins.
+fn selects_profile(args: &[String]) -> bool {
+    args.iter().any(|token| {
+        token == "--profile"
+            || token.starts_with("--profile=")
+            || (token.starts_with("-p") && !token.starts_with("--"))
+    })
+}
+
 /// Default flags for an interactive codex worker.
 ///
 /// - `--dangerously-bypass-approvals-and-sandbox` — no tool approval prompts
@@ -411,7 +464,9 @@ pub struct GitIdentity {
 ///   positional prompt (the caller injects it into the composer after
 ///   readiness). [`spawn_codex_session`] pre-trusts `config.work_dir` before
 ///   executing this command. `<flags>` is [`DEFAULT_INTERACTIVE_ARGS`] unless
-///   `config.extra_args` overrides it.
+///   `config.extra_args` overrides it. The command also selects the worker's
+///   own profile overlay ([`worker_profile_name`]) so a setting changed in the
+///   TUI never reaches the global codex config (issue #84).
 ///
 /// Both modes carry [`NO_STARTUP_UPDATE_OVERRIDE`] unconditionally — a codex
 /// worker must never self-update (and die) mid-run.
@@ -444,6 +499,10 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             push_no_update_override(&mut cmd);
             push_writable_roots(&mut cmd, &config.writable_roots);
             push_harness_args(&mut cmd, &config.harness_args);
+            if !selects_profile(&config.extra_args) && !selects_profile(&config.harness_args) {
+                cmd.push_str(" -p ");
+                cmd.push_str(&worker_profile_name(&config.session_name));
+            }
             if let Some(ref model) = config.model {
                 cmd.push_str(" --model ");
                 cmd.push_str(&shell_escape(model));
@@ -1321,7 +1380,7 @@ mod tests {
         assert_eq!(
             cmd,
             "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
-             -c check_for_update_on_startup=false \
+             -c check_for_update_on_startup=false -p cosmon-worker-polecat-codex \
              --dangerously-bypass-approvals-and-sandbox --no-alt-screen"
         );
         // The prompt must NOT leak onto the command line in interactive mode.
@@ -1340,8 +1399,41 @@ mod tests {
         assert_eq!(
             build_codex_command(&c),
             "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
-             -c check_for_update_on_startup=false -m gpt-5 --no-alt-screen"
+             -c check_for_update_on_startup=false -p cosmon-worker-polecat-codex \
+             -m gpt-5 --no-alt-screen"
         );
+    }
+
+    /// Issue #84: the overlay name is the session name mapped onto codex's
+    /// profile-name alphabet, so any session name yields a name codex accepts.
+    #[test]
+    fn worker_profile_name_uses_codex_profile_alphabet() {
+        assert_eq!(
+            worker_profile_name("fix-issue-84_9b99"),
+            "cosmon-worker-fix-issue-84_9b99"
+        );
+        assert_eq!(worker_profile_name("a.b/c d:é"), "cosmon-worker-a-b-c-d--");
+    }
+
+    /// Issue #84: an operator who selects a profile explicitly keeps it —
+    /// codex takes one `--profile`, so the per-worker overlay is not added.
+    #[test]
+    fn operator_selected_profile_replaces_the_worker_overlay() {
+        for args in [
+            vec!["-p".to_owned(), "mine".to_owned()],
+            vec!["--profile".to_owned(), "mine".to_owned()],
+            vec!["--profile=mine".to_owned()],
+            vec!["-pmine".to_owned()],
+        ] {
+            let c = cfg(CodexMode::Interactive, None, args.clone());
+            let cmd = build_codex_command(&c);
+            assert!(!cmd.contains("cosmon-worker-"), "{args:?} → {cmd:?}");
+
+            let mut h = cfg(CodexMode::Interactive, None, vec![]);
+            h.harness_args = args.clone();
+            let cmd = build_codex_command(&h);
+            assert!(!cmd.contains("cosmon-worker-"), "{args:?} → {cmd:?}");
+        }
     }
 
     /// task-20260718-230a: the standalone codex CLI can self-update on

@@ -66,7 +66,7 @@ fn interactive_default_is_quiet_steerable_and_promptless() {
     assert_eq!(
         cmd,
         "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
-         -c check_for_update_on_startup=false \
+         -c check_for_update_on_startup=false -p cosmon-worker-polecat-codex \
          --dangerously-bypass-approvals-and-sandbox --no-alt-screen"
     );
     // The prompt must never leak onto the interactive command line.
@@ -157,7 +157,7 @@ fn interactive_extra_args_override_replaces_defaults() {
     assert_eq!(
         cmd,
         "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
-         -c check_for_update_on_startup=false \
+         -c check_for_update_on_startup=false -p cosmon-worker-polecat-codex \
          --sandbox workspace-write -m gpt-5-codex"
     );
     // Overriding drops the nuclear default flag.
@@ -216,4 +216,40 @@ fn mode_parse_fails_open_to_interactive() {
     );
     assert_eq!(CodexMode::from_config_str(""), CodexMode::Interactive);
     assert_eq!(CodexMode::from_config_str("typo"), CodexMode::Interactive);
+}
+
+/// Issue #84: a setting an operator changes inside a worker's codex TUI
+/// (`/model` → reasoning level, "enter default") is written back by codex to
+/// the active *user config layer*. Without a profile that layer is the
+/// machine-wide `$CODEX_HOME/config.toml`, so the change leaks to every later
+/// codex worker in every project.
+///
+/// The interactive worker must therefore launch with its own profile-v2
+/// overlay (`-p <name>` → `$CODEX_HOME/<name>.config.toml`): codex reads the
+/// global config underneath it as the default and writes the worker's changes
+/// into the overlay. It must survive an `extra_args` override (structural,
+/// like `--add-dir`), and must stay out of `codex exec`, which has no TUI.
+#[test]
+fn interactive_worker_writes_settings_to_its_own_profile_overlay() {
+    let cmd = build_codex_command(&config(CodexMode::Interactive, None, vec![]));
+    assert!(
+        cmd.contains(" -p cosmon-worker-polecat-codex "),
+        "interactive worker must select a per-worker profile overlay, got {cmd:?}"
+    );
+
+    let overridden = build_codex_command(&config(
+        CodexMode::Interactive,
+        None,
+        vec!["--no-alt-screen".to_owned()],
+    ));
+    assert!(
+        overridden.contains(" -p cosmon-worker-polecat-codex "),
+        "an extra_args override must not drop the overlay, got {overridden:?}"
+    );
+
+    let exec = build_codex_command(&config(CodexMode::Exec, Some("go"), vec![]));
+    assert!(
+        !exec.contains(" -p "),
+        "exec has no TUI to persist from, got {exec:?}"
+    );
 }
