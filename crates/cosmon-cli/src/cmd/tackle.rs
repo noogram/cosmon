@@ -5819,16 +5819,16 @@ fn claude_login_probe_refusal(
     })?;
     let location = match config_dir.filter(|dir| !dir.is_empty()) {
         Some(dir) => format!(
-            "CLAUDE_CONFIG_DIR is set to `{dir}`; Claude Code looked for credentials at \
-             `{dir}/.credentials.json`"
+            "CLAUDE_CONFIG_DIR is set to `{dir}`, so Claude Code used that directory as \
+             its configuration home"
         ),
-        None => "CLAUDE_CONFIG_DIR is not set; Claude Code looked for credentials at \
-                 `$HOME/.claude/.credentials.json`"
+        None => "CLAUDE_CONFIG_DIR is not set, so Claude Code used its default \
+                 configuration home (`$HOME/.claude`, credentials in the macOS Keychain on macOS)"
             .to_owned(),
     };
     Some(format!(
         "Claude Code could not authenticate while probing the requested model. {location}. \
-         The probe reported: {login_detail}. Provision credentials at that location or set \
+         The probe reported: {login_detail}. Log in with that configuration home (`claude auth login`) or set \
          CLAUDE_CONFIG_DIR to the configured Claude Code home, then retry."
     ))
 }
@@ -10247,10 +10247,7 @@ mod tests {
             message.contains("CLAUDE_CONFIG_DIR is not set"),
             "{message}"
         );
-        assert!(
-            message.contains("$HOME/.claude/.credentials.json"),
-            "{message}"
-        );
+        assert!(message.contains("`$HOME/.claude`"), "{message}");
         assert!(
             !message.contains("no model in the fallback chain is available"),
             "{message}"
