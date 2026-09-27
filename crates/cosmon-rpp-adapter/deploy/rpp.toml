@@ -1,7 +1,8 @@
 # cosmon-rpp-adapter — operator config for the V0 docker-compose deploy.
 #
-# Mounted read-only at `/cosmon/.config/cosmon/rpp.toml` inside the
-# adapter container. Paths use the in-container layout, NOT host paths.
+# Baked into the image at `/cosmon/.config/cosmon/rpp.toml`; Compose may
+# replace it with a read-only mount at the same path. Paths use the
+# in-container layout, NOT host paths.
 
 # Bind on every interface so the host's 8443 port-publish reaches the
 # adapter. The compose file pins host-side to `127.0.0.1:8443`, so the
@@ -31,3 +32,8 @@ galaxies_root = "/cosmon/galaxies"
 # 30 s ceiling — `cs observe` is bounded under a second; this is
 # headroom for cold-start subprocess spawn.
 subprocess_timeout_sec = 30
+
+# IdP provisioning handoffs are published into the read-only handoff
+# volume the image creates. An empty or absent directory is a no-op.
+[trust_bootstrap]
+handoff_dir = "/cosmon/handoff"
