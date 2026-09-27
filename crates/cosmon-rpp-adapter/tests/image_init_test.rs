@@ -14,6 +14,7 @@
 //! tests (the env build is a pure function there).
 
 use std::path::Path;
+use std::process::Command;
 
 use cosmon_rpp_adapter::image_init::{ImageInit, StepOutcome};
 use cosmon_rpp_adapter::nucleon_map::Noyau;
@@ -191,4 +192,43 @@ fn materializes_with_no_cs_binary_anywhere() {
     assert!(report.all_ok(), "report had a failed step: {report:?}");
     assert_eq!(report.noyaux[0].cs_init, StepOutcome::Done);
     assert_noyau_materialized(&td.path().join("galaxies"), "tenant-demo-sandbox");
+}
+
+#[test]
+fn tenant_galaxy_starts_on_main_despite_git_default_branch() {
+    // The `GIT_CONFIG_*` variables are process-wide. Run the assertion in a
+    // dedicated test process so this regression test cannot alter Git's
+    // configuration for concurrently running tests.
+    const CHILD_MARKER: &str = "COSMON_IMAGE_INIT_GIT_DEFAULT_BRANCH_TEST_CHILD";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("tenant_galaxy_starts_on_main_despite_git_default_branch")
+            .arg("--nocapture")
+            .env(CHILD_MARKER, "1")
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "init.defaultBranch")
+            .env("GIT_CONFIG_VALUE_0", "tenant-default")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated branch-default test failed");
+        return;
+    }
+
+    let td = tempfile::tempdir().unwrap();
+    let init = image_init_for(td.path());
+    let report = init.run(&[Noyau::new("tenant-demo-sandbox")]);
+    assert!(report.all_ok(), "report had a failed step: {report:?}");
+
+    let root = td.path().join("galaxies/tenant-demo-sandbox");
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git could not resolve HEAD: {output:?}"
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "main");
 }
