@@ -1,0 +1,259 @@
+{
+  "schema_version": 1,
+  "current_revision": "standard-2026-09-28",
+  "maintenance": {
+    "owner": "usage-accounting maintainers",
+    "review_cadence_days": 30,
+    "review_triggers": [
+      "before_release",
+      "supported_model_change",
+      "provider_billing_schema_change",
+      "unknown_observed_model"
+    ]
+  },
+  "cards": [
+    {
+      "revision": "standard-2026-07-19",
+      "verified_at": "2026-07-19",
+      "comparison": "standard_direct_provider_list_price",
+      "region": "global",
+      "service_tier": "standard",
+      "entries": [
+        {
+          "provider": "openai",
+          "model": "gpt-5-codex",
+          "aliases": [],
+          "source_url": "https://developers.openai.com/api/docs/models/gpt-5-codex",
+          "effective_date": null,
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 1.25,
+            "cached_input": 0.125,
+            "cache_write_5m": null,
+            "cache_write_1h": null,
+            "output": 10.0
+          }
+        },
+        {
+          "provider": "openai",
+          "model": "gpt-5",
+          "aliases": [],
+          "source_url": "https://developers.openai.com/api/docs/models/gpt-5",
+          "effective_date": null,
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 1.25,
+            "cached_input": 0.125,
+            "cache_write_5m": null,
+            "cache_write_1h": null,
+            "output": 10.0
+          }
+        }
+      ]
+    },
+    {
+      "revision": "standard-2026-09-28",
+      "verified_at": "2026-09-28",
+      "comparison": "standard_direct_provider_list_price",
+      "region": "global",
+      "service_tier": "standard",
+      "entries": [
+        {
+          "provider": "openai",
+          "model": "gpt-5-codex",
+          "aliases": [],
+          "source_url": "https://developers.openai.com/api/docs/models/gpt-5-codex",
+          "effective_date": null,
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 1.25,
+            "cached_input": 0.125,
+            "cache_write_5m": null,
+            "cache_write_1h": null,
+            "output": 10.0
+          }
+        },
+        {
+          "provider": "openai",
+          "model": "gpt-5",
+          "aliases": [],
+          "source_url": "https://developers.openai.com/api/docs/models/gpt-5",
+          "effective_date": null,
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 1.25,
+            "cached_input": 0.125,
+            "cache_write_5m": null,
+            "cache_write_1h": null,
+            "output": 10.0
+          }
+        },
+        {
+          "provider": "openai",
+          "model": "gpt-5.1-codex",
+          "aliases": [],
+          "source_url": "https://developers.openai.com/api/docs/models/gpt-5.1-codex",
+          "effective_date": null,
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 1.25,
+            "cached_input": 0.125,
+            "cache_write_5m": null,
+            "cache_write_1h": null,
+            "output": 10.0
+          }
+        },
+        {
+          "provider": "openai",
+          "model": "gpt-5.2-codex",
+          "aliases": [],
+          "source_url": "https://developers.openai.com/api/docs/models/gpt-5.2-codex",
+          "effective_date": null,
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 1.75,
+            "cached_input": 0.175,
+            "cache_write_5m": null,
+            "cache_write_1h": null,
+            "output": 14.0
+          }
+        },
+        {
+          "provider": "openai",
+          "model": "gpt-5.3-codex",
+          "aliases": [],
+          "source_url": "https://developers.openai.com/api/docs/models/gpt-5.3-codex",
+          "effective_date": null,
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 1.75,
+            "cached_input": 0.175,
+            "cache_write_5m": null,
+            "cache_write_1h": null,
+            "output": 14.0
+          }
+        },
+        {
+          "provider": "anthropic",
+          "model": "claude-opus-4-6",
+          "aliases": [],
+          "source_url": "https://platform.claude.com/docs/en/models/opus-4-6/overview",
+          "effective_date": null,
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 5.0,
+            "cached_input": 0.5,
+            "cache_write_5m": 6.25,
+            "cache_write_1h": 10.0,
+            "output": 25.0
+          }
+        },
+        {
+          "provider": "anthropic",
+          "model": "claude-opus-4-7",
+          "aliases": [],
+          "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+          "effective_date": null,
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 5.0,
+            "cached_input": 0.5,
+            "cache_write_5m": 6.25,
+            "cache_write_1h": 10.0,
+            "output": 25.0
+          }
+        },
+        {
+          "provider": "anthropic",
+          "model": "claude-opus-4-8",
+          "aliases": [],
+          "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+          "effective_date": null,
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 5.0,
+            "cached_input": 0.5,
+            "cache_write_5m": 6.25,
+            "cache_write_1h": 10.0,
+            "output": 25.0
+          }
+        },
+        {
+          "provider": "anthropic",
+          "model": "claude-opus-5",
+          "aliases": [],
+          "source_url": "https://platform.claude.com/docs/en/about-claude/pricing",
+          "effective_date": null,
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 5.0,
+            "cached_input": 0.5,
+            "cache_write_5m": 6.25,
+            "cache_write_1h": 10.0,
+            "output": 25.0
+          }
+        },
+        {
+          "provider": "anthropic",
+          "model": "claude-opus-5-5",
+          "aliases": [],
+          "source_url": "https://platform.claude.com/docs/en/models/opus-5-5/overview",
+          "effective_date": "2026-09-22",
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 4.0,
+            "cached_input": 0.2,
+            "cache_write_5m": 5.0,
+            "cache_write_1h": 8.0,
+            "output": 20.0
+          }
+        },
+        {
+          "provider": "anthropic",
+          "model": "claude-sonnet-4-6",
+          "aliases": [],
+          "source_url": "https://platform.claude.com/docs/en/models/sonnet-4-6/overview",
+          "effective_date": null,
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 3.0,
+            "cached_input": 0.3,
+            "cache_write_5m": 3.75,
+            "cache_write_1h": 6.0,
+            "output": 15.0
+          }
+        },
+        {
+          "provider": "anthropic",
+          "model": "claude-sonnet-5",
+          "aliases": [],
+          "source_url": "https://platform.claude.com/docs/en/models/overview",
+          "effective_date": null,
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 2.0,
+            "cached_input": 0.2,
+            "cache_write_5m": 2.5,
+            "cache_write_1h": 4.0,
+            "output": 10.0
+          }
+        },
+        {
+          "provider": "anthropic",
+          "model": "claude-haiku-4-5",
+          "aliases": ["claude-haiku-4-5-20251001"],
+          "source_url": "https://platform.claude.com/docs/en/models/overview",
+          "effective_date": "2025-10-01",
+          "context_band": "all_supported_context_lengths",
+          "rates_usd_per_million_tokens": {
+            "input": 1.0,
+            "cached_input": 0.1,
+            "cache_write_5m": 1.25,
+            "cache_write_1h": 2.0,
+            "output": 5.0
+          }
+        }
+      ]
+    }
+  ]
+}
