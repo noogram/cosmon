@@ -57,6 +57,7 @@ use cosmon_core::error::CosmonError;
 use cosmon_core::harvest_door::HarvestOptions;
 use cosmon_core::id::{FleetId, MoleculeId};
 use cosmon_core::tag::Tag;
+use cosmon_core::worker_argv::CLAUDE_ADAPTER;
 use cosmon_filestore::{harvest_door, FileStore};
 use cosmon_process_witness::process_start_time;
 use cosmon_state::instrumentation::{emit_authz_decision_with_source, AuthzDecision};
@@ -79,7 +80,7 @@ use crate::drain;
 use crate::error::{ApiError, RppRejectReason};
 use crate::events_bus::MoleculeEvent;
 use crate::jwt::{JwtVerifier, ValidatedJwt};
-use crate::worker_env::{EnvelopedBackend, SharedBackend, WorkerEnvelope};
+use crate::worker_env::{env::ANTHROPIC_MODEL, EnvelopedBackend, SharedBackend, WorkerEnvelope};
 use crate::AppState;
 
 // Scope catalog lives in `crate::auth::scopes` (since v1.0.0-rc,
@@ -1633,6 +1634,7 @@ pub async fn tackle_molecule(
     let executor = LibraryExecutor::new(&tenant_root, backend)
         .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root))
         .with_tackled_by(cosmon_core::tackle::TackledBy::Human)
+        .with_adapter_model_fallback(CLAUDE_ADAPTER, state.claude_model.clone(), ANTHROPIC_MODEL)
         .with_preflight(preflight)
         // COSMON-DEV #75: the environment-dependent half of the worker's
         // launch posture. Without it the dispatch still carries its permission
@@ -2041,6 +2043,7 @@ pub async fn run_molecule(
     // that store too.
     let executor = LibraryExecutor::new(&tenant_root, backend)
         .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root))
+        .with_adapter_model_fallback(CLAUDE_ADAPTER, state.claude_model.clone(), ANTHROPIC_MODEL)
         .with_preflight(preflight)
         // The same launch policy as the tackle route, for the same reason the
         // preflight is installed on both: a posture installed on one seam and

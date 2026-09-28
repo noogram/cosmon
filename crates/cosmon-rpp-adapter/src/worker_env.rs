@@ -56,11 +56,11 @@
 //! - `ANTHROPIC_API_KEY` — the boot-resolved key (docker-secret /
 //!   operator-file ladder), which the adapter env may never have
 //!   carried; set explicitly so the worker `claude` inherits it.
-//! - `ANTHROPIC_MODEL` — the avatar-surface D1 model pin, when the
-//!   instance config carries one. It is the deployment's default only: a
-//!   model the dispatch's selection chain resolved rides the worker's argv
-//!   as `--model`, which Claude Code ranks above this variable (issue #81
-//!   point 2).
+//! - `ANTHROPIC_MODEL` — the model the dispatch resolved. The instance's
+//!   avatar-surface D1 pin is the Claude-only server floor; explicit,
+//!   formula-step, and tenant/global config pins may outrank it. At spawn the
+//!   envelope adopts the winner already rendered as `--model`, so argv and
+//!   environment cannot disagree (issues #81 and #114).
 //! - `DISABLE_AUTOUPDATER=1` — always. Claude Code otherwise updates
 //!   itself on its first start inside the worker, which moved a server
 //!   image pinned to 2.1.281 to 2.1.282 during a dispatch and drew an
@@ -248,7 +248,9 @@ pub struct WorkerEnvelope {
     /// Boot-resolved Anthropic key (docker-secret → operator-file →
     /// env ladder); `None` falls back to plain allow-list inheritance.
     pub anthropic_api_key: Option<String>,
-    /// Avatar-surface D1 model pin; `None` is the explicit opt-out.
+    /// Initial avatar-surface D1 model default; `None` disables that floor.
+    /// The dispatch resolver may replace it with a higher-priority pin at
+    /// spawn, keeping the environment equal to the rendered `--model` value.
     pub claude_model: Option<String>,
 }
 
@@ -338,15 +340,65 @@ impl<B> EnvelopedBackend<B> {
     }
 }
 
+/// Whether one executable token names the Claude adapter, as a bare command
+/// or an absolute path resolved by a launch policy.
+fn is_claude_binary(token: &str) -> bool {
+    Path::new(token).file_name().and_then(|name| name.to_str())
+        == Some(cosmon_core::worker_argv::CLAUDE_ADAPTER)
+}
+
+/// Return the last Claude `--model` value, matching the command line's
+/// rightmost-wins override shape. Both token spellings accepted by the
+/// harness are understood.
+fn claude_model_from_args(args: &[String]) -> Option<String> {
+    let mut resolved = None;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--model" {
+            if let Some(value) = args.get(index + 1) {
+                resolved = Some(value.clone());
+                index += 2;
+                continue;
+            }
+        } else if let Some(value) = args[index].strip_prefix("--model=") {
+            resolved = Some(value.to_owned());
+        }
+        index += 1;
+    }
+    resolved
+}
+
 impl<B: TransportBackend> TransportBackend for EnvelopedBackend<B> {
     fn spawn(
         &self,
         agent: &AgentDefinition,
         config: &RuntimeConfig,
     ) -> Result<SpawnHandle, TransportError> {
-        let mut args: Vec<String> = Vec::with_capacity(3 + self.env.len() + agent.args.len());
+        // The executor's argv is the result of the dispatch's model-selection
+        // fold. Make that same winner the Claude environment carrier too:
+        // otherwise a formula pin can launch with `--model A` while the
+        // deployment default remains `ANTHROPIC_MODEL=B`. Root demotion, when
+        // enabled, places the real adapter binary inside argv, so search only
+        // the portion belonging to a Claude launch.
+        let claude_args = if is_claude_binary(&agent.command) {
+            Some(agent.args.as_slice())
+        } else {
+            agent
+                .args
+                .iter()
+                .position(|arg| is_claude_binary(arg))
+                .map(|index| &agent.args[index + 1..])
+        };
+        let resolved_model = claude_args.and_then(claude_model_from_args);
+        let mut spawn_env = self.env.clone();
+        if let Some(model) = resolved_model {
+            spawn_env.retain(|(key, _)| key != env::ANTHROPIC_MODEL);
+            spawn_env.push((env::ANTHROPIC_MODEL.to_owned(), model));
+        }
+
+        let mut args: Vec<String> = Vec::with_capacity(3 + spawn_env.len() + agent.args.len());
         args.push("-i".to_owned());
-        for (k, v) in &self.env {
+        for (k, v) in &spawn_env {
             // `PWD` names the process's OWN working directory; an inherited
             // value is the *adapter's* cwd, which is a lie the moment the
             // backend honours [`AgentDefinition::cwd`] (tmux `-c` starts the
@@ -844,6 +896,119 @@ mod tests {
         ) -> Result<bool, TransportError> {
             Ok(true)
         }
+    }
+
+    #[test]
+    fn resolved_claude_path_keeps_argv_and_env_models_equal() {
+        let inner = RecordingBackend::default();
+        let mut envelope = envelope(std::path::Path::new("/galaxies"));
+        envelope.claude_model = Some("deployment-default".to_owned());
+        let backend = EnvelopedBackend {
+            inner: inner.clone(),
+            env: envelope.build_env(std::iter::empty()),
+        };
+        let agent = AgentDefinition {
+            id: cosmon_core::id::AgentId::new("model-path-probe").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "/opt/cosmon/bin/claude".to_owned(),
+            args: vec!["--model".to_owned(), "formula-model".to_owned()],
+            cwd: None,
+        };
+
+        backend.spawn(&agent, &RuntimeConfig::default()).unwrap();
+
+        let spawns = inner.spawns.lock().unwrap();
+        let args = &spawns[0].args;
+        assert!(
+            args.iter()
+                .any(|arg| arg == "ANTHROPIC_MODEL=formula-model"),
+            "an absolute Claude path must still align the environment carrier: {args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "ANTHROPIC_MODEL=deployment-default"),
+            "the losing deployment default must be removed: {args:?}"
+        );
+    }
+
+    #[test]
+    fn rightmost_claude_model_wins_the_environment_carrier() {
+        let inner = RecordingBackend::default();
+        let mut envelope = envelope(std::path::Path::new("/galaxies"));
+        envelope.claude_model = Some("deployment-default".to_owned());
+        let backend = EnvelopedBackend {
+            inner: inner.clone(),
+            env: envelope.build_env(std::iter::empty()),
+        };
+        let agent = AgentDefinition {
+            id: cosmon_core::id::AgentId::new("model-order-probe").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "claude".to_owned(),
+            args: vec![
+                "--model".to_owned(),
+                "selection-model".to_owned(),
+                "--model=harness-model".to_owned(),
+            ],
+            cwd: None,
+        };
+
+        backend.spawn(&agent, &RuntimeConfig::default()).unwrap();
+
+        let spawns = inner.spawns.lock().unwrap();
+        let args = &spawns[0].args;
+        assert!(
+            args.iter()
+                .any(|arg| arg == "ANTHROPIC_MODEL=harness-model"),
+            "the environment must mirror the rightmost native override: {args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "ANTHROPIC_MODEL=selection-model"),
+            "an earlier model flag must not disagree with the effective argv: {args:?}"
+        );
+    }
+
+    #[test]
+    fn root_demoted_claude_launch_keeps_model_carriers_equal() {
+        let inner = RecordingBackend::default();
+        let mut envelope = envelope(std::path::Path::new("/galaxies"));
+        envelope.claude_model = Some("deployment-default".to_owned());
+        let backend = EnvelopedBackend {
+            inner: inner.clone(),
+            env: envelope.build_env(std::iter::empty()),
+        };
+        let agent = AgentDefinition {
+            id: cosmon_core::id::AgentId::new("demoted-model-probe").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "/usr/bin/setpriv".to_owned(),
+            args: vec![
+                "--reuid".to_owned(),
+                "1000".to_owned(),
+                "--".to_owned(),
+                "/opt/cosmon/bin/claude".to_owned(),
+                "--model".to_owned(),
+                "demoted-model".to_owned(),
+            ],
+            cwd: None,
+        };
+
+        backend.spawn(&agent, &RuntimeConfig::default()).unwrap();
+
+        let spawns = inner.spawns.lock().unwrap();
+        let args = &spawns[0].args;
+        assert!(
+            args.iter()
+                .any(|arg| arg == "ANTHROPIC_MODEL=demoted-model"),
+            "a demoted Claude launch must align the environment carrier: {args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "ANTHROPIC_MODEL=deployment-default"),
+            "the losing deployment default must be removed: {args:?}"
+        );
     }
 
     fn spawn_through_envelope(cwd: Option<std::path::PathBuf>) -> Vec<String> {

@@ -266,13 +266,14 @@ pub struct AppState {
     /// Model pin for tenant claude worker sessions (avatar-surface
     /// D1), resolved at boot from the instance config
     /// ([`config::RppConfig::resolved_claude_model`]) — operator
-    /// binding, readable by the tenant, never written by it. Exported
-    /// as `ANTHROPIC_MODEL` into every worker spawn env so the worker
-    /// `claude` runs the pinned model. `None` is the
-    /// explicit opt-out (`claude_model = ""` in `rpp.toml`): nothing
-    /// is exported and the claude CLI resolves its own default. The
-    /// value is carried opaquely — no model-id literal lives outside
-    /// the config module's single named default.
+    /// binding, readable by the tenant, never written by it. Applied as the
+    /// Claude-only server floor after tenant-owned model pins; the winning
+    /// value is exported as both `--model` and `ANTHROPIC_MODEL` so the native
+    /// carriers cannot disagree. `None` is the explicit opt-out
+    /// (`claude_model = ""` in `rpp.toml`): no server floor is added, though
+    /// an ordinary dispatch pin still reaches both carriers. The value is
+    /// carried opaquely — no model-id literal lives outside the config
+    /// module's single named default.
     pub claude_model: Option<String>,
     /// In-RAM registry of LLM-backend health observations
     /// (T-V1-IFBDD-METER). Read-only diagnostic surface; backend

@@ -59,6 +59,7 @@ use std::path::{Path, PathBuf};
 
 use cosmon_core::config::AdaptersConfig;
 use cosmon_core::error::CosmonError;
+use cosmon_core::event_v2::ModelSelectionSource;
 use cosmon_core::harness_settings::UnsupportedHarnessCarrier;
 use cosmon_core::id::{AgentId, MoleculeId, WorkerId};
 use cosmon_core::injection::{BriefingDeliveryOutcome, InjectionOrigin, InjectionProvenance};
@@ -982,6 +983,21 @@ pub struct LibraryExecutor<B> {
     /// enough for a mock backend, not for a real TUI. See
     /// [`Self::with_briefing_delivery`].
     delivery: Option<std::sync::Arc<dyn BriefingDelivery>>,
+    /// An embedder-owned, adapter-scoped model fallback, resolved without
+    /// consulting this process's ambient environment.
+    ///
+    /// The RPP adapter uses this for its boot-resolved Claude default. It fires
+    /// only after the standard flag, formula, ambient, and tenant/global
+    /// config chain resolved no model, and only for the named adapter.
+    adapter_model_fallback: Option<AdapterModelFallback>,
+}
+
+/// A server-owned model floor for one adapter, below every tenant-owned pin.
+#[derive(Debug, Clone)]
+struct AdapterModelFallback {
+    adapter: String,
+    model: Option<String>,
+    source: String,
 }
 
 impl<B: TransportBackend> LibraryExecutor<B> {
@@ -1004,7 +1020,31 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             preflight: None,
             launch: None,
             delivery: None,
+            adapter_model_fallback: None,
         }
+    }
+
+    /// Install an adapter-scoped model fallback supplied by an embedder.
+    ///
+    /// A long-lived, multi-tenant embedder must not mutate its process
+    /// environment to steer one dispatch. The fallback is considered only
+    /// for `adapter`, after every ordinary model source. `source` is the
+    /// native carrier name recorded by `ModelSelected`. Passing `None` leaves
+    /// that adapter unpinned; omitting this builder keeps the same ordinary
+    /// selection chain.
+    #[must_use]
+    pub fn with_adapter_model_fallback(
+        mut self,
+        adapter: impl Into<String>,
+        model: Option<String>,
+        source: impl Into<String>,
+    ) -> Self {
+        self.adapter_model_fallback = Some(AdapterModelFallback {
+            adapter: adapter.into(),
+            model,
+            source: source.into(),
+        });
+        self
     }
 
     /// Install the launch policy that states this embedder's
@@ -1113,10 +1153,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // drain): an id that does not resolve degrades the per-step pins,
         // it does not block dispatch.
         let formulas_dir = &self.paths.formulas_dir;
-        let formula_path = formulas_dir.join(format!("{}.formula.toml", mol.formula_id.as_str()));
-        let formula = std::fs::read_to_string(&formula_path)
-            .ok()
-            .and_then(|text| cosmon_core::formula::Formula::parse(&text).ok());
+        let formula = load_formula(formulas_dir, &mol);
 
         // Refuse the execution kinds this executor does not cover, with a
         // typed error the caller can route on (module docs, "what this
@@ -1160,13 +1197,15 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         let global_cfg_path = global_adapter_config_path();
         let global_adapters = load_global_adapters(&global_cfg_path);
 
-        let selection = resolve_selection(&SelectionRequest {
+        let mut selection = resolve_selection(&SelectionRequest {
             adapter_flag: pin.adapter.as_deref(),
             model_flag: pin.model.as_deref(),
             formula: formula.as_ref(),
             current_step: mol.current_step,
             env_default_adapter: env_default_adapter.as_deref(),
-            env_default_model: env_model.as_ref().map(|(v, k)| (v.as_str(), *k)),
+            env_default_model: env_model
+                .as_ref()
+                .map(|(value, variable)| (value.as_str(), variable.as_str())),
             project_adapters: project_config.adapters.as_ref(),
             config_path: &config_path,
             global_adapters: global_adapters.as_ref(),
@@ -1180,6 +1219,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             // exactly as `cs tackle --harness` does (ADR-177 / issue #86).
             harness_flag: &pin.harness,
         })?;
+        self.apply_adapter_model_fallback(&mut selection);
 
         self.run_preflight(
             id,
@@ -1232,6 +1272,31 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         );
 
         self.execute(&store, &state_dir, &repo_root, &mol, &plan)
+    }
+
+    /// Apply the embedder's adapter floor without displacing any model the
+    /// standard selection chain already resolved.
+    fn apply_adapter_model_fallback(
+        &self,
+        selection: &mut cosmon_core::tackle_plan::TackleSelection,
+    ) {
+        let Some(fallback) = self.adapter_model_fallback.as_ref() else {
+            return;
+        };
+        let has_model = selection
+            .preferred_model
+            .as_deref()
+            .is_some_and(|model| !model.trim().is_empty());
+        if selection.adapter.as_str() != fallback.adapter || has_model {
+            return;
+        }
+        let Some(model) = fallback.model.as_ref().filter(|model| !model.is_empty()) else {
+            return;
+        };
+        selection.preferred_model = Some(model.clone());
+        selection.model_source = ModelSelectionSource::EnvVar {
+            var: fallback.source.clone(),
+        };
     }
 
     /// Evaluate the dispatch preconditions, if this embedder stated any
@@ -2148,19 +2213,27 @@ fn molecule_brief(mol: &MoleculeData) -> MoleculeBrief<'_> {
     }
 }
 
+/// Load a molecule's formula for the best-effort per-step selection pins.
+fn load_formula(formulas_dir: &Path, mol: &MoleculeData) -> Option<cosmon_core::formula::Formula> {
+    let path = formulas_dir.join(format!("{}.formula.toml", mol.formula_id.as_str()));
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| cosmon_core::formula::Formula::parse(&text).ok())
+}
+
 /// `(value, var_name)` of the first set-and-non-empty model env var —
 /// `$COSMON_DEFAULT_MODEL` first, the legacy `$ANTHROPIC_MODEL` second, the
 /// same tier order the CLI reads.
-fn env_default_model() -> Option<(String, &'static str)> {
+fn env_default_model() -> Option<(String, String)> {
     std::env::var("COSMON_DEFAULT_MODEL")
         .ok()
         .filter(|s| !s.is_empty())
-        .map(|v| (v, "COSMON_DEFAULT_MODEL"))
+        .map(|v| (v, "COSMON_DEFAULT_MODEL".to_owned()))
         .or_else(|| {
             std::env::var("ANTHROPIC_MODEL")
                 .ok()
                 .filter(|s| !s.is_empty())
-                .map(|v| (v, "ANTHROPIC_MODEL"))
+                .map(|v| (v, "ANTHROPIC_MODEL".to_owned()))
         })
 }
 

@@ -35,7 +35,7 @@
 //! the transport, so a cleared precondition is observable without a tmux
 //! pane or a paid worker.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
@@ -47,7 +47,9 @@ use cosmon_rpp_adapter::auth_claude::{
 use cosmon_rpp_adapter::deny_list::DenyList;
 use cosmon_rpp_adapter::nucleon_map::{HabilitationId, HabilitationMap, Noyau};
 use cosmon_rpp_adapter::rate_limit::IngressRateLimiter;
+use cosmon_rpp_adapter::worker_env::WorkerBackends;
 use cosmon_rpp_adapter::{router, AppState, BackendHealthRegistry, JwksStore, Posture};
+use cosmon_transport::mock::{MockBackend, MockCall};
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -59,6 +61,11 @@ const TARGET: &str = "task-20260911-be1e";
 /// than `refreshable`.
 const USABLE_CREDENTIALS: &str = r#"{"claudeAiOauth":{"accessToken":"tok","refreshToken":"ref","expiresAt":99999999999999,"scopes":["user:inference"]}}"#;
 
+/// Positive readiness evidence for the two TUI adapters exercised below.
+const CLAUDE_READY: &str =
+    "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n ❯ Type your message\n";
+const CODEX_READY: &str = "OpenAI Codex\nworkdir: /tmp/worktree\n";
+
 /// Build an [`AppState`] whose declared credentials file lives under
 /// `home` — the same path `GET /v1/auth/me` classifies.
 fn make_state(
@@ -66,6 +73,28 @@ fn make_state(
     tenants: &TenantWorkspaces,
     security_dir: &std::path::Path,
     home: &std::path::Path,
+) -> AppState {
+    make_state_with_worker(
+        oidc,
+        tenants,
+        security_dir,
+        home,
+        WorkerBackends::fixed(Arc::new(MockBackend::new())),
+        None,
+    )
+}
+
+/// Build the route state with an observable worker backend and RPP model
+/// default. The public tackle route must carry that default through the same
+/// resolution as a formula pin, so tests inspect the exact spawn handed to the
+/// transport port rather than a library-executor unit seam.
+fn make_state_with_worker(
+    oidc: &OidcMock,
+    tenants: &TenantWorkspaces,
+    security_dir: &std::path::Path,
+    home: &std::path::Path,
+    worker_backend: WorkerBackends,
+    claude_model: Option<String>,
 ) -> AppState {
     let _ = oidc.write_jwks_file(security_dir).unwrap();
     let jwks = JwksStore::load(security_dir).unwrap();
@@ -86,9 +115,7 @@ fn make_state(
 
     AppState {
         harvest_effect: Arc::new(cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect),
-        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(Arc::new(
-            cosmon_transport::MockBackend::new(),
-        )),
+        worker_backend,
         state_dir: security_dir.to_path_buf(),
         inbox_root: security_dir.join("whispers/inbox"),
         galaxies_root: tenants.galaxies_root().to_path_buf(),
@@ -99,7 +126,7 @@ fn make_state(
         posture: Posture::Prepared,
         drain_timeout: Duration::from_secs(10),
         anthropic_api_key: None,
-        claude_model: None,
+        claude_model,
         backend_health: Arc::new(BackendHealthRegistry::new()),
         auth_claude: Some(Arc::new(AuthClaudeState::new(
             AuthClaudeConfig::defaults_with_home(home),
@@ -117,6 +144,63 @@ fn make_state(
         provisioner: Arc::new(cosmon_rpp_adapter::provisioner::Provisioner::inert()),
         portee_provisioner: Arc::new(cosmon_rpp_adapter::portee::PorteeProvisioner::inert()),
     }
+}
+
+/// Drive the authenticated RPP tackle route and return the exact argv the
+/// injected transport backend received after the worker envelope was applied.
+async fn rpp_tackle_spawn_args(
+    tenants: &TenantWorkspaces,
+    claude_model: &str,
+    jti: &str,
+    ready_output: &str,
+) -> Vec<String> {
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    provision_credential(home.path());
+    let backend = MockBackend::new();
+    backend.set_canned_output(ready_output);
+    let state = make_state_with_worker(
+        &oidc,
+        tenants,
+        security_dir.path(),
+        home.path(),
+        WorkerBackends::fixed(Arc::new(backend.clone())),
+        Some(claude_model.to_owned()),
+    );
+
+    let (status, body) = post_tackle(router(state), &spawn_jwt(&oidc, jti)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the RPP tackle must reach the spawn seam; body: {body}"
+    );
+    backend
+        .calls()
+        .into_iter()
+        .find_map(|call| match call {
+            MockCall::Spawn { args, .. } => Some(args),
+            _ => None,
+        })
+        .expect("the RPP tackle route must spawn one worker")
+}
+
+/// Assert the two native Claude carriers agree on one resolved model.
+fn assert_model_carriers(args: &[String], model: &str) {
+    assert!(
+        args.windows(2)
+            .any(|pair| pair[0] == "--model" && pair[1] == model),
+        "the resolved model must reach the worker argv as `--model {model}`; argv: {args:?}"
+    );
+    assert!(
+        args.iter()
+            .any(|arg| arg == &format!("ANTHROPIC_MODEL={model}")),
+        "ANTHROPIC_MODEL and `--model` must carry the same resolved model; argv: {args:?}"
+    );
 }
 
 /// A JWT carrying both scopes `tackle` composes (`AND`, not `OR`).
@@ -148,6 +232,7 @@ fn provision_credential(home: &std::path::Path) {
 /// hermetic test must not depend on, so the tenant states it in config
 /// instead and the selection chain reaches the same adapter.
 fn seeded_tenants() -> TenantWorkspaces {
+    shadow_model_environment();
     let mut tenants = TenantWorkspaces::new();
     let _ = tenants.add("a");
     let tenant = tenants.tenant("a").expect("noyau 'a' must be registered");
@@ -164,6 +249,22 @@ fn seeded_tenants() -> TenantWorkspaces {
     tenant.install_task_work_formula().unwrap();
     git_init(&tenant.root);
     tenants
+}
+
+/// Keep model-resolution fixtures independent of the developer machine.
+///
+/// This test binary shares one process, so the shadow is installed once and
+/// every test observes the same empty ambient model and global-config tiers.
+fn shadow_model_environment() {
+    static SHADOW: OnceLock<()> = OnceLock::new();
+    SHADOW.get_or_init(|| {
+        std::env::remove_var("COSMON_DEFAULT_MODEL");
+        std::env::remove_var("ANTHROPIC_MODEL");
+        let scratch =
+            std::env::temp_dir().join(format!("cosmon-rpp-model-contract-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::env::set_var("COSMON_CONFIG_HOME", scratch);
+    });
 }
 
 /// Make the tenant root a real git repository with one commit.
@@ -380,5 +481,184 @@ async fn auth_me_and_tackle_agree_on_the_same_artifact() {
         dispatched["error"], "worker_credential_missing",
         "auth/me reported the credential usable — tackle must not refuse for \
          its absence; body: {dispatched}"
+    );
+}
+
+/// Issue #114 default case: the model resolved from the RPP deployment
+/// configuration reaches both native Claude carriers on the real HTTP dispatch
+/// path. This is deliberately not another library-executor-only assertion.
+#[tokio::test]
+async fn rpp_configured_default_model_reaches_worker_argv_and_env() {
+    let tenants = seeded_tenants();
+    let args = rpp_tackle_spawn_args(
+        &tenants,
+        "rpp-configured-model-114",
+        "jti-rpp-configured-model",
+        CLAUDE_READY,
+    )
+    .await;
+
+    assert_model_carriers(&args, "rpp-configured-model-114");
+}
+
+/// Issue #114 explicit case: a formula-step pin outranks the RPP deployment
+/// default, and the winning value is carried identically in argv and env.
+#[tokio::test]
+async fn rpp_explicit_model_pin_reaches_worker_argv_and_env() {
+    let tenants = seeded_tenants();
+    let tenant = tenants.tenant("a").expect("noyau 'a' is registered");
+    tenant
+        .insert_formula(
+            "task-work",
+            r#"
+formula = "task-work"
+version = 1
+description = "model-carrier regression fixture"
+id_prefix = "task"
+
+[[steps]]
+id = "step-1"
+title = "Implement"
+description = "Do the work."
+model = "rpp-formula-model-114"
+"#,
+        )
+        .unwrap();
+    let args = rpp_tackle_spawn_args(
+        &tenants,
+        "rpp-default-model-114",
+        "jti-rpp-explicit-model",
+        CLAUDE_READY,
+    )
+    .await;
+
+    assert_model_carriers(&args, "rpp-formula-model-114");
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg == "ANTHROPIC_MODEL=rpp-default-model-114"),
+        "the losing deployment default must not disagree with the explicit model pin; argv: {args:?}"
+    );
+}
+
+/// A blank formula pin has no native carrier and therefore falls through the
+/// ordinary model chain before the configured RPP floor is considered.
+#[tokio::test]
+async fn rpp_blank_formula_model_falls_through_to_tenant_config() {
+    let tenants = seeded_tenants();
+    let tenant = tenants.tenant("a").expect("noyau 'a' is registered");
+    std::fs::write(
+        tenant.root.join(".cosmon/config.toml"),
+        "[adapters]\ndefault = \"claude\"\n\n[adapters.claude]\ndefault_model = \"tenant-model-114\"\n",
+    )
+    .unwrap();
+    tenant
+        .insert_formula(
+            "task-work",
+            r#"
+formula = "task-work"
+version = 1
+description = "blank model-carrier regression fixture"
+id_prefix = "task"
+
+[[steps]]
+id = "step-1"
+title = "Implement"
+description = "Do the work."
+model = ""
+"#,
+        )
+        .unwrap();
+    let args = rpp_tackle_spawn_args(
+        &tenants,
+        "rpp-default-model-114",
+        "jti-rpp-blank-model",
+        CLAUDE_READY,
+    )
+    .await;
+
+    assert_model_carriers(&args, "tenant-model-114");
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg == "ANTHROPIC_MODEL=rpp-default-model-114"),
+        "a blank formula pin must not skip the tenant model tier: {args:?}"
+    );
+}
+
+/// The RPP default is a server floor, not a replacement for a tenant-owned
+/// `[adapters.claude].default_model` pin.
+#[tokio::test]
+async fn tenant_model_config_outranks_the_rpp_default() {
+    let tenants = seeded_tenants();
+    let tenant = tenants.tenant("a").expect("noyau 'a' is registered");
+    std::fs::write(
+        tenant.root.join(".cosmon/config.toml"),
+        "[adapters]\ndefault = \"claude\"\n\n[adapters.claude]\ndefault_model = \"tenant-model-114\"\n",
+    )
+    .unwrap();
+
+    let args = rpp_tackle_spawn_args(
+        &tenants,
+        "rpp-default-model-114",
+        "jti-rpp-tenant-model",
+        CLAUDE_READY,
+    )
+    .await;
+
+    assert_model_carriers(&args, "tenant-model-114");
+}
+
+/// A Claude deployment default is scoped to the Claude adapter. Selecting a
+/// different adapter with no model pin must not receive that model on argv.
+#[tokio::test]
+async fn rpp_claude_default_does_not_pin_a_codex_dispatch() {
+    let tenants = seeded_tenants();
+    let tenant = tenants.tenant("a").expect("noyau 'a' is registered");
+    tenant
+        .insert_formula(
+            "task-work",
+            r#"
+formula = "task-work"
+version = 1
+description = "adapter-scoped model floor fixture"
+id_prefix = "task"
+
+[[steps]]
+id = "step-1"
+title = "Implement"
+description = "Do the work."
+adapter = "codex"
+"#,
+        )
+        .unwrap();
+
+    let args = rpp_tackle_spawn_args(
+        &tenants,
+        "rpp-default-model-114",
+        "jti-rpp-codex-no-model",
+        CODEX_READY,
+    )
+    .await;
+
+    assert!(
+        args.iter().any(|arg| arg == "codex"),
+        "the formula must reach the codex adapter; argv: {args:?}"
+    );
+    assert!(
+        !args.iter().any(|arg| arg == "--model"),
+        "the Claude-only RPP default must not become a codex model pin; argv: {args:?}"
+    );
+    let events = std::fs::read_to_string(
+        tenants
+            .tenant("a")
+            .expect("noyau 'a' is registered")
+            .state_dir
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(
+        !events.contains("rpp-default-model-114"),
+        "the Claude-only fallback must not enter the codex selection record: {events}"
     );
 }
