@@ -30,7 +30,7 @@
 //! regardless of the loop's logic. A `/bin/sh` stub starts in single-digit
 //! milliseconds, so the test now measures the loop's behaviour, not the
 //! interpreter's startup. State lives in a line-oriented file
-//! (`id|status|csv-blockers`) so the stub never shells out to a JSON parser; it
+//! (`id|status|csv-blockers|merge-stamp`) so the stub never shells out to a JSON parser; it
 //! only ever *emits* JSON (which the loop reads) via `printf`.
 
 use std::os::unix::fs::PermissionsExt;
@@ -77,12 +77,13 @@ case "$verb" in
   ensemble)
     printf '{"molecules":['
     first=1
-    while IFS='|' read -r id status blocked; do
+    while IFS='|' read -r id status blocked merged; do
       [ -z "$id" ] && continue
       [ "$first" -eq 0 ] && printf ','
       first=0
       printf '{"id":"%s","status":"%s","blocked_by":' "$id" "$status"
       emit_blocked "$blocked"
+      [ -n "$merged" ] && printf ',"merged_at":"%s"' "$merged"
       printf '}'
     done < "$STATE"
     printf ']}'
@@ -97,7 +98,7 @@ case "$verb" in
         exit 1
       fi
     fi
-    while IFS='|' read -r id status blocked; do
+    while IFS='|' read -r id status blocked merged; do
       if [ "$id" = "$mol" ]; then
         printf '{"id":"%s","status":"%s"}' "$id" "$status"
         exit 0
@@ -109,10 +110,10 @@ case "$verb" in
     [ -z "$mol" ] && exit 2
     tmp="${STATE}.tmp"
     : > "$tmp"
-    while IFS='|' read -r id status blocked; do
+    while IFS='|' read -r id status blocked merged; do
       [ -z "$id" ] && continue
       [ "$id" = "$mol" ] && status="completed"
-      printf '%s|%s|%s\n' "$id" "$status" "$blocked" >> "$tmp"
+      printf '%s|%s|%s|%s\n' "$id" "$status" "$blocked" "$merged" >> "$tmp"
     done < "$STATE"
     mv "$tmp" "$STATE"
     : > "$TICK"
@@ -121,10 +122,10 @@ case "$verb" in
     [ -z "$mol" ] && exit 2
     tmp="${STATE}.tmp"
     : > "$tmp"
-    while IFS='|' read -r id status blocked; do
+    while IFS='|' read -r id status blocked merged; do
       [ -z "$id" ] && continue
-      [ "$id" = "$mol" ] && continue
-      printf '%s|%s|%s\n' "$id" "$status" "$blocked" >> "$tmp"
+      [ "$id" = "$mol" ] && merged="2026-09-28T00:00:00Z"
+      printf '%s|%s|%s|%s\n' "$id" "$status" "$blocked" "$merged" >> "$tmp"
     done < "$STATE"
     mv "$tmp" "$STATE"
     : > "$TICK"
@@ -160,9 +161,9 @@ fn recheck_skip_is_retried_not_orphaned() {
 
     // Two-molecule chain — `a` gates `b`. If `a` is orphaned by a skipped
     // recheck, `b` never unblocks and the loop hangs to Deadline.
-    // Line format: `id|status|csv-blockers`.
+    // Line format: `id|status|csv-blockers|merge-stamp`.
     let state_path = state_dir.join("fleet.lines");
-    std::fs::write(&state_path, "a|pending|\nb|pending|a\n").unwrap();
+    std::fs::write(&state_path, "a|pending||\nb|pending|a|\n").unwrap();
 
     let tick_path = state_dir.join("wake.touch");
     std::fs::write(&tick_path, b"").unwrap();
@@ -214,9 +215,13 @@ fn recheck_skip_is_retried_not_orphaned() {
 
     assert_eq!(
         molecule_count(&state_path),
-        0,
-        "expected empty fleet after drain",
+        2,
+        "completed molecules retain their merge evidence",
     );
+    let final_state = std::fs::read_to_string(&state_path).unwrap();
+    assert!(final_state
+        .lines()
+        .all(|line| line.contains("|completed|") && line.ends_with("2026-09-28T00:00:00Z")));
 
     // The injected failure was consumed — proving the recheck really did skip
     // once (otherwise the test would pass vacuously).

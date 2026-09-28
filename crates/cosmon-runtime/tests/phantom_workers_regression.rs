@@ -20,13 +20,9 @@
 //!    visible — this is the contract `tackle_as_runtime` now upholds.
 //!
 //! 2. **Fix 2** (`crates/cosmon-runtime/src/dag_policy.rs::with_pre_completed`
-//!    + `crates/cosmon-cli/src/cmd/run.rs::run`): `cs run <terminal-root>`
-//!      pre-seeds the policy's `completed` skip-set with the named root
-//!      so its forward `Blocks` dependents drain immediately at tick 0.
-//!      Since task-20260706-4d1e a collapsed root also releases its
-//!      descendants on its own when re-absorbed (blocked-by releases on
-//!      done, not on verdict), so this hook is now the tick-0 fast path
-//!      rather than the sole unblock mechanism.
+//!    + `crates/cosmon-cli/src/cmd/run.rs::run`): the policy's skip-set can
+//!    absorb a terminal root, but a `BlockedBy` child still needs a completed,
+//!    merged blocker before it is dispatchable.
 //!
 //! 3. **Part 2 — Fix A** (`crates/cosmon-runtime/src/lib.rs::Runtime::run`):
 //!    a periodic in-loop `orphan_scan` resets any `Running` molecule
@@ -282,15 +278,10 @@ fn pre_fix_phantom_pathway_is_now_blocked() {
     );
 }
 
-/// Fix #2 + task-20260706-4d1e: a Collapsed root releases its forward
-/// `Blocks` descendants. Since task-20260706-4d1e a collapsed molecule is
-/// absorbed as a terminal event on the first tick — it enters the skip-set
-/// and splices its `Blocks` children — so descendants drain **without**
-/// `with_pre_completed` (blocked-by releases on done, not on verdict). The
-/// explicit `with_pre_completed` hook remains valid and idempotent: it
-/// pre-seeds the same skip-set entry before tick 0.
+/// A collapsed root may enter the policy's skip-set, but its `BlockedBy`
+/// children must remain pending, even with an explicit pre-completion hook.
 #[test]
-fn pre_completed_collapsed_root_releases_descendants() {
+fn pre_completed_collapsed_root_keeps_blocked_by_descendants_pending() {
     let tmp = TempDir::new().expect("tempdir");
     let store = FileStore::new(tmp.path());
 
@@ -330,12 +321,7 @@ fn pre_completed_collapsed_root_releases_descendants() {
 
     let (plan, edges) = compile_plan(&store, std::slice::from_ref(&parent)).expect("compile");
 
-    // Without pre-completion: since task-20260706-4d1e the collapsed
-    // parent is absorbed as a terminal event on the first tick — it
-    // enters the skip-set and splices its `Blocks` children — so the
-    // descendants are released and dispatched even without the explicit
-    // hook. (Before task-20260706-4d1e option B held them gated, which was
-    // the "Torn down 1 completed molecule(s)" symptom of 2026-04-25.)
+    // A collapsed parent does not satisfy a BlockedBy edge.
     let mut without_fix = DagPolicy::new(plan.clone(), edges.clone());
     let snapshot = FleetSnapshot::load(&store).expect("snapshot");
     let dispatched_without_fix: std::collections::HashSet<MoleculeId> = without_fix
@@ -347,14 +333,11 @@ fn pre_completed_collapsed_root_releases_descendants() {
         })
         .collect();
     assert!(
-        dispatched_without_fix.contains(&child_a) && dispatched_without_fix.contains(&child_b),
-        "collapsed parent releases both children on done, no explicit \
-         pre-completion needed ({dispatched_without_fix:?})"
+        dispatched_without_fix.is_empty(),
+        "collapsed blocker must hold both children ({dispatched_without_fix:?})"
     );
 
-    // With pre-completion (the fix-2 path): the parent enters the
-    // skip-set, the rebuild_plan unblocks the children, and the policy
-    // emits Evolve actions for both on the first tick.
+    // Pre-completion is an internal plan hint, not a success verdict.
     let mut with_fix =
         DagPolicy::new(plan, edges).with_pre_completed(std::iter::once(parent.clone()));
     let actions_with_fix = with_fix.next_actions(&snapshot);
@@ -366,12 +349,8 @@ fn pre_completed_collapsed_root_releases_descendants() {
         })
         .collect();
     assert!(
-        dispatched.contains(&child_a),
-        "post-fix: child_a should be in the first ready frontier ({dispatched:?})"
-    );
-    assert!(
-        dispatched.contains(&child_b),
-        "post-fix: child_b should be in the first ready frontier ({dispatched:?})"
+        dispatched.is_empty(),
+        "pre-completion must not release BlockedBy children ({dispatched:?})"
     );
 }
 

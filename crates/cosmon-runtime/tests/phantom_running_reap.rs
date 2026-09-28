@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! End-to-end test for the phantom-running reap: a worker whose tmux pane
-//! died but whose molecule still reads `running` must be reaped so the
-//! resident runtime can drain past it.
+//! died but whose molecule still reads `running` must be reaped. Its
+//! `BlockedBy` dependents remain held after the collapse.
 //!
 //! # What this proves
 //!
 //! A molecule stuck `running` because its worker died — a *phantom* — used to
 //! deadlock the resident runtime forever: the scheduler never re-tackles a
 //! `running` molecule and never `done`s a non-`completed` one, so the loop
-//! neither advances past the corpse nor drains, and every downstream waiter
-//! hangs (the *flotte aveugle* class, ADR-116).
+//! neither advances nor records the worker failure (ADR-116).
 //!
 //! With the reap wired in, the loop:
 //!
@@ -18,15 +17,13 @@
 //!    not drained → it accumulates stall ticks.
 //! 2. After `STALL_TICKS_BEFORE_REAP`, fires `cs patrol --auto-collapse`, which
 //!    collapses the phantom `a` to the terminal `collapsed`.
-//! 3. Next tick: `a` is cleared (terminal), so `b` unblocks, gets tackled,
-//!    completes, and is done'd.
-//! 4. The DAG drains — exit [`ExitReason::Drained`], `summary.reaps >= 1`.
+//! 3. `b` remains pending because `a` did not complete. The bounded run
+//!    reaches [`ExitReason::Deadline`] with no tackle of `b`.
 //!
 //! The stub's `patrol` verb is liveness-blind on purpose (it collapses every
 //! `running` molecule it sees) — the *real* liveness judgement lives in
 //! `cs patrol` and is tested there; this test asserts the *loop wiring*: that
-//! a sustained stall fires the sweep and that the sweep's terminal transition
-//! unblocks the frontier.
+//! a sustained stall fires the sweep without releasing a failed blocker.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -135,7 +132,7 @@ fn make_executable(path: &PathBuf) {
 }
 
 #[test]
-fn phantom_running_molecule_is_reaped_and_dag_drains() {
+fn phantom_running_molecule_is_reaped_and_dependent_stays_pending() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
     let state_dir = root.join(".cosmon").join("state");
@@ -164,9 +161,9 @@ fn phantom_running_molecule_is_reaped_and_dag_drains() {
     let mut config = RuntimeLoopConfig::new(&root);
     config.cs_binary = stub_path;
     config.poll_interval = Duration::from_millis(20);
-    // Generous safety net — the loop must reap within a handful of stall
-    // ticks (≈STALL_TICKS_BEFORE_REAP × 20 ms) and then drain.
-    config.max_runtime = Some(Duration::from_secs(60));
+    // The loop reaps within a handful of stall ticks, then keeps the
+    // dependent held until this bounded observation ends.
+    config.max_runtime = Some(Duration::from_secs(3));
 
     let scheduler: Box<dyn ResidentScheduler> = Box::new(ReadyFrontierScheduler::new());
     let mut runtime = RuntimeLoop::new(config, scheduler);
@@ -175,33 +172,26 @@ fn phantom_running_molecule_is_reaped_and_dag_drains() {
 
     let summary = runtime
         .run(&shutdown)
-        .expect("resident runtime loop reaps the phantom and drains");
+        .expect("resident runtime loop reaps the phantom");
 
-    if summary.exit != ExitReason::Drained {
+    if summary.reaps == 0 {
         common::dump_trace(&trace_path, &summary);
     }
 
     assert_eq!(
         summary.exit,
-        ExitReason::Drained,
-        "expected Drained after reaping the phantom, got {:?}",
+        ExitReason::Deadline,
+        "dependent must remain held after the phantom collapses, got {:?}",
         summary.exit,
     );
     assert!(
         summary.reaps >= 1,
         "expected at least one reap sweep, got {summary:?}",
     );
-    // `b` unblocked once `a` was reaped → it was tackled and done'd.
-    assert!(
-        summary.tackles >= 1,
-        "expected `b` to be tackled after the reap, got {summary:?}",
-    );
-    assert!(
-        summary.dones >= 1,
-        "expected `b` to be done'd after the reap, got {summary:?}",
-    );
+    assert_eq!(summary.tackles, 0, "dependent must not tackle: {summary:?}");
+    assert_eq!(summary.dones, 0, "dependent must not finish: {summary:?}");
 
-    // Final fleet: `a` collapsed (still present, terminal), `b` done'd (gone).
+    // Final fleet: `a` collapsed and `b` still pending.
     let final_text = std::fs::read_to_string(&fleet_path).unwrap();
     let final_json: serde_json::Value = serde_json::from_str(&final_text).unwrap();
     let final_molecules = final_json["molecules"].as_array().unwrap();
@@ -211,10 +201,8 @@ fn phantom_running_molecule_is_reaped_and_dag_drains() {
         Some("collapsed"),
         "phantom `a` must be terminally collapsed, got {final_molecules:?}",
     );
-    assert!(
-        !final_molecules.iter().any(|m| m["id"] == "b"),
-        "dependent `b` must have drained, got {final_molecules:?}",
-    );
+    let b = final_molecules.iter().find(|m| m["id"] == "b");
+    assert_eq!(b.and_then(|m| m["status"].as_str()), Some("pending"));
 
     // The trace carries a `reap` line for the sweep.
     let trace = std::fs::read_to_string(&trace_path).expect("trace file exists");

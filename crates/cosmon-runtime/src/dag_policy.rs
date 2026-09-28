@@ -389,17 +389,10 @@ impl DagPolicy {
     /// and rebuild the plan accordingly.
     ///
     /// This is the explicit-operator-override entry point used by
-    /// `cs run <terminal-root>`: when an operator types `cs run` on a
-    /// molecule that is already `Collapsed` / `Completed`,
-    /// they are explicitly asking the runtime to *continue past it*.
-    /// It pre-seeds the named root into the skip-set before the first
-    /// tick so its descendants are eligible immediately, rather than
-    /// waiting for the root to be re-observed as terminal and absorbed.
-    ///
-    /// Since task-20260706-4d1e a collapsed root that *is* re-absorbed
-    /// releases its forward `Blocks` dependents on its own (blocked-by
-    /// releases on done, not on verdict), so this hook is now belt-and-
-    /// suspenders for the tick-0 case rather than the sole unblock path.
+    /// `cs run <terminal-root>`: the named root enters the policy's
+    /// skip-set before the first tick. This can advance plan bookkeeping,
+    /// but it cannot satisfy a child's `BlockedBy` edge. The frontier still
+    /// requires a completed and merged blocker before dispatch.
     ///
     /// Pre-seeding is contained — only the explicitly-named roots are
     /// promoted. Idempotent: pre-seeding the same id twice is a no-op.

@@ -183,9 +183,8 @@ pub struct EnsembleMolecule {
     #[serde(default)]
     pub stuck_at: Option<String>,
     /// Whether the formula deliberately parks this molecule after its last
-    /// step. A frozen molecule clears dependencies only when this is `true`
-    /// and [`Self::stuck_at`] is absent; an ordinary `cs freeze` remains a
-    /// pause. Defaults to `false` for older ensemble projections.
+    /// step. This does not clear `BlockedBy` dependencies: only a completed
+    /// and merged blocker does. Defaults to `false` for older projections.
     #[serde(default)]
     pub freeze_on_last_step: bool,
     /// Adapter chosen before this runtime tick by a directional routing
