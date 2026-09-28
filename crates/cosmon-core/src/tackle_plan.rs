@@ -579,7 +579,8 @@ pub fn resolve_adapter_selection(
 ///   the adapter itself.
 ///
 /// `formula_step_model` is `(model_id, formula_name, step_id)` for the
-/// currently executing step, or `None`. `env_default` is
+/// currently executing step, or `None`; a blank id is treated as absent and
+/// falls through to the lower tiers. `env_default` is
 /// `(value, var_name)` — the caller resolves `$COSMON_DEFAULT_MODEL` then
 /// the legacy `$ANTHROPIC_MODEL` and passes whichever fired, with its name,
 /// so the recorded source names the exact origin. An empty string is
@@ -613,7 +614,9 @@ pub fn resolve_model_selection(
             },
         );
     }
-    if let Some((id, formula, step_id)) = formula_step_model {
+    if let Some((id, formula, step_id)) =
+        formula_step_model.filter(|(id, _, _)| !id.trim().is_empty())
+    {
         return (
             Some(id.to_owned()),
             ModelSelectionSource::FormulaPin {
@@ -1594,6 +1597,37 @@ fn build_local_worker_protocol(out: &mut String, mol: &MoleculeBrief<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blank_formula_model_falls_through_to_project_config() {
+        let mut entries = std::collections::BTreeMap::new();
+        entries.insert(
+            "claude".to_owned(),
+            crate::config::AdapterEntry {
+                default_model: Some("tenant-model".to_owned()),
+                ..crate::config::AdapterEntry::default()
+            },
+        );
+        let adapters = AdaptersConfig {
+            default: None,
+            entries,
+        };
+
+        for blank in ["", "  "] {
+            let (model, source) = resolve_model_selection(
+                None,
+                Some((blank, "task-work", "step-1")),
+                None,
+                "claude",
+                Some(&adapters),
+                Path::new("/tenant/.cosmon/config.toml"),
+                None,
+                Path::new("/global/config.toml"),
+            );
+            assert_eq!(model.as_deref(), Some("tenant-model"));
+            assert!(matches!(source, ModelSelectionSource::Config { .. }));
+        }
+    }
 
     fn brief<'a>(
         id: &'a MoleculeId,

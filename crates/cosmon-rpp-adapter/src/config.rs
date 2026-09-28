@@ -168,12 +168,11 @@ pub struct RppConfig {
 /// this default and is hoisted to the head of the chain.
 ///
 /// The pin is the deployment's default, not the dispatch's decision
-/// (issue #81 point 2). It reaches the worker as `ANTHROPIC_MODEL` through
-/// the worker envelope; a model the dispatch's own selection chain resolves
-/// (the `--model` rung, a formula-step pin, the tenant galaxy's
-/// `[adapters.claude].default_model`) rides the worker's argv as `--model`,
-/// which Claude Code ranks above that variable. So this value applies only
-/// when the tenant pinned nothing.
+/// (issue #81 point 2). It is the Claude-only server floor, below explicit,
+/// formula-step, ambient operator, and tenant/global adapter-config pins. The
+/// resolved winner reaches the worker identically as `--model` and
+/// `ANTHROPIC_MODEL`, so this default applies only when no higher tier fired
+/// and the two carriers cannot disagree (issue #114).
 pub const DEFAULT_CLAUDE_MODEL: &str = cosmon_core::model_chain::PREFERRED_MODEL;
 
 /// Default `oidc_url` when the operator leaves it unset
