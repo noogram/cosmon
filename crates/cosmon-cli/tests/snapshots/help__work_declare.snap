@@ -1,0 +1,34 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Declare or revise a finite roster under an owning molecule
+
+Usage: cs work declare [OPTIONS] --seat <NAME=MOLECULE> <OWNER>
+
+Arguments:
+  <OWNER>  Owning molecule ID
+
+Options:
+      --config <PATH>
+          Path to configuration file
+      --seat <NAME=MOLECULE>
+          Seat and molecule, written NAME=MOLECULE; repeat for each member
+      --max-payload-bytes <MAX_PAYLOAD_BYTES>
+          Largest payload admitted, in bytes [default: 16384]
+  -v, --verbose
+          Enable verbose output
+      --json
+          Output in JSON format
+      --max-messages-per-seat <MAX_MESSAGES_PER_SEAT>
+          Maximum messages sent by each seat [default: 100]
+      --max-bytes-per-seat <MAX_BYTES_PER_SEAT>
+          Maximum aggregate payload bytes sent by each seat [default: 1048576]
+      --default-ttl-secs <DEFAULT_TTL_SECS>
+          Default message lifetime, in seconds [default: 86400]
+      --redeliver-after-secs <REDELIVER_AFTER_SECS>
+          Minimum seconds before the same adapter offers a message again [default: 60]
+      --max-delivery-attempts <MAX_DELIVERY_ATTEMPTS>
+          Maximum delivery attempts by each adapter [default: 10]
+  -h, --help
+          Print help

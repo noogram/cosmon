@@ -855,6 +855,123 @@ cs journal (operator carnet that inbox reads as its sticky top line).
 
 
 
+## `cs work`
+
+Exchange bounded evidence within a declared work scope
+
+**Usage:** `cs work <COMMAND>`
+
+###### **Subcommands:**
+
+* `declare` — Declare or revise a finite roster under an owning molecule
+* `send` — Admit bounded evidence from this member to another seat
+* `inbox` — Pull messages addressed to this member at a safe point
+* `ack` — Report how this member treated a received message
+* `list` — Rebuild the owner's message stages from canonical evidence
+
+
+
+## `cs work declare`
+
+Declare or revise a finite roster under an owning molecule
+
+**Usage:** `cs work declare [OPTIONS] --seat <NAME=MOLECULE> <OWNER>`
+
+###### **Arguments:**
+
+* `<OWNER>` — Owning molecule ID
+
+###### **Options:**
+
+* `--seat <NAME=MOLECULE>` — Seat and molecule, written NAME=MOLECULE; repeat for each member
+* `--max-payload-bytes <MAX_PAYLOAD_BYTES>` — Largest payload admitted, in bytes
+
+  Default value: `16384`
+* `--max-messages-per-seat <MAX_MESSAGES_PER_SEAT>` — Maximum messages sent by each seat
+
+  Default value: `100`
+* `--max-bytes-per-seat <MAX_BYTES_PER_SEAT>` — Maximum aggregate payload bytes sent by each seat
+
+  Default value: `1048576`
+* `--default-ttl-secs <DEFAULT_TTL_SECS>` — Default message lifetime, in seconds
+
+  Default value: `86400`
+* `--redeliver-after-secs <REDELIVER_AFTER_SECS>` — Minimum seconds before the same adapter offers a message again
+
+  Default value: `60`
+* `--max-delivery-attempts <MAX_DELIVERY_ATTEMPTS>` — Maximum delivery attempts by each adapter
+
+  Default value: `10`
+
+
+
+## `cs work send`
+
+Admit bounded evidence from this member to another seat
+
+**Usage:** `cs work send [OPTIONS] --to <TO>`
+
+###### **Options:**
+
+* `--to <TO>` — Receiving seat
+* `--file <FILE>` — Read payload bytes from a file
+* `--text <TEXT>` — Use this text as the payload
+* `--key <KEY>` — Caller-chosen idempotency key; otherwise derived from sender, recipient and digest
+* `--reply-to <REPLY_TO>` — Key of the message being answered
+* `--ttl <TTL>` — Message lifetime override, in seconds
+* `--phase <PHASE>` — Free-form phase label for evidence only
+
+
+
+## `cs work inbox`
+
+Pull messages addressed to this member at a safe point
+
+**Usage:** `cs work inbox [OPTIONS]`
+
+###### **Options:**
+
+* `--peek` — Show deliverable messages without recording a delivery attempt
+
+
+
+## `cs work ack`
+
+Report how this member treated a received message
+
+**Usage:** `cs work ack [OPTIONS] <KEY>`
+
+###### **Arguments:**
+
+* `<KEY>` — Key of the received message
+
+###### **Options:**
+
+* `--considered` — Report that the message was considered
+* `--deferred` — Report that the message was deferred
+* `--rejected` — Report that the message was rejected
+* `--reply <REPLY>` — Key of an already admitted reply
+* `--note <NOTE>` — Optional consumption note, stored by its digest beside the receipts
+
+
+
+## `cs work list`
+
+Rebuild the owner's message stages from canonical evidence
+
+**Usage:** `cs work list [OPTIONS] [OWNER]`
+
+###### **Arguments:**
+
+* `<OWNER>` — Owner molecule; defaults to the caller's declared work
+
+###### **Options:**
+
+* `--pending` — Only envelopes still pending for a recipient
+* `--open` — Only envelopes without a consumption report
+
+
+
 ## `cs panel`
 
 Panel — convene a hash-pinned supermajority panel to gate a constitutional amendment

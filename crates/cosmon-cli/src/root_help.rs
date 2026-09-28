@@ -53,6 +53,13 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
                node; cs run = N≥1 nodes (resident runtime).\n  \
              cs wait <id> &                  background wait, get notified on completion\n  \
              cs done <id>                    merge branch to its base + teardown (required!)\n\n\
+             DECLARED WORK (ADR-182): a pilot records a finite seat roster \
+             with 'cs work declare <owner> --seat a=<molecule> --seat b=<molecule>'. \
+             Members use 'cs work send --to <seat> --text <evidence>', \
+             'cs work inbox', and 'cs work ack <key> --considered|--deferred|--rejected'. \
+             'cs work list <owner>' reconstructs each message stage from the \
+             owner's canonical evidence. Messages and receipts never advance \
+             a molecule or grant lifecycle authority.\n\n\
              Pilots NEVER poll 'cs observe' by hand — always use 'cs wait'. \
              Pilots NEVER skip 'cs done' — without it the branch never merges. \
              Pilots NEVER run 'cs run' in the foreground — wrap it in a detached \

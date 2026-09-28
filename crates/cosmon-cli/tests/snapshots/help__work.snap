@@ -1,0 +1,20 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Exchange bounded evidence within a declared work scope
+
+Usage: cs work [OPTIONS] <COMMAND>
+
+Commands:
+  declare  Declare or revise a finite roster under an owning molecule
+  send     Admit bounded evidence from this member to another seat
+  inbox    Pull messages addressed to this member at a safe point
+  ack      Report how this member treated a received message
+  list     Rebuild the owner's message stages from canonical evidence
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

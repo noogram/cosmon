@@ -62,6 +62,8 @@ PILOT WORKFLOW — the full cycle is nucleate → tackle → wait → done:
   cs wait <id> &                  background wait, get notified on completion
   cs done <id>                    merge branch to its base + teardown (required!)
 .PP
+DECLARED WORK (ADR\-182): a pilot records a finite seat roster with \*(Aqcs work declare <owner> \-\-seat a=<molecule> \-\-seat b=<molecule>\*(Aq. Members use \*(Aqcs work send \-\-to <seat> \-\-text <evidence>\*(Aq, \*(Aqcs work inbox\*(Aq, and \*(Aqcs work ack <key> \-\-considered|\-\-deferred|\-\-rejected\*(Aq. \*(Aqcs work list <owner>\*(Aq reconstructs each message stage from the owner\*(Aqs canonical evidence. Messages and receipts never advance a molecule or grant lifecycle authority.
+.PP
 Pilots NEVER poll \*(Aqcs observe\*(Aq by hand — always use \*(Aqcs wait\*(Aq. Pilots NEVER skip \*(Aqcs done\*(Aq — without it the branch never merges. Pilots NEVER run \*(Aqcs run\*(Aq in the foreground — wrap it in a detached tmux session: tmux new \-d \-s runtime cs run <root> \-\-poll\-interval 5 (cs run calls cs done automatically on completion). The historical \*(Aq\-\-leaf\*(Aq and \*(Aq\-\-force\-runtime\*(Aq flags on \*(Aqcs tackle\*(Aq are deprecated no\-ops since the verb\-unification: pick the right verb instead.
 .PP
 BASE BRANCH. The branch a molecule merges back into is a property of the MOLECULE, not of your shell: \*(Aqcs tackle \-\-base <branch>\*(Aq cuts the worker\*(Aqs branch from that trunk and persists the name, and \*(Aqcs done\*(Aq reads it back. Resolution order: the molecule\*(Aqs own base → $COSMON_BASE_BRANCH → origin/HEAD → \*(Aqmain\*(Aq. Tackle without \-\-base and nothing changes — the branch is cut from the ambient HEAD and the harvest uses the environment chain, as it always did. This is what lets you pilot several molecules on several trunks from one session without a git checkout dance, and what lets a \*(Aqcs done\*(Aq fired by a tmux hook (whose environment froze when the tmux server started) still land on the right trunk.
@@ -313,6 +315,9 @@ Bootstrap a project\-local .cosmon/ directory (creates the target dir if missing
 .TP
 cs\-inbox(1)
 Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
+.TP
+cs\-work(1)
+Exchange bounded evidence within a declared work scope
 .TP
 cs\-spark(1)
 Spark — capture a one\-line operator intent into the Inbox (ADR\-061)
