@@ -733,6 +733,26 @@ pub fn emit_fleet_typed(state_dir: &Path, fleet: &str, organization_type: Option
     let _ = emit_one(path, event, None);
 }
 
+thread_local! {
+    static JOURNAL_BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Bytes of an events log this thread has read through [`read_all`] or an
+/// [`EventLogTail`] since it started.
+///
+/// A probe, not a metric: it lets a test assert how much of the journal a
+/// long-lived loop re-reads per tick (issue #116) by measuring the reads
+/// themselves rather than inferring them from timings. Thread-local so tests
+/// running in parallel do not see each other's reads.
+#[must_use]
+pub fn journal_bytes_read_by_this_thread() -> u64 {
+    JOURNAL_BYTES_READ.with(std::cell::Cell::get)
+}
+
+fn note_journal_bytes_read(n: u64) {
+    JOURNAL_BYTES_READ.with(|c| c.set(c.get().saturating_add(n)));
+}
+
 /// Read every line of the log and yield (best-effort coerced) envelopes.
 ///
 /// Lines that cannot be coerced at all are skipped — this function is for
@@ -747,6 +767,7 @@ pub fn read_all(path: impl AsRef<Path>) -> std::io::Result<Vec<Envelope>> {
     let mut out = Vec::new();
     for line in reader.lines() {
         let line = line?;
+        note_journal_bytes_read(line.len() as u64 + 1);
         if line.trim().is_empty() {
             continue;
         }
@@ -755,6 +776,143 @@ pub fn read_all(path: impl AsRef<Path>) -> std::io::Result<Vec<Envelope>> {
         }
     }
     Ok(out)
+}
+
+/// An incremental reader of `events.jsonl`: each [`Self::read_new`] returns
+/// only the envelopes appended since the previous call.
+///
+/// # Why it exists (issue #116)
+///
+/// Long-lived readers — the detached `cs realized-watch` and the `cs peek`
+/// refresh loop — used to call [`read_all`] on every tick. On a galaxy whose
+/// journal had grown to 170 MB / 550 k lines that was several full parses per
+/// second per process: each tick materialised the whole history as a
+/// `Vec<Envelope>` only to keep a handful of lines. A process holding a tail
+/// pays for the bytes once and afterwards only for what was appended, so idle
+/// costs a `stat` and a zero-byte read.
+///
+/// The cursor only ever stops at a line boundary: a line still being written
+/// (no trailing `\n` yet) is left for the next call, so a reader racing a
+/// writer never parses half an envelope and never skips one.
+///
+/// A log that shrank or was replaced (rotation, archive, a test rewriting
+/// it) is detected and re-read from byte 0; [`TailItem::Restarted`] tells
+/// the caller to drop whatever it folded from the old file.
+#[derive(Debug)]
+pub struct EventLogTail {
+    path: PathBuf,
+    offset: u64,
+    identity: Option<(u64, u64)>,
+}
+
+/// What an [`EventLogTail`] hands its caller, in log order.
+#[derive(Debug)]
+pub enum TailItem {
+    /// The log shrank or was replaced (rotation, archive, a test rewriting
+    /// it) and is being re-read from byte 0: anything folded so far is stale.
+    Restarted,
+    /// One envelope appended since the previous read.
+    Envelope(Box<Envelope>),
+}
+
+/// Largest slice of the log held in memory at once by an [`EventLogTail`].
+const TAIL_READ_CHUNK: usize = 4 * 1024 * 1024;
+
+impl EventLogTail {
+    /// A tail positioned at the start of `path`: the first
+    /// [`Self::read_new`] delivers the whole log.
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            offset: 0,
+            identity: None,
+        }
+    }
+
+    /// Byte offset up to which the log has been consumed.
+    #[must_use]
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Hand every complete line appended since the last call to `on_item`,
+    /// reading the file in bounded slices so that even the first pass over a
+    /// large log never holds more than a 4 MB slice of it, nor
+    /// more than one parsed envelope at a time.
+    ///
+    /// # Errors
+    ///
+    /// Returns `std::io::Error` when the log cannot be opened or read — the
+    /// same failure surface as [`read_all`], so callers keep their
+    /// "unreadable log" semantics. Envelopes delivered before a mid-read
+    /// error stay consumed; the next call resumes after them.
+    pub fn read_new(&mut self, mut on_item: impl FnMut(TailItem)) -> std::io::Result<()> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+
+        let mut file = File::open(&self.path)?;
+        let meta = file.metadata()?;
+        let identity = file_identity(&meta);
+        if meta.len() < self.offset || self.identity.is_some_and(|seen| seen != identity) {
+            self.offset = 0;
+            on_item(TailItem::Restarted);
+        }
+        self.identity = Some(identity);
+        if meta.len() == self.offset {
+            return Ok(());
+        }
+        file.seek(SeekFrom::Start(self.offset))?;
+        let mut remaining = meta.len() - self.offset;
+        let mut buf: Vec<u8> = Vec::new();
+        while remaining > 0 {
+            let want = usize::try_from(remaining)
+                .unwrap_or(TAIL_READ_CHUNK)
+                .min(TAIL_READ_CHUNK);
+            let start = buf.len();
+            buf.resize(start + want, 0);
+            let got = file.read(&mut buf[start..])?;
+            note_journal_bytes_read(got as u64);
+            buf.truncate(start + got);
+            if got == 0 {
+                break;
+            }
+            remaining -= got as u64;
+            // Stop at the last complete line; a torn tail waits for its `\n`.
+            let Some(end) = buf.iter().rposition(|b| *b == b'\n') else {
+                continue;
+            };
+            for line in buf[..end].split(|b| *b == b'\n') {
+                let Ok(line) = std::str::from_utf8(line) else {
+                    continue;
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Ok(env) = Envelope::from_line(line) {
+                    on_item(TailItem::Envelope(Box::new(env)));
+                }
+            }
+            self.offset += end as u64 + 1;
+            buf.drain(..=end);
+        }
+        Ok(())
+    }
+}
+
+/// `(device, inode)` of an open file, used to notice a log replaced under a
+/// tail's feet. Constant where the platform does not expose it, so only the
+/// shrink check applies there.
+fn file_identity(meta: &std::fs::Metadata) -> (u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        (meta.dev(), meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        (0, 0)
+    }
 }
 
 /// Acquire `flock(LOCK_EX)` on `file`, fast-path non-blocking, fall through
