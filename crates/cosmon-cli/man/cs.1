@@ -4,22 +4,52 @@
 .SH NAME
 cs \- Cosmon — compose, pilot and audit long\-haul AI missions where the trace matters.
 
-START HERE — nucleate → tackle → peek → whisper/done:
-  cs nucleate task\-work \-\-var\-file topic=<file>   # long statement, from a file
-  cs tackle <id> \-\-adapter claude                 # spawn a worker
-  cs peek                                         # watch it (or: cs wait <id> &)
-  cs whisper <id> \-\-file fix.md                   # correct it while still open
-  cs done <id>                                    # merge + teardown (required)
+Run `cs help` for the full command reference, `cs help guide` for the operator handbook, and `man cs` for the manual page.
+
+Source of truth: `.cosmon/state/` (JSON). Surfaces are projections — never edit directly.
+
+The normal cycle for one unit of work:
+```
+cs nucleate task\-work \-\-var\-file topic=<file>   # a long statement goes in a file, not a flag
+cs tackle <id> \-\-adapter claude                 # spawn a worker; omit \-\-adapter for the project default
+cs peek                                         # watch it work, or `cs wait <id>` to block
+cs whisper <id> \-\-file correction.md            # send a correction while the worker is still open
+cs done <id>                                    # merge to the base branch + teardown (required)
+```
+Use `cs tackle`, not `cs run`, when you intend to read the result before merging: `cs run` walks a whole DAG and calls `cs done` on completion itself, closing the review window.
+
+Stopping early is not the end of a mission: the work stays on the branch and worktree recorded at dispatch until you run `cs done <id>` (keep the partial work) or `cs collapse <id> \-\-reason "…"` (record abandonment). `cs complete`, `cs collapse`, and `cs status` print the exact branch, recorded worktree (including overrides), and concrete `cs done` command. A collapse preserves the branch for audit; it never licenses unaudited deletion.
+
+Branch audit is concrete: inspect `git log \-\-oneline <base>..<branch>` and `git diff \-\-stat <base>...<branch>`. Integrate completed work with `cs done <id>`; for abandoned active work, put the reviewed disposition in `cs collapse <id> \-\-reason "<verdict>"`. Retain the branch unless deletion is separately reviewed. `cs status` shows live branches as active work and collapsed or deliberately unmerged branches with their recorded disposition.
+
+Finishing a mission means `cs status` reads clean afterward — no zombie session, no un\-harvested `Completed` molecule, and no unresolved molecule branch. Active work and retained branches with a recorded audit disposition are visible, but are not residue. `cs status` says `clean` or names every unresolved item.
+
+Who does what — you decide the mission and protected inputs (`cs nucleate \-\-protect`) and accept or drop each result; the pilot drives the cycle above; workers do the work. Full breakdown: https://docs.noogram.org/explanation/pilot\-and\-workers.html
 
 .SH SYNOPSIS
 \fBcs\fR [\fB\-\-config\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
 .SH DESCRIPTION
-START HERE — nucleate → tackle → peek → whisper/done:
-  cs nucleate task\-work \-\-var\-file topic=<file>   # long statement, from a file
-  cs tackle <id> \-\-adapter claude                 # spawn a worker
-  cs peek                                         # watch it (or: cs wait <id> &)
-  cs whisper <id> \-\-file fix.md                   # correct it while still open
-  cs done <id>                                    # merge + teardown (required)
+Run `cs help` for the full command reference, `cs help guide` for the operator handbook, and `man cs` for the manual page.
+.PP
+Source of truth: `.cosmon/state/` (JSON). Surfaces are projections — never edit directly.
+.PP
+The normal cycle for one unit of work:
+```
+cs nucleate task\-work \-\-var\-file topic=<file>   # a long statement goes in a file, not a flag
+cs tackle <id> \-\-adapter claude                 # spawn a worker; omit \-\-adapter for the project default
+cs peek                                         # watch it work, or `cs wait <id>` to block
+cs whisper <id> \-\-file correction.md            # send a correction while the worker is still open
+cs done <id>                                    # merge to the base branch + teardown (required)
+```
+Use `cs tackle`, not `cs run`, when you intend to read the result before merging: `cs run` walks a whole DAG and calls `cs done` on completion itself, closing the review window.
+.PP
+Stopping early is not the end of a mission: the work stays on the branch and worktree recorded at dispatch until you run `cs done <id>` (keep the partial work) or `cs collapse <id> \-\-reason "…"` (record abandonment). `cs complete`, `cs collapse`, and `cs status` print the exact branch, recorded worktree (including overrides), and concrete `cs done` command. A collapse preserves the branch for audit; it never licenses unaudited deletion.
+.PP
+Branch audit is concrete: inspect `git log \-\-oneline <base>..<branch>` and `git diff \-\-stat <base>...<branch>`. Integrate completed work with `cs done <id>`; for abandoned active work, put the reviewed disposition in `cs collapse <id> \-\-reason "<verdict>"`. Retain the branch unless deletion is separately reviewed. `cs status` shows live branches as active work and collapsed or deliberately unmerged branches with their recorded disposition.
+.PP
+Finishing a mission means `cs status` reads clean afterward — no zombie session, no un\-harvested `Completed` molecule, and no unresolved molecule branch. Active work and retained branches with a recorded audit disposition are visible, but are not residue. `cs status` says `clean` or names every unresolved item.
+.PP
+Who does what — you decide the mission and protected inputs (`cs nucleate \-\-protect`) and accept or drop each result; the pilot drives the cycle above; workers do the work. Full breakdown: https://docs.noogram.org/explanation/pilot\-and\-workers.html
 .PP
 Cosmon keeps a fleet of AI agents on track. Run several on one codebase and a session will crash, or fill its context window and forget what it was doing, and you lose track of which agent was on what — cosmon gives each a durable identity and writes every step to disk, so a dead session resumes where it stopped and you can always see who is doing what. More generally it runs missions you delegate to AI: it breaks a hard problem into typed, ordered steps, executes them, and records every step so the finished work carries an auditable trace — the reasoning matters as much as the result. Nothing in it is code\-specific; it aims just as well at research\-grade missions, where a technical lock demands long, decomposed, checkable work. It is model\-agnostic, sitting above any model, so your context and data stay with you and a mission can run entirely on local models. Cosmon is the kernel of noogram — the open\-source substrate for composing, piloting and auditing missions entrusted to AI systems.
 .PP
