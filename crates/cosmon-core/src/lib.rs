@@ -74,6 +74,7 @@ pub mod harness_settings;
 pub mod id;
 pub mod kind;
 pub mod molecule;
+pub mod plan_observation;
 pub mod role;
 pub mod spore;
 pub mod tag;

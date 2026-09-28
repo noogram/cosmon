@@ -572,6 +572,9 @@ fn main() {
     // entirely. The hook fires on every prompt a worker submits; it must not
     // install tracing, walk up to a galaxy, or write an `operator.present`
     // event on the operator's behalf.
+    if let Some(code) = cosmon_cli::plan_observation_hook::intercept() {
+        std::process::exit(code);
+    }
     if let Some(code) = cosmon_cli::briefing_receipt_hook::intercept() {
         std::process::exit(code);
     }
