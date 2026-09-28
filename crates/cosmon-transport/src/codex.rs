@@ -50,6 +50,10 @@ use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use cosmon_core::advisory_attempt::{
+    AdvisoryObservation, AdvisoryUnavailableReason, NativeAdvisoryProtocol, NativeAdvisoryTool,
+    NativeCapabilityObservation,
+};
 use cosmon_core::event_v2::{AdapterHandleState, AdapterProbeKind, AdapterProbeResult};
 use cosmon_core::id::WorkerId;
 use cosmon_state::events::worker_spawn::{
@@ -67,6 +71,175 @@ pub use crate::spawn::AdapterTelemetry;
 /// The adapter-name token carried on every Worker-Spawn Port event the
 /// codex transport emits.
 pub const ADAPTER_NAME: &str = "codex";
+
+/// Build a provider-neutral observation from injected Codex probe results.
+///
+/// The caller is responsible for invoking `codex --version` and
+/// `codex features list` with the same profile and `-c` settings as the root
+/// worker, and for supplying the tool names actually exposed to that root
+/// model. This pure translator never starts a process and never reads global
+/// configuration. A source checkout or default feature table is therefore not
+/// mistaken for an installed worker observation.
+///
+/// V1 and V2 share `spawn_agent` and `wait_agent`; exclusive tool names and
+/// the effective feature listing disambiguate them. Contradictory evidence is
+/// retained as `conflicting_evidence`, not silently resolved.
+#[must_use]
+pub fn observe_native_advisory_capabilities(
+    binary_version: Option<&str>,
+    realized_model: Option<&str>,
+    feature_listing: Option<&str>,
+    exposed_tool_names: Option<&[String]>,
+) -> NativeCapabilityObservation {
+    let binary_version = text_observation(binary_version, "codex.--version.v1");
+    let realized_model = text_observation(realized_model, "codex.root-model.v1");
+    let feature_flags = feature_listing.map_or(
+        AdvisoryObservation::Unavailable {
+            reason: AdvisoryUnavailableReason::NotObserved,
+        },
+        |listing| match parse_advisory_feature_listing(listing) {
+            Some(flags) => AdvisoryObservation::Observed {
+                value: flags,
+                source: "codex.features-list.v1".to_owned(),
+            },
+            None => AdvisoryObservation::Unavailable {
+                reason: AdvisoryUnavailableReason::MalformedSource,
+            },
+        },
+    );
+
+    let tools = exposed_tool_names.map_or(
+        AdvisoryObservation::Unavailable {
+            reason: AdvisoryUnavailableReason::NotObserved,
+        },
+        |names| AdvisoryObservation::Observed {
+            value: names
+                .iter()
+                .filter_map(|name| map_advisory_tool(name))
+                .collect(),
+            source: "codex.root-tool-exposure.v1".to_owned(),
+        },
+    );
+    let protocol = infer_advisory_protocol(&feature_flags, &tools);
+    NativeCapabilityObservation {
+        binary_version,
+        realized_model,
+        feature_flags,
+        tools,
+        protocol,
+    }
+}
+
+fn text_observation(value: Option<&str>, source: &str) -> AdvisoryObservation<String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => AdvisoryObservation::Observed {
+            value: value.to_owned(),
+            source: source.to_owned(),
+        },
+        None => AdvisoryObservation::Unavailable {
+            reason: AdvisoryUnavailableReason::NotObserved,
+        },
+    }
+}
+
+fn parse_advisory_feature_listing(
+    listing: &str,
+) -> Option<std::collections::BTreeMap<String, bool>> {
+    let wanted = ["multi_agent", "multi_agent_v2", "agent_message_board"];
+    let mut flags = std::collections::BTreeMap::new();
+    for line in listing.lines() {
+        let columns: Vec<&str> = line.split_whitespace().collect();
+        let Some(name) = columns
+            .first()
+            .copied()
+            .filter(|name| wanted.contains(name))
+        else {
+            continue;
+        };
+        let value = columns
+            .last()
+            .and_then(|value| value.parse::<bool>().ok())?;
+        flags.insert(name.to_owned(), value);
+    }
+    (!flags.is_empty()).then_some(flags)
+}
+
+fn map_advisory_tool(name: &str) -> Option<NativeAdvisoryTool> {
+    let name = name
+        .rsplit(['.', ':'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(name);
+    match name {
+        "spawn_agent" => Some(NativeAdvisoryTool::Spawn),
+        "send_message" => Some(NativeAdvisoryTool::Message),
+        "followup_task" => Some(NativeAdvisoryTool::FollowUp),
+        "wait_agent" => Some(NativeAdvisoryTool::Wait),
+        "interrupt_agent" => Some(NativeAdvisoryTool::Interrupt),
+        "list_agents" => Some(NativeAdvisoryTool::List),
+        "send_input" => Some(NativeAdvisoryTool::SendInput),
+        "resume_agent" => Some(NativeAdvisoryTool::Resume),
+        "close_agent" => Some(NativeAdvisoryTool::Close),
+        "create_channel" | "get_channels" | "list_threads" | "search_posts" | "read_thread"
+        | "read_post" | "subscribe" | "unsubscribe" | "post" => {
+            Some(NativeAdvisoryTool::MessageBoard)
+        }
+        _ => None,
+    }
+}
+
+fn infer_advisory_protocol(
+    features: &AdvisoryObservation<std::collections::BTreeMap<String, bool>>,
+    tools: &AdvisoryObservation<std::collections::BTreeSet<NativeAdvisoryTool>>,
+) -> AdvisoryObservation<NativeAdvisoryProtocol> {
+    let tool_protocol = tools.value().and_then(|tools| {
+        let v1 = tools
+            .iter()
+            .any(|tool| matches!(tool, NativeAdvisoryTool::Resume | NativeAdvisoryTool::Close));
+        let v2 = tools.iter().any(|tool| {
+            matches!(
+                tool,
+                NativeAdvisoryTool::FollowUp
+                    | NativeAdvisoryTool::Interrupt
+                    | NativeAdvisoryTool::List
+                    | NativeAdvisoryTool::MessageBoard
+            )
+        });
+        match (v1, v2) {
+            (true, false) => Some(NativeAdvisoryProtocol::V1),
+            (false, true) => Some(NativeAdvisoryProtocol::V2),
+            _ => None,
+        }
+    });
+    let feature_protocol = features.value().and_then(|features| {
+        if features.get("multi_agent_v2") == Some(&true) {
+            Some(NativeAdvisoryProtocol::V2)
+        } else if features.get("multi_agent") == Some(&true) {
+            Some(NativeAdvisoryProtocol::V1)
+        } else {
+            None
+        }
+    });
+    match (tool_protocol, feature_protocol) {
+        (Some(tool), Some(feature)) if tool != feature => AdvisoryObservation::Unavailable {
+            reason: AdvisoryUnavailableReason::ConflictingEvidence,
+        },
+        (Some(protocol), _) => AdvisoryObservation::Observed {
+            value: protocol,
+            source: "codex.root-tool-exposure.v1".to_owned(),
+        },
+        (None, Some(protocol)) => AdvisoryObservation::Observed {
+            value: protocol,
+            source: "codex.features-list.v1".to_owned(),
+        },
+        (None, None) => AdvisoryObservation::Unavailable {
+            reason: if features.value().is_some() || tools.value().is_some() {
+                AdvisoryUnavailableReason::Unsupported
+            } else {
+                AdvisoryUnavailableReason::NotObserved
+            },
+        },
+    }
+}
 
 /// Default config-file path for the version pin (relative to the
 /// cosmon project root). Operator may override per-call via
@@ -964,6 +1137,7 @@ fn shell_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cosmon_core::advisory_attempt::AdvisoryUnavailableReason;
     use cosmon_core::event_v2::{Envelope, EventV2};
     use cosmon_core::id::MoleculeId;
     use std::fs;
@@ -980,6 +1154,53 @@ mod tests {
 
     fn telemetry(state_dir: &Path) -> AdapterTelemetry {
         AdapterTelemetry::new(mol(), wkr(), state_dir.to_owned(), "uuid-codex")
+    }
+
+    #[test]
+    fn advisory_probe_records_effective_v1_surface() {
+        let listing = "multi_agent stable true\nmulti_agent_v2 stable false\nagent_message_board under-development false\n";
+        let tools = vec![
+            "spawn_agent".to_owned(),
+            "send_input".to_owned(),
+            "resume_agent".to_owned(),
+            "wait_agent".to_owned(),
+            "close_agent".to_owned(),
+        ];
+        let observed = observe_native_advisory_capabilities(
+            Some("codex-cli 0.157.1"),
+            Some("model-a"),
+            Some(listing),
+            Some(&tools),
+        );
+        assert_eq!(observed.protocol.value(), Some(&NativeAdvisoryProtocol::V1));
+        let exposed = observed.tools.value().unwrap();
+        assert!(exposed.contains(&NativeAdvisoryTool::SendInput));
+        assert!(exposed.contains(&NativeAdvisoryTool::Resume));
+        assert!(!exposed.contains(&NativeAdvisoryTool::FollowUp));
+    }
+
+    #[test]
+    fn advisory_probe_does_not_hide_feature_tool_conflict() {
+        let listing = "multi_agent stable true\nmulti_agent_v2 stable false\n";
+        let tools = vec!["spawn_agent".to_owned(), "followup_task".to_owned()];
+        let observed = observe_native_advisory_capabilities(
+            Some("codex-cli 0.157.1"),
+            None,
+            Some(listing),
+            Some(&tools),
+        );
+        assert!(matches!(
+            observed.protocol,
+            AdvisoryObservation::Unavailable {
+                reason: AdvisoryUnavailableReason::ConflictingEvidence
+            }
+        ));
+        assert!(matches!(
+            observed.realized_model,
+            AdvisoryObservation::Unavailable {
+                reason: AdvisoryUnavailableReason::NotObserved
+            }
+        ));
     }
 
     fn read_envelopes(state_dir: &Path) -> Vec<Envelope> {
