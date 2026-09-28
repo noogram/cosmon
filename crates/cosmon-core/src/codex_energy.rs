@@ -592,7 +592,11 @@ mod tests {
         assert_eq!(codex.output_per_mtok, 14.0);
 
         assert!(codex_price_for("gpt-5-codex").is_some());
-        assert!(codex_price_for("gpt-5.6-sol").is_none());
+        let gpt_5_6_sol = codex_price_for("gpt-5.6-sol").unwrap();
+        assert_eq!(gpt_5_6_sol.input_per_mtok, 4.0);
+        assert_eq!(gpt_5_6_sol.cached_input_per_mtok, 0.4);
+        assert_eq!(gpt_5_6_sol.output_per_mtok, 20.0);
+        assert!(codex_price_for("gpt-5.6-sol-preview").is_none());
     }
 
     #[test]

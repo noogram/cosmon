@@ -17,9 +17,14 @@ from provider documentation are accepted.
 
 ## Sources and limitations
 
-The `standard-2026-09-28` card was checked on 2026-09-28 against the official
-model cards and price lists recorded in each entry. Primary references are:
+The `standard-2026-09-28-codex` card was checked on 2026-09-28 against the
+official model cards and price lists recorded in each entry. Primary references
+are:
 
+- The OpenAI [API pricing page](https://developers.openai.com/api/docs/pricing)
+  for the exact Codex-observed GPT-6, GPT-5.6, and GPT-5.5 ids. The card uses
+  its Standard short-context rates; GPT-5.5 is limited to its published
+  below-272K-context band.
 - OpenAI model cards for
   [GPT-5-Codex](https://developers.openai.com/api/docs/models/gpt-5-codex),
   [GPT-5.1-Codex](https://developers.openai.com/api/docs/models/gpt-5.1-codex),
