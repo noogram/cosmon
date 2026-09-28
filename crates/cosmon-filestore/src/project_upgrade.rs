@@ -435,9 +435,11 @@ cs done <id>                                    # merge to the base branch + tea
 Use `cs tackle`, not `cs run`, when you intend to read the result before merging: `cs run` \
 walks a whole DAG and calls `cs done` on completion itself, closing the review window.\n\
 \n\
-Stopping early is not the end of a mission: the work sits on `feat/<id>` in `.worktrees/<id>` \
-until you run `cs done <id>` (keep the partial work) or `cs collapse <id> --reason \"…\"` \
-(drop it). `cs status` lists what is still waiting on one of the two.\n\
+Stopping early is not the end of a mission: the work stays on the branch and worktree recorded \
+at dispatch until you run `cs done <id>` (keep the partial work) or `cs collapse <id> --reason \
+\"…\"` (record abandonment). `cs complete`, `cs collapse`, and `cs status` print the exact \
+branch, recorded worktree (including overrides), and concrete `cs done` command. A collapse \
+preserves the branch for audit; it never licenses unaudited deletion.\n\
 \n\
 Finishing a mission means `cs status` reads clean afterward — no zombie session, no \
 un-harvested `Completed` molecule, no molecule branch without a harvest or an audit verdict. \

@@ -124,6 +124,7 @@ pub mod vllm_mlx;
 pub mod wait;
 pub mod whisper;
 pub mod witness;
+pub(crate) mod work_location;
 pub mod worktree_reclaim;
 
 /// Shared context derived from global CLI flags.

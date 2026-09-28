@@ -238,9 +238,11 @@ struct BacklogInfo {
 struct HarvestableInfo {
     /// How many `Completed`, un-archived molecules are waiting.
     count: usize,
-    /// Their ids, oldest first — capped in the rendered line, not here:
-    /// `--json` gives a machine reader the whole list.
+    /// Their ids, oldest first. Retained for callers that consumed the first
+    /// #95 JSON shape; `items` adds the actionable location records.
     ids: Vec<String>,
+    /// Full location and concrete harvest command for every waiting molecule.
+    items: Vec<super::work_location::WorkLocation>,
 }
 
 /// Unmerged-branch level and its movement since the last sample.
@@ -371,9 +373,15 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .filter(|m| super::peek::PhaseFilter::is_harvestable(m.status, m.archived))
         .collect();
     harvestable_mols.sort_by_key(|m| m.updated_at);
+    let repo_root = super::work_location::repo_root(ctx);
+    let items = harvestable_mols
+        .iter()
+        .map(|m| super::work_location::WorkLocation::from_state(m, &fleet, &repo_root))
+        .collect();
     let harvestable = HarvestableInfo {
         count: harvestable_mols.len(),
         ids: harvestable_mols.iter().map(|m| m.id.to_string()).collect(),
+        items,
     };
 
     // Leases are left out of the kind breakdown for the same reason they are
@@ -621,24 +629,24 @@ fn render_surfaces_token(surfaces: &SurfaceStatus) -> String {
 /// is empty, the same convention [`render_unmerged_token`] uses for a gauge
 /// with nothing to report.
 ///
-/// Names at most three ids so the line stays one line; `cs peek --phase
-/// harvestable` is where the rest live.
-fn render_harvestable_line(h: &HarvestableInfo) -> Option<String> {
+/// Every item gets its own line: a count plus generic verbs is not a location.
+fn render_harvestable_lines(h: &HarvestableInfo) -> Vec<String> {
     if h.count == 0 {
-        return None;
+        return Vec::new();
     }
-    let shown: Vec<&str> = h.ids.iter().take(3).map(String::as_str).collect();
-    let named = shown.join(", ");
-    let more = if h.count > shown.len() {
-        format!(" (+{} more)", h.count - shown.len())
-    } else {
-        String::new()
-    };
-    Some(format!(
-        "  {}: {named}{more} — `cs done <id>` to keep the work, `cs collapse <id> --reason \
-             …` to drop it",
-        "Harvest".bold()
-    ))
+    h.items
+        .iter()
+        .map(|item| {
+            format!(
+                "  {} {} — {}; or `cs collapse {} --reason \"…\"` to record abandonment \
+                 (branch retained for audit)",
+                "Harvest".bold(),
+                item.molecule,
+                item.render(),
+                item.molecule
+            )
+        })
+        .collect()
 }
 
 /// The unmerged-branch token, level and movement.
@@ -780,7 +788,7 @@ fn render_compact(p: &Pulse) {
     }
 
     // Harvest queue — un-harvested work is never silent (issue #95).
-    if let Some(line) = render_harvestable_line(p.harvestable) {
+    for line in render_harvestable_lines(p.harvestable) {
         println!("{}", line.yellow());
     }
 }
@@ -850,9 +858,12 @@ fn render_verbose(p: &Pulse) {
 
     // Harvest queue section — issue #95: work sitting only on `feat/<id>`
     // must be as visible as the backlog it sits beside.
-    if let Some(line) = render_harvestable_line(p.harvestable) {
+    let harvest_lines = render_harvestable_lines(p.harvestable);
+    if !harvest_lines.is_empty() {
         println!();
-        println!("{}", line.yellow());
+        for line in harvest_lines {
+            println!("{}", line.yellow());
+        }
     }
 
     // Sessions section

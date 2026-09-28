@@ -16,10 +16,13 @@ use std::path::Path;
 use std::process::Command;
 
 use chrono::Utc;
-use cosmon_core::id::{FleetId, FormulaId, MoleculeId};
+use cosmon_core::agent::AgentRole;
+use cosmon_core::clearance::Clearance;
+use cosmon_core::id::{AgentId, FleetId, FormulaId, MoleculeId, WorkerId};
 use cosmon_core::molecule::MoleculeStatus;
+use cosmon_core::worker::WorkerStatus;
 use cosmon_filestore::FileStore;
-use cosmon_state::{Fleet, MoleculeData, StateStore};
+use cosmon_state::{Fleet, MoleculeData, StateStore, WorkerData};
 
 fn completed(id: &str, archived: bool) -> MoleculeData {
     MoleculeData {
@@ -187,5 +190,73 @@ fn empty_harvest_queue_is_silent() {
     assert!(
         !text.to_lowercase().contains("harvest"),
         "nothing to harvest must not print a harvest line: {text}"
+    );
+}
+
+/// The old rendering capped itself at three ids. The queue is an action list,
+/// so every item must carry its own branch, recorded checkout, and command.
+#[test]
+fn status_lists_every_item_and_honors_a_worktree_override() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonical tempdir");
+    let state_dir = tmp.path().join("state");
+    let ids = [
+        "task-20260101-1001",
+        "task-20260101-1002",
+        "task-20260101-1003",
+        "task-20260101-1004",
+    ];
+    let mut molecules: Vec<_> = ids.iter().map(|id| completed(id, false)).collect();
+    let worker_id = WorkerId::new("status-location-worker").expect("valid worker id");
+    molecules[3].assigned_worker = Some(worker_id.clone());
+    molecules[3].originating_branch = Some("feat/recorded-location".to_owned());
+
+    let mut fleet = Fleet::default();
+    let worker = WorkerData::new(
+        worker_id.clone(),
+        AgentId::new("tackle").expect("valid agent id"),
+        AgentRole::Implementation,
+        Clearance::Write,
+        WorkerStatus::Active,
+    )
+    .with_repo("overrides/status-location")
+    .with_molecule(molecules[3].id.clone());
+    fleet.workers.insert(worker_id, worker);
+    let store = FileStore::new(&state_dir);
+    store.save_fleet(&fleet).expect("save fleet");
+    for molecule in &molecules {
+        store
+            .save_molecule(&molecule.id, molecule)
+            .expect("save molecule");
+    }
+
+    let value = status_json(tmp.path(), &state_dir);
+    assert_eq!(value["harvestable"]["count"], 4);
+    let items = value["harvestable"]["items"]
+        .as_array()
+        .expect("items array");
+    assert_eq!(items.len(), 4, "JSON must not cap the action list");
+    let overridden = items
+        .iter()
+        .find(|item| item["molecule"] == ids[3])
+        .expect("overridden item");
+    assert_eq!(overridden["branch"], "feat/recorded-location");
+    assert_eq!(
+        overridden["worktree"],
+        root.join("overrides/status-location").display().to_string()
+    );
+    assert_eq!(overridden["harvest_command"], format!("cs done {}", ids[3]));
+
+    let text = status_text(tmp.path(), &state_dir);
+    for id in ids {
+        assert!(
+            text.contains(&format!("cs done {id}")),
+            "missing {id}: {text}"
+        );
+    }
+    assert!(text.contains("feat/recorded-location"), "{text}");
+    assert!(
+        text.contains(&root.join("overrides/status-location").display().to_string()),
+        "{text}"
     );
 }
