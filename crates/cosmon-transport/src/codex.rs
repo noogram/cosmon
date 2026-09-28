@@ -399,26 +399,6 @@ impl CodexMode {
 /// exec` is left untouched so batch telemetry capture is unchanged.
 pub const INTERACTIVE_LOG_LEVEL: &str = "error";
 
-/// Per-run codex config override that disables the CLI's startup
-/// self-update for the duration of the worker's run.
-///
-/// codex's standalone installer channel checks for a new release on
-/// startup and can install it mid-session ("Installing standalone
-/// package …", "Update ran successfully! Please restart Codex."),
-/// after which the process exits — the pane dies with status 0 and the
-/// worker is silently lost while the molecule stays `active`
-/// (task-20260718-230a, the codex-sol death of task-20260718-37fc).
-/// `check_for_update_on_startup = false` is codex's only supported
-/// update-check knob; carrying it as a per-invocation `-c` override
-/// scopes the kill to the worker's run without editing the operator's
-/// `~/.codex/config.toml`.
-///
-/// This override is **structural, not preferential**: it is emitted in
-/// both launch modes and is *not* part of the [`DEFAULT_INTERACTIVE_ARGS`]
-/// set an `[adapters.codex].extra_args` row replaces — a flag override
-/// must never silently re-arm mid-run self-updates.
-pub const NO_STARTUP_UPDATE_OVERRIDE: &[&str] = &["-c", "check_for_update_on_startup=false"];
-
 /// Default flags for an interactive codex worker.
 ///
 /// - `--dangerously-bypass-approvals-and-sandbox` — no tool approval prompts
@@ -510,9 +490,9 @@ pub struct CodexSessionConfig {
     /// should be writable alongside the primary workspace"): each root here
     /// is emitted as one `--add-dir` on the spawn command.
     ///
-    /// **Structural, not preferential.** Like [`NO_STARTUP_UPDATE_OVERRIDE`],
-    /// these `--add-dir` flags are emitted in *both* launch modes and are
-    /// **not** part of the [`DEFAULT_INTERACTIVE_ARGS`] set an
+    /// **Structural, not preferential.** These `--add-dir` flags are emitted
+    /// in *both* launch modes and are **not** part of the
+    /// [`DEFAULT_INTERACTIVE_ARGS`] set an
     /// `[adapters.codex].extra_args` row replaces — an operator who overrides
     /// the flags to adopt a genuine `--sandbox workspace-write` posture (the
     /// escape hatch that *drops* the nuclear
@@ -589,8 +569,11 @@ pub struct GitIdentity {
 ///   global codex config (issue #84,
 ///   [`cosmon_core::worker_argv::codex_worker_profile_args`]).
 ///
-/// Both modes carry [`NO_STARTUP_UPDATE_OVERRIDE`] unconditionally — a codex
-/// worker must never self-update (and die) mid-run.
+/// Neither mode overrides `check_for_update_on_startup`: update policy belongs
+/// to the operator. An explicit value can still arrive through
+/// [`CodexSessionConfig::harness_args`], while an interactive update prompt is
+/// surfaced by the default `cs patrol` dialogue scan and blocks `cs whisper`
+/// delivery. `cs tackle` also inspects the pane before briefing delivery.
 #[must_use]
 pub fn build_codex_command(config: &CodexSessionConfig) -> String {
     let bin = shell_escape(&config.binary.to_string_lossy());
@@ -598,7 +581,6 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
         CodexMode::Exec => {
             let mut cmd = bin;
             cmd.push_str(" exec");
-            push_no_update_override(&mut cmd);
             push_writable_roots(&mut cmd, &config.writable_roots);
             push_harness_args(&mut cmd, &config.harness_args);
             if let Some(ref model) = config.model {
@@ -617,7 +599,6 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             // No positional prompt — it is injected post-readiness (the
             // claude-mirror that also fixes the submission bug).
             let mut cmd = format!("RUST_LOG={INTERACTIVE_LOG_LEVEL} {bin}");
-            push_no_update_override(&mut cmd);
             push_writable_roots(&mut cmd, &config.writable_roots);
             push_harness_args(&mut cmd, &config.harness_args);
             // Issue #84: the worker's own profile overlay, from the builder
@@ -683,17 +664,6 @@ fn push_api_key_strip(cmd: String, pass_api_key: bool) -> String {
         prefix.push_str(var);
     }
     format!("{prefix} {cmd}")
-}
-
-/// Append [`NO_STARTUP_UPDATE_OVERRIDE`] to an in-flight command string.
-///
-/// The tokens are within [`shell_escape`]'s safe ASCII subset by
-/// construction, so they are appended verbatim.
-fn push_no_update_override(cmd: &mut String) {
-    for token in NO_STARTUP_UPDATE_OVERRIDE {
-        cmd.push(' ');
-        cmd.push_str(token);
-    }
 }
 
 /// Append one structural `--add-dir <root>` flag per extra writable root
@@ -1449,16 +1419,13 @@ mod tests {
     }
 
     /// Exec mode keeps the legacy `codex exec '<prompt>'` fire-and-forget
-    /// shape, now carrying the self-update kill (task-20260718-230a) between
-    /// the subcommand and the prompt, and the default API-key strip ahead of
-    /// the binary.
+    /// shape, with the default API-key strip ahead of the binary.
     #[test]
     fn build_command_exec_mode_is_unchanged() {
         let c = cfg(CodexMode::Exec, Some("do the thing"), vec![]);
         assert_eq!(
             build_codex_command(&c),
-            "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec \
-             -c check_for_update_on_startup=false 'do the thing'"
+            "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec 'do the thing'"
         );
     }
 
@@ -1467,8 +1434,7 @@ mod tests {
         let c = cfg(CodexMode::Exec, Some("it's done"), vec![]);
         assert_eq!(
             build_codex_command(&c),
-            "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec \
-             -c check_for_update_on_startup=false 'it'\\''s done'"
+            "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec 'it'\\''s done'"
         );
     }
 
@@ -1554,7 +1520,7 @@ mod tests {
         assert_eq!(
             cmd,
             "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
-             -c check_for_update_on_startup=false -p cosmon-worker-polecat-codex \
+             -p cosmon-worker-polecat-codex \
              --dangerously-bypass-approvals-and-sandbox --no-alt-screen"
         );
         // The prompt must NOT leak onto the command line in interactive mode.
@@ -1573,26 +1539,33 @@ mod tests {
         assert_eq!(
             build_codex_command(&c),
             "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
-             -c check_for_update_on_startup=false -p cosmon-worker-polecat-codex \
+             -p cosmon-worker-polecat-codex \
              -m gpt-5 --no-alt-screen"
         );
     }
 
-    /// task-20260718-230a: the standalone codex CLI can self-update on
-    /// startup and exit ("Update ran successfully! Please restart Codex."),
-    /// killing the pane mid-molecule. Both launch modes must carry the
-    /// per-run kill switch, and an `extra_args` override must not drop it.
+    /// Startup update policy belongs to the operator: absence preserves the
+    /// active codex configuration, while an explicit harness setting is
+    /// carried in both modes.
     #[test]
-    fn build_command_always_disables_startup_self_update() {
-        let interactive = cfg(CodexMode::Interactive, None, vec![]);
-        let exec = cfg(CodexMode::Exec, Some("batch"), vec![]);
-        let overridden = cfg(CodexMode::Interactive, None, vec!["--sandbox".into()]);
-        for c in [interactive, exec, overridden] {
-            let cmd = build_codex_command(&c);
-            assert!(
-                cmd.contains("-c check_for_update_on_startup=false"),
-                "self-update kill missing from {cmd:?}"
-            );
+    fn build_command_preserves_operator_startup_update_policy() {
+        for mode in [CodexMode::Interactive, CodexMode::Exec] {
+            let bare = cfg(mode, Some("batch"), vec![]);
+            let cmd = build_codex_command(&bare);
+            assert!(!cmd.contains("check_for_update_on_startup"), "got {cmd:?}");
+
+            for value in ["true", "false"] {
+                let mut explicit = cfg(mode, Some("batch"), vec![]);
+                explicit.harness_args = vec![
+                    "-c".to_owned(),
+                    format!("check_for_update_on_startup={value}"),
+                ];
+                let cmd = build_codex_command(&explicit);
+                assert!(
+                    cmd.contains(&format!("-c check_for_update_on_startup={value}")),
+                    "operator update policy missing from {cmd:?}"
+                );
+            }
         }
     }
 

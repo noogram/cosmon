@@ -239,7 +239,7 @@ pub struct Args {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Dialogue-scan: capture each running worker's pane and classify any
+    /// Capture each running worker's pane and classify any
     /// blocking dialogue sitting in it (tool-permission prompt vs. the Claude
     /// Code spend-/usage-limit dialog vs. a codex interactive dialog — update
     /// prompt, reasoning-level picker, rate-limit "switch model" menu; issue
@@ -252,11 +252,12 @@ pub struct Args {
     /// `--auto-confirm-safe` is also passed. A recognised codex dialog is
     /// reported alongside its `class` (`codex_dialog` in `--json`) so the
     /// finding says *why* the worker is blocked, not only how severe.
-    /// Report-only by default (no keystroke) so it is safe to schedule.
-    #[arg(long)]
+    /// Runs on every patrol by default; the flag remains accepted for
+    /// existing scheduled invocations. No keystroke is sent by default.
+    #[arg(long, default_value_t = true)]
     pub dialogue_scan: bool,
 
-    /// With `--dialogue-scan`, opt in to firing the default-accept keystroke
+    /// Opt in to firing the default-accept keystroke
     /// (Enter) on **safe** permission-class prompts only. Money stakes and
     /// unrecognised blocks are still never auto-confirmed — that refusal is
     /// encoded in the classifier, not in this flag. Off by default: the safe
@@ -264,13 +265,13 @@ pub struct Args {
     #[arg(long)]
     pub auto_confirm_safe: bool,
 
-    /// Number of pane lines `--dialogue-scan` captures per worker (default 40).
+    /// Number of pane lines the dialogue scan captures per worker (default 40).
     /// The live prompt sits at the bottom of the pane, so a small tail is
     /// enough; raise it for TUIs that render tall dialogs.
     #[arg(long, default_value_t = 40)]
     pub dialogue_lines: usize,
 
-    /// Blocked-duration threshold in seconds for `--dialogue-scan` (default
+    /// Blocked-duration threshold in seconds for the dialogue scan (default
     /// 900 = 15 min). A molecule whose progress has been frozen longer than
     /// this *and* is still sitting on a blocking dialogue escalates to a
     /// **canary RED** operator page — the heartbeat half of the primitive:
@@ -3387,8 +3388,6 @@ pub(crate) fn dialogue_scan_sweep(
     };
 
     let events_path = state_dir.join("events.jsonl");
-    let dialogue_tag = Tag::new("dialogue-blocked").ok();
-
     for mol in running {
         let Some(wid) = mol.assigned_worker.as_ref() else {
             continue;
@@ -3401,6 +3400,7 @@ pub(crate) fn dialogue_scan_sweep(
         };
         let scan = classify_pane(&pane);
         if scan.class == DialogueClass::None {
+            update_dialogue_tags(store, &mol.id, now, None);
             continue;
         }
         let codex_kind = classify_codex_dialog(&pane);
@@ -3433,22 +3433,18 @@ pub(crate) fn dialogue_scan_sweep(
             }
             DialogueAction::Alerted | DialogueAction::CanaryRed => {
                 // Surface to a human; tag so `cs ensemble` shows the block.
-                if let Some(tag) = dialogue_tag.clone() {
-                    if let Ok(mut m) = store.load_molecule(&mol.id) {
-                        if m.tags.insert(tag) {
-                            m.updated_at = now;
-                            let _ = store.save_molecule(&mol.id, &m);
-                        }
-                    }
+                // If persistence is unavailable, still page: a missing tag
+                // must not silence a real blocked worker.
+                if update_dialogue_tags(store, &mol.id, now, Some(action)) {
+                    spawn_notify_for_dialogue(
+                        &mol.id,
+                        Some(wid),
+                        scan.class,
+                        action,
+                        blocked_seconds,
+                        scan.evidence.as_deref(),
+                    );
                 }
-                spawn_notify_for_dialogue(
-                    &mol.id,
-                    Some(wid),
-                    scan.class,
-                    action,
-                    blocked_seconds,
-                    scan.evidence.as_deref(),
-                );
             }
             DialogueAction::Reported => {}
         }
@@ -3479,11 +3475,38 @@ pub(crate) fn dialogue_scan_sweep(
     report
 }
 
+/// Maintain the live blocked marker and return whether this is a new page.
+/// Missing state does not suppress a real alert.
+fn update_dialogue_tags(
+    store: &dyn StateStore,
+    mol_id: &MoleculeId,
+    now: chrono::DateTime<Utc>,
+    action: Option<DialogueAction>,
+) -> bool {
+    let (Ok(blocked), Ok(canary), Ok(mut mol)) = (
+        Tag::new("dialogue-blocked"),
+        Tag::new("dialogue-canary-red"),
+        store.load_molecule(mol_id),
+    ) else {
+        return action.is_some();
+    };
+    let changed = match action {
+        Some(DialogueAction::CanaryRed) => mol.tags.insert(blocked) | mol.tags.insert(canary),
+        Some(_) => mol.tags.insert(blocked),
+        None => mol.tags.remove(&blocked) | mol.tags.remove(&canary),
+    };
+    if changed {
+        mol.updated_at = now;
+        let _ = store.save_molecule(mol_id, &mol);
+    }
+    changed
+}
+
 /// Fire a single `cs notify` for a paging dialogue finding. Detached +
 /// best-effort — a slow channel must never block the patrol. Money stakes and
 /// canary-RED escalations page at `alert` level; an unrecognised block pages
 /// at `warn`.
-fn spawn_notify_for_dialogue(
+pub(crate) fn spawn_notify_for_dialogue(
     mol_id: &MoleculeId,
     worker_id: Option<&WorkerId>,
     class: cosmon_core::dialogue::DialogueClass,
@@ -3581,6 +3604,7 @@ fn print_dialogue_report(report: &DialogueScanReport) {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, Utc};
+    use clap::FromArgMatches as _;
     use cosmon_core::agent::AgentRole;
     use cosmon_core::clearance::Clearance;
     use cosmon_core::id::{AgentId, FormulaId, MoleculeId, WorkerId};
@@ -3594,6 +3618,15 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn patrol_scans_dialogues_without_an_opt_in_flag() {
+        let command = <Args as clap::Args>::augment_args(clap::Command::new("patrol"));
+        let matches = command.try_get_matches_from(["patrol"]).unwrap();
+        let args = Args::from_arg_matches(&matches).unwrap();
+        assert!(args.dialogue_scan);
+        assert!(!args.auto_confirm_safe);
+    }
 
     #[test]
     fn health_and_nudge_share_the_boot_stall_grace() {
@@ -6044,5 +6077,48 @@ mod tests {
         );
         assert_eq!(report.scanned, 1);
         assert!(report.findings.is_empty());
+    }
+
+    #[test]
+    fn dialogue_sweep_clears_blocked_tag_after_menu_resolves() {
+        std::env::set_var("COSMON_NOTIFY_DRY_RUN", "1");
+        let (tmp, store) = make_store();
+        let mol = make_molecule("task-20260928-menu", MoleculeStatus::Running, Some("w1"));
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let backend = mock_with_worker("w1", "Update available! 0.154.0 → 0.157.0");
+        let molecules = store.list_molecules(&MoleculeFilter::default()).unwrap();
+        let first = dialogue_scan_sweep(
+            &store,
+            tmp.path(),
+            &molecules,
+            Some(&backend),
+            &opts(false),
+            Utc::now(),
+        );
+        assert_eq!(first.findings.len(), 1);
+        assert!(store
+            .load_molecule(&mol.id)
+            .unwrap()
+            .tags
+            .iter()
+            .any(|tag| tag.as_str() == "dialogue-blocked"));
+
+        backend.set_canned_output("• Working");
+        let molecules = store.list_molecules(&MoleculeFilter::default()).unwrap();
+        let second = dialogue_scan_sweep(
+            &store,
+            tmp.path(),
+            &molecules,
+            Some(&backend),
+            &opts(false),
+            Utc::now(),
+        );
+        assert!(second.findings.is_empty());
+        assert!(!store
+            .load_molecule(&mol.id)
+            .unwrap()
+            .tags
+            .iter()
+            .any(|tag| tag.as_str() == "dialogue-blocked"));
     }
 }

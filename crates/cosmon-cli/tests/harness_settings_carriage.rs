@@ -277,44 +277,39 @@ fn pinning_nothing_changes_no_command_on_any_adapter() {
             "{adapter} must render no tokens for an empty map"
         );
     }
-    // codex's command already carries one structural `-c`
-    // (`check_for_update_on_startup=false`, NO_STARTUP_UPDATE_OVERRIDE), which
-    // is cosmon's own override and not a harness setting. So the property is
-    // *no additional* `-c`, counted — not the absence of the token.
     let bare = build_codex_command(&codex_config(vec![]));
     assert_eq!(
         bare.matches(" -c ").count(),
-        1,
-        "no harness pin → only cosmon's own structural `-c` survives: {bare}"
+        0,
+        "no harness pin must invent no codex config override: {bare}"
     );
 }
 
-/// Harness settings share codex's `-c` channel with cosmon's own structural
-/// override, and must be **additive** to it rather than replacing it.
-///
-/// The failure this pins is quiet: a harness pin that displaced
-/// `check_for_update_on_startup=false` would leave every codex worker able to
-/// stall on a startup update prompt, and nothing about the pin would look
-/// wrong.
+/// Startup update policy is a normal operator-owned harness setting, carried
+/// beside the reasoning pin rather than injected by the transport.
 #[test]
-fn a_harness_pin_is_additive_to_cosmons_own_structural_override() {
-    let flag = parse_harness_flags(&["model_reasoning_effort=high"]).expect("well-formed pair");
+fn operator_update_policy_and_reasoning_pin_share_the_codex_channel() {
+    let flag = parse_harness_flags(&[
+        "check_for_update_on_startup=false",
+        "model_reasoning_effort=high",
+    ])
+    .expect("well-formed pairs");
     let resolved = resolve_harness_settings(&flag, None);
     let args = render_harness_args("codex", &resolved).expect("codex carries the map");
     let cmd = build_codex_command(&codex_config(argv(&args)));
 
     assert!(
         cmd.contains("-c check_for_update_on_startup=false"),
-        "cosmon's structural override must survive a harness pin: {cmd}"
+        "the operator's explicit update policy must be carried: {cmd}"
     );
     assert!(
         cmd.contains("-c model_reasoning_effort=high"),
-        "and the pin must be there beside it: {cmd}"
+        "the reasoning pin must be there beside it: {cmd}"
     );
     assert_eq!(
         cmd.matches(" -c ").count(),
         2,
-        "exactly one structural override plus one pinned key: {cmd}"
+        "exactly the two operator-pinned keys must be present: {cmd}"
     );
 }
 

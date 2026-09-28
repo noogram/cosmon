@@ -306,6 +306,10 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              and every other autonomous path (patrol, heal, cs ask --execute).\n\
              'cs patrol' waits 120 seconds after a tackle before declaring its\n  \
              worker dead; '--dead-worker-grace-secs' configures that wait.\n\n\
+             Every patrol also scans live panes for blocking dialogs and pages\n  \
+             the operator for update, reasoning, or rate-limit menus. 'cs tackle'\n  \
+             checks a codex launch menu before sending its briefing. Startup\n  \
+             update policy comes from the operator's codex configuration.\n\n\
              SCHEDULER DRY-RUN OUTPUT — four row types, one per patrol:\n  \
              FIRE     patrol is due; dispatch would spawn the command now\n  \
              SKIP     gate rejected (disabled, kill-switch, not-due-yet,\n           \

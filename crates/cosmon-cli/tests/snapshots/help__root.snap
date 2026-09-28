@@ -130,6 +130,11 @@ and every other autonomous path (patrol, heal, cs ask --execute).
 'cs patrol' waits 120 seconds after a tackle before declaring its
   worker dead; '--dead-worker-grace-secs' configures that wait.
 
+Every patrol also scans live panes for blocking dialogs and pages
+  the operator for update, reasoning, or rate-limit menus. 'cs tackle'
+  checks a codex launch menu before sending its briefing. Startup
+  update policy comes from the operator's codex configuration.
+
 SCHEDULER DRY-RUN OUTPUT — four row types, one per patrol:
   FIRE     patrol is due; dispatch would spawn the command now
   SKIP     gate rejected (disabled, kill-switch, not-due-yet,
