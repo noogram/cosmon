@@ -119,7 +119,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         match complete_one(&store, &ops_dir, mol_id, &args.reason) {
             Ok(prev_status) => {
                 let already = prev_status == MoleculeStatus::Completed;
-                let branch = format!("feat/{mol_id}");
+                let completed = store.load_molecule(mol_id)?;
+                let fleet = store.load_fleet().unwrap_or_default();
+                let location = super::work_location::WorkLocation::from_state(
+                    &completed,
+                    &fleet,
+                    &super::work_location::repo_root(ctx),
+                );
                 if ctx.json {
                     results.push(serde_json::json!({
                         "molecule": mol_id.as_str(),
@@ -127,8 +133,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                         "new_status": "completed",
                         "already_completed": already,
                         "reason": args.reason,
-                        "branch": branch,
-                        "harvest_command": format!("cs done {mol_id}"),
+                        "branch": location.branch,
+                        "worktree": location.worktree,
+                        "harvest_command": location.harvest_command,
                     }));
                 } else if already {
                     println!(
@@ -136,6 +143,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                         MoleculeStatus::Completed.emoji(),
                         mol_id
                     );
+                    println!("  {}", location.render());
                 } else {
                     println!(
                         "{} {} completed (was {})",
@@ -148,9 +156,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     // where it is and how to bring it back, every time,
                     // so stopping here is never silent.
                     println!(
-                        "  work is on `{branch}` in `.worktrees/{mol_id}` — run `cs done \
-                         {mol_id}` to merge it, or `cs collapse {mol_id} --reason \"…\"` to \
-                         drop it instead."
+                        "  {}\n  or record abandonment with `cs collapse {mol_id} --reason \"…\"`; \
+                         that preserves the branch for audit.",
+                        location.render()
                     );
                 }
             }

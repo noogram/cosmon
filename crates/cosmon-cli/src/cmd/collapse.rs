@@ -123,11 +123,21 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     };
 
     if prev_status == MoleculeStatus::Collapsed {
+        let fleet = store.load_fleet().unwrap_or_default();
+        let location = super::work_location::WorkLocation::from_state(
+            &mol_data,
+            &fleet,
+            &super::work_location::repo_root(ctx),
+        );
         if ctx.json {
             let out = serde_json::json!({
                 "molecule": mol_id.as_str(),
                 "status": "collapsed",
                 "already_collapsed": true,
+                "branch": location.branch,
+                "worktree": location.worktree,
+                "harvest_command": location.harvest_command,
+                "branch_deletion_requires_audit": true,
             });
             println!("{}", serde_json::to_string(&out)?);
         } else {
@@ -136,6 +146,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 MoleculeStatus::Collapsed.emoji(),
                 mol_id
             );
+            println!("  {}", location.render());
+            println!("  collapse records abandonment only; audit the branch before deletion.");
         }
         return Ok(());
     }
@@ -241,6 +253,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 
     if ctx.json {
+        let fleet = store.load_fleet().unwrap_or_default();
+        let location = super::work_location::WorkLocation::from_state(
+            &updated,
+            &fleet,
+            &super::work_location::repo_root(ctx),
+        );
         let out = serde_json::json!({
             "molecule": mol_id.as_str(),
             "previous_status": prev_status_label,
@@ -250,6 +268,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             "reason_kind": reason_kind.as_ref().map(CollapseReason::as_str),
             "archived": updated.archived,
             "nudge_count": updated.nudge_count,
+            "branch": location.branch,
+            "worktree": location.worktree,
+            "harvest_command": location.harvest_command,
+            "branch_deletion_requires_audit": true,
         });
         println!("{}", serde_json::to_string(&out)?);
     } else {
@@ -265,6 +287,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             cause_label,
             args.reason
         );
+        let fleet = store.load_fleet().unwrap_or_default();
+        let location = super::work_location::WorkLocation::from_state(
+            &updated,
+            &fleet,
+            &super::work_location::repo_root(ctx),
+        );
+        println!("  {}", location.render());
+        println!("  collapse records abandonment only; audit the branch before deletion.");
         // Post-mortem nudge accounting (delib-20260420-1b02 P2):
         // surface how many times `cs patrol --nudge` had to poke this
         // molecule before it collapsed. > 2 nudges suggests an

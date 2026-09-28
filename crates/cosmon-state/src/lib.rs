@@ -39,12 +39,14 @@ pub mod ops;
 pub mod rebuild;
 pub mod token_meter;
 pub mod wait;
+pub mod work_location;
 
 pub use briefing_seal::BriefingSeal;
 pub use frontier::{Frontier, FRONTIER_SCHEMA_VERSION};
 pub use rebuild::{
     project_molecules_from_events, rebuild_all_missing, rebuild_molecule_state, RebuildOutcome,
 };
+pub use work_location::WorkLocation;
 
 /// Schema version for the archive subsystem.
 ///
