@@ -1,0 +1,20 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Admit bounded evidence from this member to another seat
+
+Usage: cs work send [OPTIONS] --to <TO>
+
+Options:
+      --config <PATH>        Path to configuration file
+      --to <TO>              Receiving seat
+      --file <FILE>          Read payload bytes from a file
+  -v, --verbose              Enable verbose output
+      --json                 Output in JSON format
+      --text <TEXT>          Use this text as the payload
+      --key <KEY>            Caller-chosen idempotency key; otherwise derived from sender, recipient and digest
+      --reply-to <REPLY_TO>  Key of the message being answered
+      --ttl <TTL>            Message lifetime override, in seconds
+      --phase <PHASE>        Free-form phase label for evidence only
+  -h, --help                 Print help

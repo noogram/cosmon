@@ -112,6 +112,9 @@ enum Command {
     #[command(after_help = cmd::examples::INBOX)]
     Inbox(cmd::inbox::Args),
 
+    /// Exchange bounded evidence within a declared work scope
+    Work(cmd::work::Args),
+
     /// Spark — capture a one-line operator intent into the Inbox (ADR-061)
     #[command(after_help = cmd::examples::SPARK)]
     Spark(cmd::spark::Args),
@@ -644,17 +647,22 @@ fn main() {
         let sid = operator_event::current_session_id();
         let nucleon_id = operator_event::current_nucleon_id();
         let orbitale_id = operator_event::current_orbitale_id();
-        operator_event::emit_operator_present(
-            &state_dir,
-            &sid,
-            nucleon_id.as_deref(),
-            orbitale_id.as_deref(),
-            // V0: Internal — cosmon writes the substrate, no-cloning
-            // theorem prevents downstream destructive-action gating
-            // from trusting this. A follow-up molecule wires the
-            // exogenous IoregSensor poll into this emission point.
-            cosmon_core::presence_sensor::PresenceSource::Internal,
-        );
+        // Work messages are evidence under ADR-182, not fleet events. A
+        // member's send/inbox/ack (and a pilot's declaration or list) must
+        // leave events.jsonl byte-identical for the lifecycle witness.
+        if !matches!(&cli.command, Command::Work(_)) {
+            operator_event::emit_operator_present(
+                &state_dir,
+                &sid,
+                nucleon_id.as_deref(),
+                orbitale_id.as_deref(),
+                // V0: Internal — cosmon writes the substrate, no-cloning
+                // theorem prevents downstream destructive-action gating
+                // from trusting this. A follow-up molecule wires the
+                // exogenous IoregSensor poll into this emission point.
+                cosmon_core::presence_sensor::PresenceSource::Internal,
+            );
+        }
 
         // OperatorSigned — record destructive verbs *before* dispatch
         // so the trace captures the gesture even if the action errors
@@ -675,6 +683,7 @@ fn main() {
     }
 
     let result = match cli.command {
+        Command::Work(args) => cmd::work::run(&ctx, &args),
         Command::Ensemble(args) => cmd::ensemble::run(&ctx, &args),
         Command::Nucleate(args) => cmd::nucleate::run(&ctx, &args),
         Command::Observe(args) => cmd::observe::run(&ctx, &args),
@@ -807,6 +816,9 @@ fn main() {
         // exit-1 path so a named refusal never reaches a script as "failed".
         if let Some(code) = cmd::done::refusal_exit_code(&e) {
             std::process::exit(code);
+        }
+        if e.downcast_ref::<cmd::work::WorkRefusal>().is_some() {
+            std::process::exit(2);
         }
         let code: i32 = e
             .downcast_ref::<cmd::guard::GuardError>()

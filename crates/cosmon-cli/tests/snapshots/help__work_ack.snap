@@ -1,0 +1,21 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Report how this member treated a received message
+
+Usage: cs work ack [OPTIONS] <KEY>
+
+Arguments:
+  <KEY>  Key of the received message
+
+Options:
+      --config <PATH>  Path to configuration file
+      --considered     Report that the message was considered
+      --deferred       Report that the message was deferred
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+      --rejected       Report that the message was rejected
+      --reply <REPLY>  Key of an already admitted reply
+      --note <NOTE>    Optional consumption note, stored by its digest beside the receipts
+  -h, --help           Print help

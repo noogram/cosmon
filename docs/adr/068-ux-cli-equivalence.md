@@ -256,6 +256,16 @@ proposed in `delib-20260423-becf`) is the visual sibling of §8l/§8m:
 
 ### Consequences
 
+#### Declared work messaging parity (issue #115)
+
+| Capability | CLI | Native pilot apps | API / MCP |
+|---|---|---|---|
+| Declare a work and exchange scoped evidence (`cs work declare`, `send`, `inbox`, `ack`, `list`) | Implemented in the CLI | Gap: no equivalent control or read surface | Gap: no work-message endpoint or tool |
+
+This row records the current port gap under §8l. Work-message receipts are
+evidence only; the CLI does not turn an acknowledgment into a molecule
+lifecycle transition.
+
 #### Positive
 
 - **One product, two grips.** The operator stops choosing a "lite" or

@@ -1,0 +1,14 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Pull messages addressed to this member at a safe point
+
+Usage: cs work inbox [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+      --peek           Show deliverable messages without recording a delivery attempt
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
