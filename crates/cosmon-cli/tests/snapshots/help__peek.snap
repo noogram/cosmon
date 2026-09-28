@@ -62,7 +62,7 @@ Options:
           - all:         Every phase, archive included. All of this axis, and only this axis: it does not touch the perimeter
 
       --energy-tick-interval <ENERGY_TICK_INTERVAL>
-          Cadence in seconds for emitting `EnergyTick` events into `events.jsonl`. Zero disables emission. Only active in `--no-tui` mode
+          Cadence in seconds for emitting `UsageObserved` events into `events.jsonl`. Zero disables emission. Only active in `--no-tui` mode
           
           [default: 30]
 

@@ -129,6 +129,7 @@ mod tests {
             energy_out: 0,
             energy_reasoning: 0,
             energy_cost: cosmon_observability::EnergyCost::Unknown,
+            usage: Vec::new(),
             context_window: None,
             session: None,
             socket: "s".into(),

@@ -230,6 +230,10 @@ struct WorkerRow {
     output_tokens: u64,
     reasoning_output_tokens: u64,
     cost: cosmon_observability::EnergyCost,
+    /// Authoritative usage record. `cost` above is the deprecated
+    /// single-dimension compatibility projection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<cosmon_core::usage::UsageRecord>,
     /// Resolved model id pinned for this worker's molecule
     /// (delib-20260704-b476 C3), projected from the latest `ModelSelected`
     /// event. `None` at the von-neumann floor (adapter default applies) or
@@ -585,6 +589,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 cost: energy.map_or(cosmon_observability::EnergyCost::Unknown, |e| {
                     e.cost.clone()
                 }),
+                usage: energy.and_then(|e| e.usage.clone()),
                 model: model_attr.and_then(|a| a.model.clone()),
                 model_source: model_attr.map(|a| a.source_slug().to_owned()),
                 model_cell: model_attr
@@ -656,7 +661,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let w_cached = 10;
     let w_output = 10;
     let w_reasoning = 10;
-    let w_cost = 18;
+    let w_cost = rows
+        .iter()
+        .map(|row| format_worker_usage(row).len())
+        .max()
+        .unwrap_or(18)
+        .max(18)
+        + 2;
     let total_width = w_name
         + w_role
         + w_desired
@@ -684,7 +695,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         "CACHED".bold(),
         "OUTPUT".bold(),
         "REASON".bold(),
-        "COST".bold(),
+        "USAGE".bold(),
         "MH".bold(),
         "MOLECULE".bold(),
     );
@@ -696,12 +707,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let mut fleet_cached: u64 = 0;
     let mut fleet_output: u64 = 0;
     let mut fleet_reasoning: u64 = 0;
-    let mut fleet_cost: f64 = 0.0;
+    let mut fleet_usage: Vec<cosmon_core::usage::UsageRecord> = Vec::new();
     let mut grand_input: u64 = 0;
     let mut grand_cached: u64 = 0;
     let mut grand_output: u64 = 0;
     let mut grand_reasoning: u64 = 0;
-    let mut grand_cost: f64 = 0.0;
+    let mut grand_usage: Vec<cosmon_core::usage::UsageRecord> = Vec::new();
 
     // Offset for the subtotal line (skip NAME + ROLE + DESIRED + EFFECTIVE + LIVE + CLEARANCE).
     let subtotal_pad = w_name + w_role + w_desired + w_effective + w_live + w_clear + 6;
@@ -720,14 +731,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     fleet_cached,
                     fleet_output,
                     fleet_reasoning,
-                    fleet_cost,
+                    &fleet_usage,
                 ),
             );
             fleet_input = 0;
             fleet_cached = 0;
             fleet_output = 0;
             fleet_reasoning = 0;
-            fleet_cost = 0.0;
+            fleet_usage.clear();
             println!();
         }
 
@@ -743,12 +754,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         fleet_cached += row.cached_input_tokens;
         fleet_output += row.output_tokens;
         fleet_reasoning += row.reasoning_output_tokens;
-        fleet_cost += row.cost.reference_usd().unwrap_or(0.0);
+        if let Some(usage) = &row.usage {
+            fleet_usage.push(usage.clone());
+            grand_usage.push(usage.clone());
+        }
         grand_input += row.input_tokens;
         grand_cached += row.cached_input_tokens;
         grand_output += row.output_tokens;
         grand_reasoning += row.reasoning_output_tokens;
-        grand_cost += row.cost.reference_usd().unwrap_or(0.0);
 
         // Pad BEFORE colorizing — ANSI escape codes break fixed-width formatting.
         let desired_padded = format!("{:<w_desired$}", row.desired);
@@ -761,7 +774,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         let cached_str = format_tokens(row.cached_input_tokens);
         let output_str = format_tokens(row.output_tokens);
         let reasoning_str = format_tokens(row.reasoning_output_tokens);
-        let cost_str = format_energy_cost(&row.cost);
+        let cost_str = format_worker_usage(row);
         let health_badge = row.row_kind.colorize(row.row_kind.glyph()).to_string();
         // ADR-052 ghost suffix — appended to the molecule column so the
         // eye catches it without a separate, sparsely-populated column.
@@ -804,14 +817,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     fleet_cached,
                     fleet_output,
                     fleet_reasoning,
-                    fleet_cost,
+                    &fleet_usage,
                 ),
             );
         }
     }
 
     // Grand total.
-    if grand_cost > 0.0 {
+    if !grand_usage.is_empty() {
+        let summary =
+            cosmon_observability::usage_projection::summarize_api_equivalent(&grand_usage);
         let rule_width = w_input + w_cached + w_output + w_reasoning + w_cost + 4;
         println!();
         println!(
@@ -826,7 +841,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             format_tokens(grand_cached).bold(),
             format_tokens(grand_output).bold(),
             format_tokens(grand_reasoning).bold(),
-            format_cost(grand_cost).yellow().bold(),
+            format_api_summary(&summary).yellow().bold(),
         );
     }
 
@@ -1019,15 +1034,6 @@ fn format_tokens(tokens: u64) -> String {
     }
 }
 
-/// Format a cost for display (e.g. `"$12.34"`, `"-"`).
-fn format_cost(cost: f64) -> String {
-    if cost < 0.001 {
-        "-".to_string()
-    } else {
-        format!("${cost:.2}")
-    }
-}
-
 /// Format the billing basis without conflating unknown/subscription with
 /// numeric zero.  Reference estimates are labelled because they are not the
 /// worker's actual `ChatGPT` bill.
@@ -1043,17 +1049,48 @@ fn format_energy_cost(cost: &cosmon_observability::EnergyCost) -> String {
     }
 }
 
+fn format_worker_usage(row: &WorkerRow) -> String {
+    let Some(usage) = &row.usage else {
+        return format_energy_cost(&row.cost);
+    };
+    let records = std::slice::from_ref(usage);
+    let mut parts = vec![cosmon_observability::usage_projection::format_api_equivalent(records)];
+    parts.extend(
+        cosmon_observability::usage_projection::distinct_plan_windows(records)
+            .into_iter()
+            .map(cosmon_observability::usage_projection::format_plan_window),
+    );
+    parts.push(cosmon_observability::usage_projection::format_worker_plan(
+        records,
+    ));
+    parts.join(" · ")
+}
+
+fn format_api_summary(
+    summary: &cosmon_observability::usage_projection::ApiEquivalentSummary,
+) -> String {
+    match summary.amount_usd {
+        None => format!("API equiv. unavailable (0/{})", summary.total_histories),
+        Some(amount) if summary.complete => format!("API equiv. ${amount:.2} complete"),
+        Some(amount) => format!(
+            "API equiv. ${amount:.2} partial ({}/{})",
+            summary.priced_histories, summary.total_histories
+        ),
+    }
+}
+
 /// Print a fleet subtotal line with a thin separator.
 fn print_fleet_subtotal(
     pad: usize,
     widths: (usize, usize, usize, usize, usize),
-    totals: (u64, u64, u64, u64, f64),
+    totals: (u64, u64, u64, u64, &[cosmon_core::usage::UsageRecord]),
 ) {
     let (w_input, w_cached, w_output, w_reasoning, w_cost) = widths;
-    let (input, cached, output, reasoning, cost) = totals;
-    if cost < 0.001 {
+    let (input, cached, output, reasoning, usage) = totals;
+    if usage.is_empty() {
         return;
     }
+    let summary = cosmon_observability::usage_projection::summarize_api_equivalent(usage);
     let rule_width = w_input + w_cached + w_output + w_reasoning + w_cost + 4;
     println!("  {:>pad$} {}", "", "─".repeat(rule_width).dimmed());
     println!(
@@ -1063,7 +1100,7 @@ fn print_fleet_subtotal(
         format_tokens(cached),
         format_tokens(output),
         format_tokens(reasoning),
-        format_cost(cost).yellow(),
+        format_api_summary(&summary).yellow(),
     );
 }
 
@@ -2496,11 +2533,30 @@ mod tests {
             output_tokens: 0,
             reasoning_output_tokens: 0,
             cost: cosmon_observability::EnergyCost::Unknown,
+            usage: None,
             model: None,
             model_source: None,
             model_cell: None,
             row_kind: RowKind::Idle,
         }
+    }
+
+    #[test]
+    fn ensemble_usage_row_and_json_keep_both_dimensions() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../cosmon-core/tests/fixtures/usage/usage_observed_v1.json"
+        ))
+        .unwrap();
+        let usage = serde_json::from_value(fixture["usage"].clone()).unwrap();
+        let mut row = row_with_effective("w1", "healthy");
+        row.usage = Some(usage);
+        let label = format_worker_usage(&row);
+        assert!(label.contains("API equiv. $1.25 partial"), "{label}");
+        assert!(label.contains("account 5h used 42%"), "{label}");
+        assert!(label.contains("worker plan use unavailable"), "{label}");
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["usage"]["api_equivalent"]["amount_usd"], 1.25);
+        assert!(json.get("cost").is_some(), "deprecated cost stays additive");
     }
 
     #[test]

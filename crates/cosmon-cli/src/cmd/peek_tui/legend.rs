@@ -599,6 +599,7 @@ mod tests {
                 0,
                 cw,
                 &cosmon_observability::EnergyCost::Unknown,
+                &[],
             );
             let bar: String = cell.trim_start().chars().take(1).collect();
             out.push((SectionId::Energy, "format_energy (ENERGY)", bar));

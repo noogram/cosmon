@@ -264,6 +264,10 @@ pub(crate) struct RowView {
     pub(crate) energy_out: u64,
     pub(crate) energy_reasoning: u64,
     pub(crate) energy_cost: cosmon_observability::EnergyCost,
+    /// Canonical usage histories behind this molecule row. Multiple workers
+    /// may share a molecule; cumulative histories are deduplicated before any
+    /// total is rendered.
+    pub(crate) usage: Vec<cosmon_core::usage::UsageRecord>,
     pub(crate) context_window: Option<u64>,
     pub(crate) session: Option<String>,
     pub(crate) socket: String,
@@ -3301,7 +3305,7 @@ impl App {
             Cell::from("● STEP"),
             Cell::from("TRUST"),
             Cell::from("AGE"),
-            Cell::from("IN/CACHED/OUT/RSN · COST"),
+            Cell::from("IN/CACHED/OUT/RSN · USAGE"),
             Cell::from("ADAPTER"),
         ])
         .style(Style::default().add_modifier(Modifier::BOLD));
@@ -3340,6 +3344,7 @@ impl App {
                     r.energy_reasoning,
                     r.context_window,
                     &r.energy_cost,
+                    &r.usage,
                 );
                 let is_expanded = self.expanded.contains(&r.mol_id);
                 // Tree-view indicator: ▾ when expanded, ▸ when collapsed.
@@ -3356,7 +3361,7 @@ impl App {
                 } else {
                     Vec::new()
                 };
-                let row_height = (1 + detail_lines.len()) as u16;
+                let row_height = (1 + detail_lines.len()).max(energy.lines().count()) as u16;
 
                 let mut mol_cell_lines: Vec<Line> = Vec::with_capacity(1 + detail_lines.len());
                 mol_cell_lines.push(Line::from(r.display_label(32)));
@@ -4132,6 +4137,7 @@ fn format_energy(
     reasoning: u64,
     context_window: Option<u64>,
     cost: &cosmon_observability::EnergyCost,
+    usage: &[cosmon_core::usage::UsageRecord],
 ) -> String {
     use cosmon_observability::EnergyCost;
 
@@ -4159,11 +4165,49 @@ fn format_energy(
         humanize_tokens(output),
         humanize_tokens(reasoning),
     );
+    if !usage.is_empty() {
+        let api = cosmon_observability::usage_projection::format_api_equivalent(usage);
+        let mut usage_lines = Vec::new();
+        for window in cosmon_observability::usage_projection::distinct_plan_windows(usage) {
+            let compact = cosmon_observability::usage_projection::format_plan_window(window)
+                .replace(" used ", " ");
+            if let Some(last) = usage_lines.last_mut() {
+                let combined = format!("{last} · {compact}");
+                if unicode_width::UnicodeWidthStr::width(combined.as_str()) <= 49 {
+                    *last = combined;
+                    continue;
+                }
+            }
+            usage_lines.push(compact);
+        }
+        usage_lines.push(cosmon_observability::usage_projection::format_worker_plan(
+            usage,
+        ));
+        let mut lines = vec![format!("{bar} {counters}")];
+        if let Some(first) = usage_lines.first() {
+            let combined = format!("{api} · {first}");
+            if unicode_width::UnicodeWidthStr::width(combined.as_str()) <= 49 {
+                lines.push(combined);
+                lines.extend(usage_lines.into_iter().skip(1));
+            } else {
+                lines.push(api);
+                lines.extend(usage_lines);
+            }
+        } else {
+            lines.push(api);
+        }
+        return lines
+            .into_iter()
+            .map(|line| pad_to_visible_width(&line, 49))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
     let charge = match cost {
-        EnergyCost::Unknown => "—".to_owned(),
-        EnergyCost::ReferenceUsd { usd } => format!("ref ${usd:.2}"),
+        EnergyCost::Unknown => "API equiv. unavailable".to_owned(),
+        EnergyCost::ReferenceUsd { usd } => format!("API equiv. ${usd:.2}"),
         EnergyCost::Subscription { used_percent, .. } => {
-            format!("subscription {used_percent:.0}%")
+            format!("account used {used_percent:.0}%")
         }
     };
     pad_to_visible_width(&format!("{bar} {counters} {charge}"), 49)
@@ -4310,6 +4354,7 @@ pub(crate) fn snapshot_to_rows(snap: &FleetSnapshot) -> Vec<RowView> {
                 energy_out: 0,
                 energy_reasoning: 0,
                 energy_cost: cosmon_observability::EnergyCost::Unknown,
+                usage: Vec::new(),
                 context_window: None,
                 session: None,
                 socket: String::new(),
@@ -4368,6 +4413,32 @@ fn merge_row(
         .energy_reasoning
         .saturating_add(fresh.energy_reasoning);
     merge_energy_cost(&mut existing.energy_cost, fresh.energy_cost);
+    existing.usage.extend(fresh.usage);
+    let deduplicated =
+        cosmon_observability::usage_projection::deduplicate_histories(existing.usage.iter())
+            .into_iter()
+            .cloned()
+            .collect();
+    existing.usage = deduplicated;
+    if !existing.usage.is_empty() {
+        use cosmon_observability::usage_projection::{
+            sum_token_category, summarize_api_equivalent,
+        };
+        existing.energy_in =
+            sum_token_category(&existing.usage, |record| record.tokens.input_tokens);
+        existing.energy_cached =
+            sum_token_category(&existing.usage, |record| record.tokens.cached_input_tokens);
+        existing.energy_out =
+            sum_token_category(&existing.usage, |record| record.tokens.output_tokens);
+        existing.energy_reasoning = sum_token_category(&existing.usage, |record| {
+            record.tokens.reasoning_output_tokens
+        });
+        existing.energy_cost = summarize_api_equivalent(&existing.usage)
+            .amount_usd
+            .map_or(cosmon_observability::EnergyCost::Unknown, |usd| {
+                cosmon_observability::EnergyCost::ReferenceUsd { usd }
+            });
+    }
     if existing.context_window.is_none() {
         existing.context_window = fresh.context_window;
     }
@@ -4484,6 +4555,7 @@ fn row_view_from(
         energy_out: energy.output_tokens,
         energy_reasoning: energy.reasoning_output_tokens,
         energy_cost: energy.cost,
+        usage: energy.usage.into_iter().collect(),
         context_window: energy.context_window,
         session: Some(s.name.clone()),
         socket: s.socket.clone(),
@@ -4928,6 +5000,7 @@ fn populate_snapshot(
                     cost: e.cost.clone(),
                     api_equivalent: e.api_equivalent.clone(),
                     subscription: e.subscription.clone(),
+                    usage: e.usage.clone(),
                     context_window: e.context_window,
                 }
             })
@@ -5343,9 +5416,10 @@ mod tests {
             2_000,
             Some(1_000_000),
             &cosmon_observability::EnergyCost::ReferenceUsd { usd: 1.23 },
+            &[],
         );
         assert!(s.contains("50.0K/40.0K/10.0K/2.0K"), "{s}");
-        assert!(s.contains("ref $1.23"), "{s}");
+        assert!(s.contains("API equiv. $1.23"), "{s}");
     }
 
     /// Regression for issue #87: an absent Codex price is not evidence that
@@ -5360,6 +5434,7 @@ mod tests {
             1_903,
             None,
             &cosmon_observability::EnergyCost::Unknown,
+            &[],
         );
         assert!(!s.contains("$0.00"), "unknown cost rendered as free: {s}");
         assert!(s.contains('—'), "unknown cost must be explicit: {s}");
@@ -5378,8 +5453,37 @@ mod tests {
                 used_percent: 7.0,
                 window_minutes: Some(10_080),
             },
+            &[],
         );
-        assert!(s.contains("subscription 7%"), "{s}");
+        assert!(s.contains("account used 7%"), "{s}");
+    }
+
+    #[test]
+    fn format_energy_keeps_both_usage_dimensions_and_qualifiers() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../cosmon-core/tests/fixtures/usage/usage_observed_v1.json"
+        ))
+        .unwrap();
+        let usage = serde_json::from_value(fixture["usage"].clone()).unwrap();
+        let s = format_energy(
+            1_200,
+            200,
+            300,
+            50,
+            None,
+            &cosmon_observability::EnergyCost::Unknown,
+            &[usage],
+        );
+        assert!(s.contains("API equiv. $1.25 partial"), "{s}");
+        assert!(s.contains("account 5h 42%"), "{s}");
+        assert!(s.contains("worker plan use unavailable"), "{s}");
+        for line in s.lines() {
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(line),
+                49,
+                "qualifier line escaped the fixed ENERGY cell: {line:?}"
+            );
+        }
     }
 
     #[test]
@@ -5477,6 +5581,7 @@ mod tests {
             0,
             Some(200_000),
             &cosmon_observability::EnergyCost::Unknown,
+            &[],
         );
         let big = format_energy(
             500_000,
@@ -5485,6 +5590,7 @@ mod tests {
             100_000,
             Some(200_000),
             &cosmon_observability::EnergyCost::ReferenceUsd { usd: 12.34 },
+            &[],
         );
         let nocw = format_energy(
             1_234,
@@ -5493,6 +5599,7 @@ mod tests {
             5,
             None,
             &cosmon_observability::EnergyCost::ReferenceUsd { usd: 0.01 },
+            &[],
         );
         let w_small = UnicodeWidthStr::width(small.as_str());
         let w_big = UnicodeWidthStr::width(big.as_str());
@@ -5731,6 +5838,7 @@ mod tests {
             energy_out: 0,
             energy_reasoning: 0,
             energy_cost: cosmon_observability::EnergyCost::Unknown,
+            usage: Vec::new(),
             context_window: None,
             session: None,
             socket: String::new(),
@@ -5752,6 +5860,33 @@ mod tests {
             energy_budget: None,
             adapter: cosmon_core::adapter_attribution::AdapterAttribution::default(),
         }
+    }
+
+    #[test]
+    fn merge_row_deduplicates_the_same_cumulative_usage_history() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../cosmon-core/tests/fixtures/usage/usage_observed_v1.json"
+        ))
+        .unwrap();
+        let usage: cosmon_core::usage::UsageRecord =
+            serde_json::from_value(fixture["usage"].clone()).unwrap();
+        let mut first = row_with("running", HeartbeatTier::Active);
+        first.energy_in = 1_200;
+        first.energy_out = 300;
+        first.usage.push(usage.clone());
+        let mut duplicate = row_with("running", HeartbeatTier::Active);
+        duplicate.energy_in = 1_200;
+        duplicate.energy_out = 300;
+        duplicate.usage.push(usage);
+
+        merge_row(
+            &mut first,
+            duplicate,
+            Some(cosmon_observability::worker::WorkerRole::Cognition),
+        );
+        assert_eq!(first.energy_in, 1_200);
+        assert_eq!(first.energy_out, 300);
+        assert_eq!(first.usage.len(), 1);
     }
 
     /// The vital bar's alarm counts molecules whose harvest the resident
@@ -6308,6 +6443,7 @@ mod tests {
                 cost: cosmon_observability::EnergyCost::Unknown,
                 api_equivalent: None,
                 subscription: None,
+                usage: None,
                 context_window: None,
             },
             live: "working".into(),
@@ -6445,6 +6581,7 @@ mod tests {
                     cost: cosmon_observability::EnergyCost::ReferenceUsd { usd: 0.1 },
                     api_equivalent: None,
                     subscription: None,
+                    usage: None,
                     context_window: Some(1_000_000),
                 },
                 live: "working".into(),
@@ -6462,6 +6599,7 @@ mod tests {
                     cost: cosmon_observability::EnergyCost::ReferenceUsd { usd: 1.0 },
                     api_equivalent: None,
                     subscription: None,
+                    usage: None,
                     context_window: Some(1_000_000),
                 },
                 live: "working".into(),

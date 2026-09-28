@@ -708,11 +708,10 @@ pub enum EventV2 {
         /// Wall-clock time (UTC) the worker emitted the block.
         since: DateTime<Utc>,
     },
-    /// Periodic energy (token) snapshot for a running worker.
+    /// Legacy periodic energy (token) snapshot for a running worker.
     ///
-    /// Emitted by the runtime tick loop once per poll interval while the
-    /// worker is Active. This is the critical sensor for reconstructing the
-    /// timeline graph — every tick contributes one sample to the cost curve.
+    /// Retained for old-journal decoding. Current producers emit
+    /// [`Self::UsageObserved`]; a legacy zero-dollar value remains ambiguous.
     EnergyTick {
         /// The worker being sampled.
         worker_id: WorkerId,
@@ -725,10 +724,9 @@ pub enum EventV2 {
     },
     /// Full versioned usage observation.
     ///
-    /// This reader variant is installed before any producer cutover.  It
-    /// preserves token, price, and plan availability independently; existing
-    /// producers continue to emit [`Self::EnergyTick`] until all projections
-    /// have migrated.
+    /// This reader variant was installed before producer cutover. It preserves
+    /// token, price, and plan availability independently and is now the
+    /// canonical producer format.
     UsageObserved {
         /// Canonical usage sample.
         usage: Box<UsageRecord>,
