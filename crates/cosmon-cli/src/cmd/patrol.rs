@@ -129,6 +129,11 @@ pub struct Args {
     #[arg(long)]
     pub auto_collapse: bool,
 
+    /// Minimum seconds after a tackle before patrol may call its worker dead
+    /// or freeze/collapse its molecule. Covers spawn and forced re-tackle.
+    #[arg(long, default_value_t = 120)]
+    pub dead_worker_grace_secs: u64,
+
     /// Harvest sweep: scan every `Completed` molecule with `merged_at = None`
     /// and invoke `cs harvest --molecule <id>` on each one. Belt-and-
     /// suspenders safety net for cases where the tmux `pane-died` hook
@@ -276,6 +281,24 @@ pub struct Args {
 
 /// Maximum times patrol will respawn a worker before circuit-breaking.
 const MAX_RESTARTS: u32 = 3;
+const DEFAULT_DEAD_WORKER_GRACE_SECS: i64 = 120;
+
+fn configured_dead_worker_grace(seconds: u64) -> chrono::Duration {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(chrono::Duration::try_seconds)
+        .unwrap_or(chrono::Duration::MAX)
+}
+
+fn within_dead_worker_grace(
+    molecule: &MoleculeData,
+    now: chrono::DateTime<Utc>,
+    grace: chrono::Duration,
+) -> bool {
+    molecule
+        .tackled_at
+        .is_some_and(|tackled| now.signed_duration_since(tackled) < grace)
+}
 
 /// Result of a patrol scan using the reconciliation model.
 struct ScanResult {
@@ -296,6 +319,7 @@ fn scan(
     fleet: &Fleet,
     molecules: &[MoleculeData],
     backend: Option<&dyn TransportBackend>,
+    dead_worker_grace: chrono::Duration,
 ) -> ScanResult {
     let mut stalled_workers: Vec<WorkerId> = Vec::new();
     let mut error_workers: Vec<WorkerId> = Vec::new();
@@ -303,6 +327,13 @@ fn scan(
     let mut needs_respawn: Vec<WorkerId> = Vec::new();
     let mut circuit_broken: Vec<WorkerId> = Vec::new();
     let mut record_failure: Vec<WorkerId> = Vec::new();
+    let now = Utc::now();
+    let workers_in_grace: std::collections::HashSet<&WorkerId> = molecules
+        .iter()
+        .filter(|m| matches!(m.status, MoleculeStatus::Running | MoleculeStatus::Queued))
+        .filter(|m| within_dead_worker_grace(m, now, dead_worker_grace))
+        .filter_map(|m| m.assigned_worker.as_ref())
+        .collect();
 
     for worker in fleet.workers.values() {
         // Build ObservedState from transport.
@@ -314,6 +345,9 @@ fn scan(
             },
             None => TransportState::Unknown,
         };
+        if transport == TransportState::Dead && workers_in_grace.contains(&worker.id) {
+            continue;
+        }
         let observed = ObservedState {
             transport,
             session: None, // Patrol doesn't need session detail.
@@ -368,6 +402,7 @@ fn scan(
     let orphaned_molecules: Vec<_> = molecules
         .iter()
         .filter(|m| matches!(m.status, MoleculeStatus::Running | MoleculeStatus::Queued))
+        .filter(|m| !within_dead_worker_grace(m, now, dead_worker_grace))
         .filter(|m| m.assigned_worker.as_ref().is_some_and(is_dead))
         .map(|m| m.id.clone())
         .collect();
@@ -624,6 +659,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &fleet,
         &molecules,
         backend.as_ref().map(|b| b as &dyn TransportBackend),
+        configured_dead_worker_grace(args.dead_worker_grace_secs),
     );
     let report = &scan_result.report;
 
@@ -763,17 +799,20 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // An orphan is any Running/Queued molecule whose worker is genuinely
     // dead (desired=Stopped or missing) OR whose worker needed respawn but
     // did not get it (respawn flag absent or respawn failed this run).
-    let auto_transitioned = auto_freeze_orphans(
+    let auto_transitioned = auto_freeze_orphans_with_grace(
         store.as_ref(),
         &state_dir,
         &fleet,
         &molecules,
-        RespawnOutcome {
-            needs_respawn: &scan_result.needs_respawn,
-            respawned: &respawned,
+        &OrphanSweepOptions {
+            respawn: RespawnOutcome {
+                needs_respawn: &scan_result.needs_respawn,
+                respawned: &respawned,
+            },
+            auto_collapse: args.auto_collapse,
+            backend: backend.as_ref().map(|b| b as &dyn TransportBackend),
+            dead_worker_grace: configured_dead_worker_grace(args.dead_worker_grace_secs),
         },
-        args.auto_collapse,
-        backend.as_ref().map(|b| b as &dyn TransportBackend),
     )?;
 
     // Harvest sweep: close the loop on Completed-but-unmerged molecules.
@@ -1402,16 +1441,80 @@ pub(crate) fn auto_freeze_orphans(
     auto_collapse: bool,
     backend: Option<&dyn TransportBackend>,
 ) -> anyhow::Result<Vec<MoleculeId>> {
+    auto_freeze_orphans_with_grace(
+        store,
+        state_dir,
+        fleet,
+        molecules,
+        &OrphanSweepOptions {
+            respawn,
+            auto_collapse,
+            backend,
+            dead_worker_grace: chrono::Duration::seconds(DEFAULT_DEAD_WORKER_GRACE_SECS),
+        },
+    )
+}
+
+/// Transition policy and the transport witness used at decision time.
+struct OrphanSweepOptions<'a> {
+    respawn: RespawnOutcome<'a>,
+    auto_collapse: bool,
+    backend: Option<&'a dyn TransportBackend>,
+    dead_worker_grace: chrono::Duration,
+}
+
+fn fresh_orphan_verdict(
+    store: &dyn StateStore,
+    mol: &MoleculeData,
+    options: &OrphanSweepOptions<'_>,
+) -> anyhow::Result<bool> {
+    let now = Utc::now();
+    if within_dead_worker_grace(mol, now, options.dead_worker_grace)
+        || retackle_lease_active(&store.molecule_dir(&mol.id), now)
+    {
+        return Ok(false);
+    }
+    let Some(wid) = mol.assigned_worker.as_ref() else {
+        return Ok(false);
+    };
+    let current_fleet = store.load_fleet()?;
+    let worker_dead = current_fleet
+        .workers
+        .get(wid)
+        .is_none_or(|w| w.desired == DesiredState::Stopped);
+    let respawn_failed =
+        options.respawn.needs_respawn.contains(wid) && !options.respawn.respawned.contains(wid);
+    if !(worker_dead || respawn_failed) {
+        return Ok(false);
+    }
+    if let Some(be) = options
+        .backend
+        .filter(|_| options.auto_collapse || !worker_dead)
+    {
+        // An unavailable probe is not proof of death. A new session may
+        // have appeared since the scan selected this molecule.
+        return Ok(matches!(be.is_alive(wid), Ok(false)));
+    }
+    Ok(true)
+}
+
+fn auto_freeze_orphans_with_grace(
+    store: &dyn StateStore,
+    state_dir: &std::path::Path,
+    fleet: &Fleet,
+    molecules: &[MoleculeData],
+    options: &OrphanSweepOptions<'_>,
+) -> anyhow::Result<Vec<MoleculeId>> {
     let RespawnOutcome {
         needs_respawn,
         respawned,
-    } = respawn;
-    let target_status = if auto_collapse {
+    } = options.respawn;
+    let target_status = if options.auto_collapse {
         MoleculeStatus::Collapsed
     } else {
         MoleculeStatus::Frozen
     };
-    let reason = if auto_collapse {
+    let reason = if options.auto_collapse {
         "worker dead, auto-collapsed by patrol"
     } else {
         "worker dead, auto-frozen by patrol"
@@ -1421,6 +1524,7 @@ pub(crate) fn auto_freeze_orphans(
     let stranded: Vec<MoleculeId> = molecules
         .iter()
         .filter(|m| matches!(m.status, MoleculeStatus::Running | MoleculeStatus::Queued))
+        .filter(|m| !within_dead_worker_grace(m, now, options.dead_worker_grace))
         .filter_map(|m| {
             let wid = m.assigned_worker.as_ref()?;
             let worker_dead = fleet
@@ -1448,10 +1552,16 @@ pub(crate) fn auto_freeze_orphans(
     let mut transitioned = Vec::new();
     let events_path = state_dir.join("events.jsonl");
     for mol_id in stranded {
+        // Tackle holds this same lock while binding a new worker. Keep the
+        // fresh state and transport probe adjacent to the transition.
+        let _guard = store.lock_fleet()?;
         let Ok(mut mol) = store.load_molecule(&mol_id) else {
             continue;
         };
         if !matches!(mol.status, MoleculeStatus::Running | MoleculeStatus::Queued) {
+            continue;
+        }
+        if !fresh_orphan_verdict(store, &mol, options)? {
             continue;
         }
         let prev_status = mol.status;
@@ -1469,7 +1579,7 @@ pub(crate) fn auto_freeze_orphans(
         // and idempotent, so it reaches the dead-pane carcass that
         // `terminate` cannot resolve — and says nothing when the session is
         // already gone.
-        if let (Some(be), Some(session)) = (backend, mol.tmux_session()) {
+        if let (Some(be), Some(session)) = (options.backend, mol.tmux_session()) {
             let _ = be.terminate_session(session);
         }
 
@@ -3732,6 +3842,7 @@ mod tests {
             stale_after: 300,
             expire: false,
             auto_collapse: false,
+            dead_worker_grace_secs: 120,
             harvest: false,
             livelock: false,
             livelock_stale_after: 3600,
@@ -3777,6 +3888,7 @@ mod tests {
             stale_after: 300,
             expire: false,
             auto_collapse: false,
+            dead_worker_grace_secs: 120,
             harvest: false,
             livelock: false,
             livelock_stale_after: 3600,
@@ -3822,6 +3934,7 @@ mod tests {
             stale_after: 300,
             expire: false,
             auto_collapse: false,
+            dead_worker_grace_secs: 120,
             harvest: false,
             livelock: false,
             livelock_stale_after: 3600,
@@ -3871,6 +3984,7 @@ mod tests {
             stale_after: 300,
             expire: false,
             auto_collapse: false,
+            dead_worker_grace_secs: 120,
             harvest: false,
             livelock: false,
             livelock_stale_after: 3600,
@@ -3910,6 +4024,7 @@ mod tests {
             stale_after: 300,
             expire: false,
             auto_collapse: false,
+            dead_worker_grace_secs: 120,
             harvest: false,
             livelock: false,
             livelock_stale_after: 3600,
@@ -3947,7 +4062,7 @@ mod tests {
         };
         backend.spawn(&agent, &RuntimeConfig::default()).unwrap();
 
-        let scan_result = scan(&fleet, &[], Some(&backend));
+        let scan_result = scan(&fleet, &[], Some(&backend), Duration::seconds(120));
         assert!(scan_result.report.is_healthy());
         assert!(scan_result.report.stalled_workers.is_empty());
     }
@@ -3962,7 +4077,7 @@ mod tests {
         let backend = MockBackend::new();
         // No session → is_alive returns false.
 
-        let scan_result = scan(&fleet, &[], Some(&backend));
+        let scan_result = scan(&fleet, &[], Some(&backend), Duration::seconds(120));
         assert_eq!(scan_result.needs_respawn.len(), 1);
         assert_eq!(scan_result.needs_respawn[0].as_str(), "ghost-w");
         // Also reported as stalled (diverged + dead).
@@ -3979,7 +4094,7 @@ mod tests {
 
         let backend = MockBackend::new();
 
-        let scan_result = scan(&fleet, &[], Some(&backend));
+        let scan_result = scan(&fleet, &[], Some(&backend), Duration::seconds(120));
         assert_eq!(scan_result.circuit_broken.len(), 1);
         assert!(scan_result.needs_respawn.is_empty());
         assert_eq!(scan_result.report.error_workers.len(), 1);
@@ -3991,7 +4106,7 @@ mod tests {
         let (wid, w) = make_worker("done-w", DesiredState::Stopped);
         fleet.workers.insert(wid, w);
 
-        let scan_result = scan(&fleet, &[], None);
+        let scan_result = scan(&fleet, &[], None, Duration::seconds(120));
         assert!(scan_result.report.is_healthy());
         assert_eq!(scan_result.report.idle_count, 1);
     }
@@ -4002,7 +4117,7 @@ mod tests {
         let (wid, w) = make_worker("frozen-w", DesiredState::Paused);
         fleet.workers.insert(wid, w);
 
-        let scan_result = scan(&fleet, &[], None);
+        let scan_result = scan(&fleet, &[], None, Duration::seconds(120));
         assert!(scan_result.report.is_healthy());
         assert_eq!(scan_result.report.idle_count, 1);
     }
@@ -5274,6 +5389,152 @@ mod tests {
     }
 
     #[test]
+    fn freshly_tackled_worker_is_not_auto_collapsed() {
+        let (tmp, store) = make_store();
+        let mut fleet = Fleet::default();
+        let (wid, worker) = make_worker("new-w", DesiredState::Stopped);
+        fleet.workers.insert(wid, worker);
+        store.save_fleet(&fleet).unwrap();
+
+        let mut mol = make_molecule(
+            "task-20260928-fresh",
+            MoleculeStatus::Running,
+            Some("new-w"),
+        );
+        mol.tackled_at = Some(Utc::now() - Duration::milliseconds(320));
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let backend = mock_with_worker("new-w", "working");
+
+        let transitioned = auto_freeze_orphans(
+            &store,
+            tmp.path(),
+            &fleet,
+            std::slice::from_ref(&mol),
+            RespawnOutcome {
+                needs_respawn: &[],
+                respawned: &[],
+            },
+            true,
+            Some(&backend),
+        )
+        .unwrap();
+
+        assert!(
+            transitioned.is_empty(),
+            "patrol must not collapse within the spawn grace"
+        );
+        assert_eq!(
+            store.load_molecule(&mol.id).unwrap().status,
+            MoleculeStatus::Running
+        );
+    }
+
+    #[test]
+    fn collapse_rechecks_transport_after_the_dead_worker_scan() {
+        let (tmp, store) = make_store();
+        let mut fleet = Fleet::default();
+        let (wid, worker) = make_worker("returned-w", DesiredState::Running);
+        fleet.workers.insert(wid.clone(), worker);
+        store.save_fleet(&fleet).unwrap();
+
+        let mut mol = make_molecule(
+            "task-20260928-returned",
+            MoleculeStatus::Running,
+            Some("returned-w"),
+        );
+        mol.tackled_at = Some(Utc::now() - Duration::minutes(5));
+        store.save_molecule(&mol.id, &mol).unwrap();
+
+        // The old scan recorded a dead worker. A session appeared before the
+        // collapse decision; the old scan must no longer be sufficient.
+        let backend = mock_with_worker("returned-w", "working");
+        let transitioned = auto_freeze_orphans(
+            &store,
+            tmp.path(),
+            &fleet,
+            std::slice::from_ref(&mol),
+            RespawnOutcome {
+                needs_respawn: &[wid],
+                respawned: &[],
+            },
+            true,
+            Some(&backend),
+        )
+        .unwrap();
+
+        assert!(transitioned.is_empty());
+        assert_eq!(
+            store.load_molecule(&mol.id).unwrap().status,
+            MoleculeStatus::Running
+        );
+        assert!(backend
+            .is_alive(&WorkerId::new("returned-w").unwrap())
+            .unwrap());
+    }
+
+    #[test]
+    fn scan_withholds_a_dead_verdict_during_spawn_grace() {
+        let mut fleet = Fleet::default();
+        let (wid, worker) = make_worker("starting-w", DesiredState::Running);
+        fleet.workers.insert(wid.clone(), worker);
+        let mut mol = make_molecule(
+            "task-20260928-starting",
+            MoleculeStatus::Running,
+            Some("starting-w"),
+        );
+        mol.tackled_at = Some(Utc::now() - Duration::milliseconds(320));
+        let backend = MockBackend::new();
+
+        let within = scan(
+            &fleet,
+            std::slice::from_ref(&mol),
+            Some(&backend),
+            Duration::seconds(120),
+        );
+        assert!(within.needs_respawn.is_empty());
+        assert!(within.report.stalled_workers.is_empty());
+
+        mol.tackled_at = Some(Utc::now() - Duration::minutes(5));
+        let beyond = scan(&fleet, &[mol], Some(&backend), Duration::seconds(120));
+        assert_eq!(beyond.needs_respawn, vec![wid]);
+    }
+
+    #[test]
+    fn configured_zero_grace_allows_a_dead_worker_transition() {
+        let (tmp, store) = make_store();
+        let mut fleet = Fleet::default();
+        let (wid, worker) = make_worker("zero-w", DesiredState::Stopped);
+        fleet.workers.insert(wid, worker);
+        store.save_fleet(&fleet).unwrap();
+        let mut mol = make_molecule(
+            "task-20260928-zero",
+            MoleculeStatus::Running,
+            Some("zero-w"),
+        );
+        mol.tackled_at = Some(Utc::now());
+        store.save_molecule(&mol.id, &mol).unwrap();
+
+        let transitioned = auto_freeze_orphans_with_grace(
+            &store,
+            tmp.path(),
+            &fleet,
+            std::slice::from_ref(&mol),
+            &OrphanSweepOptions {
+                respawn: RespawnOutcome {
+                    needs_respawn: &[],
+                    respawned: &[],
+                },
+                auto_collapse: true,
+                backend: None,
+                dead_worker_grace: configured_dead_worker_grace(0),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(transitioned, vec![mol.id]);
+    }
+
+    #[test]
     fn auto_freeze_orphans_skips_respawned_workers() {
         // Worker was in needs_respawn AND successfully respawned this run →
         // its molecule must stay Running (respawn brought the worker back).
@@ -5528,6 +5789,7 @@ mod tests {
             stale_after: 300,
             expire: false,
             auto_collapse: false,
+            dead_worker_grace_secs: 120,
             harvest: false,
             livelock: false,
             livelock_stale_after: 3600,
