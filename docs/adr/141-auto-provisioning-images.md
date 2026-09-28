@@ -99,6 +99,12 @@ covered by Docker's copy-ownership-on-first-mount of the image's
 `/cosmon/.cosmon/state` (pre-created `1000:999` in the image) or by the
 parc's out-of-band provisioning, as before.
 
+The handoff's authority over a binding ends after creation. At boot, a missing
+`oidc-identity.toml` is created from the handoff; an existing file is preserved
+even when it differs, and the drift is logged. Scope additions and identity or
+audience rotation therefore require an explicit operator action through the
+audited provisioner path instead of being silently reversed on restart.
+
 ### C — client_id transfer via a dedicated handoff volume, not env
 
 Inter-container transfer of the OAuth2 `client_id` (and issuer facts) uses a
@@ -156,7 +162,7 @@ client_ids (A, and B when the MCP app is created), never a wildcard.
 |---|---|---|
 | Fresh volumes, first boot | create admin + app, write handoff | wait for handoff, converge, boot |
 | Reboot (volumes intact) | auth with persisted pass, re-derive client_id, handoff rewritten only on drift | converge is a byte-identical no-op |
-| `forgejo-data` reused, our admin present | reuse | own entry converged (client_id rotation covered) |
+| `forgejo-data` reused, our admin present | reuse | allowlist converged; existing binding preserved and drift logged until explicit operator rotation |
 | `forgejo-data` reused, foreign users, no persisted pass | **fail loudly** (reset required — never guess) | unchanged (fail-closed: no new declaration) |
 | `rpp-state` reused across tenants | n/a | stale foreign issuers persist by design; `TRUSTED_FORCE=1` is the documented reset |
 | Handoff never appears (first boot) | n/a | bounded wait then non-zero exit → restart-policy crash-loop until provisioned |

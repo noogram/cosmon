@@ -47,6 +47,9 @@
 //! - **reset gesture** — `TRUSTED_FORCE=1` rewrites the whole allowlist
 //!   from the declaration (cross-tenant volume reuse, corrupt-file
 //!   recovery).
+//! - **binding bootstrap, not ownership** — a handoff creates a missing
+//!   binding, but boot never replaces an existing binding. Drift is logged
+//!   and the operator-managed file is preserved.
 //! - **bounded wait** — with a `handoff_dir` configured and
 //!   `handoff_wait_secs > 0`, a boot that finds *nothing* declared and
 //!   *nothing* on the volume polls for the handoff and errors out when
@@ -276,10 +279,15 @@ pub struct ConvergeReport {
     pub issuers_total: usize,
     /// Foreign (non-declared) entries preserved verbatim.
     pub foreign_preserved: usize,
-    /// Bindings written or rewritten this pass (nucleon ids).
+    /// Missing bindings created this pass (nucleon ids).
     pub bindings_written: Vec<String>,
     /// Bindings already semantically converged (left untouched).
     pub bindings_unchanged: usize,
+    /// Existing bindings that differed from the handoff and were preserved.
+    ///
+    /// A handoff bootstraps a missing binding; it is not continuing authority
+    /// over an operator-managed file after provisioning.
+    pub bindings_preserved: Vec<String>,
     /// Seconds spent waiting for a first handoff (0 = no wait).
     pub waited_secs: u64,
     /// First binding applied from the sorted handoff declarations.
@@ -310,6 +318,13 @@ pub struct AppliedHandoffBinding {
 impl ConvergeReport {
     /// Structured boot log of the pass.
     pub fn log(&self) {
+        if !self.bindings_preserved.is_empty() {
+            tracing::warn!(
+                event = "boot.trust_bootstrap.binding_drift_preserved",
+                bindings_preserved = ?self.bindings_preserved,
+                "existing bindings differ from the handoff; preserving operator-managed files",
+            );
+        }
         tracing::info!(
             event = "boot.trust_bootstrap",
             declared = self.declared,
@@ -319,6 +334,7 @@ impl ConvergeReport {
             foreign_preserved = self.foreign_preserved,
             bindings_written = ?self.bindings_written,
             bindings_unchanged = self.bindings_unchanged,
+            bindings_preserved = ?self.bindings_preserved,
             waited_secs = self.waited_secs,
             "trust bootstrap converged (ADR-141)",
         );
@@ -608,11 +624,14 @@ fn gather_handoffs(
     Ok(handoffs)
 }
 
-/// Converge ONE handoff binding into `nucleons/<id>/oidc-identity.toml`,
-/// via the audited renderer. Semantic idempotence: an existing file that
-/// parses to the same TOML value is left untouched. The `doc` supplies
-/// the issuer (`iss` byte-for-byte) and the audience fallback when the
-/// binding omits its own `audience`.
+/// Create ONE missing handoff binding at
+/// `nucleons/<id>/oidc-identity.toml` via the audited renderer.
+///
+/// Existing files are never rewritten by boot. A semantic match is counted
+/// as unchanged; a difference is reported and preserved because the binding
+/// may have been updated later through an explicit operator path. The `doc`
+/// supplies the issuer (`iss` byte-for-byte) and the audience fallback when
+/// the binding omits its own `audience`.
 fn converge_binding(
     state_dir: &Path,
     path: &Path,
@@ -649,11 +668,13 @@ fn converge_binding(
         .join("nucleons")
         .join(&nucleon_id)
         .join("oidc-identity.toml");
-    if binding_semantically_equal(&binding_path, &rendered) {
+    if !binding_path.exists() {
+        write_atomically(&binding_path, &rendered)?;
+        report.bindings_written.push(nucleon_id.clone());
+    } else if binding_semantically_equal(&binding_path, &rendered) {
         report.bindings_unchanged += 1;
     } else {
-        write_atomically(&binding_path, &rendered)?;
-        report.bindings_written.push(nucleon_id);
+        report.bindings_preserved.push(nucleon_id.clone());
     }
     if report.primary_binding.is_none() {
         report.primary_binding = Some(AppliedHandoffBinding {
@@ -1183,6 +1204,62 @@ mod tests {
         assert_eq!(report2.bindings_unchanged, 1);
     }
 
+    /// Issue #105 — a handoff bootstraps a missing binding, but it does not
+    /// own that file forever. An operator may extend the binding after first
+    /// boot; a restart must preserve the later, explicitly sealed scope set.
+    #[test]
+    fn test_handoff_restart_preserves_scope_added_after_provisioning() {
+        let td = TempDir::new().unwrap();
+        let handoff_dir = td.path().join("handoff");
+        std::fs::create_dir_all(&handoff_dir).unwrap();
+        std::fs::write(
+            handoff_dir.join("forgejo-issuer.toml"),
+            "schema = \"cosmon-issuer-handoff/v1\"\n\
+             [issuer]\n\
+             iss = \"http://ext/git\"\n\
+             jwks_uri = \"http://forgejo:3000/login/oauth/keys\"\n\
+             audiences = [\"client-id-abc\"]\n\
+             [binding]\n\
+             noyau = \"tenant-demo-sandbox\"\n\
+             nucleon_id = \"cosmon-forgejo\"\n\
+             sub = \"3\"\n",
+        )
+        .unwrap();
+        let state = td.path().join("state");
+        let section = section_with_handoff(&handoff_dir);
+
+        converge_with(&state, &section, None, false).unwrap();
+        let binding_path = state.join("nucleons/cosmon-forgejo/oidc-identity.toml");
+        let mut scopes = DEFAULT_BINDING_SCOPES
+            .iter()
+            .map(|scope| (*scope).to_owned())
+            .collect::<Vec<_>>();
+        scopes.push(scopes::ARTIFACT_WRITE.to_owned());
+        let operator_binding = render_oidc_identity_toml(&HabilitationBindingSpec {
+            noyau: "tenant-demo-sandbox".into(),
+            sub: "3".into(),
+            issuer: "http://ext/git".into(),
+            audience: "client-id-abc".into(),
+            nucleon_id: Some("cosmon-forgejo".into()),
+            phase: None,
+            scopes,
+            sealed_at: None,
+        })
+        .unwrap();
+        std::fs::write(&binding_path, &operator_binding).unwrap();
+
+        let report = converge_with(&state, &section, None, false).unwrap();
+
+        assert!(
+            report.bindings_written.is_empty(),
+            "restart must not replace an existing operator-owned binding"
+        );
+        assert_eq!(report.bindings_preserved, vec!["cosmon-forgejo".to_owned()]);
+        let after_restart = std::fs::read_to_string(binding_path).unwrap();
+        assert_eq!(after_restart, operator_binding);
+        assert!(after_restart.contains(scopes::ARTIFACT_WRITE));
+    }
+
     /// Issue #103 — a tenant provisioned from a handoff with no
     /// `scopes` field must be able to subscribe to `GET /v1/events`
     /// out of the box. A binding that can already spawn workers
@@ -1221,10 +1298,11 @@ mod tests {
         );
     }
 
-    /// `client_id` rotation (volume reuse): the handoff carries a new
-    /// audience → both the allowlist entry and the binding converge.
+    /// `client_id` rotation updates the allowlist declaration, but boot does
+    /// not replace the existing binding. Rotating the binding requires an
+    /// explicit operator action so boot cannot erase later scope changes.
     #[test]
-    fn test_handoff_client_id_rotation_converges_binding() {
+    fn test_handoff_client_id_rotation_preserves_existing_binding() {
         let td = TempDir::new().unwrap();
         let handoff_dir = td.path().join("handoff");
         std::fs::create_dir_all(&handoff_dir).unwrap();
@@ -1250,15 +1328,16 @@ mod tests {
         write_handoff("new-cid");
         let report = converge_with(&state, &section, None, false).unwrap();
         assert!(report.wrote_allowlist);
+        assert!(report.bindings_written.is_empty());
         assert_eq!(
-            report.bindings_written,
+            report.bindings_preserved,
             vec!["tenant-demo-sandbox".to_owned()]
         );
         let binding =
             std::fs::read_to_string(state.join("nucleons/tenant-demo-sandbox/oidc-identity.toml"))
                 .unwrap();
-        assert!(binding.contains("new-cid"));
-        assert!(!binding.contains("old-cid"));
+        assert!(binding.contains("old-cid"));
+        assert!(!binding.contains("new-cid"));
     }
 
     /// A malformed handoff is a hard, loud refusal — never skipped.
