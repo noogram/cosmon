@@ -123,6 +123,54 @@ fn cs_help_grouped_reference_snapshot() {
     insta::assert_snapshot!("cs_help_grouped_reference", stdout);
 }
 
+/// The three first-contact surfaces — installed skill, generated agent
+/// instructions, and CLI help — must carry the canonical orchestration body
+/// byte for byte. Root short/long help and grouped `cs help` are separate clap
+/// entry points, so exercise all three rather than inferring one from another.
+#[test]
+fn orchestration_body_is_identical_across_skill_agent_instructions_and_help() {
+    use cosmon_filestore::project_upgrade::{
+        generate_claude_md, generate_cosmon_skill_md, COSMON_ORCHESTRATION_BODY,
+    };
+
+    let skill = generate_cosmon_skill_md();
+    assert!(
+        skill.contains(COSMON_ORCHESTRATION_BODY),
+        "generated skill must contain the canonical orchestration body"
+    );
+
+    let project = tempfile::tempdir().expect("temp project");
+    generate_claude_md(project.path()).expect("generate agent instructions");
+    let agent_instructions = std::fs::read_to_string(project.path().join("CLAUDE.md"))
+        .expect("read generated agent instructions");
+    assert!(
+        agent_instructions.contains(COSMON_ORCHESTRATION_BODY),
+        "generated CLAUDE.md/AGENTS.md block must contain the canonical orchestration body"
+    );
+
+    for args in [&["-h"][..], &["--help"][..], &["help"][..]] {
+        let (stdout, code) = run_cs(args);
+        assert_eq!(code, 0, "cs {} exited non-zero", args.join(" "));
+        assert!(
+            stdout.contains(COSMON_ORCHESTRATION_BODY),
+            "cs {} must contain the canonical orchestration body",
+            args.join(" ")
+        );
+    }
+}
+
+/// `cs help pilot` remains the detailed help for the existing `cs pilot`
+/// command. The canonical pilot workflow is embedded in root/grouped help,
+/// not installed as a colliding synthetic `pilot` topic.
+#[test]
+fn help_pilot_still_delegates_to_the_pilot_command() {
+    let (delegated, delegated_code) = run_cs(&["help", "pilot"]);
+    let (direct, direct_code) = run_cs(&["pilot", "--help"]);
+    assert_eq!(delegated_code, 0);
+    assert_eq!(direct_code, 0);
+    assert_eq!(delegated, direct);
+}
+
 /// `--force` is a boolean reclaim-and-respawn switch, not the actor-class
 /// value accepted by `--by`. Keep that distinction explicit in the live help
 /// as well as in the full help snapshot.

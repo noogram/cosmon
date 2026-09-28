@@ -6,12 +6,27 @@ cs 0.6.0 — Cosmon agent orchestrator
 
 Usage: cs [OPTIONS] <COMMAND>
 
-START HERE — nucleate → tackle → peek → whisper/done:
-  cs nucleate task-work --var-file topic=<file>   # long statement, from a file
-  cs tackle <id> --adapter claude                 # spawn a worker
-  cs peek                                         # watch it (or: cs wait <id> &)
-  cs whisper <id> --file fix.md                   # correct it while still open
-  cs done <id>                                    # merge + teardown (required)
+Run `cs help` for the full command reference, `cs help guide` for the operator handbook, and `man cs` for the manual page.
+
+Source of truth: `.cosmon/state/` (JSON). Surfaces are projections — never edit directly.
+
+The normal cycle for one unit of work:
+```
+cs nucleate task-work --var-file topic=<file>   # a long statement goes in a file, not a flag
+cs tackle <id> --adapter claude                 # spawn a worker; omit --adapter for the project default
+cs peek                                         # watch it work, or `cs wait <id>` to block
+cs whisper <id> --file correction.md            # send a correction while the worker is still open
+cs done <id>                                    # merge to the base branch + teardown (required)
+```
+Use `cs tackle`, not `cs run`, when you intend to read the result before merging: `cs run` walks a whole DAG and calls `cs done` on completion itself, closing the review window.
+
+Stopping early is not the end of a mission: the work stays on the branch and worktree recorded at dispatch until you run `cs done <id>` (keep the partial work) or `cs collapse <id> --reason "…"` (record abandonment). `cs complete`, `cs collapse`, and `cs status` print the exact branch, recorded worktree (including overrides), and concrete `cs done` command. A collapse preserves the branch for audit; it never licenses unaudited deletion.
+
+Branch audit is concrete: inspect `git log --oneline <base>..<branch>` and `git diff --stat <base>...<branch>`. Integrate completed work with `cs done <id>`; for abandoned active work, put the reviewed disposition in `cs collapse <id> --reason "<verdict>"`. Retain the branch unless deletion is separately reviewed. `cs status` shows live branches as active work and collapsed or deliberately unmerged branches with their recorded disposition.
+
+Finishing a mission means `cs status` reads clean afterward — no zombie session, no un-harvested `Completed` molecule, and no unresolved molecule branch. Active work and retained branches with a recorded audit disposition are visible, but are not residue. `cs status` says `clean` or names every unresolved item.
+
+Who does what — you decide the mission and protected inputs (`cs nucleate --protect`) and accept or drop each result; the pilot drives the cycle above; workers do the work. Full breakdown: https://docs.noogram.org/explanation/pilot-and-workers.html
 
 Molecule lifecycle:
   spark                Spark — capture a one-line operator intent into the Inbox (ADR-061)
