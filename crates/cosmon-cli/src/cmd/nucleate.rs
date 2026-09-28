@@ -377,9 +377,13 @@ impl Args {
 ///
 /// Behaviour by origin (see [`cosmon_filestore::StateDirOrigin`]):
 /// - [`Project`](cosmon_filestore::StateDirOrigin::Project),
-///   [`Explicit`](cosmon_filestore::StateDirOrigin::Explicit),
-///   [`Env`](cosmon_filestore::StateDirOrigin::Env): the destination was
-///   chosen deliberately — stay silent.
+///   [`Explicit`](cosmon_filestore::StateDirOrigin::Explicit): the
+///   destination was chosen deliberately — stay silent here.
+/// - [`Env`](cosmon_filestore::StateDirOrigin::Env): also silent here, but
+///   not unconditionally silent overall — issue #106: when this origin
+///   shadows a galaxy found by walk-up from cwd, the resolver itself
+///   ([`cosmon_filestore::resolve_state_dir_with_origin`]) already printed a
+///   stderr warning naming both paths before returning here.
 /// - [`GlobalFallback`](cosmon_filestore::StateDirOrigin::GlobalFallback):
 ///   print a non-blocking warning to stderr; with `--require-galaxy`, fail
 ///   fast with a non-zero exit instead.
