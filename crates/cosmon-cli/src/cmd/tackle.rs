@@ -6811,14 +6811,31 @@ fn spawn_openai_session(
         .enable_all()
         .build()
         .map_err(|e| anyhow::anyhow!("cs tackle: tokio runtime build failed: {e}"))?;
-    let outcome = rt
-        .block_on(cosmon_provider::openai::run_agent_loop_counted(
+    // In-process tools inherit this process environment, unlike tmux workers
+    // whose spawn argv carries the same molecule path explicitly.
+    std::env::set_var("COSMON_MOL_DIR", mol_state_dir);
+    let turn_input = cosmon_cli::work_turn_input::WorkTurnInput::discover(mol_state_dir)
+        .map_err(|e| anyhow::anyhow!("cs tackle: work turn input failed: {e}"))?;
+    let outcome = if let Some(source) = turn_input.as_ref() {
+        rt.block_on(
+            cosmon_agent_harness::spine::run_loop_counted_with_turn_input(
+                &provider.clone().with_telemetry(Some(telemetry.clone())),
+                prompt,
+                worktree_path,
+                Some(&telemetry),
+                source,
+            ),
+        )
+        .map_err(|e| anyhow::anyhow!("cs tackle: openai agent loop failed: {e}"))?
+    } else {
+        rt.block_on(cosmon_provider::openai::run_agent_loop_counted(
             &provider,
             prompt,
             worktree_path,
             Some(&telemetry),
         ))
-        .map_err(|e| anyhow::anyhow!("cs tackle: openai agent loop failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("cs tackle: openai agent loop failed: {e}"))?
+    };
 
     // Persist the model's synthesis to the molecule state directory as durable
     // proof-of-work (parity with the local path). Best-effort: a write failure

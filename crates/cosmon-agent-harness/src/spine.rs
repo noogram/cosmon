@@ -232,6 +232,127 @@ where
     }
 }
 
+/// One bounded block selected for the next provider request only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnInput {
+    /// Store-owned key used to record the outcome after the request.
+    pub key: String,
+    /// Rendered evidence to append to this request's user input.
+    pub content: String,
+}
+
+/// Whether the provider accepted the request carrying a turn input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnInputOutcome {
+    /// The provider returned a valid turn.
+    Succeeded,
+    /// The provider returned an error.
+    Failed,
+}
+
+/// Source of optional peer evidence at the provider request boundary.
+///
+/// The source owns delivery receipts. The harness never reads a work store or
+/// assumes a message format. An empty result leaves the request unchanged.
+pub trait TurnInputSource: Send + Sync {
+    /// Select and render blocks for this request.
+    ///
+    /// # Errors
+    /// Returns a source error if custody cannot be read safely.
+    fn take(&self) -> Result<Vec<TurnInput>, String>;
+
+    /// Record the observed result of the request that carried these blocks.
+    ///
+    /// # Errors
+    /// Returns a source error if receipts cannot be persisted.
+    fn record(&self, inputs: &[TurnInput], outcome: TurnInputOutcome) -> Result<(), String>;
+}
+
+/// Error from a provider request or its turn input source.
+#[derive(Debug, thiserror::Error)]
+pub enum TurnInputProviderError<E: std::error::Error + Send + Sync + 'static> {
+    /// Source could not read input or persist the request result.
+    #[error("turn input source: {0}")]
+    Source(String),
+    /// Provider rejected the request.
+    #[error("provider: {0}")]
+    Provider(#[source] E),
+}
+
+struct TurnInputProvider<'a, P, S> {
+    provider: &'a P,
+    source: &'a S,
+}
+
+#[async_trait]
+impl<P, S> Provider for TurnInputProvider<'_, P, S>
+where
+    P: Provider,
+    P::Log: Clone,
+    S: TurnInputSource,
+{
+    type Log = P::Log;
+    type Error = TurnInputProviderError<P::Error>;
+
+    async fn one_turn(&self, log: &Self::Log) -> Result<Turn<Self::Log>, Self::Error> {
+        let inputs = self.source.take().map_err(TurnInputProviderError::Source)?;
+        if inputs.is_empty() {
+            return self
+                .provider
+                .one_turn(log)
+                .await
+                .map_err(TurnInputProviderError::Provider);
+        }
+        let mut request_log = log.clone();
+        for input in &inputs {
+            request_log.append_user(&input.content);
+        }
+        let result = self.provider.one_turn(&request_log).await;
+        let outcome = if result.is_ok() {
+            TurnInputOutcome::Succeeded
+        } else {
+            TurnInputOutcome::Failed
+        };
+        self.source
+            .record(&inputs, outcome)
+            .map_err(TurnInputProviderError::Source)?;
+        result.map_err(TurnInputProviderError::Provider)
+    }
+
+    fn tool_schema(&self) -> Vec<ToolDeclaration> {
+        self.provider.tool_schema()
+    }
+}
+
+/// Run the standard counted loop with a request-only input source.
+///
+/// Each selected block is appended to a clone of the message log so it is
+/// present in exactly one request. The canonical log keeps the provider's
+/// assistant and tool results, with no repeated peer evidence.
+///
+/// # Errors
+/// Returns the normal harness errors or a turn input source failure.
+pub async fn run_loop_counted_with_turn_input<P, S>(
+    provider: &P,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+    source: &S,
+) -> Result<WorkerOutcome, HarnessError<TurnInputProviderError<P::Error>>>
+where
+    P: Provider,
+    P::Log: Clone,
+    S: TurnInputSource,
+{
+    run_loop_counted(
+        &TurnInputProvider { provider, source },
+        briefing,
+        work_dir,
+        telemetry,
+    )
+    .await
+}
+
 /// Drive a single worker session from briefing to synthesis.
 ///
 /// Behaviour-preserving extraction of the eight-turn loop body from
@@ -1069,7 +1190,102 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::tempdir;
 
+    #[tokio::test]
+    async fn turn_input_is_present_in_exactly_one_request_and_observed_after_success() {
+        let dir = tempdir().expect("work directory");
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let seen_provider = std::sync::Arc::clone(&seen);
+        let provider = ScriptedProviderFn::<TestLog, std::io::Error>::new(move |log| {
+            let mut calls = seen_provider.lock().expect("request log");
+            calls.push(log.messages.clone());
+            if calls.len() == 1 {
+                Ok(Turn::ToolCalls {
+                    assistant: "checking".to_owned(),
+                    calls: Vec::new(),
+                })
+            } else {
+                Ok(Turn::Stop("done".to_owned()))
+            }
+        });
+        let source = ScriptedTurnInput::new("work envelope");
+        run_loop_counted_with_turn_input(&provider, "brief", dir.path(), None, &source)
+            .await
+            .expect("provider succeeded");
+        let requests = seen.lock().expect("request log");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|log| log.iter().any(|m| m == "user: work envelope"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            source.outcomes.lock().expect("outcomes").as_slice(),
+            &[TurnInputOutcome::Succeeded]
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_error_reports_failed_attempt_without_observed_context() {
+        let dir = tempdir().expect("work directory");
+        let provider = ScriptedProviderFn::<TestLog, std::io::Error>::new(|_| {
+            Err(std::io::Error::other("scripted provider failure"))
+        });
+        let source = ScriptedTurnInput::new("work envelope");
+        assert!(
+            run_loop_counted_with_turn_input(&provider, "brief", dir.path(), None, &source)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            source.outcomes.lock().expect("outcomes").as_slice(),
+            &[TurnInputOutcome::Failed]
+        );
+    }
+
+    #[derive(Default)]
+    struct ScriptedTurnInput {
+        pending: Mutex<Option<String>>,
+        outcomes: Mutex<Vec<TurnInputOutcome>>,
+    }
+
+    impl ScriptedTurnInput {
+        fn new(content: &str) -> Self {
+            Self {
+                pending: Mutex::new(Some(content.to_owned())),
+                outcomes: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl TurnInputSource for ScriptedTurnInput {
+        fn take(&self) -> Result<Vec<TurnInput>, String> {
+            Ok(self
+                .pending
+                .lock()
+                .map_err(|e| e.to_string())?
+                .take()
+                .map(|content| {
+                    vec![TurnInput {
+                        key: "one".to_owned(),
+                        content,
+                    }]
+                })
+                .unwrap_or_default())
+        }
+
+        fn record(&self, _inputs: &[TurnInput], outcome: TurnInputOutcome) -> Result<(), String> {
+            self.outcomes
+                .lock()
+                .map_err(|e| e.to_string())?
+                .push(outcome);
+            Ok(())
+        }
+    }
+
     /// Minimal `MessageLog` impl for spine tests.
+    #[derive(Clone)]
     struct TestLog {
         messages: Vec<String>,
     }
