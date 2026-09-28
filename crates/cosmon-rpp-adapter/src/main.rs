@@ -151,7 +151,8 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("trust converge failed (fail-closed): {e}"))?;
         println!(
             "trust converge OK — declared={} handoff_files={} wrote_allowlist={} \
-             issuers_total={} foreign_preserved={} bindings_written={:?} bindings_unchanged={}",
+             issuers_total={} foreign_preserved={} bindings_written={:?} bindings_unchanged={} \
+             bindings_preserved={:?}",
             report.declared,
             report.handoff_files,
             report.wrote_allowlist,
@@ -159,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
             report.foreign_preserved,
             report.bindings_written,
             report.bindings_unchanged,
+            report.bindings_preserved,
         );
         return Ok(());
     }

@@ -110,9 +110,12 @@ is required for correctness — a conformant instance heals itself under a
 restart policy.
 
 - OCI image: a background provisioner inside the container waits for the local
-  IdP, creates admin/OAuth2/trust state, and rewrites handoff/trust files only
-  on drift; every foreign entry is preserved (merge-preserving). Convergence is
-  fail-closed (parse-back before atomic replace; refuse-to-boot on failure).
+  IdP, creates admin/OAuth2/trust state, and rewrites handoff/issuer trust files
+  only on drift; every foreign issuer entry is preserved (merge-preserving).
+  A handoff binding is creation-only: boot preserves and reports any existing
+  binding that differs, leaving replacement to an explicit operator action.
+  Convergence is fail-closed (parse-back before atomic replace; refuse-to-boot
+  on failure).
 - musl binary: `provision.sh` converges the state symlink, formula/skill wiring,
   `cs init`, and the cold-copy mirror — each guarded by its own idempotence
   check. `--check-only` reports preconditions and mutates nothing.
