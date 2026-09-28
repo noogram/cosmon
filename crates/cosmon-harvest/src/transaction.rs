@@ -1959,6 +1959,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let mol_id = MoleculeId::new(&args.molecule)?;
 
+    // Issue #109 — harvest belongs to the pilot. Refused before anything is
+    // read or locked, so the worker's own `cs done` lands nothing.
+    crate::self_harvest::refuse_worker_self_harvest(&mol_id, &crate::pilot_gesture::process_env)?;
+
     // ADR-168 §D6 — authority guard. `cs done` is no more autonomous than it
     // was: this adds no right and removes none. It only makes the read-only
     // co-pilot of a co-piloted mission read-only by mechanism (M7 friction
@@ -2878,6 +2882,59 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // this dispatch and retries the molecule instead of advancing dependents
     // past a broken main.
     if merge_succeeded {
+        // Issue #109: a merge that changes the trusted shell surface is refused
+        // unless the merged surface is itself trusted — on every gate rung.
+        // Before this check the refusal was a side effect of the gate running a
+        // *delegated* command (the only rung that asked about trust), so a tree
+        // the cargo rung verified, or one no gate was declared for, landed a
+        // new `post_merge` hook unreviewed.
+        if let (Some(pmh), Some(pre)) = (pre_merge_head.as_deref(), pre_merge_trust.as_ref()) {
+            let changed = post_merge_changed_files(&repo_root, pmh).unwrap_or_default();
+            let merged_surface = crate::trust::surface_paths(&repo_root);
+            let paths = shell_surface_changes(&changed, &pre.surface, &merged_surface);
+            if let Some(refusal) =
+                unreviewed_surface_refusal(&pre.status, &crate::trust::status(&repo_root), &paths)
+            {
+                let remedy = matches!(refusal, SurfaceRefusal::MergeInvalidatedTrust).then(|| {
+                    trust_surface_remedy(
+                        &repo_root,
+                        &base_branch,
+                        &mol_id,
+                        &branch_name,
+                        &paths,
+                        project_cfg
+                            .gates
+                            .integrity_command
+                            .as_deref()
+                            .or(project_cfg.gates.build_command.as_deref()),
+                    )
+                });
+                let cause = match crate::trust::ensure_trusted(&repo_root) {
+                    Err(e) => format!(
+                        "the merge changes the trusted shell surface ({}) and the merged \
+                         surface is not trusted — {e}",
+                        paths.join(", ")
+                    ),
+                    Ok(()) => format!(
+                        "the merge changes the trusted shell surface ({})",
+                        paths.join(", ")
+                    ),
+                };
+                return Err(refuse_post_merge_and_rollback(
+                    ctx,
+                    &events_path,
+                    &mol_id,
+                    &branch_name,
+                    &repo_root,
+                    Some(pmh),
+                    merge_dispatch_seq,
+                    &actions,
+                    &cause,
+                    remedy.as_deref(),
+                ));
+            }
+        }
+
         let gate_outcome = match pre_merge_head.as_deref() {
             Some(pmh) => match run_post_merge_gate(&repo_root, pmh, &project_cfg.gates) {
                 Ok(outcome) => outcome,
@@ -5497,6 +5554,41 @@ fn merge_invalidated_trust(
 ) -> bool {
     use crate::trust::TrustStatus;
     *pre_merge == TrustStatus::Trusted && trust_refusal == Some(&TrustStatus::Stale)
+}
+
+/// Why a merge that touched the trusted shell surface is refused (issue #109).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceRefusal {
+    /// The pre-merge surface was trusted and this merge made it stale: the
+    /// issue-#74 landing sequence applies.
+    MergeInvalidatedTrust,
+    /// The repository was not trusted before the merge (never granted, or the
+    /// grant had already drifted): `cs trust` or a review of the drift, not
+    /// the landing sequence.
+    NotTrusted,
+}
+
+/// Decide whether a merge that changed `paths` of the shell surface may land.
+///
+/// A change to the surface lands only when the **merged** surface is trusted
+/// — which in practice means the operator's `COSMON_ASSUME_TRUSTED` vouch,
+/// since a grant hashes the pre-merge tree. The verdict does not depend on
+/// which post-merge gate rung runs: that dependency is what let issue #109's
+/// `.cosmon/config.toml` change through.
+fn unreviewed_surface_refusal(
+    pre_merge: &crate::trust::TrustStatus,
+    merged: &crate::trust::TrustStatus,
+    paths: &[String],
+) -> Option<SurfaceRefusal> {
+    use crate::trust::TrustStatus;
+    if paths.is_empty() || *merged == TrustStatus::Trusted {
+        return None;
+    }
+    Some(if merge_invalidated_trust(pre_merge, Some(merged)) {
+        SurfaceRefusal::MergeInvalidatedTrust
+    } else {
+        SurfaceRefusal::NotTrusted
+    })
 }
 
 /// The shell-surface paths a merge changes: every changed file that belongs to
@@ -9273,6 +9365,32 @@ mod tests {
 
     /// A surface path the branch adds (only after) or deletes (only before)
     /// is reported; an ordinary changed file is not.
+    /// Issue #109: a merge touching the shell surface lands only onto a
+    /// trusted merged surface, whatever the pre-merge status — and the
+    /// landing sequence is owed only when the merge itself staled a grant.
+    #[test]
+    fn a_surface_change_lands_only_onto_a_trusted_merged_surface() {
+        use crate::trust::TrustStatus::{Stale, Trusted, Untrusted};
+        let touched = vec![".cosmon/config.toml".to_owned()];
+        assert_eq!(unreviewed_surface_refusal(&Trusted, &Stale, &[]), None);
+        assert_eq!(
+            unreviewed_surface_refusal(&Trusted, &Trusted, &touched),
+            None
+        );
+        assert_eq!(
+            unreviewed_surface_refusal(&Trusted, &Stale, &touched),
+            Some(SurfaceRefusal::MergeInvalidatedTrust)
+        );
+        assert_eq!(
+            unreviewed_surface_refusal(&Untrusted, &Untrusted, &touched),
+            Some(SurfaceRefusal::NotTrusted)
+        );
+        assert_eq!(
+            unreviewed_surface_refusal(&Stale, &Stale, &touched),
+            Some(SurfaceRefusal::NotTrusted)
+        );
+    }
+
     #[test]
     fn shell_surface_changes_takes_both_sides_of_the_merge() {
         let changed = vec![

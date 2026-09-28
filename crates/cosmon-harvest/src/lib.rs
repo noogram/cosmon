@@ -92,6 +92,9 @@ pub mod paths;
 // The pilot-lease gesture guard: on a leased mission, only the holder may
 // harvest.
 pub mod pilot_gesture;
+// Harvest belongs to the pilot: a worker may not `cs done` its own molecule
+// (issue #109).
+pub mod self_harvest;
 // Resolution of a galaxy's target repository — the single place that answers
 // "which git repository does this galaxy's work land in?".
 pub mod target_repo;
