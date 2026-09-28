@@ -50,10 +50,11 @@
 //! left as a future extension — [`reload`] is the reusable core it would
 //! call, so adding it later is additive.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 use crate::image_init::{ImageInit, ImageInitReport};
+use crate::jwks_fetch::TrustedIssuers;
 use crate::jwt::{JwksStore, SharedJwksStore};
 use crate::nucleon_map::{HabilitationMap, Noyau, SharedHabilitationMap};
 
@@ -229,8 +230,9 @@ impl JwksReloadOutcome {
     }
 }
 
-/// Re-read the on-disk JWKS (the **authn door**) and atomically publish
-/// the fresh store into `shared`. The symmetric counterpart of [`reload`]
+/// Re-read the on-disk JWKS and HTTP issuer allowlist (the **authn door**),
+/// merge file keys with still-configured HTTP issuers, and atomically publish
+/// the result into `shared`. The symmetric counterpart of [`reload`]
 /// (the **authz door**): adding a federated peer issuer's `<iss>.json`
 /// under `<state_dir>/security/jwks/` — or removing it to revoke — takes
 /// effect on `SIGHUP` with no reboot (ADR-0023 MVP-A, D6).
@@ -244,6 +246,26 @@ impl JwksReloadOutcome {
 pub fn reload_jwks(shared: &SharedJwksStore, state_dir: &Path) -> JwksReloadOutcome {
     let issuers_before = shared.load().key_counts_by_issuer().len();
 
+    let trusted = match TrustedIssuers::load(state_dir) {
+        Ok(trusted) => trusted,
+        Err(e) => {
+            return JwksReloadOutcome {
+                issuers_before,
+                issuers_after: issuers_before,
+                keys_after: 0,
+                error: Some(format!(
+                    "read {}/security/trusted-issuers.toml: {e}",
+                    state_dir.display()
+                )),
+            };
+        }
+    };
+    let configured: HashSet<_> = trusted
+        .issuers
+        .into_iter()
+        .map(|issuer| issuer.iss)
+        .collect();
+
     let fresh = match JwksStore::load(state_dir) {
         Ok(store) => store,
         Err(e) => {
@@ -256,11 +278,11 @@ pub fn reload_jwks(shared: &SharedJwksStore, state_dir: &Path) -> JwksReloadOutc
         }
     };
 
-    let counts = fresh.key_counts_by_issuer();
+    shared.store_file_stage(&fresh, &configured);
+
+    let counts = shared.load().key_counts_by_issuer();
     let issuers_after = counts.len();
     let keys_after = counts.iter().map(|(_, n)| *n).sum();
-
-    shared.store(fresh);
 
     JwksReloadOutcome {
         issuers_before,

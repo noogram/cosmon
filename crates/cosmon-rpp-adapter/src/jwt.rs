@@ -40,7 +40,7 @@
 //! gesture removed. See smithy spec §4 (posture (b) preserved) and
 //! ADR-0023 (multi-issuer MVP-A).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -71,6 +71,14 @@ pub struct JwksStore {
     /// Allowed (`iss`, `aud`) pairs. The validator rejects requests
     /// whose `iss` is not in this set (clause a — issuer pinning).
     allowed_audiences: HashMap<String, Vec<String>>,
+    /// Issuers whose current keys came from the HTTP-fetch path. This
+    /// provenance lets a file-stage reload preserve fetched keys while
+    /// still removing file-staged issuers whose files were deleted.
+    remote_issuers: HashSet<String>,
+    /// Issuers still present in the current HTTP-fetch configuration.
+    /// Kept in the same atomically published snapshot as the keys so a
+    /// stale refresh cannot race a SIGHUP revocation and restore trust.
+    configured_remote_issuers: HashSet<String>,
 }
 
 /// One key record carried by the store.
@@ -339,7 +347,54 @@ impl JwksStore {
             inserted += 1;
         }
         self.allowed_audiences.insert(issuer.to_owned(), audiences);
+        self.remote_issuers.insert(issuer.to_owned());
         Ok(inserted)
+    }
+
+    /// Overlay the HTTP-fetched issuers from `live` onto this store.
+    ///
+    /// A SIGHUP file-stage reload starts from a new [`Self::load`] result,
+    /// so deleted files remain revoked. Only issuers carrying explicit
+    /// HTTP-fetch provenance survive from the live snapshot; their keys
+    /// and audience pins replace any same-issuer file entry because the
+    /// HTTP path is the primary source when configured.
+    fn preserve_remote_issuers_from(&mut self, live: &Self, configured: &HashSet<String>) {
+        for issuer in live.remote_issuers.intersection(configured) {
+            self.by_iss_kid.retain(|(iss, _kid), _| iss != issuer);
+            self.by_iss_kid.extend(
+                live.by_iss_kid
+                    .iter()
+                    .filter(|((iss, _kid), _record)| iss == issuer)
+                    .map(|(key, record)| (key.clone(), record.clone())),
+            );
+            if let Some(audiences) = live.allowed_audiences.get(issuer) {
+                self.allowed_audiences
+                    .insert(issuer.clone(), audiences.clone());
+            }
+        }
+        self.remote_issuers = live
+            .remote_issuers
+            .intersection(configured)
+            .cloned()
+            .collect();
+        self.configured_remote_issuers.clone_from(configured);
+    }
+
+    /// Remove HTTP-fetched material for issuers outside the current
+    /// configuration while leaving file-backed issuers untouched.
+    fn retain_configured_remote_issuers(&mut self, configured: &HashSet<String>) {
+        let revoked: HashSet<_> = self
+            .remote_issuers
+            .difference(configured)
+            .cloned()
+            .collect();
+        self.by_iss_kid
+            .retain(|(iss, _kid), _record| !revoked.contains(iss));
+        self.allowed_audiences
+            .retain(|iss, _audiences| !revoked.contains(iss));
+        self.remote_issuers
+            .retain(|issuer| configured.contains(issuer));
+        self.configured_remote_issuers.clone_from(configured);
     }
 }
 
@@ -417,6 +472,49 @@ impl SharedJwksStore {
     /// it; the next request sees the refreshed key set.
     pub fn store(&self, store: JwksStore) {
         self.0.store(Arc::new(store));
+    }
+
+    /// Set the initial HTTP-fetch allowlist in the same snapshot as the
+    /// live keys. [`crate::jwks_fetch::JwksProvider`] calls this when it
+    /// takes ownership of a store.
+    pub(crate) fn configure_remote_issuers(&self, configured: &HashSet<String>) {
+        self.0.rcu(|live| {
+            let mut next = (**live).clone();
+            next.retain_configured_remote_issuers(configured);
+            Arc::new(next)
+        });
+    }
+
+    /// Whether the current snapshot still authorises HTTP refreshes for
+    /// `issuer`.
+    pub(crate) fn is_remote_issuer_configured(&self, issuer: &str) -> bool {
+        self.load().configured_remote_issuers.contains(issuer)
+    }
+
+    /// Publish a store produced by an HTTP refresh without allowing a
+    /// stale refresh snapshot to overwrite a concurrent SIGHUP revocation.
+    pub(crate) fn store_remote_refresh(&self, refreshed: &JwksStore) {
+        self.0.rcu(|live| {
+            let configured = &live.configured_remote_issuers;
+            let mut next = refreshed.clone();
+            next.retain_configured_remote_issuers(configured);
+            Arc::new(next)
+        });
+    }
+
+    /// Publish a freshly loaded file-stage store without dropping issuers
+    /// populated by the HTTP-fetch path.
+    ///
+    /// The read-copy-update loop re-applies the overlay if another writer
+    /// publishes while the reload is being committed, so the reload never
+    /// restores an older fetched-key snapshot merely because the two paths
+    /// crossed.
+    pub(crate) fn store_file_stage(&self, file_store: &JwksStore, configured: &HashSet<String>) {
+        self.0.rcu(|live| {
+            let mut merged = file_store.clone();
+            merged.preserve_remote_issuers_from(live, configured);
+            Arc::new(merged)
+        });
     }
 }
 

@@ -58,7 +58,7 @@
 //! `reload_jwks_read_error_keeps_live_store`). A network failure closes
 //! the door, it never opens it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -313,6 +313,11 @@ impl JwksProvider {
     /// fetcher. Uses [`DEFAULT_CACHE_MISS_COOLDOWN`].
     #[must_use]
     pub fn new(shared: SharedJwksStore, issuers: Vec<TrustedIssuer>, fetcher: JwksFetcher) -> Self {
+        let configured = issuers
+            .iter()
+            .map(|issuer| issuer.iss.clone())
+            .collect::<HashSet<_>>();
+        shared.configure_remote_issuers(&configured);
         Self {
             shared,
             fetcher,
@@ -357,7 +362,12 @@ impl JwksProvider {
     pub async fn refresh_all(&self) -> JwksRefreshReport {
         let mut store = (**self.shared.load()).clone();
         let mut issuers_ok = 0;
-        for issuer in &self.issuers {
+        let configured: Vec<_> = self
+            .issuers
+            .iter()
+            .filter(|issuer| self.shared.is_remote_issuer_configured(&issuer.iss))
+            .collect();
+        for issuer in &configured {
             match self.fetcher.fetch_issuer(issuer).await {
                 Ok(json) => {
                     match store.replace_remote_jwks(&issuer.iss, issuer.audiences.clone(), &json) {
@@ -387,9 +397,9 @@ impl JwksProvider {
             }
         }
         let keys_total = store.key_counts_by_issuer().iter().map(|(_, n)| *n).sum();
-        self.shared.store(store);
+        self.shared.store_remote_refresh(&store);
         JwksRefreshReport {
-            issuers_total: self.issuers.len(),
+            issuers_total: configured.len(),
             issuers_ok,
             keys_total,
         }
@@ -405,6 +415,9 @@ impl JwksProvider {
     /// `true` only when this call performed a fetch that updated the
     /// store.
     pub async fn refresh_issuer(&self, iss: &str) -> bool {
+        if !self.shared.is_remote_issuer_configured(iss) {
+            return false;
+        }
         let Some(issuer) = self.issuers.iter().find(|i| i.iss == iss).cloned() else {
             return false;
         };
@@ -423,7 +436,7 @@ impl JwksProvider {
                 let mut store = (**self.shared.load()).clone();
                 match store.replace_remote_jwks(iss, issuer.audiences.clone(), &json) {
                     Ok(_) => {
-                        self.shared.store(store);
+                        self.shared.store_remote_refresh(&store);
                         true
                     }
                     Err(e) => {
@@ -523,6 +536,7 @@ impl JwksProvider {
 mod tests {
     use super::*;
     use crate::jwt::{JwksStore, JwtVerifier};
+    use crate::reload::reload_jwks;
     use crate::Posture;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -592,6 +606,22 @@ mod tests {
         let shared = SharedJwksStore::new(JwksStore::default());
         JwksProvider::new(shared, issuers, JwksFetcher::new().unwrap())
             .with_cooldown(Duration::from_millis(0))
+    }
+
+    fn write_trusted_issuer(state_dir: &Path, issuer: &TrustedIssuer) -> std::path::PathBuf {
+        let security_dir = state_dir.join("security");
+        std::fs::create_dir_all(&security_dir).unwrap();
+        let path = security_dir.join("trusted-issuers.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[[issuer]]\niss = \"{}\"\njwks_uri = \"{}\"\naudiences = [\"cosmon-rpp-tenant-demo\"]\n",
+                issuer.iss,
+                issuer.jwks_uri.as_deref().unwrap(),
+            ),
+        )
+        .unwrap();
+        path
     }
 
     #[tokio::test]
@@ -812,6 +842,112 @@ mod tests {
         let v = JwtVerifier::validate(&provider.shared().load(), &token, Posture::Prepared)
             .expect("fetched key should validate the token");
         assert_eq!(v.sub, "sub-1");
+    }
+
+    #[tokio::test]
+    async fn fetched_key_survives_sighup_reload() {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+        let td = tempfile::tempdir().unwrap();
+        let priv_pem = include_str!("../tests/fixtures/test_rsa_private.pem");
+        let mock = MockIdp::start(Arc::new(Mutex::new(TEST_JWKS.to_owned()))).await;
+        let issuer = TrustedIssuer {
+            iss: "https://idp.test".to_owned(),
+            jwks_uri: Some(format!("{}/keys", mock.base())),
+            audiences: vec!["cosmon-rpp-tenant-demo".to_owned()],
+        };
+        write_trusted_issuer(td.path(), &issuer);
+        let provider = provider_for(vec![issuer]);
+        provider.refresh_all().await;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = serde_json::json!({
+            "iss": "https://idp.test",
+            "sub": "sub-1",
+            "aud": "cosmon-rpp-tenant-demo",
+            "iat": now,
+            "exp": now + 60,
+            "jti": "tok-1",
+        });
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("kid-1".into());
+        let key = EncodingKey::from_rsa_pem(priv_pem.as_bytes()).unwrap();
+        let token = encode(&header, &claims, &key).unwrap();
+
+        JwtVerifier::validate(&provider.shared().load(), &token, Posture::Prepared)
+            .expect("HTTP-fetched key should authenticate before reload");
+
+        let outcome = reload_jwks(&provider.shared(), td.path());
+        assert!(outcome.is_ok());
+
+        JwtVerifier::validate(&provider.shared().load(), &token, Posture::Prepared)
+            .expect("HTTP-fetched key should authenticate after reload");
+    }
+
+    #[tokio::test]
+    async fn removed_http_issuer_is_revoked_on_sighup_reload() {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+        let td = tempfile::tempdir().unwrap();
+        let priv_pem = include_str!("../tests/fixtures/test_rsa_private.pem");
+        let mock = MockIdp::start(Arc::new(Mutex::new(TEST_JWKS.to_owned()))).await;
+        let issuer = TrustedIssuer {
+            iss: "https://idp.test".to_owned(),
+            jwks_uri: Some(format!("{}/keys", mock.base())),
+            audiences: vec!["cosmon-rpp-tenant-demo".to_owned()],
+        };
+        let trusted_issuers_path = write_trusted_issuer(td.path(), &issuer);
+        let provider = provider_for(vec![issuer]);
+        provider.refresh_all().await;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = serde_json::json!({
+            "iss": "https://idp.test",
+            "sub": "sub-1",
+            "aud": "cosmon-rpp-tenant-demo",
+            "iat": now,
+            "exp": now + 60,
+            "jti": "tok-removed-issuer",
+        });
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("kid-1".into());
+        let key = EncodingKey::from_rsa_pem(priv_pem.as_bytes()).unwrap();
+        let token = encode(&header, &claims, &key).unwrap();
+
+        JwtVerifier::validate(&provider.shared().load(), &token, Posture::Prepared)
+            .expect("configured HTTP issuer should authenticate before removal");
+
+        std::fs::remove_file(trusted_issuers_path).unwrap();
+        let outcome = reload_jwks(&provider.shared(), td.path());
+        assert!(outcome.is_ok());
+
+        let err = JwtVerifier::validate(&provider.shared().load(), &token, Posture::Prepared)
+            .expect_err("removed HTTP issuer must be revoked by reload");
+        assert!(matches!(
+            err,
+            crate::error::RppRejectReason::IssuerNotPinned
+        ));
+
+        let hits_after_reload = mock.jwks_hits.load(Ordering::SeqCst);
+        let report = provider.refresh_all().await;
+        assert_eq!(report.issuers_total, 0);
+        assert_eq!(
+            mock.jwks_hits.load(Ordering::SeqCst),
+            hits_after_reload,
+            "the stale provider must not contact an issuer removed by reload",
+        );
+        let err = JwtVerifier::validate(&provider.shared().load(), &token, Posture::Prepared)
+            .expect_err("a later refresh must not restore a removed issuer");
+        assert!(matches!(
+            err,
+            crate::error::RppRejectReason::IssuerNotPinned
+        ));
     }
 
     #[test]
