@@ -36,6 +36,7 @@ pub mod frontier;
 pub mod instrumentation;
 pub mod journal;
 pub mod ops;
+pub mod plan_observation;
 pub mod rebuild;
 pub mod token_meter;
 pub mod wait;
