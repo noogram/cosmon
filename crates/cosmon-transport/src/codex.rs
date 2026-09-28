@@ -411,7 +411,10 @@ pub struct GitIdentity {
 ///   positional prompt (the caller injects it into the composer after
 ///   readiness). [`spawn_codex_session`] pre-trusts `config.work_dir` before
 ///   executing this command. `<flags>` is [`DEFAULT_INTERACTIVE_ARGS`] unless
-///   `config.extra_args` overrides it.
+///   `config.extra_args` overrides it. The command also selects the worker's
+///   own profile overlay so a setting changed in the TUI never reaches the
+///   global codex config (issue #84,
+///   [`cosmon_core::worker_argv::codex_worker_profile_args`]).
 ///
 /// Both modes carry [`NO_STARTUP_UPDATE_OVERRIDE`] unconditionally — a codex
 /// worker must never self-update (and die) mid-run.
@@ -444,6 +447,15 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             push_no_update_override(&mut cmd);
             push_writable_roots(&mut cmd, &config.writable_roots);
             push_harness_args(&mut cmd, &config.harness_args);
+            // Issue #84: the worker's own profile overlay, from the builder
+            // the library executor renders too (ADR-181).
+            for token in cosmon_core::worker_argv::codex_worker_profile_args(
+                &config.session_name,
+                &[&config.extra_args, &config.harness_args],
+            ) {
+                cmd.push(' ');
+                cmd.push_str(&shell_escape(&token));
+            }
             if let Some(ref model) = config.model {
                 cmd.push_str(" --model ");
                 cmd.push_str(&shell_escape(model));
@@ -1321,7 +1333,7 @@ mod tests {
         assert_eq!(
             cmd,
             "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
-             -c check_for_update_on_startup=false \
+             -c check_for_update_on_startup=false -p cosmon-worker-polecat-codex \
              --dangerously-bypass-approvals-and-sandbox --no-alt-screen"
         );
         // The prompt must NOT leak onto the command line in interactive mode.
@@ -1340,7 +1352,8 @@ mod tests {
         assert_eq!(
             build_codex_command(&c),
             "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
-             -c check_for_update_on_startup=false -m gpt-5 --no-alt-screen"
+             -c check_for_update_on_startup=false -p cosmon-worker-polecat-codex \
+             -m gpt-5 --no-alt-screen"
         );
     }
 

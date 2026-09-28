@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The **one** builder for a claude worker's launch argv (COSMON-DEV #75).
+//! The **one** builder for a claude worker's launch argv (COSMON-DEV #75),
+//! and for the codex worker's profile overlay (issue #84).
 //!
 //! # Why this module exists
 //!
@@ -258,6 +259,73 @@ pub fn compose_launch(
     }
 }
 
+/// The adapter name whose profile overlay [`codex_worker_profile_args`]
+/// selects. Named for the same reason as [`CLAUDE_ADAPTER`].
+pub const CODEX_ADAPTER: &str = "codex";
+
+/// Prefix of the per-worker codex profile an interactive codex worker
+/// launches with (issue #84). See [`codex_worker_profile_name`].
+pub const CODEX_WORKER_PROFILE_PREFIX: &str = "cosmon-worker-";
+
+/// Name of the codex profile-v2 overlay an interactive codex worker launches
+/// with (`codex -p <name>`), derived from its session name.
+///
+/// # Why this exists (issue #84, ADR-181)
+///
+/// codex's TUI persists a setting changed interactively (`/model` → reasoning
+/// level, confirmed as the default) into the **active user config layer**.
+/// Without a profile that layer is the machine-wide `$CODEX_HOME/config.toml`,
+/// so one operator adjustment inside one worker became the default of every
+/// later codex worker, in every project. With `-p <name>`, codex layers
+/// `$CODEX_HOME/<name>.config.toml` on top of that base file and the overlay
+/// becomes the active user layer: the global config is still *read* as the
+/// default, and the worker's changes are *written* to its own overlay.
+/// Measured against codex-cli 0.157.1.
+///
+/// `CODEX_HOME` is deliberately left alone: the `ChatGPT` login and the
+/// session rollouts the realized-model observer reads live there.
+///
+/// The overlay is keyed by the session name, which is per molecule, so a
+/// re-tackle of the same molecule keeps its adjustment. codex accepts
+/// `[A-Za-z0-9_-]` in a profile name, so every other character is mapped to
+/// `-`.
+#[must_use]
+pub fn codex_worker_profile_name(session_name: &str) -> String {
+    let mut name = CODEX_WORKER_PROFILE_PREFIX.to_owned();
+    name.extend(session_name.chars().map(|c| {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            c
+        } else {
+            '-'
+        }
+    }));
+    name
+}
+
+/// The `-p <worker-profile>` tokens an interactive codex worker launches
+/// with — the **one** builder both dispatch paths render (issue #84):
+/// `cosmon_transport::codex::build_codex_command` quotes them into its shell
+/// string, and the library executor hands them to the transport as argv.
+///
+/// `operator_args` are the argv slices the operator controls on this launch
+/// (`[adapters.codex].extra_args`, the rendered harness settings). When any of
+/// them already selects a profile, nothing is emitted: codex takes a single
+/// `--profile`, and the operator's explicit choice wins.
+#[must_use]
+pub fn codex_worker_profile_args(session_name: &str, operator_args: &[&[String]]) -> Vec<String> {
+    let selects_profile = operator_args.iter().any(|args| {
+        args.iter().any(|token| {
+            token == "--profile"
+                || token.starts_with("--profile=")
+                || (token.starts_with("-p") && !token.starts_with("--"))
+        })
+    });
+    if selects_profile {
+        return Vec::new();
+    }
+    vec!["-p".to_owned(), codex_worker_profile_name(session_name)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +482,39 @@ mod tests {
                 "bypassPermissions",
             ],
         );
+    }
+
+    /// Issue #84: the overlay name is the session name mapped onto codex's
+    /// profile-name alphabet, so any session name yields a name codex accepts.
+    #[test]
+    fn codex_worker_profile_name_uses_codex_profile_alphabet() {
+        assert_eq!(
+            codex_worker_profile_name("fix-issue-84_9b99"),
+            "cosmon-worker-fix-issue-84_9b99"
+        );
+        assert_eq!(
+            codex_worker_profile_name("a.b/c d:é"),
+            "cosmon-worker-a-b-c-d--"
+        );
+    }
+
+    /// Issue #84: the overlay is selected by default, and an operator who
+    /// selects a profile explicitly — in any spelling, on either operator
+    /// surface — keeps it instead.
+    #[test]
+    fn codex_worker_profile_yields_to_an_operator_selected_profile() {
+        assert_eq!(
+            codex_worker_profile_args("s", &[&[], &[]]),
+            vec!["-p", "cosmon-worker-s"]
+        );
+        for spelling in [
+            vec!["-p".to_owned(), "mine".to_owned()],
+            vec!["--profile".to_owned(), "mine".to_owned()],
+            vec!["--profile=mine".to_owned()],
+            vec!["-pmine".to_owned()],
+        ] {
+            assert!(codex_worker_profile_args("s", &[&spelling, &[]]).is_empty());
+            assert!(codex_worker_profile_args("s", &[&[], &spelling]).is_empty());
+        }
     }
 }
