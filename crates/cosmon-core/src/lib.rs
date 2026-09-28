@@ -74,6 +74,7 @@ pub mod harness_settings;
 pub mod id;
 pub mod kind;
 pub mod molecule;
+pub mod plan_observation;
 /// Reviewed, versioned reference tariffs and pure usage valuation.
 pub mod price_manifest;
 pub mod role;
