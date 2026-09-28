@@ -38,11 +38,17 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+use cosmon_core::agent::AgentRole;
+use cosmon_core::clearance::Clearance;
+use cosmon_core::id::{AgentId, MoleculeId, WorkerId};
+use cosmon_core::worker::WorkerStatus;
+use cosmon_filestore::FileStore;
 use cosmon_oidc_testkit::{IssueJwt, OidcMock, OidcMockConfig, TenantWorkspaces};
 use cosmon_rpp_adapter::deny_list::DenyList;
 use cosmon_rpp_adapter::nucleon_map::{HabilitationId, HabilitationMap, Noyau};
 use cosmon_rpp_adapter::rate_limit::IngressRateLimiter;
 use cosmon_rpp_adapter::{router, AppState, BackendHealthRegistry, JwksStore, Posture};
+use cosmon_state::{Fleet, StateStore, WorkerData};
 use cosmon_thin_cli::cli::{
     run_with, Cli, CollapseArgs, Command as ThinCmd, EnsembleArgs, FreezeArgs, NucleateArgs,
     ObserveArgs, StuckArgs, TagArgs, ThawArgs,
@@ -680,6 +686,28 @@ async fn parity_collapse() {
             &serde_json::json!({"status": "running"}),
         )
         .unwrap();
+    let store = FileStore::new(&tenant_a.state_dir);
+    let mut fleet = Fleet::default();
+    for id in ["task-20260504-cocs", "task-20260504-coth"] {
+        let molecule_id = MoleculeId::new(id).unwrap();
+        let worker_id = WorkerId::new(format!("worker-{id}")).unwrap();
+        let mut molecule = store.load_molecule(&molecule_id).unwrap();
+        molecule.assigned_worker = Some(worker_id.clone());
+        molecule.originating_branch = Some(format!("feat/recorded-{id}"));
+        store.save_molecule(&molecule_id, &molecule).unwrap();
+
+        let worker = WorkerData::new(
+            worker_id.clone(),
+            AgentId::new("parity").unwrap(),
+            AgentRole::Implementation,
+            Clearance::Write,
+            WorkerStatus::Active,
+        )
+        .with_repo(format!("overrides/{id}"))
+        .with_molecule(molecule_id);
+        fleet.workers.insert(worker_id, worker);
+    }
+    store.save_fleet(&fleet).unwrap();
 
     let oidc = OidcMock::start_with(OidcMockConfig {
         audiences: vec!["cosmon-rpp-a".to_owned()],
@@ -737,6 +765,15 @@ async fn parity_collapse() {
     assert_eq!(thin_out["status"], "collapsed");
     assert_eq!(cs_out["reason"], "test-reason");
     assert_eq!(thin_out["reason"], "test-reason");
+    assert_eq!(thin_out["branch"], "feat/recorded-task-20260504-coth");
+    assert!(
+        thin_out["worktree"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("overrides/task-20260504-coth")),
+        "recorded --workdir must survive the remote collapse: {thin_out}"
+    );
+    assert_eq!(thin_out["harvest_command"], "cs done task-20260504-coth");
+    assert_eq!(thin_out["branch_deletion_requires_audit"], true);
 
     // Normalise the differing molecule id.
     let mut cs_norm = cs_out.clone();
@@ -746,6 +783,19 @@ async fn parity_collapse() {
     }
     if let Some(obj) = thin_norm.as_object_mut() {
         obj.insert("molecule".to_owned(), Value::String("<normalised>".into()));
+    }
+    for (value, id) in [
+        (&mut cs_norm, "task-20260504-cocs"),
+        (&mut thin_norm, "task-20260504-coth"),
+    ] {
+        if let Some(obj) = value.as_object_mut() {
+            for field in ["branch", "worktree", "harvest_command"] {
+                if let Some(text) = obj.get(field).and_then(Value::as_str) {
+                    let normalised = text.replace(id, "<normalised>");
+                    obj.insert(field.to_owned(), Value::String(normalised));
+                }
+            }
+        }
     }
 
     let diffs = compare(&cs_norm, &thin_norm, "collapse", &allowlist);

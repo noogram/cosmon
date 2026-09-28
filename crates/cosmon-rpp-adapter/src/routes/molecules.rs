@@ -53,6 +53,7 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use cosmon_core::auth::{JwtClaims, Subject};
+use cosmon_core::error::CosmonError;
 use cosmon_core::harvest_door::HarvestOptions;
 use cosmon_core::id::{FleetId, MoleculeId};
 use cosmon_core::tag::Tag;
@@ -65,7 +66,7 @@ use cosmon_state::ops::{
     NucleateRequest, ObserveError, ObserveJson, OpsError, StuckError, StuckJson, StuckRequest,
     TagError, TagJson, ThawError, ThawJson, ThawRequest,
 };
-use cosmon_state::StateStore;
+use cosmon_state::{StateStore, WorkLocation};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -964,6 +965,53 @@ pub struct CollapseBody {
     pub kind: Option<String>,
 }
 
+fn collapse_work_location(
+    store: &dyn StateStore,
+    tenant_root: &Path,
+    molecule_id: &MoleculeId,
+    request_id: &str,
+) -> Result<WorkLocation, ApiError> {
+    let molecule = store
+        .load_molecule(molecule_id)
+        .map_err(|error| match error {
+            CosmonError::MoleculeNotFound(_) => ApiError {
+                status: StatusCode::NOT_FOUND,
+                label: "not_found",
+                request_id: Some(request_id.to_owned()),
+            },
+            _ => ApiError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                label: "store_unavailable",
+                request_id: Some(request_id.to_owned()),
+            },
+        })?;
+    let fleet = store.load_fleet().map_err(|_| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        label: "store_unavailable",
+        request_id: Some(request_id.to_owned()),
+    })?;
+    let repo_root =
+        std::fs::canonicalize(tenant_root).unwrap_or_else(|_| tenant_root.to_path_buf());
+    Ok(WorkLocation::from_state(&molecule, &fleet, &repo_root))
+}
+
+fn collapse_body(body: &CollapseJson, location: WorkLocation) -> Value {
+    let mut value = serde_json::to_value(body).unwrap_or(Value::Null);
+    if let Some(fields) = value.as_object_mut() {
+        fields.insert("branch".to_owned(), Value::String(location.branch));
+        fields.insert("worktree".to_owned(), Value::String(location.worktree));
+        fields.insert(
+            "harvest_command".to_owned(),
+            Value::String(location.harvest_command),
+        );
+        fields.insert(
+            "branch_deletion_requires_audit".to_owned(),
+            Value::Bool(true),
+        );
+    }
+    value
+}
+
 /// `POST /v1/molecules/:id/collapse` — V1 mutation cut (T-CST-EXPAND).
 pub async fn collapse_molecule(
     State(state): State<Arc<AppState>>,
@@ -1014,6 +1062,12 @@ pub async fn collapse_molecule(
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
     let store = FileStore::new(&tenant_state_dir);
     let subject = subject_for_jwt(&jwt);
+    let location = collapse_work_location(
+        &store,
+        &tenant_root,
+        &molecule_id,
+        spark.request_id.as_str(),
+    )?;
 
     let request = CollapseRequest {
         reason: body.reason,
@@ -1054,7 +1108,7 @@ pub async fn collapse_molecule(
         })?;
 
     let body = CollapseJson::from_view(&view);
-    let body_value = serde_json::to_value(&body).unwrap_or(Value::Null);
+    let body_value = collapse_body(&body, location);
 
     state.events.publish(MoleculeEvent::state_changed(
         spark.noyau.as_str(),
