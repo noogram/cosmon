@@ -369,6 +369,24 @@ pub fn classify_pane(text: &str) -> DialogueScan {
         };
     }
 
+    // A named codex menu dominates unrelated permission text elsewhere in
+    // the capture tail. Without this precedence, a stale "Do you want to
+    // proceed?" line above a current update prompt or reasoning picker would
+    // classify the whole pane as `Permission`: patrol could press Enter when
+    // `--auto-confirm-safe` is enabled, and `cs whisper` would paste into the
+    // menu. Rate-limit switches have already returned through the money
+    // branch above; the other two named menus fail closed as `Unknown`.
+    if matches!(
+        classify_codex_dialog(text),
+        Some(CodexDialogKind::UpdateAvailable | CodexDialogKind::ReasoningPicker)
+    ) {
+        let evidence = first_match(&lower, &lines, BLOCKING_MARKERS);
+        return DialogueScan {
+            class: DialogueClass::Unknown,
+            evidence,
+        };
+    }
+
     let permission_hit = first_match(&lower, &lines, PERMISSION_MARKERS);
     let risky_hit = first_match(&lower, &lines, RISKY_MARKERS);
 
@@ -565,6 +583,32 @@ mod tests {
             DialogueClass::None,
             "reasoning picker went undetected"
         );
+        assert!(!scan.class.auto_confirmable());
+        assert_eq!(
+            classify_codex_dialog(pane),
+            Some(CodexDialogKind::ReasoningPicker)
+        );
+    }
+
+    #[test]
+    fn codex_update_prompt_dominates_stale_permission_text() {
+        let pane = "Do you want to proceed?\n  1. Yes\n\n\
+                    Update available! 0.154.0 -> 0.157.0";
+        let scan = classify_pane(pane);
+        assert_eq!(scan.class, DialogueClass::Unknown);
+        assert!(!scan.class.auto_confirmable());
+        assert_eq!(
+            classify_codex_dialog(pane),
+            Some(CodexDialogKind::UpdateAvailable)
+        );
+    }
+
+    #[test]
+    fn codex_reasoning_picker_dominates_stale_permission_text() {
+        let pane = "Do you want to proceed?\n  1. Yes\n\n\
+                    Select Reasoning Level for gpt-6-astra";
+        let scan = classify_pane(pane);
+        assert_eq!(scan.class, DialogueClass::Unknown);
         assert!(!scan.class.auto_confirmable());
         assert_eq!(
             classify_codex_dialog(pane),
