@@ -1227,7 +1227,15 @@ When unsure of a command's syntax, run `cs --help` or `cs <command> --help`.**\n
     out.push_str("1. Read the project's CLAUDE.md for conventions (if it exists).\n");
     out.push_str("2. Implement the step, meeting its exit criteria.\n");
     out.push_str(&render_gates_instruction(&config.gates));
-    out.push_str("4. Commit your changes.\n");
+    out.push_str(
+        "4. Commit your changes — but only if `git status --porcelain` is \
+non-empty. A step whose deliverable is written outside the worktree (a \
+report, a verdict file, a run-scoped artifact directory) can leave the \
+worktree clean; that is a valid outcome, not a missed step. Never create an \
+empty or marker commit (\"docs: record...\", \"test: capture...\") just to \
+satisfy this instruction — an empty commit still lands on `main` if the \
+branch is merged, and it is not evidence of anything.\n",
+    );
 
     // Steps 5+ vary based on on_complete config.
     let on_complete = config.worker.on_complete;
@@ -1631,6 +1639,50 @@ mod tests {
         assert!(plan.prompt.contains("make the tackle plan pure"));
         assert!(plan.prompt.contains("Extract the pure half."));
         assert!(plan.prompt.contains("cs complete task-20260904-f4c6"));
+    }
+
+    /// noogram/cosmon#110: the coding-agent brief used to say "4. Commit your
+    /// changes." unconditionally — an evidence-only node (writing its
+    /// deliverable outside the worktree, per the `cosmon-dev` spore's own
+    /// `${output_dir}` convention) had nothing to commit, so it produced a
+    /// ritual empty or marker commit instead, and that commit would land on
+    /// `main` if its branch were merged. The instruction must now be
+    /// conditional on there being something to commit, and must say so.
+    #[test]
+    fn the_commit_step_is_conditional_and_forbids_ritual_empty_commits() {
+        let id = MoleculeId::new("task-20260928-ae25").unwrap();
+        let formula_id = FormulaId::new("task-work").unwrap();
+        let mut variables = HashMap::new();
+        variables.insert(
+            "topic".to_owned(),
+            "write intake.md; no code changes".to_owned(),
+        );
+        let config = ProjectConfig::default();
+        let molecule = brief(&id, &formula_id, &variables);
+
+        let prompt = build_prompt(
+            &molecule,
+            None,
+            None,
+            &config,
+            Path::new("/galaxy/.cosmon/state/molecules/task-20260928-ae25"),
+            "claude",
+            None,
+        );
+
+        assert!(
+            !prompt.contains("4. Commit your changes.\n"),
+            "the unconditional ritual instruction must be gone"
+        );
+        assert!(
+            prompt.contains("git status --porcelain") && prompt.contains("non-empty"),
+            "the commit step must be conditioned on there being something to commit"
+        );
+        assert!(
+            prompt.contains("Never create an\nempty or marker commit")
+                || prompt.contains("Never create an empty or marker commit"),
+            "the brief must forbid a ritual empty/marker commit"
+        );
     }
 
     /// Issue #94: a molecule born with `--protect` tells its worker, in the
