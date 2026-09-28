@@ -90,9 +90,9 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              and SKIPS anything no longer Pending, carrying a sticky 'human' claim, \
              or tagged 'hold:pilot'. Use 'cs claim <id>' before reaching for a pending \
              molecule: it writes the durable pilot hold before 'cs tackle', and \
-             'cs release <id>' removes it. The runtime always defers to that hold. \
-             A prior 'cs claim' gives the pilot priority; otherwise the first \
-             tackle to claim the molecule wins. Operators do not normally \
+             'cs release <id>' removes it. The runtime defers when its \
+             post-lock recheck sees that hold. Otherwise the first tackle \
+             to claim the molecule wins. Operators do not normally \
              type '--by'; 'human' is the default.\n\n\
              SPORE (ADR-140) germinates a whole polymer from a shareable \
              'spore.toml' template, the way 'cs nucleate' germinates one \

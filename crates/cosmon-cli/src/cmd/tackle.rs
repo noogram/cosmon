@@ -374,8 +374,18 @@ fn refresh_after_dispatch_claim(
     store: &FileStore,
     prior: &MoleculeData,
     force: bool,
+    tackled_by: &cosmon_core::tackle::TackledBy,
 ) -> anyhow::Result<MoleculeData> {
     let current = store.load_molecule(&prior.id)?;
+    if !tackled_by.is_human()
+        && (current.is_human_claimed()
+            || current.tags.iter().any(|tag| tag.as_str() == "hold:pilot"))
+    {
+        return Err(anyhow::anyhow!(
+            "cs tackle: runtime dispatch of {} refused: pilot holds the molecule",
+            prior.id
+        ));
+    }
     if let Some(process) = current.process.as_ref() {
         if !force || current.process != prior.process {
             let adapter = process.adapter_name.as_deref().unwrap_or("unknown");
@@ -397,6 +407,12 @@ fn refresh_after_dispatch_claim(
             "molecule {} is {} — cannot tackle a terminal molecule",
             current.id,
             current.status
+        ));
+    }
+    if current.status == MoleculeStatus::Running && current.process.is_none() && !force {
+        return Err(anyhow::anyhow!(
+            "cs tackle: molecule {} is already running without a worker process",
+            current.id
         ));
     }
     Ok(current)
@@ -628,7 +644,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         Some(store.acquire_dispatch_lock(&mol_id)?)
     };
     if dispatch_claim.is_some() {
-        mol = refresh_after_dispatch_claim(&store, &mol, args.force)?;
+        mol = refresh_after_dispatch_claim(&store, &mol, args.force, &tackled_by)?;
     }
 
     // 2. Load formula for context.
@@ -9838,9 +9854,14 @@ mod tests {
             let _claim = other_store
                 .acquire_dispatch_lock(&stale_snapshot.id)
                 .unwrap();
-            let result = refresh_after_dispatch_claim(&other_store, &stale_snapshot, false)
-                .map(|_| String::new())
-                .unwrap_or_else(|error| error.to_string());
+            let result = refresh_after_dispatch_claim(
+                &other_store,
+                &stale_snapshot,
+                false,
+                &cosmon_core::tackle::TackledBy::Human,
+            )
+            .map(|_| String::new())
+            .unwrap_or_else(|error| error.to_string());
             result_tx.send(result).unwrap();
         });
         attempted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
@@ -9862,6 +9883,56 @@ mod tests {
         assert!(error.contains("winning-worker"), "{error}");
         assert!(error.contains("local"), "{error}");
         assert!(error.contains("model-pinned"), "{error}");
+    }
+
+    #[test]
+    fn resident_rechecks_pilot_hold_after_dispatch_claim() {
+        let (_tmp, state_dir) = make_store();
+        let store = FileStore::new(&state_dir);
+        let pending = sample_molecule("task-20260928-b119", MoleculeStatus::Pending);
+        store.save_molecule(&pending.id, &pending).unwrap();
+        let mut claimed = pending.clone();
+        claimed
+            .tags
+            .insert(cosmon_core::tag::Tag::new("hold:pilot").unwrap());
+        store.save_molecule(&claimed.id, &claimed).unwrap();
+
+        let _claim = store.acquire_dispatch_lock(&pending.id).unwrap();
+        let error = refresh_after_dispatch_claim(
+            &store,
+            &pending,
+            false,
+            &cosmon_core::tackle::TackledBy::runtime(42),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("pilot holds"), "{error}");
+        assert_eq!(
+            store.load_molecule(&pending.id).unwrap().status,
+            MoleculeStatus::Pending
+        );
+    }
+
+    #[test]
+    fn second_tackle_refuses_running_molecule_without_process() {
+        let (_tmp, state_dir) = make_store();
+        let store = FileStore::new(&state_dir);
+        let pending = sample_molecule("task-20260928-c119", MoleculeStatus::Pending);
+        store.save_molecule(&pending.id, &pending).unwrap();
+        let mut running = pending.clone();
+        running.status = MoleculeStatus::Running;
+        store.save_molecule(&running.id, &running).unwrap();
+
+        let _claim = store.acquire_dispatch_lock(&pending.id).unwrap();
+        let error = refresh_after_dispatch_claim(
+            &store,
+            &pending,
+            false,
+            &cosmon_core::tackle::TackledBy::Human,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("already running"), "{error}");
     }
 
     /// COSMON #90 — the end-to-end shape of the fix: a *live* session torn
