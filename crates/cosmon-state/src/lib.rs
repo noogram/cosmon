@@ -25,6 +25,7 @@ use cosmon_core::molecule_class::MoleculeClass;
 use cosmon_core::tag::Tag;
 use cosmon_core::worker::{derive_worker_role, DesiredState, WorkerRole, WorkerStatus};
 
+pub mod advisory_attempt;
 pub mod archive;
 pub mod attestor_log;
 pub mod avatar;

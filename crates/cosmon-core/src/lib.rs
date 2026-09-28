@@ -98,6 +98,8 @@ pub mod adapter_exit;
 #[doc(hidden)]
 pub mod admission;
 #[doc(hidden)]
+pub mod advisory_attempt;
+#[doc(hidden)]
 pub mod agent;
 #[doc(hidden)]
 pub mod algorithmic_provenance;
