@@ -149,6 +149,19 @@ fn empty_and_unreadable_store_do_not_inject_context() {
 }
 
 #[test]
+fn stale_work_reference_does_not_qualify_for_hook_wiring() {
+    let (_dir, state) = setup();
+    let member = mol(&state, B);
+    assert!(cosmon_cli::work_hook::is_current_member(&member));
+    let scope_path = mol(&state, OWNER).join("work/scope.json");
+    let mut scope: serde_json::Value =
+        serde_json::from_slice(&fs::read(&scope_path).expect("scope")).expect("scope JSON");
+    scope["seats"].as_object_mut().expect("seats").remove("b");
+    fs::write(scope_path, serde_json::to_vec(&scope).expect("scope JSON")).expect("revise roster");
+    assert!(!cosmon_cli::work_hook::is_current_member(&member));
+}
+
+#[test]
 fn declared_seats_exchange_and_ack_across_hook_adapters() {
     for (sender, recipient) in [
         ("claude", "codex"),

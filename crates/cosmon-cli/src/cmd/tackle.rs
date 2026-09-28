@@ -5248,7 +5248,7 @@ fn spawn_claude_and_prompt(
     // returns, so the absence of a receipt later can be attributed to a hook
     // that was never installed rather than to a prompt that was never accepted.
     let receipt_mint =
-        mint_briefing_receipt_overlay(wid, mol_state_dir.join("work-ref.json").is_file());
+        mint_briefing_receipt_overlay(wid, cosmon_cli::work_hook::is_current_member(mol_state_dir));
     let receipt_overlay = receipt_mint.path();
 
     let claude_cmd = cosmon_cli::tackle_env::build_claude_command(
@@ -6226,7 +6226,7 @@ fn warn_codex_api_key_stripped(var: &str) {
 }
 
 fn mint_codex_work_hook_home(mol_state_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    if !mol_state_dir.join("work-ref.json").is_file() {
+    if !cosmon_cli::work_hook::is_current_member(mol_state_dir) {
         return None;
     }
     let home = mol_state_dir.join("codex-work-home");

@@ -8,7 +8,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::os::fd::FromRawFd as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
 use chrono::Utc;
@@ -29,6 +29,35 @@ pub const HOOK_SUBCOMMAND: &str = "work-hook";
 struct WorkRef {
     owner_molecule: MoleculeId,
     seat: AdvisorySeatId,
+}
+
+/// Whether the molecule still holds the seat named by its work reference.
+///
+/// Dispatch uses this read-only check before installing a provider hook. The
+/// hook repeats membership validation at firing time because a roster may be
+/// revised after the worker starts.
+#[must_use]
+pub fn is_current_member(member_dir: &Path) -> bool {
+    let Some(name) = member_dir.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Ok(member_id) = MoleculeId::new(name) else {
+        return false;
+    };
+    let Ok(bytes) = fs::read(member_dir.join("work-ref.json")) else {
+        return false;
+    };
+    let Ok(reference) = serde_json::from_slice::<WorkRef>(&bytes) else {
+        return false;
+    };
+    let Some(parent) = member_dir.parent() else {
+        return false;
+    };
+    let store = FileWorkMessageStore::new(parent.join(reference.owner_molecule.as_str()));
+    let Ok(Some(scope)) = store.load_scope() else {
+        return false;
+    };
+    scope.owner == reference.owner_molecule && scope.seat_of(&member_id) == Some(&reference.seat)
 }
 
 /// Intercept a work hook before the ordinary CLI emits any output or events.
