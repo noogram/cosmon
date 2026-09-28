@@ -246,7 +246,7 @@ enum Command {
     #[command(after_help = cmd::examples::STATUS)]
     Status(cmd::status::Args),
 
-    /// Tackle a molecule — spawn ONE worker on this node (always leaf; for DAG walks use `cs run`)
+    /// Tackle a molecule — claim before model selection and spawn ONE worker (for DAG walks use `cs run`)
     #[command(after_help = cmd::examples::TACKLE)]
     Tackle(cmd::tackle::Args),
 

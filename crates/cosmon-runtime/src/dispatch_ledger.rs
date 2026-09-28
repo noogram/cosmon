@@ -99,6 +99,17 @@ pub enum DispatchLedgerError {
     #[error("identifier error: {0}")]
     Id(#[from] cosmon_core::id::IdError),
 
+    /// Another tackle bound the molecule after this caller read it.
+    #[error("dispatch claim lost: winning worker {worker}, adapter {adapter}, model {model}")]
+    ClaimLost {
+        /// The worker already bound to the molecule.
+        worker: WorkerId,
+        /// Its recorded adapter, or an explicit unknown for legacy state.
+        adapter: String,
+        /// Its selected model, or the unrecorded adapter default.
+        model: String,
+    },
+
     /// The `WorkerSpawned` event could not be appended to `events.jsonl`.
     ///
     /// The dispatch is refused (and its partial writes undone) because a
@@ -219,6 +230,22 @@ pub fn commit_dispatch(
 ) -> Result<(MoleculeData, DispatchRecorded), DispatchLedgerError> {
     let mol_id = mol.id.clone();
     let _g = store.lock_fleet()?;
+    let current = store.load_molecule(&mol_id)?;
+    if current.process != mol.process {
+        if let Some(process) = current.process.as_ref() {
+            return Err(DispatchLedgerError::ClaimLost {
+                worker: process.worker_id.clone(),
+                adapter: process
+                    .adapter_name
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                model: process
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "adapter default (unrecorded)".to_owned()),
+            });
+        }
+    }
     let mut updated = mol.clone();
     if matches!(
         updated.status,
@@ -673,6 +700,43 @@ mod tests {
         // from this instant onwards.
         let fleet = store.load_fleet().expect("fleet");
         assert!(fleet.workers.contains_key(&worker));
+    }
+
+    /// Two tacklers can both read Pending before either records its worker.
+    /// The second must lose loudly and leave the first model pin intact.
+    #[test]
+    fn stale_second_tackle_cannot_replace_winning_worker_or_model() {
+        let (dir, store, pending) = fixture();
+        let manual_worker = WorkerId::new("manual-aaaa").expect("worker id");
+        let runtime_worker = WorkerId::new("runtime-bbbb").expect("worker id");
+        let (adapter, _, _) =
+            cosmon_core::spawn_seam::validate_adapter_name("local", &["local".to_owned()])
+                .expect("built-in adapter");
+        let mut manual = record(&manual_worker, &adapter, dir.path());
+        manual.model = Some("model-pinned");
+        commit_dispatch(&store, &pending, &manual).expect("manual dispatch");
+
+        let mut runtime = record(&runtime_worker, &adapter, dir.path());
+        runtime.model = Some("model-default");
+        runtime.tackled_by = TackledBy::Runtime { pid: 42 };
+        let error = commit_dispatch(&store, &pending, &runtime)
+            .expect_err("stale runtime tackle must lose")
+            .to_string();
+        assert!(error.contains("manual-aaaa"), "{error}");
+        assert!(error.contains("local"), "{error}");
+        assert!(error.contains("model-pinned"), "{error}");
+
+        let winner = store.load_molecule(&pending.id).expect("winner");
+        assert_eq!(winner.worker(), Some(&manual_worker));
+        assert_eq!(
+            winner.process.as_ref().and_then(|p| p.model.as_deref()),
+            Some("model-pinned")
+        );
+        assert!(!store
+            .load_fleet()
+            .expect("fleet")
+            .workers
+            .contains_key(&runtime_worker));
     }
 
     /// The dispatch records **where the transcript will be**, in a file that

@@ -14,6 +14,16 @@ scoped to the patrol dead-worker policy; it is not a full command inventory.
 The dead-worker policy and dialogue scan are applied by the patrol command.
 These native controls and Reveal CLI actions remain parity gaps under ADR-068.
 
+## Concurrent tackle claim (issue #119)
+
+| Capability | CLI | Native UI | Other CLI views |
+|---|---|---|---|
+| Serialize a manual tackle and resident dispatch before model selection | `cs tackle` claims the molecule until the spawn verdict; a losing invocation exits non-zero and names the winning worker, adapter and selected model | No equivalent admission control audited | No equivalent admission control audited |
+
+The loser receives a recorded model pin when one exists. If the winning
+adapter chose its own default, the exact model is unrecorded and the error
+says so.
+
 ## Blocked dependents (issue #118)
 
 | Capability | CLI | Native UI | Other CLI views |

@@ -226,6 +226,32 @@ impl FileStore {
         self.root.join(CosmonPath::FleetLock.rel())
     }
 
+    /// Claim one molecule's dispatch from before selection through spawn.
+    ///
+    /// A separate lock per molecule lets unrelated tackles proceed while a
+    /// manual tackle and a resident dispatch of the same molecule serialize.
+    /// Callers must take this before the fleet lock, never inside it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state-store error if the lock file cannot be opened or locked.
+    pub fn acquire_dispatch_lock(&self, id: &MoleculeId) -> Result<DispatchLockGuard, CosmonError> {
+        let path = self.molecule_dir(id).join("dispatch.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| CosmonError::StateStore {
+                reason: format!("failed to open dispatch lock for {id}: {e}"),
+            })?;
+        file.lock_exclusive().map_err(|e| CosmonError::StateStore {
+            reason: format!("failed to claim dispatch for {id}: {e}"),
+        })?;
+        Ok(DispatchLockGuard { file })
+    }
+
     /// Path to the trunk-write lock file (ADR-110 Phase 1 /
     /// invariant **I1 WRITER-UNIQUE**).
     ///
@@ -453,6 +479,19 @@ impl FileStore {
 pub struct FleetLockGuard {
     /// `None` only during drop.
     file: Option<File>,
+}
+
+/// RAII claim on one molecule's dispatch, released after the spawn verdict.
+#[must_use = "dispatch claim is released when the guard drops"]
+#[derive(Debug)]
+pub struct DispatchLockGuard {
+    file: File,
+}
+
+impl Drop for DispatchLockGuard {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 impl Drop for FleetLockGuard {
