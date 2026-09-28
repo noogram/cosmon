@@ -50,8 +50,8 @@
 //! - the shared propulsion ledger (`propel_count` / `last_propelled_at`), so
 //!   this channel and `--propel` cannot double-nudge one stall;
 //! - the ADR-137 §5 no-interference guard ([`heal_gate`]) — a worker a human is
-//!   piloting, a `health:hold` molecule, and the `~/.cosmon/health.off`
-//!   kill-switch all stop the sweep dead.
+//!   piloting, a `health:hold` molecule, and the `~/.cosmon/health.off` or
+//!   `~/.cosmon/stand-down.lock` kill-switch all stop the sweep dead.
 //!
 //! The result is strictly narrower than `--propel`: every worker it would
 //! propel, `--propel` would too, and almost every worker `--propel` would
@@ -60,6 +60,7 @@
 use chrono::Utc;
 use cosmon_core::event_v2::PerturbationChannel;
 use cosmon_core::id::{MoleculeId, WorkerId};
+use cosmon_core::kill_switch::Autonomous;
 use cosmon_core::patrol::{heal_gate, GuardConfig, HealBlockReason, HealGate, HealthRemedy};
 use cosmon_core::propel::{
     decide_api_stall_nudge, EscalateReason, NudgeChannel, NudgeDecision, NudgeSkip,
@@ -220,7 +221,7 @@ pub(crate) fn propel_api_stalled_molecules(inputs: &SweepInputs<'_>) -> ApiStall
         .scan()
         .unwrap_or_default();
     let guard_cfg = GuardConfig::default();
-    let kill_switched = super::patrol_heal::global_kill_switch_present();
+    let kill_switched = cosmon_cli::kill_switches::halting(Autonomous::ApiStallSweep).is_some();
 
     for (wid, mid, age) in candidates {
         if !be.is_alive(&wid).unwrap_or(false) {

@@ -7,7 +7,9 @@
 //!
 //! * emits the resolved dispatch plan (default — dry-run), or
 //! * actually shells out to `cs nucleate` + `cs tackle` when
-//!   `--execute` is passed.
+//!   `--execute` is passed — unless `~/.cosmon/ask.off` or the global
+//!   `~/.cosmon/stand-down.lock` exists, in which case the plan is printed
+//!   and audited as `kill_switched` but not dispatched.
 //!
 //! Gated behind `--experimental` until telemetry confirms hit-rate
 //! ≥ 70% (briefing deliverable 2). Running without `--experimental`
@@ -21,6 +23,7 @@ use std::process::Command;
 
 use chrono::Utc;
 use cosmon_ask::{AskPipeline, AskState, AtomicQuestion, AuditRecord, Outcome, RuleParser};
+use cosmon_core::kill_switch::Autonomous;
 use cosmon_registry::TomlGalaxyIndex;
 
 use super::Context;
@@ -44,7 +47,8 @@ pub struct Args {
     /// Actually dispatch — shell out to `cs nucleate` + `cs tackle`.
     /// Without this, the command is a dry-run: it prints the resolved
     /// plan and appends an audit record, but does not create a
-    /// molecule.
+    /// molecule. Refused while `~/.cosmon/ask.off` or
+    /// `~/.cosmon/stand-down.lock` exists.
     #[arg(long)]
     pub execute: bool,
 
@@ -109,7 +113,17 @@ fn handle_state(ctx: &Context, args: &Args, state: AskState) -> anyhow::Result<(
                 .unwrap_or_else(|| args.text.clone());
             render_resolved(ctx, &galaxy.name, &galaxy.path, formula.as_str(), &topic);
             let (mol_id, outcome) = if args.execute {
-                dispatch(&galaxy.path, formula.as_str(), &topic)?
+                // ADR-071's hard kill-switch, and the global stand-down
+                // (issue #108): the plan is printed and audited, never run.
+                if let Some(switch) = cosmon_cli::kill_switches::halting(Autonomous::AskDispatch) {
+                    eprintln!(
+                        "cs ask: {} present — not dispatching (remove the file to resume)",
+                        cosmon_cli::kill_switches::display_path(switch)
+                    );
+                    (None, Outcome::KillSwitched)
+                } else {
+                    dispatch(&galaxy.path, formula.as_str(), &topic)?
+                }
             } else {
                 (None, Outcome::Dispatched)
             };

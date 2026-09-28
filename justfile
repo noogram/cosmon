@@ -248,6 +248,7 @@ quick:
     ./scripts/no-pilot-env.sh ./scripts/check-book-links.sh
     ./scripts/no-pilot-env.sh ./scripts/check-book-links.test.sh
     ./scripts/no-pilot-env.sh ./scripts/source-provenance.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/curate-all-galaxies.test.sh
     ./scripts/no-pilot-env.sh ./scripts/install-hooks.test.sh
     ./scripts/no-pilot-env.sh ./scripts/check-fixture-independence.sh
     ./scripts/no-pilot-env.sh ./scripts/check-fixture-independence.test.sh

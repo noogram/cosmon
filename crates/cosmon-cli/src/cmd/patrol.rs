@@ -20,6 +20,7 @@ use colored::Colorize;
 use cosmon_core::event_v2::{EventV2, PerturbationChannel};
 use cosmon_core::expiry::{evaluate_expiry, ExpiryAction, ExpiryPolicy};
 use cosmon_core::id::{MoleculeId, WorkerId};
+use cosmon_core::kill_switch::Autonomous;
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_core::patrol::{PatrolAction, PatrolReport, BOOT_STALL_GRACE};
 use cosmon_core::process::project_process_status;
@@ -81,7 +82,8 @@ pub struct Args {
     /// flag and is never propelled (the be1e SEV-1 use/mention trap). Keeps
     /// every `--propel` guardrail — exponential backoff to `propel-exhausted`,
     /// the `propel-orphaned` escalation, the ADR-137 §5 no-interference guard
-    /// and the `~/.cosmon/health.off` kill-switch.
+    /// and the `~/.cosmon/health.off` kill-switch. `~/.cosmon/stand-down.lock`
+    /// stops every `cs patrol` sweep, this one included.
     #[arg(long)]
     pub propel_api_stall: bool,
 
@@ -570,6 +572,25 @@ fn respawn_worker(
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // Guard: require project identity before touching transport.
     super::require_project_identity(ctx)?;
+
+    // Issue #108 — the global stand-down switch stops every autonomous
+    // component, and a patrol run is one: every sweep below either mutates
+    // state or feeds a sweep that does. Checked before any state is read so a
+    // stood-down fleet sees no write at all.
+    if let Some(switch) = cosmon_cli::kill_switches::halting(Autonomous::Patrol) {
+        let path = cosmon_cli::kill_switches::display_path(switch);
+        if ctx.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "stood_down": { "switch": switch.file_name(), "path": path },
+                })
+            );
+        } else {
+            println!("patrol: {path} present — no sweep run (remove the file to resume)");
+        }
+        return Ok(());
+    }
 
     let state_dir = ctx.config.clone().unwrap_or_else(super::default_state_dir);
     let store = ctx.store_at(&state_dir);

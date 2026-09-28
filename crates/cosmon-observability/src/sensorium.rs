@@ -119,8 +119,9 @@ pub struct Sensorium {
     /// the lit-up future is visible before it ships.
     pub voix_awaiting: u32,
 
-    /// `[off]` — kill-switch visible. True when `~/.cosmon/autopilot.off`
-    /// exists. Organs still tick on disk; only the rendering dims.
+    /// `[off]` — kill-switch visible. True when the autopilot patrols are
+    /// halted: `~/.cosmon/autopilot.off` or the global
+    /// `~/.cosmon/stand-down.lock` exists. Organs still tick on disk; only the rendering dims.
     /// Silence is the *guarantee* of the kill-switch, not its
     /// consequence.
     pub autopilot_off: bool,

@@ -308,7 +308,8 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              Yes, re-fire on a cadence               -> cosmon-scheduler\n  \
              No, runs forever, restart if it dies    -> cosmon-daemon-supervisor\n\n\
              Operator views: cs scheduler status / cs daemons list|status|logs|reload.\n\
-             Shared kill-switch: 'touch ~/.cosmon/stand-down.lock' silences both.\n\n\
+             Shared kill-switch: 'touch ~/.cosmon/stand-down.lock' silences both,\n\
+             and every other autonomous path (patrol, heal, cs ask --execute).\n\n\
              SCHEDULER DRY-RUN OUTPUT — four row types, one per patrol:\n  \
              FIRE     patrol is due; dispatch would spawn the command now\n  \
              SKIP     gate rejected (disabled, kill-switch, not-due-yet,\n           \

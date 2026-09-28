@@ -190,6 +190,8 @@ pub mod interaction;
 #[doc(hidden)]
 pub mod interaction_mode;
 #[doc(hidden)]
+pub mod kill_switch;
+#[doc(hidden)]
 pub mod llm;
 #[doc(hidden)]
 pub mod message;

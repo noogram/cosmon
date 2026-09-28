@@ -60,7 +60,7 @@ LOAD-BEARING INVARIANTS (every step honours these — restated per \
 step for crash-proof reading):
 
   (a) KILL-SWITCH GENERALITY. Each step checks \
-      `~/.cosmon/autopilot.off` at start. If present, the step writes \
+      `~/.cosmon/autopilot.off` (or the global `~/.cosmon/stand-down.lock`) at start. If present, the step writes \
       a one-line abort marker to `MOLECULE_DIR/abort.log` and exits \
       cleanly without firing any side effect (no file writes outside \
       that marker). This is the generalised kill-switch contract — \
@@ -218,7 +218,7 @@ Resolve $PEAU_DATE: if the `date` variable is empty, use today UTC \
 (`date -u +%Y-%m-%d`). Resolve $SINCE_HOURS from the `since_hours` \
 variable (default 24).
 
-KILL-SWITCH CHECK. If `~/.cosmon/autopilot.off` exists, write one \
+KILL-SWITCH CHECK. If `~/.cosmon/autopilot.off` or `~/.cosmon/stand-down.lock` exists, write one \
 line to `MOLECULE_DIR/abort.log` (`read aborted: autopilot.off`) and \
 exit 0.
 
@@ -287,7 +287,7 @@ with a single `read skipped` line and no raw rows were written; OR \
 ~/.cosmon/state/peau/raw/$PEAU_DATE.ndjson exists with one JSON line \
 per signal seen across the three sources, each line is valid JSON, \
 and MOLECULE_DIR/read-summary.md exists with per-source counts. \
-If ~/.cosmon/autopilot.off was present at step start, \
+If ~/.cosmon/autopilot.off or ~/.cosmon/stand-down.lock was present at step start, \
 MOLECULE_DIR/abort.log exists and no raw rows were written beyond it.
 """
 
@@ -299,7 +299,7 @@ MOLECULE_DIR/abort.log exists and no raw rows were written beyond it.
 id = "dedupe"
 title = "Dedupe raw rows against the ever-growing seen.ndjson ledger"
 description = """
-KILL-SWITCH CHECK. If `~/.cosmon/autopilot.off` exists, write \
+KILL-SWITCH CHECK. If `~/.cosmon/autopilot.off` or `~/.cosmon/stand-down.lock` exists, write \
 `dedupe aborted: autopilot.off` to `MOLECULE_DIR/abort.log` and \
 exit 0.
 
@@ -354,7 +354,7 @@ appears exactly once in seen.ndjson (the union of pre-existing rows \
 MOLECULE_DIR/dedupe-summary.md exists. NO row is appended to \
 seen.ndjson without a matching survivor row. seen.ndjson is \
 APPEND-ONLY (verifiable by `wc -l` strictly non-decreasing across \
-runs). If ~/.cosmon/autopilot.off was present, MOLECULE_DIR/abort.log \
+runs). If ~/.cosmon/autopilot.off or ~/.cosmon/stand-down.lock was present, MOLECULE_DIR/abort.log \
 exists and seen.ndjson was not modified.
 """
 
@@ -366,7 +366,7 @@ exists and seen.ndjson was not modified.
 id = "triage"
 title = "Apply per-sender / per-keyword rules; emit ≤ N tiles"
 description = """
-KILL-SWITCH CHECK (autopilot.off → abort).
+KILL-SWITCH CHECK (autopilot.off or stand-down.lock → abort).
 
 IDEMPOTENCY CHECK (morning file exists → skip).
 
@@ -489,7 +489,7 @@ invoked. NO outbound message was sent.
 id = "write"
 title = "Write the morning brief + pre-drafts to ~/.cosmon/state/morning/"
 description = """
-KILL-SWITCH CHECK (autopilot.off → abort).
+KILL-SWITCH CHECK (autopilot.off or stand-down.lock → abort).
 
 IDEMPOTENCY CHECK. If `~/.cosmon/state/morning/$PEAU_DATE.md` \
 exists, append `write skipped: morning file exists for $PEAU_DATE` \
@@ -612,7 +612,7 @@ substituted template. If overflow_count > 0, \
 ~/.cosmon/state/morning/$PEAU_DATE.overflow-deferred.md exists. \
 MOLECULE_DIR/write-summary.md exists. NO write occurred under the \
 cosmon repo (verifiable via `git status` — clean for this step's \
-work). If ~/.cosmon/autopilot.off was present at step start, \
+work). If ~/.cosmon/autopilot.off or ~/.cosmon/stand-down.lock was present at step start, \
 MOLECULE_DIR/abort.log exists and the morning file was not created \
 or modified.
 """
@@ -625,7 +625,7 @@ or modified.
 id = "emit"
 title = "Emit a typed event with initiator=Tick (the §1-bit)"
 description = """
-KILL-SWITCH CHECK (autopilot.off → abort).
+KILL-SWITCH CHECK (autopilot.off or stand-down.lock → abort).
 
 IDEMPOTENCY CHECK. If `~/.cosmon/state/morning/$PEAU_DATE.md` did \
 NOT exist at the start of step 1 AND the brief was just written in \

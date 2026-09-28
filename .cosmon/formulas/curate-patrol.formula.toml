@@ -55,7 +55,7 @@ step for crash-proof reading):
       it is a no-op but the call is wired so v1 inherits the guard
       for free.
 
-  (e) KILL-SWITCH. Each step checks `~/.cosmon/autopilot.off` at
+  (e) KILL-SWITCH. Each step checks `~/.cosmon/autopilot.off` (or the global `~/.cosmon/stand-down.lock`) at
       start. If present, the step writes a one-line abort marker to
       `MOLECULE_DIR/abort.log` and exits cleanly without firing any
       side effect. The operator's kill-switch is honoured even
@@ -190,7 +190,7 @@ Resolve MOLECULE_DIR from `cs --json observe {this_mol_id}` (the \
 `molecule_dir` field). NEVER write artifacts to the worktree — they \
 are destroyed by `cs done`.
 
-KILL-SWITCH CHECK. If `~/.cosmon/autopilot.off` exists, write one \
+KILL-SWITCH CHECK. If `~/.cosmon/autopilot.off` or `~/.cosmon/stand-down.lock` exists, write one \
 line to `MOLECULE_DIR/abort.log` (`scan aborted: autopilot.off`) and \
 exit 0. Honoured at the start of every step.
 
@@ -261,7 +261,7 @@ with newline. MOLECULE_DIR/scan-summary.md exists with the header \
 counts, per-skip-reason table, and peer-lock status. Every molecule \
 whose formula starts with `curate-` appears as Skip{why: \
 \"patrol-self\"} (godel firebreak visible in the ledger). \
-If ~/.cosmon/autopilot.off was present at step start, \
+If ~/.cosmon/autopilot.off or ~/.cosmon/stand-down.lock was present at step start, \
 MOLECULE_DIR/abort.log exists and no scan.ndjson rows were written \
 beyond it.
 """
@@ -274,7 +274,7 @@ beyond it.
 id = "classify"
 title = "Apply the decision matrix; honour budget caps"
 description = """
-KILL-SWITCH CHECK (autopilot.off → abort).
+KILL-SWITCH CHECK (autopilot.off or stand-down.lock → abort).
 
 Read MOLECULE_DIR/scan.ndjson line by line. Skip any line whose \
 action is already Skip{...} (firebreaks land in step 1). For each \
@@ -349,7 +349,7 @@ side effects yet — those land in step 4 (`act`).
 id = "decide"
 title = "Encode two-pass discipline; freeze the action plan into decisions.ndjson"
 description = """
-KILL-SWITCH CHECK (autopilot.off → abort).
+KILL-SWITCH CHECK (autopilot.off or stand-down.lock → abort).
 
 Read MOLECULE_DIR/scan.ndjson; deduplicate by mol_id (latest line \
 wins). For each verdict, apply the TWO-PASS DISCIPLINE — the \
@@ -424,7 +424,7 @@ Rung 2 invariant). NO side effects fired in this step.
 id = "act"
 title = "Apply the cheap+reversible actions one at a time"
 description = """
-KILL-SWITCH CHECK (autopilot.off → abort).
+KILL-SWITCH CHECK (autopilot.off or stand-down.lock → abort).
 
 DRY-RUN GUARD. If $CURATE_DRY_RUN == "true", write one line to \
 MOLECULE_DIR/act.log (`act skipped: dry_run=true`) and exit 0. \
@@ -489,7 +489,7 @@ fired (verifiable via grep over act.log).
 id = "report"
 title = "Render Feynman-register report.md, write surfaced.md, append curate-log.md line"
 description = """
-KILL-SWITCH CHECK (autopilot.off → abort).
+KILL-SWITCH CHECK (autopilot.off or stand-down.lock → abort).
 
 Render MOLECULE_DIR/report.md in Feynman register (≤60s read, \
 template reproduced verbatim each night for muscle-memory). The \

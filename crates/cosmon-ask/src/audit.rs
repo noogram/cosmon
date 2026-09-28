@@ -35,7 +35,8 @@ pub enum Outcome {
     Aborted,
     /// Running-quota gate refused the dispatch.
     QuotaRefused,
-    /// Kill-switch `~/.cosmon/ask.off` was present.
+    /// Kill-switch `~/.cosmon/ask.off` (or the global
+    /// `~/.cosmon/stand-down.lock`) was present; nothing was dispatched.
     KillSwitched,
     /// Errored during resolution or dispatch — the CLI will surface
     /// the message separately; the log records only the tag.

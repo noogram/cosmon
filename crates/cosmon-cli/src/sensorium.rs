@@ -40,7 +40,9 @@ use cosmon_observability::sensorium::{HeartbeatKind, Sensorium, HEARTBEAT_WINDOW
 pub fn load_sensorium(state_dir: &Path) -> Sensorium {
     let root = state_dir.join("sensorium");
     let now = Utc::now();
-    let autopilot_off = autopilot_off_marker_exists();
+    let autopilot_off =
+        crate::kill_switches::halting(cosmon_core::kill_switch::Autonomous::AutopilotPatrol)
+            .is_some();
 
     let peau_signals_24h = count_inbox_within(&root.join("inbox.ndjson"), now, Duration::hours(24));
     let heartbeat = load_heartbeat(&root.join("heartbeat.ndjson"));
@@ -59,19 +61,6 @@ pub fn load_sensorium(state_dir: &Path) -> Sensorium {
         voix_awaiting,
         autopilot_off,
     }
-}
-
-/// Resolve `~/.cosmon/autopilot.off` and report whether the file
-/// exists. Returns `false` when `$HOME` is unset rather than panicking
-/// — the kill-switch is a UI hint, not a security boundary.
-fn autopilot_off_marker_exists() -> bool {
-    let Ok(home) = std::env::var("HOME") else {
-        return false;
-    };
-    PathBuf::from(home)
-        .join(".cosmon")
-        .join("autopilot.off")
-        .exists()
 }
 
 fn count_inbox_within(path: &Path, now: DateTime<Utc>, window: Duration) -> u32 {
