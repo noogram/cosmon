@@ -128,7 +128,8 @@ noyau      = "tenant-demo-sandbox"
 nucleon_id = "cosmon-forgejo"
 sub        = "1"                  # real uid from /api/v1/user, never assumed
 audience   = "<client_id_A>"      # defaults to audiences[0] when omitted
-# scopes optional; defaults to molecule:read/write, worker:spawn, artifact:read
+# scopes optional; defaults to molecule:read/write, worker:spawn, artifact:read,
+# events:subscribe (issue #103 — a tenant that can spawn workers can watch them)
 
 # Additional bindings — the two-audience provisioner (task-20260710-6ffc).
 # One self-provisioning gesture publishes N habilitations, one per audience
