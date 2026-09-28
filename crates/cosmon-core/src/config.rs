@@ -1735,6 +1735,29 @@ pub struct GatesConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc_command: Option<String>,
 
+    /// Command that runs the project's full gate bundle **detached**, writing
+    /// its combined log and exit code to files the caller can poll, and
+    /// returning immediately regardless of how long the bundle takes.
+    /// Example (this repo): `./scripts/run-gates-bg.sh`.
+    ///
+    /// Exists because an agent's shell tool caps how long it will wait on a
+    /// *foreground* command (roughly 10 minutes for Claude Code's Bash tool),
+    /// which is well under a Rust workspace's documented cold gate time
+    /// (`just gates`, ~15 minutes cold per this repo's CLAUDE.md). A worker
+    /// that runs the bundle in the foreground either gets cut off mid-run or
+    /// wraps it in its own `timeout N` — and then reads that timeout firing
+    /// as a failed gate, when it measured nothing but the tool's patience.
+    /// Four molecules collapsed this way on 2026-09-28 (noogram/cosmon#112)
+    /// although their work was correct and every scoped test was green.
+    ///
+    /// When this is set, [`crate::tackle_plan::render_gates_instruction`]
+    /// tells the worker to launch the bundle through it and poll the exit-code
+    /// file instead of bounding the bundle itself — a slow run is not a
+    /// failure, and a run that genuinely never finishes is reported as
+    /// incomplete and retryable, never as a failed gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_runner_command: Option<String>,
+
     /// The top rung of the post-merge integrity cascade `cs done` runs on the
     /// **combined** tree, once the branch has merged but before `merged_at`
     /// makes the landing observable. When set, cosmon runs this command
@@ -2530,6 +2553,7 @@ mod tests {
             typecheck_command: None,
             setup_command: None,
             doc_command: Some("cargo doc --workspace --no-deps".to_owned()),
+            background_runner_command: Some("./scripts/run-gates-bg.sh".to_owned()),
             integrity_command: Some("cargo check --workspace --all-targets".to_owned()),
             fail_closed_on_unverified: true,
         };

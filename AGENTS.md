@@ -67,6 +67,21 @@ machine (`task-20260925-fd07`, cold, ambient fleet load 12–250 on 16 cores):
 all of it the test run itself (compile steps drop to seconds warm). Quote
 whichever figure matches the situation you're describing.
 
+An agent's shell tool caps how long it will wait on a **foreground** command —
+about 10 minutes for Claude Code's Bash tool — which is under even the *warm*
+figure above and well under the cold one on a loaded shared machine. Running
+`just gates` in the foreground, or wrapping it in your own `timeout`, means the
+tool's own patience limit gets read back as a gate verdict: on 2026-09-28 four
+worker molecules collapsed exactly this way although their work was correct
+and every scoped test was green (noogram/cosmon#112). Use `just gates-bg`
+instead: it detaches the run via `scripts/run-gates-bg.sh` and returns at
+once, writing the combined log and the exit code to files under
+`$COSMON_MOL_DIR` (or `./.cosmon-gates-runs` outside a molecule). Poll for the
+exit file with short, separate checks — `test -f "$dir/gates.exit" && cat
+"$dir/gates.exit"` — never one long blocking wait. A slow run is not a
+failure; a run that genuinely never finishes is reported as incomplete and
+retryable, never as a failed gate.
+
 The individual commands, which is what those two recipes run:
 
 ```text
@@ -166,9 +181,11 @@ On 2026-09-26 main went red in CI on `check-docs-one-gate.sh` — a
 `/<tool>/install.sh` reference in `docs/book/src`, one of the ~25 checks the
 workflows run in `.github/workflows/*.yml` — while `just gates` was green
 locally. `just quick` now also runs every check that is offline (no network,
-no container, no secret, no GitHub PR-event context) and fast (well under a
-second each on this machine, measured with `./scripts/no-pilot-env.sh` around
-every step, same wrapper as the rest of `quick`):
+no container, no secret, no GitHub PR-event context) and fast — well under a
+second each on this machine, except `run-gates-bg.test.sh` (~2.5 s: it has to
+spawn and kill real processes to prove a real detach, see #112) — measured
+with `./scripts/no-pilot-env.sh` around every step, same wrapper as the rest
+of `quick`:
 
 ```text
 scripts/sovereignty-gate.sh
@@ -190,6 +207,7 @@ scripts/release/render-brew-formula.test.sh
 scripts/release/render-tap-from-artifacts.test.sh
 scripts/release/check-install-drift.test.sh
 scripts/release/docs-deploy.test.sh
+scripts/run-gates-bg.test.sh                       # ~2.5 s — spawns/kills real processes (#112)
 ```
 
 `check-provenance.sh` needs explicit `main HEAD` args locally: its own

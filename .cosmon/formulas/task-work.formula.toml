@@ -78,6 +78,18 @@ broken intra-doc link therefore compiles, lints, and tests green, and is \
 caught only by CI on main — after the merge, when you are gone. Run it \
 before claiming done.
 
+NEVER bound the full gate bundle yourself with a foreground `timeout` or by \
+waiting on it directly. An agent shell tool's own patience limit is not a \
+gate verdict, and hitting it is not a failed gate — noogram/cosmon#112 \
+collapsed four otherwise-correct molecules exactly this way on 2026-09-28. \
+When the project declares `[gates].background_runner_command` (this repo: \
+`./scripts/run-gates-bg.sh`, also reachable as `just gates-bg`), launch the \
+bundle through it and poll the exit-code file it writes with short, separate \
+checks instead. A slow run is not a failure. A run that genuinely never \
+finishes is reported through the lifecycle as incomplete and retryable (with \
+the log) — never as a failed gate, and never a reason to collapse the \
+molecule on its own.
+
 RESULT CONTRACT — if `$COSMON_ARTIFACT_DIR` is set in your env (it is \
 whenever a tenant tackled this molecule through the RPP API), copy your \
 single canonical deliverable there as `result.md` (or, if the \

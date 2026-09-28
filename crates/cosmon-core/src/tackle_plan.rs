@@ -866,7 +866,40 @@ pub fn render_gates_instruction(gates: &GatesConfig) -> String {
     if let Some(test_cmd) = &gates.test_command {
         out.push_str(&render_test_stall_guidance(test_cmd));
     }
+    if let Some(runner) = &gates.background_runner_command {
+        out.push_str(&render_background_runner_guidance(runner));
+    }
     out
+}
+
+/// Render the guidance that travels with a declared
+/// [`GatesConfig::background_runner_command`].
+///
+/// noogram/cosmon#112: four worker molecules collapsed on 2026-09-28 although
+/// their work was correct and every scoped test was green — each ran the full
+/// gate bundle in the foreground, bounded it with its own `timeout` (an agent
+/// shell tool typically caps a foreground command well under a cold Rust
+/// workspace's gate time), and treated that timeout firing as a failed gate.
+/// The bound measured the tool's patience, not the gates.
+///
+/// When a project declares a detached runner, this tells the worker to launch
+/// the bundle through it and poll the exit-code file it writes, instead of
+/// wrapping the bundle in a foreground timeout of its own. A slow run is not
+/// a failure, and a run that genuinely never finishes is reported through the
+/// lifecycle as incomplete and retryable — never as a failed gate or a reason
+/// to collapse the molecule.
+fn render_background_runner_guidance(runner: &str) -> String {
+    format!(
+        "   ⚠️ Never bound the full gate bundle with your own `timeout` or by \
+         waiting on it in the foreground — an agent shell tool's own patience \
+         limit is not a gate verdict, and hitting it is not a failed gate. \
+         Launch it detached instead: `{runner}` returns at once and writes its \
+         combined log and exit code to files you can poll. Wait on the \
+         exit-code file with short, separate checks rather than one long \
+         blocking call; a slow run is not a failure. If the run genuinely \
+         never finishes, report it as incomplete and retryable (with the log) \
+         — never as a failed gate.\n"
+    )
 }
 
 /// Render the anti-stall guidance that travels with the test gate.
@@ -1764,5 +1797,51 @@ mod tests {
             AdapterSelectionSource::Default { .. }
         ));
         assert_eq!(selection.ownership_warning, None);
+    }
+
+    /// noogram/cosmon#112: with a `background_runner_command` declared, the
+    /// generated worker brief must point at it and tell the worker never to
+    /// bound the full gate bundle with its own foreground timeout — the
+    /// false-failure shape that collapsed four healthy molecules on
+    /// 2026-09-28.
+    #[test]
+    fn gates_instruction_directs_worker_to_declared_background_runner() {
+        let gates = GatesConfig {
+            build_command: Some("cargo check --workspace".to_owned()),
+            test_command: Some("cargo test --workspace --no-fail-fast".to_owned()),
+            background_runner_command: Some("./scripts/run-gates-bg.sh".to_owned()),
+            ..Default::default()
+        };
+        let out = render_gates_instruction(&gates);
+        assert!(
+            out.contains("./scripts/run-gates-bg.sh"),
+            "brief must name the declared runner: {out}"
+        );
+        assert!(
+            out.contains("not a failed gate") || out.contains("not a failure"),
+            "brief must say a slow/timed-out foreground wait is not itself a \
+             gate failure: {out}"
+        );
+        assert!(
+            out.to_lowercase().contains("never bound"),
+            "brief must forbid bounding the full bundle with the agent's own \
+             timeout: {out}"
+        );
+    }
+
+    /// With no `background_runner_command` declared, the brief stays exactly
+    /// as it was before #112 — no runner is invented out of thin air for a
+    /// project that has not declared one.
+    #[test]
+    fn gates_instruction_omits_background_runner_guidance_when_unconfigured() {
+        let gates = GatesConfig {
+            test_command: Some("pytest -q".to_owned()),
+            ..Default::default()
+        };
+        let out = render_gates_instruction(&gates);
+        assert!(
+            !out.contains("gates-bg") && !out.to_lowercase().contains("background runner"),
+            "no background-runner guidance should appear unconfigured: {out}"
+        );
     }
 }

@@ -80,6 +80,11 @@ format_command = "cargo fmt --all -- --check"
 # Without this slot the only thing that ever catches one is CI on main —
 # after the merge, when the worker that authored the link is long gone.
 doc_command    = "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps"
+# Detached runner for the full bundle (issue #112): an agent shell tool's own
+# foreground timeout is not a gate verdict, so the worker brief points here
+# instead of telling the worker to bound `just gates` itself. See
+# scripts/run-gates-bg.sh and `just gates-bg`.
+background_runner_command = "./scripts/run-gates-bg.sh"
 
 # Archive — durable proof-of-work trail (ADR-030 + ADR-052)
 [archive]

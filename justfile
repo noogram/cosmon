@@ -273,6 +273,10 @@ quick:
     ./scripts/no-pilot-env.sh ./scripts/release/render-tap-from-artifacts.test.sh
     ./scripts/no-pilot-env.sh ./scripts/release/check-install-drift.test.sh
     ./scripts/no-pilot-env.sh ./scripts/release/docs-deploy.test.sh
+    # gates-bg's detach must actually detach (issue #112) — this one spawns
+    # and kills real processes to prove it, so it costs ~2.5 s rather than
+    # the sub-second budget of the checks above.
+    ./scripts/no-pilot-env.sh ./scripts/run-gates-bg.test.sh
 
 # `--no-fail-fast` is deliberate: cargo stops at the first red target by
 # default, which hides every later failure at identical wall-clock. A run that
@@ -307,6 +311,22 @@ gates: quick
 #
 # Alias for `gates`, kept because it is the name in everyone's fingers.
 check: gates
+
+# Run `just gates` DETACHED — returns at once, writes its combined log and
+# exit code to files under $COSMON_MOL_DIR (or ./.cosmon-gates-runs when
+# unset) instead of blocking the caller for the gates' full duration.
+#
+# noogram/cosmon#112: `just gates` is documented at ~15 min cold, but an
+# agent's shell tool caps how long it will wait on a FOREGROUND command well
+# under that — so a worker running `just gates` directly either gets cut off
+# or wraps it in its own `timeout`, and then reads that timeout firing as a
+# failed gate. It measured the tool's patience, not the gates. This is the
+# `[gates].background_runner_command` this repo declares in
+# .cosmon/config.toml; `cs tackle` tells every worker to use it instead of
+# bounding `just gates` itself. See scripts/run-gates-bg.sh for the exact
+# file contract (gates.log / gates.pid / gates.exit) and how to poll it.
+gates-bg:
+    ./scripts/run-gates-bg.sh just gates
 
 # Supply-chain checks (mirror of .github/workflows/deny.yml)
 audit:
