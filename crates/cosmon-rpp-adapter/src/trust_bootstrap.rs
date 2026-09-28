@@ -72,12 +72,18 @@ pub const HANDOFF_SCHEMA: &str = "cosmon-issuer-handoff/v1";
 
 /// Default scopes granted by a handoff-declared binding when the
 /// handoff does not name its own. The v1 tenant surface: read/write
-/// molecules, spawn workers, read artifacts.
+/// molecules, spawn workers, read artifacts, subscribe to the
+/// noyau's lifecycle event stream. `EVENTS_SUBSCRIBE` joined the
+/// bundle at issue #103: a tenant already trusted to spawn workers
+/// ([`scopes::WORKER_SPAWN`]) is expected to be able to watch what it
+/// dispatched without an operator hand-editing the binding after
+/// provisioning.
 pub const DEFAULT_BINDING_SCOPES: &[&str] = &[
     scopes::MOLECULE_READ,
     scopes::MOLECULE_WRITE,
     scopes::WORKER_SPAWN,
     scopes::ARTIFACT_READ,
+    scopes::EVENTS_SUBSCRIBE,
 ];
 
 /// `[trust_bootstrap]` section of `rpp.toml` (global-config surface,
@@ -1175,6 +1181,44 @@ mod tests {
         assert!(!report2.wrote_allowlist, "second boot: no rewrite");
         assert!(report2.bindings_written.is_empty());
         assert_eq!(report2.bindings_unchanged, 1);
+    }
+
+    /// Issue #103 — a tenant provisioned from a handoff with no
+    /// `scopes` field must be able to subscribe to `GET /v1/events`
+    /// out of the box. A binding that can already spawn workers
+    /// ([`DEFAULT_BINDING_SCOPES`] includes [`scopes::WORKER_SPAWN`])
+    /// is expected to be able to watch what it dispatched, without an
+    /// operator hand-editing the binding after provisioning.
+    #[test]
+    fn test_handoff_default_scopes_include_events_subscribe() {
+        let td = TempDir::new().unwrap();
+        let handoff_dir = td.path().join("handoff");
+        std::fs::create_dir_all(&handoff_dir).unwrap();
+        std::fs::write(
+            handoff_dir.join("forgejo-issuer.toml"),
+            "schema = \"cosmon-issuer-handoff/v1\"\n\
+             [issuer]\n\
+             iss = \"http://ext/git\"\n\
+             jwks_uri = \"http://forgejo:3000/login/oauth/keys\"\n\
+             audiences = [\"client-id-abc\"]\n\
+             [binding]\n\
+             noyau = \"tenant-demo-sandbox\"\n\
+             nucleon_id = \"cosmon-forgejo\"\n\
+             sub = \"3\"\n",
+        )
+        .unwrap();
+        let state = td.path().join("state");
+        let section = section_with_handoff(&handoff_dir);
+
+        converge_with(&state, &section, None, false).unwrap();
+        let binding =
+            std::fs::read_to_string(state.join("nucleons/cosmon-forgejo/oidc-identity.toml"))
+                .unwrap();
+        assert!(
+            binding.contains(scopes::EVENTS_SUBSCRIBE),
+            "a default-scoped handoff binding must grant events:subscribe \
+             (issue #103); rendered binding was:\n{binding}"
+        );
     }
 
     /// `client_id` rotation (volume reuse): the handoff carries a new

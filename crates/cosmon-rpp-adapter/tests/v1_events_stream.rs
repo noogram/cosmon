@@ -220,6 +220,126 @@ async fn sse_rejects_missing_scope_with_403() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
+/// Issue #103 — a tenant provisioned from a handoff (no `scopes` field
+/// in `[binding]`) must be able to `GET /v1/events` on the default
+/// grant alone, with a JWT that carries no `cosmon:*` scope of its own
+/// (mirrors the real Forgejo `OAuth2` token, which only ever carries
+/// `openid`).
+#[tokio::test]
+async fn tenant_provisioned_from_handoff_can_subscribe_to_events_by_default() {
+    let mut tenants = TenantWorkspaces::new();
+    let _ = tenants.add("a");
+
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+
+    let security_dir = tempfile::tempdir().unwrap();
+    let _ = oidc.write_jwks_file(security_dir.path()).unwrap();
+
+    // Converge a handoff exactly as a self-provisioning IdP would
+    // publish it — no `scopes` field, so the binding falls back to
+    // `DEFAULT_BINDING_SCOPES`.
+    let handoff_dir = security_dir.path().join("handoff");
+    std::fs::create_dir_all(&handoff_dir).unwrap();
+    std::fs::write(
+        handoff_dir.join("issuer.toml"),
+        format!(
+            "schema = \"cosmon-issuer-handoff/v1\"\n\
+             [issuer]\n\
+             iss = \"{iss}\"\n\
+             audiences = [\"cosmon-rpp-a\"]\n\
+             [binding]\n\
+             noyau = \"a\"\n\
+             nucleon_id = \"nuc-a\"\n\
+             sub = \"sub-a\"\n",
+            iss = oidc.issuer()
+        ),
+    )
+    .unwrap();
+    let section = cosmon_rpp_adapter::trust_bootstrap::TrustBootstrapSection {
+        handoff_dir: Some(handoff_dir),
+        handoff_wait_secs: Some(0),
+        issuer: Vec::new(),
+    };
+    cosmon_rpp_adapter::trust_bootstrap::converge_with(security_dir.path(), &section, None, false)
+        .expect("handoff converges");
+
+    let jwks = JwksStore::load(security_dir.path()).unwrap();
+    let nucleon_map = HabilitationMap::load(security_dir.path()).unwrap();
+    let rate_limiter =
+        IngressRateLimiter::new(security_dir.path().join("oidc-rate-limit"), 64.0, 0.0);
+    let deny_list =
+        DenyList::new(security_dir.path().to_path_buf()).with_ttl(Duration::from_secs(0));
+    let state = AppState {
+        harvest_effect: std::sync::Arc::new(
+            cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
+        ),
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(std::sync::Arc::new(
+            cosmon_transport::MockBackend::new(),
+        )),
+        state_dir: security_dir.path().to_path_buf(),
+        inbox_root: security_dir.path().join("whispers/inbox"),
+        galaxies_root: tenants.galaxies_root().to_path_buf(),
+        jwks: cosmon_rpp_adapter::SharedJwksStore::new(jwks),
+        nucleon_map: cosmon_rpp_adapter::SharedHabilitationMap::new(nucleon_map),
+        rate_limiter: Arc::new(rate_limiter),
+        deny_list: Arc::new(deny_list),
+        posture: Posture::Prepared,
+        drain_timeout: Duration::from_secs(10),
+        anthropic_api_key: None,
+        claude_model: None,
+        backend_health: Arc::new(BackendHealthRegistry::new()),
+        auth_claude: None,
+        artifact_root: std::path::PathBuf::from("/tmp/cosmon"),
+        dist: std::sync::Arc::new(cosmon_rpp_adapter::routes::dist::DistState::new(
+            "/tmp/cosmon-dist",
+        )),
+        install_templating: std::sync::Arc::new(
+            cosmon_rpp_adapter::config::InstallTemplating::default(),
+        ),
+        events: std::sync::Arc::new(EventBus::with_default_capacity()),
+        metrics: std::sync::Arc::new(cosmon_rpp_adapter::MetricsRegistry::new()),
+        drains: std::sync::Arc::new(cosmon_rpp_adapter::DrainRegistry::default()),
+        admin_seal: std::sync::Arc::new(cosmon_rpp_adapter::admin_seal::AdminSeal::disabled()),
+        provisioner: std::sync::Arc::new(cosmon_rpp_adapter::provisioner::Provisioner::inert()),
+        portee_provisioner: std::sync::Arc::new(
+            cosmon_rpp_adapter::portee::PorteeProvisioner::inert(),
+        ),
+    };
+    let app = router(state);
+
+    // The Forgejo OAuth2 ApplicationClient issues `openid` only — the
+    // binding is the sole source of any `cosmon:*` scope here.
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "sub-a",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &["openid"],
+        lifetime_secs: Some(60),
+        jti: Some("jti-handoff-events-1"),
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/events")
+                .header("Authorization", format!("Bearer {jwt}"))
+                .header("Accept", "text/event-stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a handoff-provisioned tenant must get events:subscribe by default (issue #103)"
+    );
+}
+
 #[tokio::test]
 async fn bus_subscriber_receives_state_changed_after_nucleate() {
     let mut tenants = TenantWorkspaces::new();
