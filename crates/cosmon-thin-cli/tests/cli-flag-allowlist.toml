@@ -197,6 +197,12 @@ class = "out_of_scope"
 reason = "Inbox display — local-only operator surface."
 
 [[verb_absent_from_thin]]
+verb = "work"
+class = "out_of_scope"
+adr_ref = "ADR-182 §3; ADR-080 §8p"
+reason = "declared work messaging reads and writes the owning molecule's local canonical evidence; issue #115 W3 adds no RPP route or remote member-identity contract. CLI-only until that port is designed."
+
+[[verb_absent_from_thin]]
 verb = "spark"
 class = "out_of_scope"
 reason = "operator intent capture — local-only (ADR-061)."
