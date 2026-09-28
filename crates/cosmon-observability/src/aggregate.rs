@@ -202,6 +202,8 @@ mod tests {
                 output_tokens: 50,
                 reasoning_output_tokens: 10,
                 cost: crate::worker::EnergyCost::Unknown,
+                api_equivalent: None,
+                subscription: None,
                 context_window: Some(1_000_000),
             },
             live: "working".into(),

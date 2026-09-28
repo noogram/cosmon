@@ -13,12 +13,10 @@
 //! Codex chain: worker → tmux pane cwd (`#{pane_current_path}`, with the
 //! fleet-recorded worktree as post-mortem fallback) →
 //! [`resolve_codex_session_by_cwd`] (the `session_meta.payload.cwd` join)
-//! → [`cosmon_core::codex_energy`] token parser + price table →
-//! [`WorkerEnergy`]. Cost is attributed to the last realized model of the
-//! session's `turn_context` trajectory. A `ChatGPT` plan is shown as a
-//! subscription-limit share; otherwise a priced model is shown as a labelled
-//! reference estimate, and an unpriced model keeps the real token counts with
-//! an explicitly unknown cost (honest floor — never fabricate a rate).
+//! → [`cosmon_core::codex_energy`] token parser + price manifest →
+//! [`WorkerEnergy`]. Cumulative deltas are priced against their exact realized
+//! models. A `ChatGPT` allowance and API-equivalent USD remain independent;
+//! an unpriced segment keeps its real counters and explicit partial coverage.
 //!
 //! Used by `cs ensemble` and `cs peek` to display the real energy spent by
 //! every active worker, whichever subprocess adapter hosts it.
@@ -26,12 +24,17 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use cosmon_core::codex_energy::{codex_energy_from_session, codex_price_for};
+use cosmon_core::codex_energy::{codex_energy_from_session, CodexSubscriptionUsage};
 use cosmon_core::energy::TokenCount;
 use cosmon_core::event_v2::EventV2;
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::model_realization::{
     realized_models_from_claude_jsonl, realized_models_from_codex_session, ModelObservationSource,
+};
+use cosmon_core::price_manifest::{bundled_price_manifest, value_model_segments};
+use cosmon_core::usage::{
+    ApiEquivalent, ModelUsageSegment, ObservationProvenance, ObservationScope,
+    TokenCount as UsageTokenCount, UnavailableReason,
 };
 
 /// Per-worker aggregated energy values.
@@ -45,8 +48,12 @@ pub struct WorkerEnergy {
     pub output: TokenCount,
     /// Reasoning-output subset of [`Self::output`].
     pub reasoning_output: TokenCount,
-    /// Cost or subscription interpretation of the usage.
+    /// Backward-compatible projection of API-equivalent USD cost.
     pub cost: cosmon_observability::EnergyCost,
+    /// Versioned API-equivalent valuation with explicit coverage.
+    pub api_equivalent: Option<ApiEquivalent>,
+    /// Plan allowance remains independent from API-equivalent USD.
+    pub subscription: Option<CodexSubscriptionUsage>,
     /// Model context-window capacity, when the adapter reports it.
     pub context_window: Option<u64>,
 }
@@ -103,7 +110,6 @@ pub fn load_worker_energy(
     fleet: &cosmon_state::Fleet,
 ) -> HashMap<WorkerId, WorkerEnergy> {
     let mut map: HashMap<WorkerId, WorkerEnergy> = HashMap::new();
-    let pricing = claudion::PricingModel::opus();
 
     // Fold the global journal **once** into a `mol_id -> last adapter` map,
     // then read the per-worker adapter from that map. The previous shape
@@ -153,7 +159,7 @@ pub fn load_worker_energy(
                 .and_then(|cwd| codex_sessions.get(cwd.to_string_lossy().as_ref()))
                 .and_then(|session| read_codex_worker_energy(session))
         } else {
-            probe_worker_energy_with_adapter(state_dir, backends, worker_id, adapter, &pricing)
+            probe_worker_energy_with_adapter(state_dir, backends, worker_id, adapter)
         };
         let Some(energy) = energy else {
             continue;
@@ -214,7 +220,6 @@ pub fn probe_worker_energy_with_adapter(
     backends: &[cosmon_transport::TmuxBackend],
     worker_id: &WorkerId,
     adapter: Option<&str>,
-    pricing: &claudion::PricingModel,
 ) -> Option<WorkerEnergy> {
     if adapter == Some("codex") {
         return probe_codex_worker_energy(state_dir, backends, worker_id);
@@ -230,18 +235,39 @@ pub fn probe_worker_energy_with_adapter(
         return None;
     }
     let session_log = claudion::parse_session(&jsonl_path).ok()?;
-    let metrics = claudion::compute_metrics(&session_log, pricing);
-    let input_total = metrics.total_input + metrics.total_cache_creation + metrics.total_cache_read;
+    let (input_total, cached_input, output) = claude_totals(&session_log)?;
+    let (segments, segments_complete) = claude_model_segments(&session_log);
+    let api_equivalent = value_current_segments(
+        &segments,
+        segments_complete,
+        "claude_code_session_log",
+        "anthropic",
+    );
     Some(WorkerEnergy {
-        input: TokenCount::new(input_total.get()),
-        cached_input: TokenCount::new(metrics.total_cache_read.get()),
-        output: TokenCount::new(metrics.total_output.get()),
+        input: TokenCount::new(input_total),
+        cached_input: TokenCount::new(cached_input),
+        output: TokenCount::new(output),
         reasoning_output: TokenCount::new(0),
-        cost: cosmon_observability::EnergyCost::ReferenceUsd {
-            usd: metrics.total_cost.get(),
-        },
+        cost: legacy_cost_projection(&api_equivalent),
+        api_equivalent: Some(api_equivalent),
+        subscription: None,
         context_window: None,
     })
+}
+
+fn claude_totals(session: &claudion::SessionLog) -> Option<(u64, u64, u64)> {
+    let mut input = 0_u64;
+    let mut cached = 0_u64;
+    let mut output = 0_u64;
+    for turn in &session.turns {
+        input = input
+            .checked_add(turn.input_tokens.get())?
+            .checked_add(turn.cache_creation_input_tokens.get())?
+            .checked_add(turn.cache_read_input_tokens.get())?;
+        cached = cached.checked_add(turn.cache_read_input_tokens.get())?;
+        output = output.checked_add(turn.output_tokens.get())?;
+    }
+    Some((input, cached, output))
 }
 
 /// Probe a **codex** worker's energy from its rollout session log.
@@ -250,16 +276,12 @@ pub fn probe_worker_energy_with_adapter(
 /// worktree `cs tackle` recorded on the fleet when no pane answers (dead
 /// pane — same post-mortem fallback as the realized-model capture) →
 /// [`resolve_codex_session_by_cwd`] → last cumulative `token_count` line
-/// ([`codex_energy_from_session`]) → cost priced against the **last**
-/// realized model of the `turn_context` trajectory
-/// ([`cosmon_core::codex_energy::codex_price_for`]).
+/// ([`codex_energy_from_session`]) → deduplicated model-segment valuation.
 ///
-/// A rollout-reported `ChatGPT` plan takes precedence over the reference-price
-/// estimate and is rendered as its usage-limit share. Honest floor: a model
-/// absent from the price table yields real token counts with unknown cost,
-/// which the ensemble/peek COST column renders as `—`. Input tokens include
-/// the cached portion — the same class of total the claude chain reports
-/// (fresh + cache creation + cache read).
+/// A rollout-reported `ChatGPT` plan is retained beside the reference-price
+/// estimate. Honest floor: a wholly unpriced history yields real token counts
+/// with unknown cost. Input tokens include the cached portion — the same class
+/// of total the claude chain reports (fresh + cache creation + cache read).
 fn probe_codex_worker_energy(
     state_dir: &Path,
     backends: &[cosmon_transport::TmuxBackend],
@@ -273,41 +295,111 @@ fn probe_codex_worker_energy(
 
 /// Project one already-resolved Codex rollout into worker energy.
 fn read_codex_worker_energy(session_path: &Path) -> Option<WorkerEnergy> {
-    let (snapshot, realized_model) = read_codex_rollout_energy(session_path)?;
+    let (snapshot, _) = read_codex_rollout_energy(session_path)?;
     let usage = snapshot.usage;
-    let reference_cost = realized_model
-        .as_deref()
-        .and_then(codex_price_for)
-        .map(|price| usage.cost_usd(&price));
-    let cost = snapshot.subscription.map_or_else(
-        || {
-            reference_cost.map_or(cosmon_observability::EnergyCost::Unknown, |usd| {
-                cosmon_observability::EnergyCost::ReferenceUsd { usd }
-            })
-        },
-        |subscription| cosmon_observability::EnergyCost::Subscription {
-            plan_type: subscription.plan_type,
-            used_percent: subscription.used_percent,
-            window_minutes: subscription.window_minutes,
-        },
+    let api_equivalent = value_current_segments(
+        &snapshot.model_segments,
+        snapshot.model_segments_complete,
+        "codex_rollout_token_count",
+        "openai",
     );
+    let cost = legacy_cost_projection(&api_equivalent);
     Some(WorkerEnergy {
         input: TokenCount::new(usage.input_tokens),
         cached_input: TokenCount::new(usage.cached_input_tokens),
         output: TokenCount::new(usage.output_tokens),
         reasoning_output: TokenCount::new(usage.reasoning_output_tokens),
         cost,
+        api_equivalent: Some(api_equivalent),
+        subscription: snapshot.subscription,
         context_window: snapshot.model_context_window,
     })
 }
 
+fn value_current_segments(
+    segments: &[ModelUsageSegment],
+    segments_complete: bool,
+    source: &str,
+    provider: &str,
+) -> ApiEquivalent {
+    let provenance = ObservationProvenance {
+        source: source.to_owned(),
+        provider: Some(provider.to_owned()),
+        observed_at: None,
+        captured_at: None,
+        scope: ObservationScope::UsageHistory,
+    };
+    let Ok(manifest) = bundled_price_manifest() else {
+        return ApiEquivalent::Unavailable {
+            reason: UnavailableReason::MissingPricingCategory,
+        };
+    };
+    let Some(card) = manifest.current_card() else {
+        return ApiEquivalent::Unavailable {
+            reason: UnavailableReason::MissingPricingCategory,
+        };
+    };
+    value_model_segments(card, segments, segments_complete, provenance)
+}
+
+fn legacy_cost_projection(value: &ApiEquivalent) -> cosmon_observability::EnergyCost {
+    match value {
+        ApiEquivalent::Estimated { amount_usd, .. } => {
+            cosmon_observability::EnergyCost::ReferenceUsd {
+                usd: amount_usd.get(),
+            }
+        }
+        ApiEquivalent::Unavailable { .. } | _ => cosmon_observability::EnergyCost::Unknown,
+    }
+}
+
+fn claude_model_segments(session: &claudion::SessionLog) -> (Vec<ModelUsageSegment>, bool) {
+    let mut segments = Vec::new();
+    let mut complete = true;
+    for turn in &session.turns {
+        let Some(model) = turn.model.as_deref().filter(|model| !model.is_empty()) else {
+            complete = false;
+            continue;
+        };
+        let Some(input_tokens) = turn
+            .input_tokens
+            .get()
+            .checked_add(turn.cache_creation_input_tokens.get())
+            .and_then(|total| total.checked_add(turn.cache_read_input_tokens.get()))
+        else {
+            complete = false;
+            continue;
+        };
+        segments.push(ModelUsageSegment {
+            model: model.to_owned(),
+            input_tokens: UsageTokenCount::Measured {
+                tokens: input_tokens,
+            },
+            cached_input_tokens: UsageTokenCount::Measured {
+                tokens: turn.cache_read_input_tokens.get(),
+            },
+            cache_write_tokens: UsageTokenCount::Measured {
+                tokens: turn.cache_creation_input_tokens.get(),
+            },
+            output_tokens: UsageTokenCount::Measured {
+                tokens: turn.output_tokens.get(),
+            },
+            reasoning_output_tokens: UsageTokenCount::Unavailable {
+                reason: UnavailableReason::Unsupported,
+            },
+        });
+    }
+    (segments, complete)
+}
+
 /// Stream one resolved Codex rollout into its latest energy + model reading.
 ///
-/// The file is read once and retains only its compact `token_count` events;
-/// this lets a rate-limit-only tail update the subscription share without
-/// allocating the complete rollout. Session discovery has already selected
-/// the one rollout whose header matches the worker cwd, so this is
-/// O(active session), not O(all historical sessions).
+/// The file is read once and retains only compact `token_count` and
+/// `turn_context` events. The latter binds cumulative counter deltas to exact
+/// realized model ids, while a rate-limit-only tail can still update the
+/// subscription share without allocating the complete rollout. Session
+/// discovery has already selected the one rollout whose header matches the
+/// worker cwd, so this is O(active session), not O(all historical sessions).
 fn read_codex_rollout_energy(
     path: &Path,
 ) -> Option<(
@@ -320,7 +412,7 @@ fn read_codex_rollout_energy(
     let mut energy_events = String::new();
     let mut latest_model = None;
     for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
-        if line.contains("\"type\":\"token_count\"") {
+        if line.contains("\"type\":\"token_count\"") || line.contains("\"type\":\"turn_context\"") {
             energy_events.push_str(&line);
             energy_events.push('\n');
         }
@@ -1306,6 +1398,8 @@ mod tests {
             output: TokenCount::new(50),
             reasoning_output: TokenCount::new(20),
             cost: cosmon_observability::EnergyCost::ReferenceUsd { usd: 0.25 },
+            api_equivalent: None,
+            subscription: None,
             context_window: Some(1_000),
         };
         let (i, cached, o, reasoning) = e.token_tuple();
@@ -1314,6 +1408,28 @@ mod tests {
         assert_eq!(o, 50);
         assert_eq!(reasoning, 20);
         assert_eq!(e.cost.reference_usd(), Some(0.25));
+    }
+
+    #[test]
+    fn cli_claude_reader_prices_each_realized_model() {
+        use std::io::Write as _;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"s","timestamp":"2026-09-28T08:00:00Z","message":{{"model":"claude-opus-4-6","usage":{{"input_tokens":1000000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":100000}}}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"s","timestamp":"2026-09-28T08:01:00Z","message":{{"model":"claude-sonnet-5","usage":{{"input_tokens":1000000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":100000}}}}}}"#
+        )
+        .unwrap();
+        let session = claudion::parse_session(file.path()).unwrap();
+        let (segments, complete) = claude_model_segments(&session);
+        let value =
+            value_current_segments(&segments, complete, "independent_cli_fixture", "anthropic");
+        assert_eq!(legacy_cost_projection(&value).reference_usd(), Some(10.5));
     }
 
     // ---- task-20260727-3f46: the session-log root actually used ----------
@@ -1583,7 +1699,7 @@ mod tests {
                     "\n",
                     r#"{{"type":"turn_context","payload":{{"model":"{model}"}}}}"#,
                     "\n",
-                    r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":2000000,"cached_input_tokens":1000000,"output_tokens":100000,"reasoning_output_tokens":40000,"total_tokens":2100000}}}}}}}}"#,
+                    r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":2000000,"cached_input_tokens":1000000,"output_tokens":100000,"reasoning_output_tokens":40000,"total_tokens":2100000}}}},"rate_limits":{{"primary":{{"used_percent":7.0,"window_minutes":10080}},"plan_type":"pro"}}}}}}"#,
                     "\n",
                 ),
                 cwd = cwd.to_string_lossy(),
@@ -1608,7 +1724,7 @@ mod tests {
         let wt = root.path().join(".worktrees").join(mol.as_str());
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::create_dir_all(&wt).unwrap();
-        seed_codex_rollout(&wt, "gpt-5.6-terra");
+        seed_codex_rollout(&wt, "gpt-5.3-codex");
 
         seed_dispatch(&state_dir, &mol, "codex", "worker-1");
         register_fleet_worker(
@@ -1625,8 +1741,19 @@ mod tests {
         assert_eq!(cached, 1_000_000);
         assert_eq!(output, 100_000);
         assert_eq!(reasoning, 40_000);
-        // 1M fresh × $2.50 + 1M cached × $0.25 + 100k out × $15 = $4.25.
-        assert_eq!(energy.cost.reference_usd(), Some(4.25));
+        // 1M fresh × $1.75 + 1M cached × $0.175 + 100k out × $14 = $3.325.
+        assert_eq!(energy.cost.reference_usd(), Some(3.325));
+        assert_eq!(
+            energy.subscription.as_ref().map(|usage| usage.used_percent),
+            Some(7.0)
+        );
+        assert!(matches!(
+            energy.api_equivalent,
+            Some(ApiEquivalent::Estimated {
+                coverage: cosmon_core::usage::PricingCoverage::Complete,
+                ..
+            })
+        ));
 
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),

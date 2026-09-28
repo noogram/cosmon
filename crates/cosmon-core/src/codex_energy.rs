@@ -31,24 +31,27 @@
 //!
 //! # Pricing: data, not scattered constants
 //!
-//! [`codex_price_for`] is a lookup into one table of per-model rates
-//! (`claudion::PricingModel` set the precedent of pricing-as-data). Codex
+//! [`codex_price_for`] is a compatibility lookup into the versioned manifest.
+//! Codex
 //! billing shape is input / cached-input / output; **reasoning tokens bill as
 //! output** and are already included in `output_tokens`, so they carry no
 //! rate of their own. **Honest floor:** a model absent from the table yields
 //! `None` — tokens stay computable, cost displays as `—`. Never fabricate a
 //! rate.
 //!
-//! # Cost attribution (v1)
+//! # Model-segment attribution
 //!
-//! A whole session is attributed to the **last** realized model from the
-//! `turn_context` trajectory (consistent with the trajectory-collapse
-//! semantics of the realized-model display). `total_token_usage` is not split
-//! per model, so a mid-session model change makes this an approximation;
-//! a per-turn split (`last_token_usage` × the turn's `turn_context.model`)
-//! is possible future work if the cost error ever matters.
+//! Successive cumulative readings are differenced and paired with the exact
+//! active `turn_context.model`. Repeated cumulative snapshots contribute zero,
+//! so allowance-only refreshes cannot duplicate usage. If any delta lacks a
+//! model or counters regress, the snapshot retains its exact totals and marks
+//! model coverage incomplete rather than assigning the whole session to its
+//! last model.
 
 use serde::{Deserialize, Serialize};
+
+use crate::price_manifest::bundled_price_manifest;
+use crate::usage::{ModelUsageSegment, TokenCount, UnavailableReason};
 
 /// Cumulative token counters for a codex session, as reported by the last
 /// `event_msg`/`token_count` record's `total_token_usage` object.
@@ -61,7 +64,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// The struct exists (rather than a bare tuple) so pricing can honor the
 /// subset relations explicitly — see [`Self::cost_usd`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[allow(clippy::struct_field_names)] // field names mirror the codex wire format verbatim
 pub struct CodexTokenUsage {
     /// Total input tokens, **including** the cached portion.
@@ -105,16 +108,20 @@ pub struct CodexEnergySnapshot {
     pub model_context_window: Option<u64>,
     /// `ChatGPT` subscription allowance use, when present in the rollout.
     pub subscription: Option<CodexSubscriptionUsage>,
+    /// Deduplicated cumulative deltas paired with exact realized models.
+    pub model_segments: Vec<ModelUsageSegment>,
+    /// Whether every cumulative token delta had a realized model identity.
+    pub model_segments_complete: bool,
 }
 
 impl CodexTokenUsage {
     /// The non-cached portion of the input, billed at the full input rate.
     ///
-    /// Saturating: a malformed log claiming more cached than total input
-    /// yields `0` rather than wrapping.
+    /// Returns `None` for malformed subset counters rather than silently
+    /// clamping an invalid observation into a priceable one.
     #[must_use]
-    pub fn uncached_input_tokens(&self) -> u64 {
-        self.input_tokens.saturating_sub(self.cached_input_tokens)
+    pub fn uncached_input_tokens(&self) -> Option<u64> {
+        self.input_tokens.checked_sub(self.cached_input_tokens)
     }
 
     /// Dollar cost of this usage at the given per-model rates.
@@ -123,10 +130,15 @@ impl CodexTokenUsage {
     /// output × output_rate` — reasoning tokens are already inside
     /// `output_tokens` and are **not** billed again.
     #[must_use]
-    pub fn cost_usd(&self, price: &CodexModelPrice) -> f64 {
-        per_mtok(self.uncached_input_tokens(), price.input_per_mtok)
-            + per_mtok(self.cached_input_tokens, price.cached_input_per_mtok)
-            + per_mtok(self.output_tokens, price.output_per_mtok)
+    pub fn cost_usd(&self, price: &CodexModelPrice) -> Option<f64> {
+        if self.reasoning_output_tokens > self.output_tokens {
+            return None;
+        }
+        Some(
+            per_mtok(self.uncached_input_tokens()?, price.input_per_mtok)
+                + per_mtok(self.cached_input_tokens, price.cached_input_per_mtok)
+                + per_mtok(self.output_tokens, price.output_per_mtok),
+        )
     }
 }
 
@@ -147,9 +159,25 @@ fn per_mtok(tokens: u64, rate: f64) -> f64 {
 enum CodexEnergyLine {
     /// An event record whose payload *may* be a `token_count` event.
     EventMsg(CodexEventPayloadHolder),
+    /// Model identity applying to subsequent cumulative token readings.
+    TurnContext(CodexTurnContextHolder),
     /// Any other record type — ignored for energy purposes.
     #[serde(other)]
     Other,
+}
+
+/// The `payload` wrapper of a `turn_context` record.
+#[derive(Debug, Deserialize)]
+struct CodexTurnContextHolder {
+    #[serde(default)]
+    payload: Option<CodexTurnContext>,
+}
+
+/// Model-bearing portion of a `turn_context` payload.
+#[derive(Debug, Deserialize)]
+struct CodexTurnContext {
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// The `payload` wrapper of an `event_msg` record.
@@ -237,21 +265,46 @@ pub fn codex_energy_from_session(content: &str) -> Option<CodexEnergySnapshot> {
     let mut usage = None;
     let mut model_context_window = None;
     let mut subscription = None;
+    let mut current_model = None;
+    let mut previous_usage = None;
+    let mut model_segments = Vec::new();
+    let mut model_segments_complete = true;
 
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let Ok(CodexEnergyLine::EventMsg(holder)) = serde_json::from_str::<CodexEnergyLine>(line)
-        else {
+        let Ok(record) = serde_json::from_str::<CodexEnergyLine>(line) else {
             continue;
+        };
+        let holder = match record {
+            CodexEnergyLine::EventMsg(holder) => holder,
+            CodexEnergyLine::TurnContext(holder) => {
+                if let Some(model) = holder.payload.and_then(|payload| payload.model) {
+                    current_model = Some(model);
+                }
+                continue;
+            }
+            CodexEnergyLine::Other => continue,
         };
         let Some(CodexEventPayload::TokenCount(event)) = holder.payload else {
             continue;
         };
         if let Some(info) = event.info {
             if let Some(new_usage) = info.total_token_usage {
+                match usage_delta(previous_usage, new_usage) {
+                    Some(delta) if delta.total_tokens > 0 => {
+                        if let Some(model) = current_model.as_deref() {
+                            add_model_delta(&mut model_segments, model, delta);
+                        } else {
+                            model_segments_complete = false;
+                        }
+                    }
+                    Some(_) => {}
+                    None => model_segments_complete = false,
+                }
+                previous_usage = Some(new_usage);
                 usage = Some(new_usage);
             }
             if info.model_context_window.is_some() {
@@ -269,11 +322,91 @@ pub fn codex_energy_from_session(content: &str) -> Option<CodexEnergySnapshot> {
         }
     }
 
+    let usage = usage?;
+    model_segments_complete &= segments_match_usage(&model_segments, usage);
     Some(CodexEnergySnapshot {
-        usage: usage?,
+        usage,
         model_context_window,
         subscription,
+        model_segments,
+        model_segments_complete,
     })
+}
+
+fn usage_delta(
+    previous: Option<CodexTokenUsage>,
+    current: CodexTokenUsage,
+) -> Option<CodexTokenUsage> {
+    let previous = previous.unwrap_or_default();
+    Some(CodexTokenUsage {
+        input_tokens: current.input_tokens.checked_sub(previous.input_tokens)?,
+        cached_input_tokens: current
+            .cached_input_tokens
+            .checked_sub(previous.cached_input_tokens)?,
+        output_tokens: current.output_tokens.checked_sub(previous.output_tokens)?,
+        reasoning_output_tokens: current
+            .reasoning_output_tokens
+            .checked_sub(previous.reasoning_output_tokens)?,
+        total_tokens: current.total_tokens.checked_sub(previous.total_tokens)?,
+    })
+}
+
+fn measured(tokens: u64) -> TokenCount {
+    TokenCount::Measured { tokens }
+}
+
+fn add_model_delta(segments: &mut Vec<ModelUsageSegment>, model: &str, delta: CodexTokenUsage) {
+    let index = segments
+        .iter()
+        .position(|item| item.model == model)
+        .unwrap_or_else(|| {
+            segments.push(ModelUsageSegment {
+                model: model.to_owned(),
+                input_tokens: measured(0),
+                cached_input_tokens: measured(0),
+                cache_write_tokens: measured(0),
+                output_tokens: measured(0),
+                reasoning_output_tokens: measured(0),
+            });
+            segments.len() - 1
+        });
+    let segment = &mut segments[index];
+    add_measured(&mut segment.input_tokens, delta.input_tokens);
+    add_measured(&mut segment.cached_input_tokens, delta.cached_input_tokens);
+    add_measured(&mut segment.output_tokens, delta.output_tokens);
+    add_measured(
+        &mut segment.reasoning_output_tokens,
+        delta.reasoning_output_tokens,
+    );
+}
+
+fn add_measured(count: &mut TokenCount, delta: u64) {
+    let TokenCount::Measured { tokens } = count else {
+        *count = TokenCount::Unavailable {
+            reason: UnavailableReason::MalformedSource,
+        };
+        return;
+    };
+    if let Some(total) = tokens.checked_add(delta) {
+        *tokens = total;
+    } else {
+        *count = TokenCount::Unavailable {
+            reason: UnavailableReason::MalformedSource,
+        };
+    }
+}
+
+fn segments_match_usage(segments: &[ModelUsageSegment], usage: CodexTokenUsage) -> bool {
+    let sum = |select: fn(&ModelUsageSegment) -> TokenCount| {
+        segments
+            .iter()
+            .map(select)
+            .try_fold(0_u64, |total, count| total.checked_add(count.measured()?))
+    };
+    sum(|segment| segment.input_tokens) == Some(usage.input_tokens)
+        && sum(|segment| segment.cached_input_tokens) == Some(usage.cached_input_tokens)
+        && sum(|segment| segment.output_tokens) == Some(usage.output_tokens)
+        && sum(|segment| segment.reasoning_output_tokens) == Some(usage.reasoning_output_tokens)
 }
 
 // ---- Price table -----------------------------------------------------------
@@ -295,55 +428,6 @@ pub struct CodexModelPrice {
     pub output_per_mtok: f64,
 }
 
-/// The codex price table — **data, not scattered constants** (claudion
-/// precedent). One row per priced model id, exactly as the id appears on the
-/// `turn_context` record.
-///
-/// Rates are USD per million tokens as published by `OpenAI` (verified
-/// 2026-07-19). gpt-5 / gpt-5-codex share the gpt-5 rate card.
-const CODEX_PRICE_TABLE: &[(&str, CodexModelPrice)] = &[
-    (
-        "gpt-5.6-sol",
-        CodexModelPrice {
-            input_per_mtok: 5.0,
-            cached_input_per_mtok: 0.50,
-            output_per_mtok: 30.0,
-        },
-    ),
-    (
-        "gpt-5.6-terra",
-        CodexModelPrice {
-            input_per_mtok: 2.50,
-            cached_input_per_mtok: 0.25,
-            output_per_mtok: 15.0,
-        },
-    ),
-    (
-        "gpt-5.6-luna",
-        CodexModelPrice {
-            input_per_mtok: 1.0,
-            cached_input_per_mtok: 0.10,
-            output_per_mtok: 6.0,
-        },
-    ),
-    (
-        "gpt-5",
-        CodexModelPrice {
-            input_per_mtok: 1.25,
-            cached_input_per_mtok: 0.125,
-            output_per_mtok: 10.0,
-        },
-    ),
-    (
-        "gpt-5-codex",
-        CodexModelPrice {
-            input_per_mtok: 1.25,
-            cached_input_per_mtok: 0.125,
-            output_per_mtok: 10.0,
-        },
-    ),
-];
-
 /// Look up the billing rates for a realized codex model id (exact match on
 /// the id as reported by `turn_context`).
 ///
@@ -352,10 +436,13 @@ const CODEX_PRICE_TABLE: &[(&str, CodexModelPrice)] = &[
 /// worse than an absent one.
 #[must_use]
 pub fn codex_price_for(model: &str) -> Option<CodexModelPrice> {
-    CODEX_PRICE_TABLE
-        .iter()
-        .find(|(id, _)| *id == model)
-        .map(|(_, price)| *price)
+    let manifest = bundled_price_manifest().ok()?;
+    let rate = manifest.current_card()?.rate_for(model)?;
+    Some(CodexModelPrice {
+        input_per_mtok: rate.rates_usd_per_million_tokens.input,
+        cached_input_per_mtok: rate.rates_usd_per_million_tokens.cached_input?,
+        output_per_mtok: rate.rates_usd_per_million_tokens.output,
+    })
 }
 
 #[cfg(test)]
@@ -459,21 +546,53 @@ mod tests {
         assert_eq!(usage.total_tokens, 10);
     }
 
+    #[test]
+    fn cumulative_snapshots_are_deduplicated_into_model_segments() {
+        let jsonl = concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5-codex"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"reasoning_output_tokens":4,"total_tokens":110}}}}"#,
+            "\n",
+            // An allowance refresh repeats the same cumulative snapshot.
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":10,"reasoning_output_tokens":4,"total_tokens":110}}}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200,"cached_input_tokens":100,"output_tokens":30,"reasoning_output_tokens":9,"total_tokens":230}}}}"#,
+        );
+        let snapshot = codex_energy_from_session(jsonl).unwrap();
+        assert!(snapshot.model_segments_complete);
+        assert_eq!(snapshot.model_segments.len(), 2);
+        assert_eq!(
+            snapshot.model_segments[0].input_tokens.measured(),
+            Some(100)
+        );
+        assert_eq!(
+            snapshot.model_segments[1].input_tokens.measured(),
+            Some(100),
+            "second segment is the cumulative delta, not the repeated total"
+        );
+        assert_eq!(
+            snapshot.model_segments[1].cached_input_tokens.measured(),
+            Some(20)
+        );
+        assert_eq!(
+            snapshot.model_segments[1].output_tokens.measured(),
+            Some(20)
+        );
+    }
+
     // ---- Pricing ----------------------------------------------------------
 
     #[test]
-    fn price_table_has_the_gpt_56_tiers() {
-        let sol = codex_price_for("gpt-5.6-sol").unwrap();
-        assert_eq!(sol.input_per_mtok, 5.0);
-        assert_eq!(sol.cached_input_per_mtok, 0.50);
-        assert_eq!(sol.output_per_mtok, 30.0);
+    fn price_lookup_uses_exact_sourced_manifest_ids() {
+        let codex = codex_price_for("gpt-5.3-codex").unwrap();
+        assert_eq!(codex.input_per_mtok, 1.75);
+        assert_eq!(codex.cached_input_per_mtok, 0.175);
+        assert_eq!(codex.output_per_mtok, 14.0);
 
-        let terra = codex_price_for("gpt-5.6-terra").unwrap();
-        assert_eq!(terra.input_per_mtok, 2.50);
-        assert_eq!(terra.output_per_mtok, 15.0);
-
-        assert!(codex_price_for("gpt-5.6-luna").is_some());
         assert!(codex_price_for("gpt-5-codex").is_some());
+        assert!(codex_price_for("gpt-5.6-sol").is_none());
     }
 
     #[test]
@@ -485,8 +604,8 @@ mod tests {
 
     #[test]
     fn cost_splits_cached_from_fresh_input() {
-        // 1M fresh input + 1M cached + 100k output on terra:
-        // 1.0×$2.50 + 1.0×$0.25 + 0.1×$15 = $4.25
+        // 1M fresh input + 1M cached + 100k output on GPT-5.3-Codex:
+        // 1.0×$1.75 + 1.0×$0.175 + 0.1×$14 = $3.325.
         let usage = CodexTokenUsage {
             input_tokens: 2_000_000,
             cached_input_tokens: 1_000_000,
@@ -494,16 +613,16 @@ mod tests {
             reasoning_output_tokens: 40_000,
             total_tokens: 2_100_000,
         };
-        let price = codex_price_for("gpt-5.6-terra").unwrap();
-        let cost = usage.cost_usd(&price);
-        assert!((cost - 4.25).abs() < 1e-9);
+        let price = codex_price_for("gpt-5.3-codex").unwrap();
+        let cost = usage.cost_usd(&price).unwrap();
+        assert!((cost - 3.325).abs() < 1e-9);
     }
 
     #[test]
     fn reasoning_tokens_are_not_double_billed() {
         // Reasoning is a subset of output: two usages with the same output
         // total but different reasoning shares cost the same.
-        let price = codex_price_for("gpt-5.6-sol").unwrap();
+        let price = codex_price_for("gpt-5.3-codex").unwrap();
         let base = CodexTokenUsage {
             input_tokens: 1_000,
             cached_input_tokens: 0,
@@ -515,11 +634,11 @@ mod tests {
             reasoning_output_tokens: 900,
             ..base
         };
-        assert!((base.cost_usd(&price) - heavy_reasoning.cost_usd(&price)).abs() < 1e-12);
+        assert_eq!(base.cost_usd(&price), heavy_reasoning.cost_usd(&price));
     }
 
     #[test]
-    fn malformed_cached_exceeding_input_saturates() {
+    fn malformed_cached_exceeding_input_is_unpriceable() {
         let usage = CodexTokenUsage {
             input_tokens: 10,
             cached_input_tokens: 999,
@@ -527,18 +646,22 @@ mod tests {
             reasoning_output_tokens: 0,
             total_tokens: 10,
         };
-        assert_eq!(usage.uncached_input_tokens(), 0);
+        assert_eq!(usage.uncached_input_tokens(), None);
+        assert_eq!(
+            usage.cost_usd(&codex_price_for("gpt-5.3-codex").unwrap()),
+            None
+        );
     }
 
     #[test]
     fn real_session_total_prices_end_to_end() {
         // Compose the two pure pieces the probe will chain: parse the real
-        // line, price it as sol. Fresh input 78,020 × $5 + cached 2,139,392
-        // × $0.50 + output 8,285 × $30 = $0.39010 + $1.069696 + $0.24855.
+        // line, price it as GPT-5.3-Codex. The expected value is calculated
+        // independently from the official three rates.
         let usage = codex_token_usage_from_session(REAL_TOKEN_COUNT_LINE).unwrap();
-        let price = codex_price_for("gpt-5.6-sol").unwrap();
-        let cost = usage.cost_usd(&price);
-        let expected = 0.390_10 + 1.069_696 + 0.248_55;
+        let price = codex_price_for("gpt-5.3-codex").unwrap();
+        let cost = usage.cost_usd(&price).unwrap();
+        let expected = 0.136_535 + 0.374_393_6 + 0.115_99;
         assert!((cost - expected).abs() < 1e-9);
     }
 }
