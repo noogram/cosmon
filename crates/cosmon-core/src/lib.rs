@@ -77,6 +77,8 @@ pub mod molecule;
 pub mod role;
 pub mod spore;
 pub mod tag;
+/// Versioned, I/O-free usage observations shared by event and UI readers.
+pub mod usage;
 pub mod worker;
 
 // ---------------------------------------------------------------------------

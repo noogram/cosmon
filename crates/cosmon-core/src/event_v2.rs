@@ -41,6 +41,7 @@ use crate::id::{MoleculeId, WorkerId};
 use crate::injection::InjectionOrigin;
 use crate::quality_band::QualityBand;
 use crate::spawn_seam::LoopOwnership;
+use crate::usage::UsageRecord;
 
 /// Wire-side projection of [`LoopOwnership`] (ADR-103).
 ///
@@ -365,6 +366,35 @@ impl Envelope {
             return Ok(env);
         }
         migrate_legacy_line(line)
+    }
+
+    /// Project either usage event generation into the canonical record.
+    ///
+    /// New [`EventV2::UsageObserved`] values borrow their record.  Legacy
+    /// [`EventV2::EnergyTick`] values are converted conservatively: their
+    /// envelope timestamp is retained as capture time, unreported token
+    /// subsets remain unavailable, and a historical zero-dollar amount stays
+    /// ambiguous rather than becoming measured zero.
+    #[must_use]
+    pub fn usage_record(&self) -> Option<std::borrow::Cow<'_, UsageRecord>> {
+        match &self.event {
+            EventV2::UsageObserved { usage } => Some(std::borrow::Cow::Borrowed(usage.as_ref())),
+            EventV2::EnergyTick {
+                worker_id,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+            } => Some(std::borrow::Cow::Owned(
+                UsageRecord::from_legacy_energy_tick(
+                    worker_id.clone(),
+                    *input_tokens,
+                    *output_tokens,
+                    *cost_usd,
+                    self.timestamp,
+                ),
+            )),
+            _ => None,
+        }
     }
 }
 
@@ -692,6 +722,16 @@ pub enum EventV2 {
         output_tokens: u64,
         /// Cumulative cost in USD.
         cost_usd: f64,
+    },
+    /// Full versioned usage observation.
+    ///
+    /// This reader variant is installed before any producer cutover.  It
+    /// preserves token, price, and plan availability independently; existing
+    /// producers continue to emit [`Self::EnergyTick`] until all projections
+    /// have migrated.
+    UsageObserved {
+        /// Canonical usage sample.
+        usage: Box<UsageRecord>,
     },
     /// A molecule's TTL fired and an expiry policy was applied (ADR-029).
     ///
@@ -2713,7 +2753,8 @@ impl EventV2 {
     /// Used by the event-log writer to assign a per-molecule sequence number
     /// (`mol_seq`) under the append flock. Returns `None` for events that
     /// describe pure worker lifecycle or runtime telemetry without a
-    /// molecule reference (`WorkerKilled`, `WorkerHeartbeat`, `EnergyTick`).
+    /// molecule reference (`WorkerKilled`, `WorkerHeartbeat`, `EnergyTick`,
+    /// `UsageObserved`).
     ///
     /// For [`Self::DecaySpliced`] the parent is returned — the splice is
     /// recorded against the molecule that *was* in the DAG slot, not against
@@ -2791,6 +2832,7 @@ impl EventV2 {
             Self::WorkerKilled { .. }
             | Self::WorkerHeartbeat { .. }
             | Self::EnergyTick { .. }
+            | Self::UsageObserved { .. }
             | Self::FleetTyped { .. }
             | Self::OperatorPresent { .. }
             | Self::OperatorAbsent { .. }
@@ -3959,6 +4001,11 @@ mod tests {
                 output_tokens: 250,
                 cost_usd: 0.015,
             },
+            Envelope::from_line(
+                include_str!("../tests/fixtures/usage/usage_observed_v1.json").trim(),
+            )
+            .unwrap()
+            .event,
             EventV2::Expired {
                 molecule_id: mid("cs-20260411-aaaa"),
                 policy_applied: ExpiryPolicy::Collapse,
@@ -4598,6 +4645,7 @@ mod tests {
             | EventV2::BlockingDialogueDetected { .. }
             | EventV2::WorkerBlockedOnOperator { .. }
             | EventV2::EnergyTick { .. }
+            | EventV2::UsageObserved { .. }
             | EventV2::Expired { .. }
             | EventV2::GateStarted { .. }
             | EventV2::GateCompleted { .. }

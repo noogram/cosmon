@@ -80,6 +80,7 @@ impl Action {
             | EventV2::WorkerSpawned { .. }
             | EventV2::WorkerHeartbeat { .. }
             | EventV2::EnergyTick { .. }
+            | EventV2::UsageObserved { .. }
             | EventV2::Expired { .. }
             | EventV2::GateStarted { .. }
             | EventV2::GateCompleted { .. }

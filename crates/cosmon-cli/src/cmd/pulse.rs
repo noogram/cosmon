@@ -374,7 +374,8 @@ fn duration_from_secs(secs: f64) -> Duration {
 /// Returns `(progress_count, fuel_debit, scanned)`.
 /// Progress events: `step_completed`, `molecule_completed`,
 /// `molecule_evolved` (V1 kind), `molecule_step_completed` (V2 type).
-/// Energy debit: delta of `EnergyTick` / `energy_tick` cumulative totals.
+/// Energy debit: delta of legacy `energy_tick` or versioned
+/// `usage_observed` cumulative totals.
 ///
 /// Silently skips lines that fail to parse (best-effort over a partial file).
 fn scan_events(path: &Path, cutoff: DateTime<Utc>, now: DateTime<Utc>) -> (u64, u64, u64) {
@@ -409,8 +410,10 @@ fn scan_events(path: &Path, cutoff: DateTime<Utc>, now: DateTime<Utc>) -> (u64, 
             | "molecule_step_completed" => {
                 progress_count += 1;
             }
-            "energy_tick" => {
-                let total = energy_total(&val);
+            "energy_tick" | "usage_observed" => {
+                let Some(total) = energy_total(&val) else {
+                    continue;
+                };
                 energy_first.get_or_insert(total);
                 energy_last = Some(total);
             }
@@ -512,11 +515,12 @@ fn read_scheduler_state_patrol_age_secs(
     secs_since(now, ts)
 }
 
-/// Derive a rough fuel percentage proxy from `EnergyTick` cumulative totals.
+/// Derive a rough fuel percentage proxy from legacy or versioned cumulative
+/// token totals.
 ///
 /// Phase 1: uses the ratio of last-known cumulative vs an estimated cap of
 /// 10M tokens/month. Full wiring (ADR-138 `FuelBudget`) is P1.5.
-/// Returns 0.0 when no `EnergyTick` events are present.
+/// Returns 0.0 when no legacy or versioned usage events are present.
 fn derive_fuel_pct(path: &Path, now: DateTime<Utc>) -> f64 {
     let Ok(content) = std::fs::read_to_string(path) else {
         return 0.0;
@@ -536,8 +540,10 @@ fn derive_fuel_pct(path: &Path, now: DateTime<Utc>) -> f64 {
         if ts < cutoff {
             continue;
         }
-        if event_kind(&val) == "energy_tick" {
-            let total = energy_total(&val);
+        if matches!(event_kind(&val), "energy_tick" | "usage_observed") {
+            let Some(total) = energy_total(&val) else {
+                continue;
+            };
             if total > last_total {
                 last_total = total;
             }
@@ -568,16 +574,29 @@ fn event_kind(val: &Value) -> &str {
         .unwrap_or("")
 }
 
-/// Sum input + output tokens from an `energy_tick` event.
-fn energy_total(val: &Value) -> u64 {
-    val.get("input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
-        .saturating_add(
-            val.get("output_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+/// Sum measured input + output tokens from either usage-event generation.
+///
+/// Missing counters return `None`; the reader never substitutes zero for an
+/// unavailable token observation.
+fn energy_total(val: &Value) -> Option<u64> {
+    let (input, output) = if event_kind(val) == "usage_observed" {
+        let tokens = val.get("usage")?.get("tokens")?;
+        (
+            measured_token_count(tokens.get("input_tokens")?)?,
+            measured_token_count(tokens.get("output_tokens")?)?,
         )
+    } else {
+        (
+            val.get("input_tokens")?.as_u64()?,
+            val.get("output_tokens")?.as_u64()?,
+        )
+    };
+    Some(input.saturating_add(output))
+}
+
+/// Read one canonical measured-token object from the raw JSON surface.
+fn measured_token_count(value: &Value) -> Option<u64> {
+    (value.get("status")?.as_str()? == "measured").then(|| value.get("tokens")?.as_u64())?
 }
 
 // ---------------------------------------------------------------------------
@@ -868,6 +887,49 @@ mod tests {
 
         let (p, _b, _scanned) = scan_events(&path, now - Duration::minutes(5), now);
         assert_eq!(p, 0, "old event should be outside window");
+    }
+
+    #[test]
+    fn raw_reader_counts_versioned_usage_samples_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let now = Utc::now();
+        let first_ts = now - Duration::minutes(2);
+        let second_ts = now - Duration::minutes(1);
+        let fixture =
+            include_str!("../../../cosmon-core/tests/fixtures/usage/usage_observed_v1.json").trim();
+        let first = fixture
+            .replace("2026-09-28T08:00:00Z", &first_ts.to_rfc3339())
+            .replace("\"seq\":7", "\"seq\":8")
+            .replace("\"sample-0007\"", "\"sample-0008\"");
+        let second = fixture
+            .replace("2026-09-28T08:00:00Z", &second_ts.to_rfc3339())
+            .replace("\"seq\":7", "\"seq\":9")
+            .replace("\"sample-0007\"", "\"sample-0009\"")
+            .replace("\"tokens\":1200", "\"tokens\":1250")
+            .replace("\"tokens\":300", "\"tokens\":350");
+        std::fs::write(&path, format!("{first}\n{second}\n")).unwrap();
+
+        let (_progress, debit, scanned) = scan_events(&path, now - Duration::minutes(5), now);
+        assert_eq!(
+            debit, 100,
+            "cumulative samples must be differenced, not summed"
+        );
+        assert_eq!(scanned, 2, "each JSONL sample must be visited exactly once");
+    }
+
+    #[test]
+    fn raw_reader_does_not_turn_unavailable_tokens_into_zero() {
+        let fixture: Value = serde_json::from_str(
+            include_str!("../../../cosmon-core/tests/fixtures/usage/usage_observed_v1.json").trim(),
+        )
+        .unwrap();
+        let mut unavailable = fixture;
+        unavailable["usage"]["tokens"]["input_tokens"] = serde_json::json!({
+            "status": "unavailable",
+            "reason": "not_observed"
+        });
+        assert_eq!(energy_total(&unavailable), None);
     }
 
     #[test]
