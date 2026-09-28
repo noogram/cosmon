@@ -1,34 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Integration test: a multi-stage mission-plan fleet DAG must run to
-//! completion via **one** `cs run <sink>` with **zero** manual edge surgery.
+//! Integration test: a frozen prerequisite holds a multi-stage fleet DAG,
+//! which can drain after that prerequisite completes and merges.
 //!
 //! # What this guards
 //!
-//! Two cosmon-core defects broke mission-plan fleets end-to-end:
-//!
-//! - **BUG 1 (orphaned children).** A mission-plan mission `freeze`s itself
-//!   on its last step (`freeze_on_last_step`) once it has decomposed into a
-//!   child DAG. Every child is nucleated `--blocked-by mission`. A frozen
-//!   mission is never `cs done`'d and so never stamps `merged_at` — and the
-//!   frontier reducer used to gate `Frozen` predecessors on `merged_at`.
-//!   Result: the first stage (`architect`) stayed `Pending` forever behind a
-//!   frozen-but-unmerged blocker, the whole fleet froze, and the operator had
-//!   to hand-delete the dead `blocked_by` link from every child's
-//!   `state.json`.
-//!
-//! - **BUG 2 (drain at stage boundaries).** `cs run` chains a DAG by
-//!   completing each stage and advancing to the next ready frontier. A
-//!   blocker that has reached a terminal state (or has been torn down by an
-//!   auto-`cs done`) must count as *resolved*. When it did not, a fan-in node
-//!   (`red-team` blocked-by all five builders) could never see all its
-//!   blockers satisfied at once, and the run drained with downstream nodes
-//!   still `Pending`.
-//!
-//! The fix (in `cosmon_state::frontier::compute_from_molecules`) treats a
-//! `Frozen`, `Collapsed`, or *absent* (torn-down) blocker as cleared. This
-//! test reproduces the atlas fleet topology and asserts the whole reachable
-//! DAG drains to terminal from a single `cs run <sink>`.
+//! The first child has a `BlockedBy` link to a frozen mission. A freeze does
+//! not certify success, so every downstream stage must remain pending. Once
+//! the mission is completed and merged, a fresh run can dispatch the chain.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -68,6 +47,7 @@ impl Executor for CompletingExecutor {
         let store = FileStore::new(&self.store_path);
         let mut mol = store.load_molecule(id).map_err(RuntimeError::State)?;
         mol.status = MoleculeStatus::Completed;
+        mol.merged_at = Some(Utc::now());
         mol.current_step = mol.total_steps;
         mol.updated_at = Utc::now();
         store
@@ -155,19 +135,18 @@ fn seed(
 // The test
 // ---------------------------------------------------------------------------
 
-/// Reproduce the atlas `atlas-cleanroom` fleet topology:
+/// Reproduce a mission-plan fleet topology:
 ///
 /// ```text
 ///   mission (Frozen)  →  architect  →  builder{1..5}  →  red-team  →  soundness  →  integrator(sink)
 /// ```
 ///
 /// Children carry only `BlockedBy` links. The mission is already `Frozen`
-/// (it decomposed and parked via `freeze_on_last_step`). One `cs run <sink>`
-/// — modelled here as `Runtime` + `DagPolicy` rooted at the integrator —
-/// must drive every node to terminal with no manual edge surgery.
+/// (it decomposed and parked via `freeze_on_last_step`). The first run must
+/// hold the chain; after completing the mission, the second run drains it.
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive end-to-end fleet scenario
-fn mission_plan_fleet_chains_to_completion_from_one_run() {
+fn mission_plan_fleet_waits_for_frozen_blocker_then_drains_after_completion() {
     let tmp = TempDir::new().expect("tempdir");
     let store = FileStore::new(tmp.path());
 
@@ -279,17 +258,16 @@ fn mission_plan_fleet_chains_to_completion_from_one_run() {
 
     let report = runtime.run().expect("runtime should not error");
 
-    // The run must drain because the whole DAG reached terminal — NOT because
-    // it stalled. (Before the fix it drained on tick 1 with architect..sink
-    // all still Pending, behind the frozen mission's unmerged blocker.)
+    // A run can report policy drain with pending descendants when no node is
+    // ready; the persisted statuses distinguish this from completed work.
     assert_eq!(
         report.reason,
         ShutdownReason::PolicyDrained,
-        "fleet should drain by completion, got {:?}",
+        "fleet should have no eligible work, got {:?}",
         report.reason,
     );
 
-    // Every worker node must be Completed; the mission stays Frozen.
+    // Every worker node stays Pending while the mission is Frozen.
     let final_store = FileStore::new(tmp.path());
     let mut all_terminal = vec![
         architect.clone(),
@@ -302,8 +280,8 @@ fn mission_plan_fleet_chains_to_completion_from_one_run() {
         let mol = final_store.load_molecule(id).expect("load molecule");
         assert_eq!(
             mol.status,
-            MoleculeStatus::Completed,
-            "{id} must be Completed after one cs run — found {:?} (orphaned behind a dead edge?)",
+            MoleculeStatus::Pending,
+            "{id} must remain pending behind the frozen mission — found {:?}",
             mol.status,
         );
     }
@@ -311,6 +289,36 @@ fn mission_plan_fleet_chains_to_completion_from_one_run() {
     assert_eq!(
         mission_final.status,
         MoleculeStatus::Frozen,
-        "the frozen mission must stay frozen, not be resurrected",
+        "the first run must not complete the frozen mission",
     );
+
+    // Completion and integration are the explicit release gesture. The
+    // executor stamps merged_at for each descendant it finishes as well.
+    let mut mission_done = mission_final;
+    mission_done.status = MoleculeStatus::Completed;
+    mission_done.merged_at = Some(Utc::now());
+    final_store
+        .save_molecule(&mission, &mission_done)
+        .expect("complete mission");
+    let (plan, edges) = compile_plan(&final_store, std::slice::from_ref(&integrator))
+        .expect("recompile after release");
+    let mut runtime = Runtime::new(
+        Box::new(FileStore::new(tmp.path())),
+        Box::new(DagPolicy::new(plan, edges)),
+        Box::new(CompletingExecutor::new(tmp.path().to_path_buf())),
+        RuntimeConfig {
+            poll_interval: Duration::from_millis(1),
+            max_runtime: Some(Duration::from_secs(10)),
+            sweep_orphan_descendants_every: None,
+            liveness_recheck_every: None,
+        },
+    );
+    let report = runtime.run().expect("runtime should drain after release");
+    assert_eq!(report.reason, ShutdownReason::PolicyDrained);
+    for id in &all_terminal {
+        let mol = final_store
+            .load_molecule(id)
+            .expect("load released molecule");
+        assert_eq!(mol.status, MoleculeStatus::Completed, "{id} should drain");
+    }
 }

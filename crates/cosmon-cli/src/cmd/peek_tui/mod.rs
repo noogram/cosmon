@@ -489,10 +489,11 @@ impl RowView {
         } else {
             None
         };
-        let has_blockers = self
-            .blocked_by
-            .iter()
-            .any(|(_, status)| !matches!(status.as_str(), "completed" | "collapsed"));
+        let has_blockers = self.blocked_by.iter().any(|(_, status)| {
+            !status
+                .parse::<cosmon_core::molecule::MoleculeStatus>()
+                .is_ok_and(cosmon_core::molecule::MoleculeStatus::satisfies_blocked_by)
+        });
         visual_classify(&RowInputs {
             status: core_status,
             heartbeat,
@@ -3951,6 +3952,19 @@ fn expanded_detail_lines(r: &RowView) -> Vec<Line<'static>> {
             .collect::<Vec<_>>()
             .join(", ");
         lines.push(field("blocked-by", &blocked_str, false));
+        if r.blocked_by.iter().any(|(_, status)| status == "collapsed") {
+            lines.push(field(
+                "release",
+                "collapse this dependent, then re-nucleate with --blocked-by <completed-blocker>",
+                false,
+            ));
+        } else if r.blocked_by.iter().any(|(_, status)| status == "frozen") {
+            lines.push(field(
+                "release",
+                "finish the frozen blocker, then cs complete and cs done it",
+                false,
+            ));
+        }
     }
 
     // tags
@@ -7521,6 +7535,33 @@ mod tests {
             !joined.contains("(pending)"),
             "an unobservable realization must never read as pending:\n{joined}"
         );
+    }
+
+    #[test]
+    fn expanded_pending_dependent_names_collapsed_blocker_and_recovery() {
+        let mut row = row_with("pending", HeartbeatTier::Active);
+        row.mol_id = "task-20260928-bbbb".into();
+        row.blocked_by = vec![("task-20260928-aaaa".into(), "collapsed".into())];
+        let detail = expanded_detail_lines(&row)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(detail.contains("task-20260928-aaaa [collapsed]"));
+        assert!(detail.contains("re-nucleate with --blocked-by"));
+    }
+
+    #[test]
+    fn expanded_pending_dependent_names_frozen_blocker_and_completion() {
+        let mut row = row_with("pending", HeartbeatTier::Active);
+        row.blocked_by = vec![("task-20260928-aaaa".into(), "frozen".into())];
+        let detail = expanded_detail_lines(&row)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(detail.contains("task-20260928-aaaa [frozen]"));
+        assert!(detail.contains("cs complete and cs done"));
     }
 
     #[test]

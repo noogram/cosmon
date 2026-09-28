@@ -2,6 +2,12 @@
 \* Mechanical formalisation of the cosmon "ten invariants" enumerated
 \* in ADR-052 ("One Ledger, One Writer, One Witness per Field").
 \*
+\* Issue #118 changes the BlockedBy admission read: only Completed satisfies
+\* a predecessor edge. This spec has no dependency-edge relation or frontier
+\* variable, so the new invariant is out of this model's state space. The
+\* pure frontier and both runtime scheduler tests provide its executable
+\* witness; extending this spec with a DAG is separate formal work.
+\*
 \* The spec skeleton was produced by the deliberation
 \* delib-20260419-d34b synthesis.md §(c) (Gödel persona, ~80 LOC).
 \* This file extends it on three points the synthesis omits but which

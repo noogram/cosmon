@@ -4,6 +4,12 @@
 
 Accepted (2026-04-14) — implemented in task-20260414-d631.
 
+**Dependency satisfaction revised by issue #118 (2026-09-28):** the atomic
+frontier remains the dispatch projection, but a `BlockedBy` predecessor now
+satisfies its edge only after successful completion and integration. Collapse
+and freeze keep dependents pending. The older terminal-state clauses below
+record the original decision and no longer describe the admission rule.
+
 Derived from deliberation `delib-20260414-e6b8` (TLA+ vs foundry-tla vs
 hybride). See the synthesis file's insights I2 (torvalds) and I4 (einstein)
 for the full convergence trail. This ADR is the **pre-spec refactor** that

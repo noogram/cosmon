@@ -7,9 +7,9 @@
 //! Before this module, the cosmon scheduler decided whether a molecule was
 //! safe to dispatch by combining **two separate facts** on every poll tick:
 //!
-//! 1. **DAG readiness** — all `BlockedBy` predecessors are in a terminal
-//!    state (computed from [`crate::MoleculeData::typed_links`] via the
-//!    runtime's `Plan`).
+//! 1. **DAG readiness** — all `BlockedBy` predecessors completed
+//!    successfully (computed from [`crate::MoleculeData::typed_links`] via
+//!    the runtime's `Plan`).
 //! 2. **Predecessor branch merged** — `cs done` has fast-forwarded or
 //!    three-way-merged the predecessor's feature branch back onto `main`
 //!    (enforced only by the temporal ordering of the runtime loop:
@@ -92,7 +92,7 @@ pub struct Frontier {
     /// Wall-clock time the projection was computed.
     pub computed_at: DateTime<Utc>,
     /// Molecule ids that are **dispatchable right now**: pending, every
-    /// upstream predecessor merged (via `merged_at`) or collapsed.
+    /// upstream predecessor completed and merged (via `merged_at`).
     ///
     /// Sorted ascending by id for deterministic serialization.
     pub ready: Vec<MoleculeId>,
@@ -130,26 +130,14 @@ impl Frontier {
 ///    all excluded).
 /// 2. It has no `assigned_worker` — a dispatched-but-not-yet-running
 ///    worker would race with the scheduler if it surfaced twice.
-/// 3. Every `BlockedBy { source }` upstream predecessor is **cleared**:
-///    - `status == Completed` **and** `merged_at.is_some()`
-///      (merge-before-dispatch — the dependent's worktree needs the
-///      committed output), or
-///    - `status == Frozen` **and** `stuck_at.is_none()` (a *delivered*
-///      freeze: the predecessor delivered its work and parked for
-///      visibility — e.g. a mission-plan mission that decomposed; it owns
-///      no branch the children must wait to see merged). A *stuck* freeze
-///      (`cs stuck`, `stuck_at.is_some()`) is **not** cleared — it means
-///      "not ready, hold dependents", or
-///    - `status == Collapsed` (the collapse cascade releases successors),
-///      or
-///    - the predecessor is **absent from the snapshot** (torn down by
-///      `cs done`, which merges before removing — so its work has landed).
-/// 4. Every `DecayedFrom` parent (if any) meets the same criterion.
+/// 3. Every `BlockedBy { source }` predecessor completed and merged. A
+///    collapsed, frozen, or missing blocker remains unsatisfied.
+/// 4. `DecayedFrom` is a lateral lineage edge rather than a prerequisite:
+///    a collapsed parent or an explicit delivered freeze may expose its
+///    products, preserving the existing decay behavior.
 ///
-/// A missing predecessor clears (rather than blocks) because the only way
-/// a once-present blocker leaves the store is `cs done`, which merges
-/// first; treating it as unmet permanently orphaned mission-plan children
-/// behind a dead `blocked_by` edge.
+/// A missing predecessor is not evidence of completion. `cs done` retains
+/// the terminal molecule state, so a missing record must fail closed.
 ///
 /// The returned `ready` vector is sorted by molecule id for deterministic
 /// serialization.
@@ -160,64 +148,27 @@ pub fn compute_from_molecules(molecules: &[crate::MoleculeData]) -> Vec<Molecule
 
     let predecessor_cleared = |id: &MoleculeId| -> bool {
         let Some(m) = by_id.get(id) else {
-            // A predecessor absent from the snapshot has been torn down by
-            // `cs done` (which merges *before* removing) — or it is a
-            // dangling link inherited from an already-torn-down ancestor.
-            // Either way the work it owed, if any, has already landed on the
-            // dependent's branch lineage. Treat it as cleared so dependents
-            // are never orphaned behind a dead edge.
-            //
-            // This is the load-bearing fix for the "dead `blocked_by`"
-            // class: a mission-plan child left `--blocked-by` a collapsed /
-            // frozen / torn-down parent used to stay PERMANENTLY blocked,
-            // freezing the whole fleet DAG and forcing manual edge surgery
-            // on each child's `state.json` (task-20260604-6056). Before this
-            // change a missing predecessor was treated as "unmet", which is
-            // safe only while every blocker is still live — but `cs run`
-            // auto-`cs done`s completed blockers mid-DAG, so the invariant
-            // "every blocker is live" never held in a chaining fleet.
-            return true;
+            return false;
         };
         match m.status {
-            // `Collapsed` releases its successors unconditionally (the
-            // collapse cascade frees the lateral axis).
-            MoleculeStatus::Collapsed => true,
-            // `Frozen` is TWO disjoint species that must gate oppositely, so
-            // it cannot clear unconditionally — the discriminant is
-            // `stuck_at`:
-            //
-            // - **delivered-freeze** (`stuck_at == None`, set by
-            //   `freeze_on_last_step`) has *delivered* its work and is parked
-            //   for visibility — the canonical case is a mission-plan mission
-            //   that finished decomposing into a child DAG. It produces no
-            //   branch the children must wait to see merged onto `main`:
-            //   content flows through the DAG-aligned branch lineage
-            //   (`cs tackle` branches from the blocker's branch), not through
-            //   `main`. Requiring `merged_at` here was the BUG-1 orphan: a
-            //   frozen mission is never `cs done`'d, never stamps `merged_at`,
-            //   and would gate every child forever. → **release**.
-            //
-            // - **stuck-freeze** (`stuck_at.is_some()`, set by `cs stuck`)
-            //   means "not ready — waiting on an external decision / missing
-            //   prerequisite / do-not-execute". Releasing its dependents is
-            //   exactly wrong: a blocker that literally says "do not execute"
-            //   would fling its successors at the runtime. This is the
-            //   convoy-cascade hole (task-20260710-6174: an idea frozen
-            //   "NE PAS EXÉCUTER" was read as delivered, dispatching its
-            //   children 5f33+700e). → **stay blocked**. When the operator
-            //   resolves it (`cs thaw` → Pending, or advances to
-            //   Completed+merged) the successors gate correctly again.
-            MoleculeStatus::Frozen => m.stuck_at.is_none(),
-            // A completed predecessor must additionally have its branch
-            // merged (merge-before-dispatch) so the dependent's worktree
-            // carries its committed output.
-            MoleculeStatus::Completed => m.merged_at.is_some(),
+            // Completion satisfies the edge; integration is a separate
+            // condition so the dependent sees its blocker's output.
+            status if status.satisfies_blocked_by() => m.merged_at.is_some(),
             // ADR-062 — Starved is non-cleared (waiting on external
             // refresh); any future `MoleculeStatus` variant added under
             // `#[non_exhaustive]` defaults to non-cleared until an
             // explicit decision is made.
             _ => false,
         }
+    };
+
+    let decayed_parent_cleared = |id: &MoleculeId| -> bool {
+        by_id.get(id).is_none_or(|parent| match parent.status {
+            MoleculeStatus::Collapsed => true,
+            MoleculeStatus::Frozen => parent.stuck_at.is_none(),
+            MoleculeStatus::Completed => parent.merged_at.is_some(),
+            _ => false,
+        })
     };
 
     let mut ready: Vec<MoleculeId> = molecules
@@ -228,7 +179,7 @@ pub fn compute_from_molecules(molecules: &[crate::MoleculeData]) -> Vec<Molecule
         .filter(|m| {
             m.typed_links.iter().all(|link| match link {
                 cosmon_core::interaction::MoleculeLink::DecayedFrom { id } => {
-                    predecessor_cleared(id)
+                    decayed_parent_cleared(id)
                 }
                 _ => true,
             })
@@ -497,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_predecessor_releases_successor() {
+    fn collapsed_predecessor_holds_successor() {
         let store = MemStore::default();
         let a = mk("task-20260414-aaaa", MoleculeStatus::Collapsed, Vec::new());
         store.save_molecule(&a.id, &a).unwrap();
@@ -512,25 +463,61 @@ mod tests {
         store.save_molecule(&b.id, &b).unwrap();
 
         let f = compute(&store).unwrap();
-        assert_eq!(f.ready.len(), 1);
+        assert!(f.ready.is_empty());
     }
 
     #[test]
-    fn frozen_predecessor_releases_successor_without_merged_at() {
-        // BUG 1 (task-20260604-6056): a mission-plan mission freezes itself
-        // post-decompose (`freeze_on_last_step`) and is never `cs done`'d, so
-        // it never stamps `merged_at`. Its children must still be released —
-        // gating a Frozen blocker on `merged_at` orphaned them forever.
+    fn collapsed_and_frozen_blockers_keep_pending_dependent_out_of_frontier() {
+        for status in [MoleculeStatus::Collapsed, MoleculeStatus::Frozen] {
+            let blocker = mk("task-20260928-aaaa", status, Vec::new());
+            let dependent = mk(
+                "task-20260928-bbbb",
+                MoleculeStatus::Pending,
+                vec![MoleculeLink::BlockedBy {
+                    source: blocker.id.clone(),
+                }],
+            );
+            let ready = compute_from_molecules(&[blocker, dependent]);
+            assert!(
+                !ready.iter().any(|id| id.as_str() == "task-20260928-bbbb"),
+                "{status:?} blocker must not release its dependent"
+            );
+        }
+    }
+
+    #[test]
+    fn collapsed_parent_exposes_decay_product_without_releasing_blocked_by() {
+        let parent = mk("task-20260928-aaaa", MoleculeStatus::Collapsed, Vec::new());
+        let product = mk(
+            "task-20260928-bbbb",
+            MoleculeStatus::Pending,
+            vec![MoleculeLink::DecayedFrom {
+                id: parent.id.clone(),
+            }],
+        );
+        let blocked = mk(
+            "task-20260928-cccc",
+            MoleculeStatus::Pending,
+            vec![MoleculeLink::BlockedBy {
+                source: parent.id.clone(),
+            }],
+        );
+        let ready = compute_from_molecules(&[parent, product.clone(), blocked]);
+        assert_eq!(ready, vec![product.id]);
+    }
+
+    #[test]
+    fn frozen_predecessor_holds_successor_without_completion() {
+        // A parked mission may have produced child descriptions, but its
+        // frozen status does not certify completion of a BlockedBy edge.
         let store = MemStore::default();
         let mission = mk("mission-20260604-aaaa", MoleculeStatus::Frozen, Vec::new());
         assert!(
             mission.merged_at.is_none(),
             "frozen mission has no merge stamp"
         );
-        // Pin the species: this is a *delivered* freeze (freeze_on_last_step
-        // path), NOT a `cs stuck` freeze. `stuck_at` distinguishes the two —
-        // the sibling test `stuck_frozen_predecessor_does_NOT_release_successor`
-        // covers the opposite case.
+        // An ordinary freeze has no stuck stamp. That absence does not turn
+        // the pause into a completed prerequisite.
         assert!(
             mission.stuck_at.is_none(),
             "delivered-freeze has no stuck stamp"
@@ -547,12 +534,7 @@ mod tests {
         store.save_molecule(&child.id, &child).unwrap();
 
         let f = compute(&store).unwrap();
-        assert_eq!(
-            f.ready.len(),
-            1,
-            "child must dispatch behind a frozen (delivered) mission"
-        );
-        assert_eq!(f.ready[0].as_str(), "task-20260604-bbbb");
+        assert!(f.ready.is_empty(), "frozen blocker must hold its child");
     }
 
     #[test]
@@ -592,13 +574,10 @@ mod tests {
     }
 
     proptest::proptest! {
-        /// Property: a Frozen predecessor releases its successor **iff** it is
-        /// a delivered-freeze (`stuck_at == None`). This is the exact bisection
-        /// the fix introduces — the two Frozen species gate oppositely and the
-        /// only distinguisher is `stuck_at`. All other molecule fields are held
-        /// fixed; only the presence/absence of the stuck stamp varies.
+        /// A frozen prerequisite remains unsatisfied with or without a
+        /// diagnostic stuck stamp.
         #[test]
-        fn frozen_predecessor_release_iff_not_stuck(is_stuck in proptest::bool::ANY) {
+        fn frozen_predecessor_never_releases_on_stuck_stamp(is_stuck in proptest::bool::ANY) {
             let store = MemStore::default();
             let mut blocker = mk("task-20260710-6174", MoleculeStatus::Frozen, Vec::new());
             blocker.stuck_at = if is_stuck { Some(Utc::now()) } else { None };
@@ -614,20 +593,17 @@ mod tests {
             store.save_molecule(&child.id, &child).unwrap();
 
             let released = !compute(&store).unwrap().ready.is_empty();
-            proptest::prop_assert_eq!(released, !is_stuck);
+            proptest::prop_assert!(!released);
         }
     }
 
     #[test]
-    fn missing_predecessor_releases_successor() {
-        // BUG 2 compounding (task-20260604-6056): `cs run` auto-`cs done`s a
-        // completed blocker mid-DAG (merge happens before teardown). On the
-        // next tick the blocker is gone from the store; its dependent must
-        // still chain rather than stay blocked behind a dead `blocked_by`
-        // edge to a torn-down molecule.
+    fn missing_predecessor_holds_successor() {
+        // A missing record gives no lifecycle verdict. The dependent waits
+        // for restoration or an explicit operator replacement.
         let store = MemStore::default();
         // Note: the predecessor `task-20260604-dead` is intentionally NOT
-        // saved — it models a blocker already torn down by `cs done`.
+        // saved — the projection cannot infer what happened to it.
         let child = mk(
             "task-20260604-cccc",
             MoleculeStatus::Pending,
@@ -638,12 +614,7 @@ mod tests {
         store.save_molecule(&child.id, &child).unwrap();
 
         let f = compute(&store).unwrap();
-        assert_eq!(
-            f.ready.len(),
-            1,
-            "child must dispatch when its only blocker has been torn down"
-        );
-        assert_eq!(f.ready[0].as_str(), "task-20260604-cccc");
+        assert!(f.ready.is_empty(), "missing blocker must hold its child");
     }
 
     #[test]

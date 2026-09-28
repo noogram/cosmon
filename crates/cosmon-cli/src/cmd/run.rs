@@ -414,23 +414,15 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
         let limits = load_parallel_limits(&formulas_dir, &formula_ids);
 
-        // Phantom-workers fix #2: when `cs run <root>` is invoked on a
-        // molecule that is already terminal (Collapsed / Completed /
-        // Frozen), the operator is explicitly asking the runtime to
-        // continue past the root. Pre-seeding the named root into
-        // `completed` makes its descendants eligible at tick 0 rather
-        // than waiting for the root to be re-observed as terminal and
-        // absorbed. Since task-20260706-4d1e a collapsed root also
-        // releases its forward `Blocks` dependents on its own when
-        // absorbed (blocked-by releases on done, not on verdict), so this
-        // hook is now the tick-0 fast path rather than the sole unblock
-        // mechanism it was under option B.
+        // A terminal root can enter the plan's skip-set at tick 0. This
+        // does not release BlockedBy children of a collapsed or frozen root;
+        // the frontier still requires a completed and merged blocker.
         // See `docs/diagnostic/2026-04-25-phantom-workers.md`.
         let pre_completed: Vec<MoleculeId> = match store.load_molecule(&root_id) {
             Ok(root) if root.status.is_terminal() => {
                 if !ctx.json {
                     eprintln!(
-                        "ℹ runtime: root {} is {} — pre-seeding skip-set so descendants can drain.",
+                        "ℹ runtime: root {} is {} — recording it in the plan; blocked-by dependents still require completion.",
                         root_id, root.status
                     );
                 }

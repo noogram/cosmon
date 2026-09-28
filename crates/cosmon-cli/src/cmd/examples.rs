@@ -353,6 +353,11 @@ pub const STATUS: &str = "EXAMPLES:
   cs status task-20260907-b25f        # one molecule: status/phase/updated_at/terminal
   cs status task-20260907-b25f --json # same four fields, machine-readable
 
+BLOCKED-BY: only completion satisfies a dependency. A collapsed or frozen
+      blocker keeps pending dependents held. Human status names those dependents;
+      finish and harvest a frozen blocker (`cs complete`, then `cs done`), or collapse and re-nucleate a
+      dependent with a new --blocked-by edge after its blocker collapses.
+
 STALENESS: the pulse carries derivatives, not only levels — `oldest 39d · 2 >48h`
       is the age of the oldest waiting molecule and how many are past the
       threshold, from the same arithmetic `cs peek` renders in its vitals
@@ -935,6 +940,9 @@ pub const PEEK: &str = "EXAMPLES:
   cs peek --snapshot > /tmp/a     # capture from any device, then `diff` two
                                   #   captures and expect zero bytes (see
                                   #   docs/guides/peek-snapshot.md)
+
+The selected dependent's blocked-by detail names a collapsed or frozen
+blocker and the operator gesture that can release or replace the edge.
 
 Keys in the TUI: j/k navigate, p tmux pane capture, b/l/e/s/r/n/g
 briefing/log/events/synthesis/responses/notes/git tabs.";

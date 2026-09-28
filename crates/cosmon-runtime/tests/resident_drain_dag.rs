@@ -10,7 +10,8 @@
 //!
 //! 1. Reads the ensemble via the stubbed `cs` binary.
 //! 2. Dispatches `Tackle` for `a` (only ready molecule).
-//! 3. Sees `a` flip to `completed`, dispatches `Done(a)`, then `Tackle(b)`.
+//! 3. Sees `a` flip to `completed`, dispatches `Done(a)` which stamps its
+//!    merge, then `Tackle(b)`.
 //! 4. Repeats for `c`.
 //! 5. Exits with [`ExitReason::Drained`] when nothing is `pending` /
 //!    `running`.
@@ -57,7 +58,7 @@ Supported verbs:
   observe <id> --json → print `{id, status}` for one molecule (anti-preemption
                         lease re-read, task-20260531-a12f)
   tackle <id>       → mark molecule <id> as `completed`
-  done <id>         → remove molecule <id> from the fleet
+  done <id>         → stamp the completed molecule's merge
 """
 import json
 import sys
@@ -110,7 +111,9 @@ def main(argv):
                 if m["id"] == mol_id:
                     m["status"] = "completed"
         else:  # done
-            data["molecules"] = [m for m in data["molecules"] if m["id"] != mol_id]
+            for m in data["molecules"]:
+                if m["id"] == mol_id:
+                    m["merged_at"] = "2026-09-28T00:00:00Z"
         save(data)
         return 0
     sys.stderr.write(f"stub: unknown verb {verb!r}\n")
@@ -186,14 +189,15 @@ fn three_molecule_dag_drains_under_resident_runtime() {
     assert_eq!(summary.tackles, 3, "expected 3 tackles, got {summary:?}");
     assert_eq!(summary.dones, 3, "expected 3 dones, got {summary:?}");
 
-    // Fleet file: all three molecules have been done'd → empty list.
+    // Fleet file: all three completed molecules retain merge evidence.
     let final_text = std::fs::read_to_string(&fleet_path).unwrap();
     let final_json: serde_json::Value = serde_json::from_str(&final_text).unwrap();
     let final_molecules = final_json["molecules"].as_array().unwrap();
-    assert!(
-        final_molecules.is_empty(),
-        "expected empty fleet after drain, got {final_molecules:?}",
-    );
+    assert_eq!(final_molecules.len(), 3);
+    for molecule in final_molecules {
+        assert_eq!(molecule["status"], "completed");
+        assert!(molecule["merged_at"].is_string());
+    }
 
     // NDJSON trace assertions — the IFBDD instrument is populated.
     let trace = std::fs::read_to_string(&trace_path).expect("trace file exists");

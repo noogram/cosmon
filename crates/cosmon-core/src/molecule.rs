@@ -185,6 +185,16 @@ impl MoleculeStatus {
         matches!(self, Self::Completed | Self::Collapsed)
     }
 
+    /// Whether this status satisfies a dependent's `BlockedBy` edge.
+    ///
+    /// Completion is the only successful prerequisite. Collapse records an
+    /// unsuccessful terminal verdict, while freeze pauses work; neither
+    /// supplies the result a dependent was waiting for.
+    #[must_use]
+    pub fn satisfies_blocked_by(self) -> bool {
+        matches!(self, Self::Completed)
+    }
+
     /// Returns `true` if the molecule is alive (not terminal).
     #[must_use]
     pub fn is_alive(self) -> bool {
