@@ -29,6 +29,8 @@ Options:
           Expire sweep: scan molecules whose `expires_at` is in the past and apply their [`ExpiryPolicy`] (ADR-029). Idempotent — safe to run repeatedly on the same state. `Warn` tags the molecule with `expired` and emits a surface alert; `Collapse` transitions `pending` → `collapsed` with reason `expired (TTL)`; `Escalate` tags `escalated` and emits the canonical `Expired` event for downstream transforms
       --auto-collapse
           Aggressive orphan remediation: transition orphaned molecules to `Collapsed` (terminal) instead of `Frozen` (recoverable). Default is `Frozen` because the molecule can be revived once the worker situation is understood; `--auto-collapse` is for cases where the operator wants the DAG to advance past the dead work and never revisit it
+      --dead-worker-grace-secs <DEAD_WORKER_GRACE_SECS>
+          Minimum seconds after a tackle before patrol may call its worker dead or freeze/collapse its molecule. Covers spawn and forced re-tackle [default: 120]
       --harvest
           Harvest sweep: scan every `Completed` molecule with `merged_at = None` and invoke `cs harvest --molecule <id>` on each one. Belt-and- suspenders safety net for cases where the tmux `pane-died` hook never armed (tmux server restart, brutal crash, molecule completed before the hook was installed, …). Idempotent: already-merged molecules are silent no-ops inside `cs harvest`
       --livelock

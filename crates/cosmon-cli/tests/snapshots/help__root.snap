@@ -125,6 +125,8 @@ Decision rule — does the command finish on its own?
 Operator views: cs scheduler status / cs daemons list|status|logs|reload.
 Shared kill-switch: 'touch ~/.cosmon/stand-down.lock' silences both,
 and every other autonomous path (patrol, heal, cs ask --execute).
+'cs patrol' waits 120 seconds after a tackle before declaring its
+  worker dead; '--dead-worker-grace-secs' configures that wait.
 
 SCHEDULER DRY-RUN OUTPUT — four row types, one per patrol:
   FIRE     patrol is due; dispatch would spawn the command now
