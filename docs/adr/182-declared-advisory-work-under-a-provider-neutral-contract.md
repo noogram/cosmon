@@ -5,22 +5,29 @@
 **Status:** Proposed  
 **Date:** 2026-09-28  
 **Authoring molecule:** `task-20260928-c463`  
+**Revising molecule:** `task-20260928-db65` (operator review of 2026-09-28)  
 **Source deliberation:** `delib-20260928-3e5d`  
 **Decider:** Noogram
 
 ## Decision requested
 
 Permit bounded, declared advisory attempts inside a molecule, subject to the
-contract below. Require collaboration across providers within the same piece
-of work. Native delegation is an optional provider adapter; it cannot be the
-Cosmon coordination layer. Preserve one authority for each lifecycle field.
+contract below. Any two molecules in the same declared work may exchange
+messages and intermediate evidence, whether they run on the same provider or
+on different ones. The contract must support work that mixes providers; it
+does not require any work to mix them. Native delegation is an optional
+provider adapter; it cannot be the Cosmon coordination layer. Preserve one
+authority for each lifecycle field.
 
 This is a proposal for operator review. It changes no command, permission,
 formula, or founding text. The operator authorized opening the amendment and a
-measurement-led comparison, and subsequently required collaboration across
-providers with open messaging among all agents in the work. Neither instruction ratifies the replacement text below. C2 may
-implement only an accepted contract; C3 must establish capability and register
-its budget before trials. A native-only implementation fails the requirement.
+measurement-led comparison, then required open messaging among all agents in
+the work, and on review required that collaboration be decoupled from the
+choice of provider. None of these instructions ratifies the replacement text
+below. C2 may implement only an accepted contract; C3 must establish
+capability and register its budget before trials. An implementation that lets
+molecules communicate only through one provider's native tools fails the
+requirement.
 If acceptable authority separation or canonical recovery cannot be demonstrated,
 decline native attempts and keep separately supervised molecules. A decline
 blocks C2's native implementation; it cannot be reinterpreted as permission.
@@ -43,8 +50,9 @@ the DAG, change credentials, train models or replace the root transport.
 ## 1. Work, execution and authority
 
 A work scope names the owning molecule and a finite roster of seats. Each seat
-has an assignment, required/optional status, provider requirements, evidence
-contract and resource allocation. A seat may be a native advisory execution or
+has an assignment, required/optional status, provider requirements (including
+any declared provider-diversity requirement), evidence contract and resource
+allocation. A seat may be a native advisory execution or
 an independently supervised molecule linked to the same work. The roster is
 artifact metadata; it is not another scheduler or lifecycle state machine.
 
@@ -64,14 +72,28 @@ receipts must not introduce competing `status`, `current_step`, `merged_at` or
 formula-completion authority. ADR-052's one-writer rule remains unchanged.
 There is no independently authoritative attempt ledger.
 
-Use a separate molecule when an assignment needs an independent provider,
-permission boundary, branch, lifecycle, retry policy or recovery obligation.
-For example, a Claude reviewer and a Codex reviewer can each own a molecule
-while contributing to one declared work scope. This separation preserves their
-independent supervision without postponing all communication until completion.
-A different model label in a shared native runtime is not provider independence.
-A native reviewer shares the owning molecule's acceptance and recovery boundary;
+Use a separate molecule when an assignment needs its own permission boundary,
+branch, lifecycle, retry policy or recovery obligation. The molecule boundary
+and the provider choice are independent: two molecules on the same provider,
+or a Claude molecule, a Codex molecule and a molecule on another provider (for
+example one reached through OpenRouter), can all contribute to one declared
+work scope and exchange messages and intermediate evidence under §3. Separate
+supervision does not postpone communication until completion, and a provider
+difference is neither required for communication nor an obstacle to it.
+A native reviewer runs in the owning molecule's runtime, shares its acceptance
+and recovery boundary, and is limited to the providers that runtime can reach;
 its failure is a missing attempt, not a new molecule status.
+
+### Provider diversity is a seat property
+
+A formula that needs independence of judgment, such as a cross-provider review,
+declares provider diversity on the seats concerned: which seats must run on a
+provider different from which others, and what counts as different. Dispatch
+checks that declaration and records the observed provider for each seat (§2
+item 3). A different model label in a shared native runtime does not satisfy a
+provider-diversity requirement. The communication mechanism neither implies nor
+requires provider diversity; a seat without such a declaration may run on any
+provider the work allows, including the same one as its peers.
 
 ### Authority is checked at the effect
 
@@ -96,7 +118,8 @@ it does not by itself create a security boundary under the same uid. A bounded
 cooperative trial may document convention-only behavior, but cannot pass the
 authority-enforcement adoption gate on that basis.
 
-Any agent in the work may message any other agent in that work. Discussion
+Any agent in the work may message any other agent in that work, whatever
+provider each runs on. Discussion
 may carry evidence, questions and suggested corrections. Retasking, starting a new turn for an idle peer, interruption,
 closing a peer, nested spawning and lifecycle calls require the responsible
 owner's separate authority. They are not implied by permission to message.
@@ -112,8 +135,9 @@ Before dispatch, persist in the owning molecule's canonical directory:
 2. Frozen assignments, input/source digests, raw response destinations, rubric,
    required seats, first-pass/discussion phases and the exact independence
    claim. Separate execution does not imply blindness or statistical independence.
-3. Requested and observed provider/model/configuration, tool capabilities,
-   permission envelope and enforcement evidence. Undisclosed effective values
+3. Requested and observed provider/model/configuration, any provider-diversity
+   declaration and the result of checking it, tool capabilities, permission
+   envelope and enforcement evidence. Undisclosed effective values
    remain unknown. Preserve ADR-181's profile behavior without claiming that
    child roles receive distinct profiles or credentials.
 4. Hard limits and observation availability: total attempts, retries, concurrent
@@ -189,6 +213,10 @@ to schedule molecule dependencies or declare completion.
 
 ### A Claude worker and a Codex worker exchanging evidence
 
+The example uses two providers to show that the contract crosses a provider
+boundary. The same steps apply unchanged to two Claude workers or two Codex
+workers; only the adapters named in steps 2–4 differ.
+
 1. Declare both reviewer molecules as peers under a common owning work scope.
    They may start after their actual prerequisites; neither depends on the
    other's completion merely to exchange intermediate evidence. The final
@@ -217,7 +245,7 @@ The provider route and realized model observation must be recorded separately.
 | Harness | Required capability; availability must be demonstrated |
 |---|---|
 | Every provider | Export complete outputs; receive bounded evidence with stable keys; emit keyed consumption reports; expose effective settings or mark them unknown; support deadlines, cancellation/stop policy and usage limits; recover from canonical inputs; enforce required access boundaries. |
-| Codex | A supported recipient-input path with honest enqueue/context observations. Native same-provider tools are optional shortcuts only when their effects are mirrored into canonical evidence. They cannot be required for cross-provider discovery or routing. |
+| Codex | A supported recipient-input path with honest enqueue/context observations. Native same-provider tools are optional shortcuts only when their effects are mirrored into canonical evidence. They cannot be required for discovery or routing, whether the peer runs on Codex or on another provider. |
 | Claude | A supported input or resume/next-turn path that safely inserts evidence into the intended model context, plus export and acknowledgment. A tmux paste is insufficient proof of context delivery. No claim is made here that an installed version satisfies the contract. |
 | Other API harnesses | Explicit model-input assembly, tool/result export, durable acknowledgment, idempotency handling and bounded execution. Merely accepting chat messages at an API does not satisfy recovery or authority requirements. |
 
@@ -298,10 +326,10 @@ Replace the consecutive bullets beginning **No broker, no message queue**,
 **No mailboxes**, **No background bash, no hidden side-channels**, and
 **No sub-agents inside workers** with exactly:
 
-> - **No broker or message queue as lifecycle authority.** The DAG owns dependency ordering; canonical filesystem evidence owns content. Declared, bounded advisory exchange may connect peers across providers under ADR-182. It cannot schedule molecules or satisfy dependencies.
-> - **No hidden mailboxes.** Any agent in a declared work scope may message any other. Advisory exchange requires durable payloads, explicit admission, context-delivery observations, consumption reports and retention. Native provider mail or boards are optional delivery mechanisms and never the sole record of accepted evidence.
+> - **No broker or message queue as lifecycle authority.** The DAG owns dependency ordering; canonical filesystem evidence owns content. Declared, bounded advisory exchange may connect any agents of a declared work under ADR-182, whether they run on the same provider or on different ones. It cannot schedule molecules or satisfy dependencies.
+> - **No hidden mailboxes.** Any agent in a declared work scope may message any other, whatever provider each runs on. Every message is recorded durably with its sender, recipient, time, delivery and consumption status. Advisory exchange requires durable payloads, explicit admission, context-delivery observations, consumption reports and retention. Native provider mail or boards are optional delivery mechanisms and never the sole record of accepted evidence.
 > - **No background bash or hidden lifecycle side-channels.** Every molecule state transition remains a visible `cs` invocation. Advisory messages carry evidence and requests; they do not confer lifecycle, retasking, interruption or integration authority.
-> - **No undeclared sub-agents inside workers.** A molecule may contain bounded native advisory attempts under ADR-182, with canonical assignments, outputs, acceptance and recovery obligations. Independent provider, permissions, branch, lifecycle or recovery requirements use separate molecules and typed links. Those molecules may exchange declared advisory evidence within the same work scope through the provider-neutral contract.
+> - **No undeclared sub-agents inside workers.** A molecule may contain bounded native advisory attempts under ADR-182, with canonical assignments, outputs, acceptance and recovery obligations. Independent permissions, branch, lifecycle or recovery requirements use separate molecules and typed links. Those molecules may exchange declared advisory evidence within the same work scope through the provider-neutral contract, on one provider or several. Provider diversity is declared on a seat when a formula needs independent judgment; it is neither required for communication nor implied by it.
 
 The architecture-neutral paragraph and all other THESIS bullets remain outside
 this amendment. Existing harvest wording is interpreted under accepted ADR-172;
@@ -311,13 +339,13 @@ this proposal does not reopen that decision.
 
 Insert the following paragraph after item 2:
 
-> Declared advisory attempts do not inherit the owning worker's lifecycle or integration authority. The owner remains responsible for formula progress, required reviewers, acceptance, retries and aggregate limits. Advisory evidence exchange across providers uses ADR-182's scoped contract and does not authorize peer retasking, interruption or harvest. Effect boundaries must enforce any claimed denial; roles, shared uid and sibling-shell shape are not authorization. Existing operator reservations and ADR-172 remain binding.
+> Declared advisory attempts do not inherit the owning worker's lifecycle or integration authority. The owner remains responsible for formula progress, required reviewers, acceptance, retries and aggregate limits. Advisory evidence exchange among the agents of a declared work, on one provider or several, uses ADR-182's scoped contract and does not authorize peer retasking, interruption or harvest. Effect boundaries must enforce any claimed denial; roles, shared uid and sibling-shell shape are not authorization. Existing operator reservations and ADR-172 remain binding.
 
 ### Architectural invariants §7b, final paragraph
 
 Replace the paragraph beginning “No new command perimeter is required” with:
 
-> Deliberations retain the existing molecule lifecycle commands. A worker may invoke declared advisory attempts only under an accepted ADR-182 contract, with required seats, canonical evidence and explicit capability fallback. Native provider tools are optional adapters. Independent provider or recovery requirements use separate molecules in the same declared work scope; advisory exchange follows the provider-neutral contract. A native terminal notice does not complete a formula step or satisfy a reviewer requirement.
+> Deliberations retain the existing molecule lifecycle commands. A worker may invoke declared advisory attempts only under an accepted ADR-182 contract, with required seats, canonical evidence and explicit capability fallback. Native provider tools are optional adapters. Independent permission, lifecycle or recovery requirements use separate molecules in the same declared work scope; advisory exchange among them follows the provider-neutral contract whatever provider each runs on. A panel that needs independent judgment declares provider diversity on its seats. A native terminal notice does not complete a formula step or satisfy a reviewer requirement.
 
 ### Architectural invariants §7c, after “No hidden link-fidelity assumptions”
 
@@ -329,7 +357,7 @@ Insert this bullet before “The restart-fidelity test”:
 
 Replace that entire bullet with:
 
-> - **No mailbox as control plane.** Any agent in a declared work scope may send advisory evidence to any other member, including different providers, under ADR-182. No communication graph is required. Scope, payloads, admission, context-delivery observations, consumption reports, quotas and retention remain canonical and bounded. No mailbox, file scan or message acknowledgment changes dependency readiness, claims work, advances a formula or grants lifecycle or integration authority.
+> - **No mailbox as control plane.** Any agent in a declared work scope may send advisory evidence to any other member under ADR-182, whether both run on the same provider or on different ones. No communication graph is required. Scope, payloads, admission, context-delivery observations, consumption reports, quotas and retention remain canonical and bounded. No mailbox, file scan or message acknowledgment changes dependency readiness, claims work, advances a formula or grants lifecycle or integration authority.
 
 The §7e control/data table, §8d lifecycle field authority and §8 canonical store
 remain unchanged. Pending delivery is an evidence projection, not DAG ordering.
@@ -393,8 +421,10 @@ measurements or assurances about installed harnesses:
 | Source deliberation `synthesis.md` §B and convergence resolution | Recommends declared attempts and measurements; its panel is not blanket authorization or cross-provider evidence. |
 
 The comparison must include sequential persona simulation (labelled as such),
-native separate reviewers, separately supervised reviewers, and a mixed-provider
-exchange between at least two actual providers. Use frozen tasks and a matched
+native separate reviewers, separately supervised reviewers exchanging evidence
+on a single provider, and the same exchange between at least two actual
+providers. The mixed-provider arm demonstrates the capability; it does not make
+provider mixing a requirement of adopted work. Use frozen tasks and a matched
 rubric; record provider differences as a confounder. Register model pins,
 repetitions, source/input digests, scoring, quotas, stopping rules, failures and
 recovery windows before execution. Score source correctness, missed conflicts,
@@ -411,7 +441,7 @@ failures in the denominator and do not treat failed runs as successful timings.
 Adoption requires recoverable evidence and obligation accounting, demonstrated
 authority restrictions, and a useful measured quality/time/resource tradeoff.
 The same observations may justify declining native delegation while retaining
-the neutral cross-provider contract. No runtime comparison was executed by this
+the provider-neutral collaboration contract. No runtime comparison was executed by this
 C1 proposal; C2 capability/enforcement evidence and C3 preregistration remain
 open. The durable C1 `report.md` distinguishes static evidence, gate results,
 inference and remaining work.
