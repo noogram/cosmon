@@ -13,6 +13,14 @@
 //! 2. **`COSMON_STATE_DIR`** environment variable
 //! 3. **Walk-up discovery** — search from CWD upward for a `.cosmon/` directory
 //! 4. **Global fallback** — `$HOME/cosmon/state`
+//!
+//! Case 2 still wins over case 3 when both apply — an explicit ops override
+//! stays authoritative — but issue #106: it used to win *silently*, so an
+//! operator inside a tenant galaxy on a host where `COSMON_STATE_DIR` points
+//! elsewhere read and wrote the wrong fleet with no indication why. When the
+//! environment variable shadows a galaxy found by walk-up, this module now
+//! prints a warning on stderr naming both paths (see
+//! `warn_if_env_shadows_project`).
 
 use std::path::{Path, PathBuf};
 
@@ -108,9 +116,17 @@ pub fn resolve_state_dir_with_origin(explicit: Option<&Path>) -> (PathBuf, State
         return (path.to_path_buf(), StateDirOrigin::Explicit);
     }
 
-    // 2. Environment variable.
+    // 2. Environment variable. Still wins over a galaxy found in cwd (an
+    // explicit ops override stays authoritative), but issue #106: winning
+    // silently is what let an operator inside a tenant galaxy read and write
+    // a different fleet with no indication why. Warn, naming both paths, when
+    // walk-up from the process cwd would have found a different galaxy.
     if let Ok(dir) = std::env::var("COSMON_STATE_DIR") {
-        return (PathBuf::from(dir), StateDirOrigin::Env);
+        let env_dir = PathBuf::from(dir);
+        if let Ok(cwd) = std::env::current_dir() {
+            warn_if_env_shadows_project(&env_dir, &cwd);
+        }
+        return (env_dir, StateDirOrigin::Env);
     }
 
     // 3. Walk-up discovery — returns .cosmon/state/ for FileStore compatibility.
@@ -120,6 +136,33 @@ pub fn resolve_state_dir_with_origin(explicit: Option<&Path>) -> (PathBuf, State
 
     // 4. Global fallback — no galaxy in cwd or ancestors.
     (global_fallback(), StateDirOrigin::GlobalFallback)
+}
+
+/// Warn on stderr when `COSMON_STATE_DIR` silently outranks a galaxy found by
+/// walk-up from `start` — issue #106.
+///
+/// A no-op when `start` (or an ancestor) carries no `.cosmon/config.toml`:
+/// an explicit override used outside any galaxy is not shadowing anything,
+/// and warning there would just be noise on every host-global invocation.
+fn warn_if_env_shadows_project(env_dir: &Path, start: &Path) {
+    let Some(project_cosmon) = walk_up_find_cosmon_dir_from(start) else {
+        return;
+    };
+    let project_state = project_cosmon.join("state");
+    let env_canonical = env_dir
+        .canonicalize()
+        .unwrap_or_else(|_| env_dir.to_path_buf());
+    if env_canonical == project_state {
+        return;
+    }
+    eprintln!(
+        "warning: COSMON_STATE_DIR={} overrides the galaxy found at {} (from {}) \
+         — using the environment variable. Unset COSMON_STATE_DIR to use the \
+         galaxy in cwd instead.",
+        env_dir.display(),
+        project_state.display(),
+        start.display()
+    );
 }
 
 /// Walk up from the current working directory looking for a `.cosmon/` directory.
@@ -262,9 +305,14 @@ pub fn resolve_formulas_dir(explicit: Option<&Path>) -> PathBuf {
 /// `resolve_state_dir(Some(path))` directly instead of this helper.
 #[must_use]
 pub fn resolve_state_dir_from(start: &Path) -> PathBuf {
-    // 1. Environment variable still wins over walk-up.
+    // 1. Environment variable still wins over walk-up. See
+    // `warn_if_env_shadows_project` (issue #106): the MCP server gets the
+    // same stderr warning as the CLI when a client's `cwd` sits inside a
+    // galaxy that `COSMON_STATE_DIR` silently shadows.
     if let Ok(dir) = std::env::var("COSMON_STATE_DIR") {
-        return PathBuf::from(dir);
+        let env_dir = PathBuf::from(dir);
+        warn_if_env_shadows_project(&env_dir, start);
+        return env_dir;
     }
 
     // 2. Walk-up discovery from the caller-supplied start dir.
