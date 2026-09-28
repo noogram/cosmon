@@ -21,7 +21,7 @@ use cosmon_core::event_v2::{EventV2, PerturbationChannel};
 use cosmon_core::expiry::{evaluate_expiry, ExpiryAction, ExpiryPolicy};
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::molecule::MoleculeStatus;
-use cosmon_core::patrol::{PatrolAction, PatrolReport};
+use cosmon_core::patrol::{PatrolAction, PatrolReport, BOOT_STALL_GRACE};
 use cosmon_core::process::project_process_status;
 use cosmon_core::propel::{
     decide_nudge, EscalateReason, NudgeChannel, NudgeDecision, NudgeSkip, NudgeView,
@@ -101,7 +101,8 @@ pub struct Args {
     /// Also covers the boot-stall class (task-20260718-ac03): a Running
     /// molecule with NO progress signal at all — the stuck bootstrap paste
     /// whose Enter was lost at spawn — is nudged once tackled more than
-    /// 120 s ago. The nudge text references `briefing.md` so the re-engaged
+    /// [`BOOT_STALL_GRACE`] ago, the same grace used by `cs health`. The nudge
+    /// text references `briefing.md` so the re-engaged
     /// worker re-reads its contract before continuing. Increments
     /// [`cosmon_state::MoleculeData::nudge_count`] (M5).
     #[arg(long)]
@@ -2210,28 +2211,13 @@ fn project_liveness_onto_process(
 /// twice within this duration. Cheap nudges, but not duplicate ones.
 pub(crate) const NUDGE_IDEMPOTENCE_SECS: i64 = 60;
 
-/// Boot-stall budget for `cs patrol --nudge`: a `Running` molecule that has
-/// *never* recorded progress (`last_progress_at == None`) is nudged once its
-/// tackle is older than this many seconds.
-///
-/// This is the patrol half of the stuck-paste fix (task-20260718-ac03): a
-/// worker whose bootstrap paste lost its submitting Enter sits at the prompt
-/// with zero events and zero tokens forever — and because it never produced a
-/// `last_progress_at`, the pre-fix classifier skipped it *by construction*
-/// (`--propel` keys off progress staleness, `--nudge` off `last_progress_at`).
-/// A never-started molecule had neither, so the exact failure mode the patrol
-/// exists to catch was structurally invisible to it (13× on one galaxy,
-/// 2026-07-18). The signal here is control-plane only — a missing progress
-/// timestamp against `tackled_at` — never a pane grep (ADR-137 §2).
-pub(crate) const NUDGE_BOOT_STALL_SECS: i64 = 120;
-
 /// Pure: among `molecules`, return those that are `Running`, have an
 /// assigned worker, and are stalled by either signal:
 ///
 /// - **step-stall** — `last_progress_at` older than `now - budget` (where
 ///   `budget = step.timeout_minutes`, default 30 min); or
 /// - **boot-stall** — no `last_progress_at` at all and `tackled_at` (fallback
-///   `updated_at` for legacy records) older than [`NUDGE_BOOT_STALL_SECS`] —
+///   `updated_at` for legacy records) older than [`BOOT_STALL_GRACE`] —
 ///   the never-started worker whose bootstrap paste was never submitted.
 ///
 /// Both classes honor the [`NUDGE_IDEMPOTENCE_SECS`] guard. Loads each
@@ -2270,7 +2256,7 @@ where
             // fall back to `updated_at` (stamped at tackle and frozen
             // since, precisely because nothing ever happened).
             let anchor = mol.tackled_at.unwrap_or(mol.updated_at);
-            now.signed_duration_since(anchor).num_seconds() > NUDGE_BOOT_STALL_SECS
+            now.signed_duration_since(anchor) > BOOT_STALL_GRACE
         };
         if !stalled {
             continue;
@@ -3463,11 +3449,12 @@ fn print_dialogue_report(report: &DialogueScanReport) {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
     use cosmon_core::agent::AgentRole;
     use cosmon_core::clearance::Clearance;
     use cosmon_core::id::{AgentId, FormulaId, MoleculeId, WorkerId};
     use cosmon_core::molecule::MoleculeStatus;
+    use cosmon_core::patrol::{scan as scan_health, HealthThresholds, MoleculeHealthView};
     use cosmon_core::worker::{DesiredState, WorkerStatus};
     use cosmon_filestore::FileStore;
     use cosmon_state::{Fleet, MoleculeData, StateStore, WorkerData};
@@ -3476,6 +3463,55 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn health_and_nudge_share_the_boot_stall_grace() {
+        let now = Utc::now();
+        let id = MoleculeId::new("task-20260927-c1fc").unwrap();
+
+        let mut within_grace = MoleculeHealthView::healthy(id.clone(), now);
+        within_grace.tackled_at = Some(now - Duration::seconds(100));
+        within_grace.last_progress_at = None;
+        within_grace.events_advanced_since_tackle = false;
+        assert!(
+            scan_health(&[within_grace], now, &HealthThresholds::default()).is_healthy(),
+            "health must not report a boot stall at 100 seconds"
+        );
+
+        let mut nudge_within_grace =
+            make_molecule(&id.to_string(), MoleculeStatus::Running, Some("w1"));
+        nudge_within_grace.formula_id = FormulaId::new("task-work").unwrap();
+        nudge_within_grace.tackled_at = Some(now - Duration::seconds(100));
+        assert!(
+            find_stalled_for_nudge(&[nudge_within_grace], now, |_| {
+                Some(synthetic_task_work_formula(Some(5)))
+            })
+            .is_empty(),
+            "nudge must not report a boot stall at 100 seconds"
+        );
+
+        let mut beyond_grace = MoleculeHealthView::healthy(id.clone(), now);
+        beyond_grace.tackled_at = Some(now - Duration::seconds(130));
+        beyond_grace.last_progress_at = None;
+        beyond_grace.events_advanced_since_tackle = false;
+        assert!(
+            !scan_health(&[beyond_grace], now, &HealthThresholds::default()).is_healthy(),
+            "health must report a boot stall at 130 seconds"
+        );
+
+        let mut nudge_beyond_grace =
+            make_molecule(&id.to_string(), MoleculeStatus::Running, Some("w1"));
+        nudge_beyond_grace.formula_id = FormulaId::new("task-work").unwrap();
+        nudge_beyond_grace.tackled_at = Some(now - Duration::seconds(130));
+        assert_eq!(
+            find_stalled_for_nudge(&[nudge_beyond_grace], now, |_| {
+                Some(synthetic_task_work_formula(Some(5)))
+            })
+            .len(),
+            1,
+            "nudge must report a boot stall at 130 seconds"
+        );
+    }
 
     /// COSMON-DEV #20 defect A4 — a patrol-respawned worker must carry the same
     /// out-of-worktree writable grant a freshly tackled one does.
@@ -4590,7 +4626,7 @@ mod tests {
         let mut mol = make_molecule("task-20260718-b0aa", MoleculeStatus::Running, Some("w1"));
         mol.formula_id = FormulaId::new("task-work").unwrap();
         mol.last_progress_at = None;
-        mol.tackled_at = Some(now - chrono::Duration::seconds(NUDGE_BOOT_STALL_SECS + 60));
+        mol.tackled_at = Some(now - (BOOT_STALL_GRACE + chrono::Duration::seconds(60)));
         let mols = vec![mol];
         let stalled =
             find_stalled_for_nudge(&mols, now, |_| Some(synthetic_task_work_formula(Some(5))));
@@ -4608,7 +4644,7 @@ mod tests {
         mol.formula_id = FormulaId::new("task-work").unwrap();
         mol.last_progress_at = None;
         mol.tackled_at = None;
-        mol.updated_at = now - chrono::Duration::seconds(NUDGE_BOOT_STALL_SECS + 60);
+        mol.updated_at = now - (BOOT_STALL_GRACE + chrono::Duration::seconds(60));
         let mols = vec![mol];
         let stalled =
             find_stalled_for_nudge(&mols, now, |_| Some(synthetic_task_work_formula(Some(5))));
@@ -4623,7 +4659,7 @@ mod tests {
         let mut mol = make_molecule("task-20260718-b0cc", MoleculeStatus::Running, Some("w1"));
         mol.formula_id = FormulaId::new("task-work").unwrap();
         mol.last_progress_at = None;
-        mol.tackled_at = Some(now - chrono::Duration::seconds(NUDGE_BOOT_STALL_SECS + 60));
+        mol.tackled_at = Some(now - (BOOT_STALL_GRACE + chrono::Duration::seconds(60)));
         mol.last_nudged_at = Some(now - chrono::Duration::seconds(30));
         let mols = vec![mol];
         let stalled =
