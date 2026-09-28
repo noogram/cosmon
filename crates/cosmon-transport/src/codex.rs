@@ -558,6 +558,9 @@ pub struct CodexSessionConfig {
     /// `true` restores pass-through for an installation that intentionally
     /// bills codex by API key.
     pub pass_api_key: bool,
+    /// Isolated Codex home containing this member's measured `hooks.json`
+    /// form. `None` keeps a non-member launch byte-identical.
+    pub work_hook_home: Option<PathBuf>,
 }
 
 /// An operator git identity — the `(name, email)` pinned into the author and
@@ -601,6 +604,12 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             push_no_update_override(&mut cmd);
             push_writable_roots(&mut cmd, &config.writable_roots);
             push_harness_args(&mut cmd, &config.harness_args);
+            for token in
+                cosmon_core::worker_argv::codex_work_hook_args(config.work_hook_home.is_some())
+            {
+                cmd.push(' ');
+                cmd.push_str(&shell_escape(&token));
+            }
             if let Some(ref model) = config.model {
                 cmd.push_str(" --model ");
                 cmd.push_str(&shell_escape(model));
@@ -620,6 +629,12 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             push_no_update_override(&mut cmd);
             push_writable_roots(&mut cmd, &config.writable_roots);
             push_harness_args(&mut cmd, &config.harness_args);
+            for token in
+                cosmon_core::worker_argv::codex_work_hook_args(config.work_hook_home.is_some())
+            {
+                cmd.push(' ');
+                cmd.push_str(&shell_escape(&token));
+            }
             // Issue #84: the worker's own profile overlay, from the builder
             // the library executor renders too (ADR-181).
             for token in cosmon_core::worker_argv::codex_worker_profile_args(
@@ -647,6 +662,16 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             }
             cmd
         }
+    };
+    let cmd = if let Some(home) = &config.work_hook_home {
+        let member = home.parent().unwrap_or(home);
+        format!(
+            "CODEX_HOME={} COSMON_MOL_DIR={} {cmd}",
+            shell_escape(&home.to_string_lossy()),
+            shell_escape(&member.to_string_lossy())
+        )
+    } else {
+        cmd
     };
     let cmd = push_api_key_strip(cmd, config.pass_api_key);
     prefix_git_identity_env(config.git_identity.as_ref(), cmd)
@@ -763,6 +788,52 @@ fn codex_user_config_path() -> Result<PathBuf, CodexError> {
             reason: "neither CODEX_HOME nor HOME is set".to_owned(),
         })?;
     Ok(codex_home.join("config.toml"))
+}
+
+/// Prepare the Codex 0.157.1 hook form measured by W0 for one work member.
+///
+/// The per-worker home carries the operator's existing login and config but
+/// has its own `hooks.json`; it never edits the operator's hook list. The
+/// caller treats an error as pull-only delivery.
+///
+/// # Errors
+/// Returns an I/O error if the home or hook file cannot be prepared.
+pub fn write_work_hook_home(home: &Path, cs_bin: &Path) -> std::io::Result<()> {
+    let source = std::env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|value| PathBuf::from(value).join(".codex")))
+        .ok_or_else(|| std::io::Error::other("Codex home is unavailable"))?;
+    std::fs::create_dir_all(home)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
+    }
+    for name in ["config.toml", "auth.json"] {
+        let from = source.join(name);
+        if from.is_file() {
+            let to = home.join(name);
+            std::fs::copy(from, &to)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o600))?;
+            }
+        }
+    }
+    let hooks = serde_json::json!({"hooks": {"PostToolUse": [{"hooks": [{
+        "type": "command",
+        "command": format!("{} work-hook codex", shell_escape(&cs_bin.to_string_lossy()))
+    }]}]}});
+    let path = home.join("hooks.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&hooks)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 /// Persist a Codex project trust grant for a fresh cosmon worktree.
@@ -909,7 +980,14 @@ fn ensure_codex_project_trusted_at(config_path: &Path, work_dir: &Path) -> Resul
 /// created.
 pub fn spawn_codex_session(config: &CodexSessionConfig) -> Result<(), CodexError> {
     if config.mode == CodexMode::Interactive {
-        ensure_codex_project_trusted(&config.work_dir)?;
+        if let Some(home) = &config.work_hook_home {
+            ensure_codex_project_trusted_at(
+                &home.join("config.toml"),
+                Path::new(&config.work_dir),
+            )?;
+        } else {
+            ensure_codex_project_trusted(&config.work_dir)?;
+        }
     }
     let cmd = build_codex_command(config);
 
@@ -1312,6 +1390,7 @@ mod tests {
             writable_roots: vec![],
             harness_args: vec![],
             pass_api_key: false,
+            work_hook_home: None,
         }
     }
 

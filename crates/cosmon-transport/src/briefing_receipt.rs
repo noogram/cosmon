@@ -490,7 +490,23 @@ pub fn write_settings_overlay(
     cs_bin: &Path,
     station: &ReceiptStation,
 ) -> std::io::Result<()> {
-    let doc = serde_json::json!({
+    write_settings_overlay_for_work(path, cs_bin, station, false)
+}
+
+/// Write the receipt overlay with `PostToolUse` delivery for a declared member.
+///
+/// The extra hook is scoped to the per-dispatch overlay; ordinary workers keep
+/// the exact receipt-only settings document.
+///
+/// # Errors
+/// Returns an I/O or serialization error if the overlay cannot be written.
+pub fn write_settings_overlay_for_work(
+    path: &Path,
+    cs_bin: &Path,
+    station: &ReceiptStation,
+    work_member: bool,
+) -> std::io::Result<()> {
+    let mut doc = serde_json::json!({
         "hooks": {
             "UserPromptSubmit": [{
                 "hooks": [{
@@ -501,6 +517,15 @@ pub fn write_settings_overlay(
             }]
         }
     });
+    if work_member {
+        doc["hooks"]["PostToolUse"] = serde_json::json!([{
+            "hooks": [{
+                "type": "command",
+                "command": format!("{} work-hook claude", shell_quote(&cs_bin.to_string_lossy())),
+                "timeout": 5
+            }]
+        }]);
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1127,6 +1152,22 @@ mod tests {
             let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "the overlay must be 0600");
         }
+    }
+
+    #[test]
+    fn declared_member_overlay_adds_post_tool_use_hook() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("settings.json");
+        let station = ReceiptStation::at(tmp.path().join("receipts"));
+        write_settings_overlay_for_work(&path, Path::new("/usr/local/bin/cs"), &station, true)
+            .expect("overlay");
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).expect("read")).expect("JSON");
+        assert_eq!(
+            doc["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
+            "/usr/local/bin/cs work-hook claude"
+        );
+        assert!(doc["hooks"]["UserPromptSubmit"].is_array());
     }
 
     /// The overlay is a new file cosmon owns. It never reads, merges into, or

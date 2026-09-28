@@ -64,6 +64,7 @@ fn codex_config(harness_args: Vec<String>) -> CodexSessionConfig {
         writable_roots: vec![],
         harness_args,
         pass_api_key: false,
+        work_hook_home: None,
     }
 }
 

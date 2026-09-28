@@ -581,6 +581,9 @@ fn main() {
     if let Some(code) = cosmon_cli::briefing_receipt_hook::intercept() {
         std::process::exit(code);
     }
+    if let Some(code) = cosmon_cli::work_hook::intercept() {
+        std::process::exit(code);
+    }
 
     // Parse through `ArgMatches` rather than `Cli::parse()` so the verb the
     // §3.5 gate below refuses is the name **clap** resolved, not a name a
