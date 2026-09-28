@@ -301,6 +301,8 @@ pub mod transport;
 pub mod visual;
 #[doc(hidden)]
 pub mod vitality;
+#[doc(hidden)]
+pub mod work_message;
 pub mod worker_argv;
 #[doc(hidden)]
 pub mod worktree_reclaim;
