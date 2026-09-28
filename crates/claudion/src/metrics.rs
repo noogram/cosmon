@@ -199,6 +199,8 @@ mod tests {
             model: Some("claude-opus-4-6".to_string()),
             input_tokens: TokenCount::new(input),
             cache_creation_input_tokens: TokenCount::new(0),
+            cache_creation_5m_input_tokens: None,
+            cache_creation_1h_input_tokens: None,
             cache_read_input_tokens: TokenCount::new(cache_read),
             output_tokens: TokenCount::new(output),
         }

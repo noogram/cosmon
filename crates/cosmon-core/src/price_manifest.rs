@@ -324,6 +324,11 @@ pub fn value_model_segments(
             }
             continue;
         };
+        if rate.context_band != "all_supported_context_lengths" && segment_has_usage(segment) {
+            // Cumulative logs do not retain each request's context length. The
+            // short-band arithmetic is a known subtotal, never full coverage.
+            missing.insert(format!("{}:context_length_unknown", segment.model));
+        }
         let rates = rate.rates_usd_per_million_tokens;
 
         match (
@@ -348,21 +353,28 @@ pub fn value_model_segments(
                     }
                 }
                 if cache_write > 0 {
-                    match (rates.cache_write_5m, rates.cache_write_1h) {
-                        (Some(short), Some(long)) if (short - long).abs() < f64::EPSILON => {
-                            amount += per_million(cache_write, short);
-                        }
-                        (Some(_), Some(_)) => {
-                            missing.insert(format!("{}:cache_write_duration", segment.model));
-                        }
-                        (Some(write), None) | (None, Some(write)) => {
-                            amount += per_million(cache_write, write);
-                        }
-                        (None, None) => {
-                            missing.insert(format!("{}:cache_write", segment.model));
-                        }
+                    let Some(write_amount) =
+                        price_cache_write(segment, rates, cache_write, &mut missing)
+                    else {
+                        return malformed();
+                    };
+                    amount += write_amount;
+                }
+            }
+            (Some(input), Some(cached), None) => {
+                let Some(fresh) = input.checked_sub(cached) else {
+                    return malformed();
+                };
+                amount += per_million(fresh, rates.input);
+                priced_any = true;
+                if cached > 0 {
+                    if let Some(cached_rate) = rates.cached_input {
+                        amount += per_million(cached, cached_rate);
+                    } else {
+                        missing.insert(format!("{}:cached_input", segment.model));
                     }
                 }
+                missing.insert(format!("{}:cache_write_unavailable", segment.model));
             }
             _ => {
                 missing.insert(format!("{}:input_categories", segment.model));
@@ -397,6 +409,36 @@ pub fn value_model_segments(
         coverage,
         basis: card.basis(),
         provenance,
+    }
+}
+
+fn price_cache_write(
+    segment: &ModelUsageSegment,
+    rates: TokenRates,
+    cache_write: u64,
+    missing: &mut BTreeSet<String>,
+) -> Option<f64> {
+    match (rates.cache_write_5m, rates.cache_write_1h) {
+        (Some(short), Some(long)) if (short - long).abs() < f64::EPSILON => {
+            Some(per_million(cache_write, short))
+        }
+        (Some(short), Some(long)) => {
+            match (segment.cache_write_5m_tokens, segment.cache_write_1h_tokens) {
+                (Some(five), Some(hour)) if five.checked_add(hour) == Some(cache_write) => {
+                    Some(per_million(five, short) + per_million(hour, long))
+                }
+                (None, None) => {
+                    missing.insert(format!("{}:cache_write_duration", segment.model));
+                    Some(0.0)
+                }
+                _ => None,
+            }
+        }
+        (Some(write), None) | (None, Some(write)) => Some(per_million(cache_write, write)),
+        (None, None) => {
+            missing.insert(format!("{}:cache_write", segment.model));
+            Some(0.0)
+        }
     }
 }
 

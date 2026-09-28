@@ -286,6 +286,12 @@ pub struct ModelUsageSegment {
     pub cached_input_tokens: TokenCount,
     /// Cache-write subset of segment input.
     pub cache_write_tokens: TokenCount,
+    /// Five-minute cache-write subset, when the source reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_5m_tokens: Option<u64>,
+    /// One-hour cache-write subset, when the source reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_tokens: Option<u64>,
     /// Total output tokens in this segment.
     pub output_tokens: TokenCount,
     /// Reasoning subset of segment output.
@@ -403,6 +409,8 @@ pub enum Freshness {
     Fresh,
     /// Observation is older than the adapter's freshness policy permits.
     Stale,
+    /// The observed allowance window has passed its reset time.
+    Reset,
     /// No defensible freshness classification is available.
     Unknown,
 }

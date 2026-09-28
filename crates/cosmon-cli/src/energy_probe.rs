@@ -531,12 +531,24 @@ fn build_usage_record(
             cached_input_tokens: UsageTokenCount::Measured {
                 tokens: cached_input,
             },
-            cache_write_tokens: UsageTokenCount::Measured {
-                tokens: cache_write,
+            cache_write_tokens: if provider == "openai" {
+                UsageTokenCount::Unavailable {
+                    reason: UnavailableReason::Unsupported,
+                }
+            } else {
+                UsageTokenCount::Measured {
+                    tokens: cache_write,
+                }
             },
             output_tokens: UsageTokenCount::Measured { tokens: output },
-            reasoning_output_tokens: UsageTokenCount::Measured {
-                tokens: reasoning_output,
+            reasoning_output_tokens: if provider == "anthropic" {
+                UsageTokenCount::Unavailable {
+                    reason: UnavailableReason::Unsupported,
+                }
+            } else {
+                UsageTokenCount::Measured {
+                    tokens: reasoning_output,
+                }
             },
             model_segments: if segments.is_empty() {
                 Availability::Unavailable {
@@ -641,6 +653,8 @@ fn claude_model_segments(session: &claudion::SessionLog) -> (Vec<ModelUsageSegme
             cache_write_tokens: UsageTokenCount::Measured {
                 tokens: turn.cache_creation_input_tokens.get(),
             },
+            cache_write_5m_tokens: turn.cache_creation_5m_input_tokens,
+            cache_write_1h_tokens: turn.cache_creation_1h_input_tokens,
             output_tokens: UsageTokenCount::Measured {
                 tokens: turn.output_tokens.get(),
             },
@@ -682,7 +696,9 @@ fn read_codex_rollout_energy(
         }
     }
     let captured_at = file_capture_time(path).unwrap_or_else(chrono::Utc::now);
-    let plan = cosmon_core::plan_observation::codex_plan(&energy_events, captured_at).plan;
+    let mut observation = cosmon_core::plan_observation::codex_plan(&energy_events, captured_at);
+    observation.refresh(chrono::Utc::now(), chrono::Duration::minutes(10));
+    let plan = observation.plan;
     Some((
         codex_energy_from_session(&energy_events)?,
         latest_model,
@@ -1831,6 +1847,112 @@ mod tests {
     }
 
     #[test]
+    fn codex_production_reader_preserves_account_scope_and_unavailable_attribution() {
+        let root = tempfile::TempDir::new().unwrap();
+        let rollout = root.path().join("rollout.jsonl");
+        std::fs::write(
+            &rollout,
+            concat!(
+                r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra"}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":300,"reasoning_output_tokens":50,"total_tokens":1500}},"rate_limits":{"primary":{"used_percent":42,"window_minutes":300}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let worker = WorkerId::new("quartz").unwrap();
+        let usage = read_codex_worker_energy(&rollout, &worker)
+            .unwrap()
+            .usage
+            .unwrap();
+        assert_eq!(usage.plan.windows.len(), 1);
+        assert!(usage
+            .plan
+            .windows
+            .iter()
+            .all(|w| w.scope == ObservationScope::Account));
+        assert!(matches!(
+            usage.plan.worker_attributed,
+            Availability::Unavailable {
+                reason: UnavailableReason::MissingAttributionEvidence
+            }
+        ));
+    }
+
+    #[test]
+    fn codex_production_reader_refreshes_stale_and_reset_windows() {
+        let root = tempfile::TempDir::new().unwrap();
+        let rollout = root.path().join("rollout.jsonl");
+        std::fs::write(
+            &rollout,
+            concat!(
+                r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra"}}"#,
+                "\n",
+                r#"{"timestamp":"2020-01-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":300,"reasoning_output_tokens":50,"total_tokens":1500}},"rate_limits":{"primary":{"used_percent":42,"window_minutes":300,"resets_at":1},"secondary":{"used_percent":10,"window_minutes":10080}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let worker = WorkerId::new("quartz").unwrap();
+        let usage = read_codex_worker_energy(&rollout, &worker)
+            .unwrap()
+            .usage
+            .unwrap();
+        let labels = usage
+            .plan
+            .windows
+            .iter()
+            .map(cosmon_observability::usage_projection::format_plan_window)
+            .collect::<Vec<_>>();
+        assert!(
+            labels
+                .iter()
+                .any(|s| s.contains("reset") && !s.contains("42%")),
+            "{labels:?}"
+        );
+        assert!(labels.iter().any(|s| s.contains("stale")), "{labels:?}");
+    }
+
+    #[test]
+    fn unsupported_token_categories_are_not_reported_as_measured_zero() {
+        let worker = WorkerId::new("quartz").unwrap();
+        for (provider, category) in [("anthropic", "reasoning"), ("openai", "cache_write")] {
+            let record = build_usage_record(
+                &worker,
+                Path::new("/tmp/sanitized-fixture"),
+                provider,
+                "fixture",
+                100,
+                0,
+                0,
+                10,
+                0,
+                &[],
+                ApiEquivalent::Unavailable {
+                    reason: UnavailableReason::NotObserved,
+                },
+                unavailable_plan(),
+                None,
+            )
+            .unwrap();
+            let count = if category == "reasoning" {
+                record.tokens.reasoning_output_tokens
+            } else {
+                record.tokens.cache_write_tokens
+            };
+            assert!(
+                matches!(
+                    count,
+                    UsageTokenCount::Unavailable {
+                        reason: UnavailableReason::Unsupported
+                    }
+                ),
+                "{provider}: {count:?}"
+            );
+        }
+    }
+
+    #[test]
     fn unchanged_rollout_produces_the_same_canonical_observation() {
         let root = tempfile::TempDir::new().unwrap();
         let rollout = root.path().join("rollout.jsonl");
@@ -1900,6 +2022,27 @@ mod tests {
         let value =
             value_current_segments(&segments, complete, "independent_cli_fixture", "anthropic");
         assert_eq!(legacy_cost_projection(&value).reference_usd(), Some(10.5));
+    }
+
+    #[test]
+    fn cli_claude_reader_prices_cache_duration_split_from_session_log() {
+        use std::io::Write as _;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, r#"{{"type":"assistant","sessionId":"s","message":{{"model":"claude-opus-5-5","usage":{{"input_tokens":0,"cache_creation_input_tokens":1000000,"cache_read_input_tokens":0,"output_tokens":0,"cache_creation":{{"ephemeral_5m_input_tokens":400000,"ephemeral_1h_input_tokens":600000}}}}}}}}"#).unwrap();
+        let session = claudion::parse_session(file.path()).unwrap();
+        let (segments, complete) = claude_model_segments(&session);
+        let value =
+            value_current_segments(&segments, complete, "independent_cli_fixture", "anthropic");
+        match value {
+            ApiEquivalent::Estimated {
+                amount_usd,
+                coverage: cosmon_core::usage::PricingCoverage::Complete,
+                ..
+            } => {
+                assert!((amount_usd.get() - 6.8).abs() < 1e-12);
+            }
+            other => panic!("cache split must have complete valuation: {other:?}"),
+        }
     }
 
     // ---- task-20260727-3f46: the session-log root actually used ----------
@@ -2220,9 +2363,9 @@ mod tests {
         assert!(matches!(
             energy.api_equivalent,
             Some(ApiEquivalent::Estimated {
-                coverage: cosmon_core::usage::PricingCoverage::Complete,
+                coverage: cosmon_core::usage::PricingCoverage::Partial { ref missing },
                 ..
-            })
+            }) if missing == &["gpt-5.3-codex:cache_write_unavailable"]
         ));
 
         match prev_home {
