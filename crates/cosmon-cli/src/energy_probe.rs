@@ -784,15 +784,6 @@ impl RealizedCapture {
             .emit_model_observation_unavailable_once(worker, adapter, expected_root);
     }
 
-    /// Byte offset consumed in the current session log, `0` when none is
-    /// resolved yet. Exposed so a test can assert that a tick read only the
-    /// appended bytes rather than trusting the observations alone.
-    #[cfg(test)]
-    #[must_use]
-    pub fn session_offset(&self) -> u64 {
-        self.session.as_ref().map_or(0, |s| s.offset)
-    }
-
     /// One capture: read what the session log gained since the last tick and
     /// emit the newly-observed tail of the realized trajectories (D4:
     /// first observation emits, unchanged emits nothing, change re-emits).
