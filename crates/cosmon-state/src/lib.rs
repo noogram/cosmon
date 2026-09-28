@@ -42,6 +42,7 @@ pub mod rebuild;
 pub mod token_meter;
 pub mod wait;
 pub mod work_location;
+pub mod work_message;
 
 pub use briefing_seal::BriefingSeal;
 pub use frontier::{Frontier, FRONTIER_SCHEMA_VERSION};
