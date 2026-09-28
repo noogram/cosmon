@@ -372,11 +372,61 @@ fn is_local_host(host: &str) -> bool {
 
 /// Map a model id to its canonical family label by prefix, or `None` when the
 /// id is empty. Unknown ids resolve (via the caller) to the id itself.
+///
+/// # `OpenRouter`'s `<vendor>/<model>` convention (issue #99)
+///
+/// `OpenRouter` (and other OpenAI-compatible routers) name a routed model
+/// `"<vendor-slug>/<model>"`, e.g. `"google/gemini-2.5-flash"` or
+/// `"anthropic/claude-3.5-sonnet"`. The vendor slug is resolved FIRST — it
+/// names which weights actually answer, which is what `family` means — so a
+/// router seat running `openai/gpt-4o` or `anthropic/claude-…` resolves to
+/// family `openai` / `anthropic` and does **not** count as a distinct
+/// provider family purely because it was reached through a router adapter.
+/// An unrecognised vendor slug falls through to the bare-id prefix rules on
+/// the part after the slash (so `"custom-mirror/claude-3.5-sonnet"` still
+/// resolves to `anthropic` via model lineage), and only when that also fails
+/// does the whole `"vendor/model"` string become the identity fallback — two
+/// distinct unrouted vendor+model pairs must stay distinct, exactly as two
+/// distinct bare unknown ids do below.
 fn family_from_model(model: Option<&str>) -> Option<String> {
     let m = model?.trim().to_ascii_lowercase();
     if m.is_empty() {
         return None;
     }
+    if let Some((vendor, rest)) = m.split_once('/') {
+        if let Some(fam) = family_from_vendor_slug(vendor) {
+            return Some(fam);
+        }
+        if let Some(fam) = family_from_bare_model(rest) {
+            return Some(fam);
+        }
+        return Some(m);
+    }
+    Some(family_from_bare_model(&m).unwrap_or(m))
+}
+
+/// Resolve an OpenRouter-style vendor slug (the segment before the `/` in a
+/// routed model id) to a family label, or `None` when the slug names no
+/// vendor this module knows.
+fn family_from_vendor_slug(vendor: &str) -> Option<String> {
+    let fam = match vendor {
+        "anthropic" => "anthropic",
+        "openai" => "openai",
+        "google" => "google",
+        "deepseek" => "deepseek",
+        "mistralai" | "mistral" => "mistral",
+        "x-ai" | "xai" => "xai",
+        "meta-llama" | "meta" => "llama",
+        "qwen" | "alibaba" => "qwen",
+        "moonshotai" | "moonshot" => "moonshot",
+        _ => return None,
+    };
+    Some(fam.to_string())
+}
+
+/// Resolve a bare (non-router, no `vendor/` prefix) model id to a family
+/// label by prefix, or `None` when the id's lineage is not recognised.
+fn family_from_bare_model(m: &str) -> Option<String> {
     let fam = if m.starts_with("claude") {
         "anthropic"
     } else if m.starts_with("gpt")
@@ -400,9 +450,7 @@ fn family_from_model(model: Option<&str>) -> Option<String> {
     } else if m.starts_with("mistral") || m.starts_with("mixtral") {
         "mistral"
     } else {
-        // Unknown lineage: the id *is* the family label, so distinct unknown
-        // models stay distinct and identical ones collapse.
-        return Some(m);
+        return None;
     };
     Some(fam.to_string())
 }
@@ -797,6 +845,124 @@ mod tests {
             "on an unrecognised host the family IS the host, so the two \
              components must be spelled identically or one seat contradicts \
              itself"
+        );
+    }
+
+    // ── issue #99 — OpenRouter as the reachable third family ──────────────
+
+    /// **RED before the fix.** OpenRouter (and other OpenAI-compatible
+    /// routers) name a routed model `"<vendor>/<model>"`. Before this fix,
+    /// `family_from_model` had no notion of the `vendor/` prefix, so the
+    /// whole string fell through to the "unknown lineage: the id is the
+    /// family" branch — `"openai/gpt-4o"` resolved to family
+    /// `"openai/gpt-4o"`, a string distinct from the bare `"openai"` family
+    /// a plain `codex`/`[adapters.openai]` seat resolves to. An OpenRouter
+    /// seat silently *re-routing the generator's own family* therefore
+    /// counted as a diversity witness purely because of the router's
+    /// `vendor/` spelling — exactly the proxy-costume ADR-147 forbids, just
+    /// reached through a router instead of a `base_url` override. The fix
+    /// resolves the vendor slug first, so the routed model's REAL family
+    /// wins and collapses onto the generator's.
+    #[test]
+    fn openrouter_seat_routing_an_openai_model_resolves_to_openai_not_a_third_family() {
+        assert_eq!(
+            provider_family(
+                Some("https://openrouter.ai/api/v1"),
+                Some("openai/gpt-4o"),
+                "openai"
+            ),
+            "openai",
+            "an OpenRouter seat running an openai/* model must resolve to \
+             family 'openai' — the SAME family a plain openai seat resolves \
+             to — never to a distinct 'openai/gpt-4o' string that would let \
+             it masquerade as a third family"
+        );
+    }
+
+    /// Same failure mode on the anthropic side: an OpenRouter seat running
+    /// `anthropic/claude-…` must collapse onto the `claude` generator's
+    /// family, not read as independent of it.
+    #[test]
+    fn openrouter_seat_routing_an_anthropic_model_resolves_to_anthropic() {
+        assert_eq!(
+            provider_family(
+                Some("https://openrouter.ai/api/v1"),
+                Some("anthropic/claude-3.5-sonnet"),
+                "openai"
+            ),
+            "anthropic"
+        );
+    }
+
+    /// **GREEN.** An OpenRouter seat routing a genuinely third-family model
+    /// (Google or DeepSeek — distinct labs, distinct weights, distinct
+    /// training stack from both Anthropic and OpenAI) resolves to that
+    /// family, reachable with `OPENROUTER_API_KEY` and no Mistral key.
+    #[test]
+    fn openrouter_seat_routing_a_third_family_model_resolves_correctly() {
+        assert_eq!(
+            provider_family(
+                Some("https://openrouter.ai/api/v1"),
+                Some("google/gemini-2.5-flash"),
+                "openai"
+            ),
+            "google"
+        );
+        assert_eq!(
+            provider_family(
+                Some("https://openrouter.ai/api/v1"),
+                Some("deepseek/deepseek-chat"),
+                "openai"
+            ),
+            "deepseek"
+        );
+    }
+
+    /// An unrecognised OpenRouter vendor slug falls through to the bare-id
+    /// prefix rules on the part after the slash, so a mirror/alias vendor
+    /// still resolves via the model's own lineage rather than being
+    /// swallowed as an opaque, always-distinct string.
+    #[test]
+    fn unrecognised_vendor_slug_falls_back_to_the_model_suffix_lineage() {
+        assert_eq!(
+            provider_family(None, Some("some-mirror/claude-3.5-sonnet"), "openai"),
+            "anthropic"
+        );
+    }
+
+    /// A real-config exercise of [`resolve_endpoint_tuple`] itself for the
+    /// scenario issue #99 is about: an operator with `claude`, `openai`, and
+    /// `openrouter` credentials, `risk = security` requiring 3 distinct
+    /// families. `[adapters.openai]` stays the plain generator seat; a
+    /// SEPARATE `[adapters.openrouter]` section reaches the third family
+    /// through OpenRouter. See `committee::tests` for the roster-floor-level
+    /// counterpart (`cosmon_core::committee::RosterPlan::distinct_families`),
+    /// which is where the jury floor is actually enforced.
+    #[test]
+    fn openrouter_third_seat_resolves_distinctly_from_claude_and_openai() {
+        let adapters = adapters_with(&[
+            ("claude", None, Some("claude-opus-5")),
+            ("openai", None, Some("gpt-4o")),
+            (
+                "openrouter",
+                Some("https://openrouter.ai/api/v1"),
+                Some("google/gemini-2.5-flash"),
+            ),
+        ]);
+        let families: std::collections::BTreeSet<String> = ["claude", "openai", "openrouter"]
+            .iter()
+            .map(|seat| resolve_endpoint_tuple(Some(&adapters), seat).family)
+            .collect();
+        assert_eq!(
+            families,
+            std::collections::BTreeSet::from([
+                "anthropic".to_string(),
+                "openai".to_string(),
+                "google".to_string(),
+            ]),
+            "claude + openai + an OpenRouter seat on google/… must resolve to \
+             3 distinct families, reachable with OPENROUTER_API_KEY and no \
+             Mistral key"
         );
     }
 

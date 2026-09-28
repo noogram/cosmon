@@ -3468,6 +3468,105 @@ mod tests {
         assert!(!plan.floor_met, "2 families cannot meet a floor of 3");
     }
 
+    /// **Issue #99, at the roster-floor level.** An operator holding
+    /// Anthropic + OpenAI + OpenRouter credentials (no Mistral key) must be
+    /// able to clear a `security` stake's 3-family floor. The generator sits
+    /// on `claude` (anthropic); one refuter sits on the plain `openai`
+    /// section (openai); the third refuter is reached through
+    /// `[adapters.openrouter]`, an OpenAI-compatible section whose
+    /// `base_url` points at OpenRouter and whose `default_model` names the
+    /// routed model.
+    ///
+    /// Before issue #99's fix, `provider_diversity::family_from_model` had no
+    /// notion of OpenRouter's `"<vendor>/<model>"` convention, so a
+    /// THIRD-family model like `"google/gemini-2.5-flash"` resolved to the
+    /// whole string as its own opaque "family" rather than to `"google"` —
+    /// distinct from `"anthropic"`/`"openai"` by accident of spelling, not by
+    /// a resolved vendor. Worse, an operator who mis-routed the third seat to
+    /// `"openai/gpt-4o"` (still OpenAI's own weights) would ALSO have read as
+    /// a distinct, opaque family string, silently inflating the floor with an
+    /// echo of the `openai` seat. This test pins the correct behaviour: the
+    /// OpenRouter seat on a genuine third-family model clears the floor, and
+    /// the same seat re-pointed at an `openai/…` model collapses onto the
+    /// `openai` refuter's family instead of inflating the count.
+    #[test]
+    fn openrouter_seat_clears_the_security_floor_without_mistral() {
+        let adapters = crate::config::AdaptersConfig {
+            entries: [
+                (
+                    "openai".to_string(),
+                    crate::config::AdapterEntry {
+                        default_model: Some("gpt-4o".into()),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "openrouter".to_string(),
+                    crate::config::AdapterEntry {
+                        base_url: Some("https://openrouter.ai/api/v1".into()),
+                        default_model: Some("google/gemini-2.5-flash".into()),
+                        api_key_env: Some("OPENROUTER_API_KEY".into()),
+                        ..Default::default()
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let req = CommitteeRequirement {
+            required: true,
+            min_distinct_families: 3,
+        };
+        let gen = seat("gen", SeatRole::Generator, "anthropic", "author");
+        let openai_refuter = seat("ref-openai", SeatRole::Refuter, "openai", "skeptic");
+        let openrouter_refuter = seat_at(
+            "ref-openrouter",
+            SeatRole::Refuter,
+            resolve_endpoint_tuple(Some(&adapters), "openrouter"),
+            "security-refuter",
+        );
+        let plan = plan_committee(&gen, &[openai_refuter.clone(), openrouter_refuter], req);
+        assert_eq!(plan.admitted.len(), 2);
+        assert_eq!(
+            plan.distinct_families(),
+            3,
+            "claude + openai + an OpenRouter seat on google/… must clear a \
+             3-family floor with no Mistral key involved"
+        );
+        assert!(plan.floor_met);
+
+        // The mis-route: the OpenRouter seat pinned to an openai/* model
+        // instead of a genuinely third-family one. Its family must collapse
+        // onto the `openai` refuter's — the floor must NOT read as met.
+        let mis_routed = crate::config::AdapterEntry {
+            base_url: Some("https://openrouter.ai/api/v1".into()),
+            default_model: Some("openai/gpt-4o".into()),
+            api_key_env: Some("OPENROUTER_API_KEY".into()),
+            ..Default::default()
+        };
+        let mis_routed_adapters = crate::config::AdaptersConfig {
+            entries: [("openrouter".to_string(), mis_routed)]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let mis_routed_refuter = seat_at(
+            "ref-openrouter",
+            SeatRole::Refuter,
+            resolve_endpoint_tuple(Some(&mis_routed_adapters), "openrouter"),
+            "security-refuter",
+        );
+        let bad_plan = plan_committee(&gen, &[openai_refuter, mis_routed_refuter], req);
+        assert_eq!(
+            bad_plan.distinct_families(),
+            2,
+            "an OpenRouter seat re-routing the generator's-peer openai family \
+             must NOT count as a third family"
+        );
+        assert!(!bad_plan.floor_met);
+    }
+
     // ── SOR-may-not-bargain-a-witness ────────────────────────────────────
 
     #[test]
