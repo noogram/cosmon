@@ -8,7 +8,7 @@ use cosmon_core::codex_energy::CodexSubscriptionUsage;
 use cosmon_core::price_manifest::{bundled_price_manifest, value_model_segments};
 use cosmon_core::usage::{
     ApiEquivalent, ModelUsageSegment, ObservationProvenance, ObservationScope, TokenCount,
-    UnavailableReason,
+    UnavailableReason, UsageRecord,
 };
 
 /// Newtype wrapper for a worker identifier.
@@ -87,6 +87,10 @@ pub struct EnergyBudget {
     /// Plan allowance observation, independent from API-equivalent USD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription: Option<CodexSubscriptionUsage>,
+    /// Authoritative versioned usage record. Legacy fields above remain a
+    /// deprecated projection for existing JSON consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageRecord>,
     /// Context window size, if known.
     pub context_window: Option<u64>,
 }
@@ -133,6 +137,7 @@ impl EnergyBudget {
             cost: legacy_cost_projection(&api_equivalent),
             api_equivalent: Some(api_equivalent),
             subscription: None,
+            usage: None,
             context_window: None,
         })
     }
@@ -256,6 +261,7 @@ mod tests {
             cost: EnergyCost::Unknown,
             api_equivalent: None,
             subscription: None,
+            usage: None,
             context_window: Some(200_000),
         };
         assert_eq!(b.total(), 42);

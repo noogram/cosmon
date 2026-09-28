@@ -63,7 +63,7 @@ briefing/log/events/synthesis/responses/notes/git tabs.
   - `all`:
     Every phase, archive included. All of this axis, and only this axis: it does not touch the perimeter
 
-* `--energy-tick-interval <ENERGY_TICK_INTERVAL>` — Cadence in seconds for emitting `EnergyTick` events into `events.jsonl`. Zero disables emission. Only active in `--no-tui` mode
+* `--energy-tick-interval <ENERGY_TICK_INTERVAL>` — Cadence in seconds for emitting `UsageObserved` events into `events.jsonl`. Zero disables emission. Only active in `--no-tui` mode
 
   Default value: `30`
 * `--snapshot` — Emit a byte-deterministic, fixed-width (120-col) ASCII snapshot of the fleet and exit. The same fleet state produces byte-identical output across every device — iPhone SSH, iPad Blink, `MacBook`, tmux pane — so a PR reviewer can `diff` two captures and expect zero differences. Implies `--no-tui` and disables propulsion; no clock or environment (`$COLUMNS`, `$TERM`) affects the output

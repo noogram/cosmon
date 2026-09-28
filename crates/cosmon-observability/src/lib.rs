@@ -40,6 +40,7 @@ pub mod render;
 pub mod replay;
 pub mod sensorium;
 pub mod session;
+pub mod usage_projection;
 pub mod worker;
 
 pub use aggregate::FleetSnapshot;

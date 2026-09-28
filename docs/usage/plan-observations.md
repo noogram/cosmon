@@ -28,8 +28,8 @@ Claude's two named window durations are 300 and 10080 minutes. Codex durations
 come from the event; `primary` does not necessarily mean five hours.
 
 `cosmon_core::plan_observation::codex_plan` reads quota separately from token
-counters and the deprecated primary-only energy projection. C4 must use this
-reader for canonical plan metadata. A new rate-limit object replaces the
+counters and the deprecated primary-only energy projection. The canonical
+usage probe uses this reader for plan metadata. A new rate-limit object replaces the
 window set within its quota bucket. Distinct Codex `limit_id` values retain
 separate window sets under hashed meter prefixes; a bucket hash is not an
 account identity. Missing siblings are explicit; token-only records and null limits
@@ -50,8 +50,9 @@ replacement and per-worker/source locking within a caller-supplied attempt
 root. Older concurrent captures cannot overwrite newer ones. Reads do not
 create directories or update times. The root must identify the worker attempt;
 reuse across attempts is not supported. Only sanitized metadata is persisted.
-This is a replaceable observation cache, not a second lifecycle ledger. C4
-owns canonical `UsageObserved` emission after combining independent components.
+This is a replaceable observation cache, not a second lifecycle ledger.
+`UsageObserved` is the canonical durable emission after combining independent
+components.
 Removing the attempt directory retires this cache.
 
 ## Explicit worker launch integration
@@ -82,9 +83,9 @@ criterion open. Synthetic fixtures and a working pipe are not live evidence.
 
 ## CLI/UI parity and specification scope
 
-No operator command, help, man page or existing UI projection changes here.
 The internal hook is intercepted before ordinary CLI startup, like the briefing
-receipt hook; it is not an operator verb. Existing help/man snapshots therefore
-require no regeneration. Peek, snapshot, ensemble, JSON and canonical event
-producer cutover remain C4 work. No molecule mutation or lifecycle transition
-changes; the observation cache is out of band for `CosmonRun.tla`.
+receipt hook; it is not an operator verb. Peek, snapshot, ensemble, JSON and
+the canonical event producer are documented in
+[the usage surface contract](usage-surfaces.md). No molecule mutation or
+lifecycle transition changes; the observation cache is out of band for
+`CosmonRun.tla`.

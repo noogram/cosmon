@@ -449,7 +449,7 @@ pub struct Args {
     #[arg(long, value_enum, value_delimiter = ',')]
     pub phase: Vec<PhaseSelector>,
 
-    /// Cadence in seconds for emitting `EnergyTick` events into
+    /// Cadence in seconds for emitting `UsageObserved` events into
     /// `events.jsonl`. Zero disables emission. Only active in `--no-tui` mode.
     #[arg(long, default_value_t = 30)]
     pub energy_tick_interval: u64,
@@ -504,7 +504,7 @@ pub(crate) struct NoTuiOptions {
     pub no_tmux: bool,
     /// Heartbeat label shown in the footer (`peek` or `watch`).
     pub label: &'static str,
-    /// Cadence for emitting `EnergyTick` events (0 disables).
+    /// Cadence for emitting `UsageObserved` events (0 disables).
     pub energy_tick_interval: u64,
     /// Phase filter applied to the `MoleculeAdded` baseline stream. The
     /// default ([`PhaseFilter::unfinished`]) hides the archive and
@@ -662,9 +662,6 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 /// backwards. If a consumer who genuinely needs a bucket ever appears, name
 /// them and add the field in a minor release.
 ///
-/// Also absent: energy / token counts. `cs ensemble --json` already
-/// publishes them per worker, and peek cannot see the sessions a
-/// token-accounting consumer would need (see `docs/guides/inbox-trial.md`).
 #[derive(Debug, serde::Serialize)]
 struct PeekMoleculeJson {
     /// Stable molecule id (e.g. `task-20260716-6a4e`).
@@ -737,6 +734,10 @@ struct PeekMoleculeJson {
     /// with a clock a keystroke can bump. `cs observe --json` publishes the
     /// same field, which is the parity this schema exists to hold.
     updated_at: DateTime<Utc>,
+    /// Canonical usage histories for workers bound to this molecule.
+    /// Histories are deduplicated before publication; an empty array means
+    /// no source observation, never measured zero.
+    usage: Vec<cosmon_core::usage::UsageRecord>,
 }
 
 /// The `cs peek --json` document.
@@ -860,6 +861,7 @@ fn snapshot_to_json(
                 heartbeat: row.heartbeat,
                 last_activity: row.last_activity,
                 updated_at: mol.updated_at,
+                usage: row.usage.clone(),
             })
         })
         .collect();
@@ -979,7 +981,7 @@ pub(crate) fn run_no_tui(ctx: &Context, opts: &NoTuiOptions) -> anyhow::Result<(
     };
     let mut last_energy_tick = now0;
     let events_path = state_dir.join("events.jsonl");
-    let mut last_energy: std::collections::HashMap<String, (u64, u64, f64)> =
+    let mut last_energy: std::collections::HashMap<String, cosmon_core::usage::UsageRecord> =
         std::collections::HashMap::new();
 
     let mut spinner_idx = 0usize;
@@ -1053,8 +1055,8 @@ pub(crate) fn run_no_tui(ctx: &Context, opts: &NoTuiOptions) -> anyhow::Result<(
     }
 }
 
-/// Probe every active worker's claudion energy, emit an `EnergyTick` event
-/// per worker, and echo a short delta line to stdout.
+/// Probe every active worker's usage, emit one `UsageObserved` event for each
+/// changed cumulative history, and echo a short delta line to stdout.
 fn emit_energy_ticks(
     store: &FileStore,
     events_path: &std::path::Path,
@@ -1062,10 +1064,8 @@ fn emit_energy_ticks(
     socket: &str,
     stdout: &mut std::io::Stdout,
     tty: bool,
-    last_energy: &mut std::collections::HashMap<String, (u64, u64, f64)>,
+    last_energy: &mut std::collections::HashMap<String, cosmon_core::usage::UsageRecord>,
 ) {
-    use cosmon_core::event_v2::EventV2;
-
     let Ok(fleet) = store.load_fleet() else {
         return;
     };
@@ -1077,38 +1077,74 @@ fn emit_energy_ticks(
 
     clear_line(stdout, tty).ok();
     for (wid, e) in &energy {
-        let (input, _cached, output, _reasoning) = e.token_tuple();
-        let cost = e.cost.reference_usd().unwrap_or(0.0);
-        let wid_s = wid.as_str().to_owned();
-        let prev = last_energy.get(&wid_s).copied().unwrap_or((0, 0, 0.0));
-        let delta_tokens = (input + output).saturating_sub(prev.0 + prev.1);
-        let delta_cost = (cost - prev.2).max(0.0);
-        last_energy.insert(wid_s.clone(), (input, output, cost));
-
-        let Ok(worker_id) = cosmon_core::id::WorkerId::new(&wid_s) else {
+        let Some(usage) = e.usage.clone() else {
             continue;
         };
-        let _ = cosmon_state::event_log::emit_one(
-            events_path,
-            EventV2::EnergyTick {
-                worker_id,
-                input_tokens: input,
-                output_tokens: output,
-                cost_usd: cost,
-            },
-            None,
-        );
+        let input = usage.tokens.input_tokens.measured().unwrap_or_default();
+        let output = usage.tokens.output_tokens.measured().unwrap_or_default();
+        let cost = match &usage.api_equivalent {
+            cosmon_core::usage::ApiEquivalent::Estimated { amount_usd, .. } => {
+                Some(amount_usd.get())
+            }
+            _ => None,
+        };
+        let wid_s = wid.as_str().to_owned();
+        let previous = last_energy.get(&wid_s);
+        let Some(event) = changed_usage_event(previous, &usage) else {
+            continue;
+        };
+        let previous_tokens = previous.map_or(0, |record| {
+            record
+                .tokens
+                .input_tokens
+                .measured()
+                .unwrap_or_default()
+                .saturating_add(record.tokens.output_tokens.measured().unwrap_or_default())
+        });
+        let previous_cost = previous.and_then(|record| match &record.api_equivalent {
+            cosmon_core::usage::ApiEquivalent::Estimated { amount_usd, .. } => {
+                Some(amount_usd.get())
+            }
+            _ => None,
+        });
+        let delta_tokens = input.saturating_add(output).saturating_sub(previous_tokens);
+        let delta_cost = cost
+            .zip(previous_cost)
+            .map(|(now, before)| (now - before).max(0.0));
+        last_energy.insert(wid_s.clone(), usage.clone());
 
+        let _ = cosmon_state::event_log::emit_one(events_path, event, None);
+
+        let cost_delta = delta_cost.map_or_else(
+            || "API equiv. unavailable".to_owned(),
+            |amount| format!("API equiv. +${amount:.4}"),
+        );
         let line = format!(
-            "~ {:<12} energy: {} tokens (+{}, ${:.4})\n",
+            "~ {:<12} usage: {} tokens (+{}, {})\n",
             wid_s,
             humanize_tokens_small(input + output),
             humanize_tokens_small(delta_tokens),
-            delta_cost,
+            cost_delta,
         );
         let _ = stdout.write_all(line.as_bytes());
         let _ = stdout.flush();
     }
+}
+
+/// Construct the canonical durable event only when a cumulative observation
+/// changed. The producer keeps one comparison seam so replay and poll-loop
+/// deduplication exercise the same event shape.
+fn changed_usage_event(
+    previous: Option<&cosmon_core::usage::UsageRecord>,
+    usage: &cosmon_core::usage::UsageRecord,
+) -> Option<cosmon_core::event_v2::EventV2> {
+    let unchanged = previous.is_some_and(|previous| {
+        previous.subject.history == usage.subject.history
+            && previous.observation_id == usage.observation_id
+    });
+    (!unchanged).then(|| cosmon_core::event_v2::EventV2::UsageObserved {
+        usage: Box::new(usage.clone()),
+    })
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -1698,13 +1734,22 @@ mod tests {
             updated_at: Utc::now(),
         });
         if with_session {
+            let worker_id = format!("worker-{id}");
             snap.push_session(Session {
                 name: format!("cosmon-{id}"),
                 socket: "cosmon".into(),
                 project_root: "~/galaxies/cosmon".into(),
                 molecule_id: Some(id.to_owned()),
-                worker_id: None,
+                worker_id: Some(worker_id.clone()),
                 last_activity: Some(Utc::now()),
+            });
+            snap.insert_worker(cosmon_observability::Worker {
+                id: worker_id.as_str().into(),
+                molecule_id: Some(id.to_owned()),
+                session: format!("cosmon-{id}"),
+                energy: cosmon_observability::EnergyBudget::default(),
+                live: "working".to_owned(),
+                role: cosmon_observability::worker::WorkerRole::Cognition,
             });
         }
     }
@@ -1729,6 +1774,57 @@ mod tests {
         // --json` describe one molecule with two answers.
         let v = json_value(&json_fixture(MoleculeStatus::Pending, true));
         assert_eq!(v["molecules"][0]["status"], "pending");
+    }
+
+    #[test]
+    fn json_adds_usage_for_each_molecule() {
+        let mut snap = json_fixture(MoleculeStatus::Running, true);
+        let mut worker = snap.workers().next().unwrap().clone();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../cosmon-core/tests/fixtures/usage/usage_observed_v1.json"
+        ))
+        .unwrap();
+        worker.energy.usage = Some(serde_json::from_value(fixture["usage"].clone()).unwrap());
+        snap.insert_worker(worker);
+        let v = json_value(&snap);
+        assert!(
+            v["molecules"][0].get("usage").is_some(),
+            "peek JSON must publish additive usage rather than directing consumers elsewhere: {v}"
+        );
+        assert_eq!(
+            v["molecules"][0]["usage"][0]["api_equivalent"]["amount_usd"],
+            1.25
+        );
+        assert_eq!(
+            v["molecules"][0]["usage"][0]["plan"]["windows"][0]["scope"],
+            "account"
+        );
+    }
+
+    #[test]
+    fn durable_usage_producer_deduplicates_and_round_trips_the_canonical_record() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../cosmon-core/tests/fixtures/usage/usage_observed_v1.json"
+        ))
+        .unwrap();
+        let usage: cosmon_core::usage::UsageRecord =
+            serde_json::from_value(fixture["usage"].clone()).unwrap();
+
+        assert!(changed_usage_event(Some(&usage), &usage).is_none());
+        let mut recaptured = usage.clone();
+        recaptured.tokens.provenance.captured_at = Some(Utc::now());
+        assert!(
+            changed_usage_event(Some(&usage), &recaptured).is_none(),
+            "capture-time churn is not a new cumulative observation"
+        );
+        let encoded = serde_json::to_vec(&changed_usage_event(None, &usage).unwrap()).unwrap();
+        let replayed: cosmon_core::event_v2::EventV2 = serde_json::from_slice(&encoded).unwrap();
+        match replayed {
+            cosmon_core::event_v2::EventV2::UsageObserved { usage: replayed } => {
+                assert_eq!(*replayed, usage);
+            }
+            other => panic!("producer emitted the wrong durable variant: {other:?}"),
+        }
     }
 
     #[test]
@@ -1772,7 +1868,8 @@ mod tests {
                 "last_activity",
                 "project",
                 "status",
-                "updated_at"
+                "updated_at",
+                "usage"
             ],
             "the peek --json schema changed; a new key is a forever contract",
         );

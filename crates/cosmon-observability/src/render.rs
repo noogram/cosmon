@@ -271,6 +271,9 @@ pub fn render_canonical(snap: &FleetSnapshot, cfg: &SnapshotConfig) -> String {
     workers.sort_by(|a, b| a.id.0.cmp(&b.id.0));
     for wk in &workers {
         push_padded_line(&mut out, &worker_row(wk), w);
+        for line in worker_usage_lines(wk) {
+            push_padded_line(&mut out, &line, w);
+        }
     }
 
     push_section_header(&mut out, "SESSIONS", w);
@@ -477,11 +480,30 @@ fn worker_row(w: &Worker) -> String {
         humanize_tokens(w.energy.output_tokens),
         humanize_tokens(w.energy.reasoning_output_tokens),
     );
-    let cost = match &w.energy.cost {
-        EnergyCost::Unknown => "-".to_owned(),
-        EnergyCost::ReferenceUsd { usd } => format!("ref ${usd:.4}"),
-        EnergyCost::Subscription { used_percent, .. } => {
-            format!("subscription {used_percent:.0}%")
+    let cost = if let Some(usage) = &w.energy.usage {
+        crate::usage_projection::format_api_equivalent(std::slice::from_ref(usage))
+    } else if let Some(api) = &w.energy.api_equivalent {
+        match api {
+            cosmon_core::usage::ApiEquivalent::Estimated {
+                amount_usd,
+                coverage,
+                ..
+            } => format!(
+                "API ${:.2} {}",
+                amount_usd.get(),
+                if matches!(coverage, cosmon_core::usage::PricingCoverage::Complete) {
+                    "complete"
+                } else {
+                    "partial"
+                }
+            ),
+            _ => "API unavailable".to_owned(),
+        }
+    } else {
+        match &w.energy.cost {
+            EnergyCost::ReferenceUsd { usd } => format!("API ${usd:.2}"),
+            EnergyCost::Unknown => "-".to_owned(),
+            EnergyCost::Subscription { .. } => "API unavailable".to_owned(),
         }
     };
     format!(
@@ -493,6 +515,75 @@ fn worker_row(w: &Worker) -> String {
         trunc(&tokens, 24),
         trunc(&cost, 18),
     )
+}
+
+fn worker_usage_lines(w: &Worker) -> Vec<String> {
+    if let Some(usage) = &w.energy.usage {
+        let records = std::slice::from_ref(usage);
+        let mut lines = vec![format!(
+            "    {}",
+            crate::usage_projection::format_api_equivalent(records)
+        )];
+        lines.extend(
+            crate::usage_projection::distinct_plan_windows(records)
+                .into_iter()
+                .map(|window| {
+                    format!(
+                        "    {}",
+                        crate::usage_projection::format_plan_window(window)
+                    )
+                }),
+        );
+        lines.push(format!(
+            "    {}",
+            crate::usage_projection::format_worker_plan(records)
+        ));
+        return lines;
+    }
+
+    let mut lines = Vec::new();
+    if let Some(api) = &w.energy.api_equivalent {
+        let label = match api {
+            cosmon_core::usage::ApiEquivalent::Estimated {
+                amount_usd,
+                coverage,
+                ..
+            } => format!(
+                "API equiv. ${:.2} {}",
+                amount_usd.get(),
+                if matches!(coverage, cosmon_core::usage::PricingCoverage::Complete) {
+                    "complete"
+                } else {
+                    "partial"
+                }
+            ),
+            cosmon_core::usage::ApiEquivalent::Unavailable { .. } => {
+                "API equiv. unavailable".to_owned()
+            }
+            _ => "API equiv. unavailable".to_owned(),
+        };
+        lines.push(format!("    {label}"));
+    }
+    if let Some(plan) = &w.energy.subscription {
+        let duration = plan.window_minutes.map_or_else(
+            || "primary".to_owned(),
+            |minutes| {
+                if minutes % 1_440 == 0 {
+                    format!("{}d", minutes / 1_440)
+                } else if minutes % 60 == 0 {
+                    format!("{}h", minutes / 60)
+                } else {
+                    format!("{minutes}m")
+                }
+            },
+        );
+        lines.push(format!(
+            "    account {duration} used {:.0}%",
+            plan.used_percent
+        ));
+        lines.push("    worker plan use unavailable".to_owned());
+    }
+    lines
 }
 
 /// SESSIONS column layout.
@@ -570,6 +661,11 @@ mod tests {
     use super::*;
     use crate::fixture::canonical_snapshot;
     use crate::sensorium::HeartbeatKind;
+    use cosmon_core::codex_energy::CodexSubscriptionUsage;
+    use cosmon_core::usage::{
+        ApiEquivalent, NonNegativeFinite, ObservationProvenance, ObservationScope, PricingBasis,
+        PricingCoverage,
+    };
 
     #[test]
     fn json_view_has_expected_top_keys() {
@@ -621,6 +717,43 @@ mod tests {
         for sig in crate::fixture::canonical_signals() {
             assert!(out.contains(sig), "missing canonical signal {sig:?}");
         }
+    }
+
+    #[test]
+    fn canonical_worker_keeps_api_equivalent_and_account_plan_side_by_side() {
+        let mut snapshot = canonical_snapshot();
+        let mut worker = snapshot.workers().next().unwrap().clone();
+        worker.energy.cost = crate::worker::EnergyCost::ReferenceUsd { usd: 1.23 };
+        worker.energy.api_equivalent = Some(ApiEquivalent::Estimated {
+            amount_usd: NonNegativeFinite::new(1.23, "fixture amount").unwrap(),
+            coverage: PricingCoverage::Partial {
+                missing: vec!["cache_write_tokens".to_owned()],
+            },
+            basis: PricingBasis::RateCard {
+                revision: "fixture-r1".to_owned(),
+                source: "https://example.invalid/rates".to_owned(),
+                verified_at: chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+                comparison: "standard_list_price".to_owned(),
+            },
+            provenance: ObservationProvenance {
+                source: "fixture".to_owned(),
+                provider: Some("openai".to_owned()),
+                observed_at: None,
+                captured_at: None,
+                scope: ObservationScope::UsageHistory,
+            },
+        });
+        worker.energy.subscription = Some(CodexSubscriptionUsage {
+            plan_type: Some("pro".to_owned()),
+            used_percent: 42.0,
+            window_minutes: Some(300),
+        });
+        snapshot.insert_worker(worker);
+
+        let out = render_canonical(&snapshot, &SnapshotConfig::default());
+        assert!(out.contains("API equiv. $1.23 partial"), "{out}");
+        assert!(out.contains("account 5h used 42%"), "{out}");
+        assert!(out.contains("worker plan use unavailable"), "{out}");
     }
 
     #[test]

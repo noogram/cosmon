@@ -33,9 +33,11 @@ use cosmon_core::model_realization::{
 };
 use cosmon_core::price_manifest::{bundled_price_manifest, value_model_segments};
 use cosmon_core::usage::{
-    ApiEquivalent, ModelUsageSegment, ObservationProvenance, ObservationScope,
-    TokenCount as UsageTokenCount, UnavailableReason,
+    ApiEquivalent, Availability, ModelUsageSegment, ObservationProvenance, ObservationScope,
+    PlanApplicability, PlanUsage, TokenCount as UsageTokenCount, TokenUsage, UnavailableReason,
+    UsageHistory, UsageObservationId, UsageRecord, UsageSubject, CURRENT_USAGE_SCHEMA_VERSION,
 };
+use sha2::{Digest as _, Sha256};
 
 /// Per-worker aggregated energy values.
 #[derive(Clone, Debug, Default)]
@@ -54,6 +56,9 @@ pub struct WorkerEnergy {
     pub api_equivalent: Option<ApiEquivalent>,
     /// Plan allowance remains independent from API-equivalent USD.
     pub subscription: Option<CodexSubscriptionUsage>,
+    /// Authoritative record consumed by every new projection and durable
+    /// producer. The legacy fields remain populated for compatibility.
+    pub usage: Option<UsageRecord>,
     /// Model context-window capacity, when the adapter reports it.
     pub context_window: Option<u64>,
 }
@@ -170,7 +175,7 @@ pub fn load_worker_energy_with_adapters(
             codex_cwds
                 .get(worker_id)
                 .and_then(|cwd| codex_sessions.get(cwd.to_string_lossy().as_ref()))
-                .and_then(|session| read_codex_worker_energy(session))
+                .and_then(|session| read_codex_worker_energy(session, worker_id))
         } else {
             probe_worker_energy_with_adapter(state_dir, backends, worker_id, adapter)
         };
@@ -348,13 +353,29 @@ pub fn probe_worker_energy_with_adapter(
         return None;
     }
     let session_log = claudion::parse_session(&jsonl_path).ok()?;
-    let (input_total, cached_input, output) = claude_totals(&session_log)?;
+    let (input_total, cached_input, cache_write, output) = claude_totals(&session_log)?;
     let (segments, segments_complete) = claude_model_segments(&session_log);
     let api_equivalent = value_current_segments(
         &segments,
         segments_complete,
         "claude_code_session_log",
         "anthropic",
+    );
+    let plan = unavailable_plan();
+    let canonical_usage = build_usage_record(
+        worker_id,
+        &jsonl_path,
+        "anthropic",
+        "claude_code_session_log",
+        input_total,
+        cached_input,
+        cache_write,
+        output,
+        0,
+        &segments,
+        api_equivalent.clone(),
+        plan,
+        file_capture_time(&jsonl_path),
     );
     Some(WorkerEnergy {
         input: TokenCount::new(input_total),
@@ -364,13 +385,15 @@ pub fn probe_worker_energy_with_adapter(
         cost: legacy_cost_projection(&api_equivalent),
         api_equivalent: Some(api_equivalent),
         subscription: None,
+        usage: canonical_usage,
         context_window: None,
     })
 }
 
-fn claude_totals(session: &claudion::SessionLog) -> Option<(u64, u64, u64)> {
+fn claude_totals(session: &claudion::SessionLog) -> Option<(u64, u64, u64, u64)> {
     let mut input = 0_u64;
     let mut cached = 0_u64;
+    let mut cache_write = 0_u64;
     let mut output = 0_u64;
     for turn in &session.turns {
         input = input
@@ -378,9 +401,10 @@ fn claude_totals(session: &claudion::SessionLog) -> Option<(u64, u64, u64)> {
             .checked_add(turn.cache_creation_input_tokens.get())?
             .checked_add(turn.cache_read_input_tokens.get())?;
         cached = cached.checked_add(turn.cache_read_input_tokens.get())?;
+        cache_write = cache_write.checked_add(turn.cache_creation_input_tokens.get())?;
         output = output.checked_add(turn.output_tokens.get())?;
     }
-    Some((input, cached, output))
+    Some((input, cached, cache_write, output))
 }
 
 /// Probe a **codex** worker's energy from its rollout session log.
@@ -403,13 +427,13 @@ fn probe_codex_worker_energy(
     let cwd = resolve_tmux_pane_cwd(backends, worker_id)
         .or_else(|| resolve_recorded_worker_cwd(state_dir, worker_id))?;
     let session_path = resolve_codex_session_by_cwd(&cwd)?;
-    read_codex_worker_energy(&session_path)
+    read_codex_worker_energy(&session_path, worker_id)
 }
 
 /// Project one already-resolved Codex rollout into worker energy.
-fn read_codex_worker_energy(session_path: &Path) -> Option<WorkerEnergy> {
-    let (snapshot, _) = read_codex_rollout_energy(session_path)?;
-    let usage = snapshot.usage;
+fn read_codex_worker_energy(session_path: &Path, worker_id: &WorkerId) -> Option<WorkerEnergy> {
+    let (snapshot, _, plan) = read_codex_rollout_energy(session_path)?;
+    let token_usage = snapshot.usage;
     let api_equivalent = value_current_segments(
         &snapshot.model_segments,
         snapshot.model_segments_complete,
@@ -417,16 +441,139 @@ fn read_codex_worker_energy(session_path: &Path) -> Option<WorkerEnergy> {
         "openai",
     );
     let cost = legacy_cost_projection(&api_equivalent);
+    let canonical_usage = build_usage_record(
+        worker_id,
+        session_path,
+        "openai",
+        "codex_rollout_token_count",
+        token_usage.input_tokens,
+        token_usage.cached_input_tokens,
+        0,
+        token_usage.output_tokens,
+        token_usage.reasoning_output_tokens,
+        &snapshot.model_segments,
+        api_equivalent.clone(),
+        plan,
+        file_capture_time(session_path),
+    );
     Some(WorkerEnergy {
-        input: TokenCount::new(usage.input_tokens),
-        cached_input: TokenCount::new(usage.cached_input_tokens),
-        output: TokenCount::new(usage.output_tokens),
-        reasoning_output: TokenCount::new(usage.reasoning_output_tokens),
+        input: TokenCount::new(token_usage.input_tokens),
+        cached_input: TokenCount::new(token_usage.cached_input_tokens),
+        output: TokenCount::new(token_usage.output_tokens),
+        reasoning_output: TokenCount::new(token_usage.reasoning_output_tokens),
         cost,
         api_equivalent: Some(api_equivalent),
         subscription: snapshot.subscription,
+        usage: canonical_usage,
         context_window: snapshot.model_context_window,
     })
+}
+
+fn unavailable_plan() -> PlanUsage {
+    PlanUsage {
+        applicability: PlanApplicability::Unknown {
+            reason: UnavailableReason::NotObserved,
+        },
+        windows: Vec::new(),
+        worker_attributed: Availability::Unavailable {
+            reason: UnavailableReason::MissingAttributionEvidence,
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_usage_record(
+    worker_id: &WorkerId,
+    history_path: &Path,
+    provider: &str,
+    source: &str,
+    input: u64,
+    cached_input: u64,
+    cache_write: u64,
+    output: u64,
+    reasoning_output: u64,
+    segments: &[ModelUsageSegment],
+    api_equivalent: ApiEquivalent,
+    plan: PlanUsage,
+    captured_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<UsageRecord> {
+    let core_worker = cosmon_core::id::WorkerId::new(worker_id.as_str()).ok()?;
+    let history_digest = Sha256::digest(history_path.as_os_str().as_encoded_bytes());
+    let history_id = format!("{provider}-{history_digest:x}");
+    let mut identity_plan = plan.clone();
+    for window in &mut identity_plan.windows {
+        window.provenance.captured_at = None;
+    }
+    let observation_material = serde_json::to_vec(&(
+        &history_id,
+        input,
+        cached_input,
+        cache_write,
+        output,
+        reasoning_output,
+        &api_equivalent,
+        &identity_plan,
+    ))
+    .ok()?;
+    let observation_digest = Sha256::digest(observation_material);
+    let record = UsageRecord {
+        schema_version: CURRENT_USAGE_SCHEMA_VERSION,
+        observation_id: UsageObservationId::Known {
+            id: format!("usage-{observation_digest:x}"),
+        },
+        subject: UsageSubject {
+            worker_id: core_worker,
+            attempt: None,
+            history: UsageHistory::Known { id: history_id },
+        },
+        tokens: TokenUsage {
+            input_tokens: UsageTokenCount::Measured { tokens: input },
+            cached_input_tokens: UsageTokenCount::Measured {
+                tokens: cached_input,
+            },
+            cache_write_tokens: UsageTokenCount::Measured {
+                tokens: cache_write,
+            },
+            output_tokens: UsageTokenCount::Measured { tokens: output },
+            reasoning_output_tokens: UsageTokenCount::Measured {
+                tokens: reasoning_output,
+            },
+            model_segments: if segments.is_empty() {
+                Availability::Unavailable {
+                    reason: UnavailableReason::NotObserved,
+                }
+            } else {
+                Availability::Available {
+                    value: segments.to_vec(),
+                }
+            },
+            provenance: ObservationProvenance {
+                source: source.to_owned(),
+                provider: Some(provider.to_owned()),
+                observed_at: None,
+                captured_at,
+                scope: ObservationScope::UsageHistory,
+            },
+        },
+        api_equivalent,
+        plan,
+    };
+    record.validate().ok()?;
+    Some(record)
+}
+
+/// Return the stable capture time for a cumulative history snapshot.
+///
+/// A wall-clock timestamp generated on every poll would make an unchanged
+/// record compare unequal and cause the durable producer to emit duplicates.
+/// The history mtime advances when the provider appends data and remains
+/// stable between polls.
+fn file_capture_time(path: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()
+        .map(chrono::DateTime::<chrono::Utc>::from)
 }
 
 fn value_current_segments(
@@ -518,6 +665,7 @@ fn read_codex_rollout_energy(
 ) -> Option<(
     cosmon_core::codex_energy::CodexEnergySnapshot,
     Option<String>,
+    PlanUsage,
 )> {
     use std::io::BufRead as _;
 
@@ -533,7 +681,13 @@ fn read_codex_rollout_energy(
             latest_model = Some(model.to_string());
         }
     }
-    Some((codex_energy_from_session(&energy_events)?, latest_model))
+    let captured_at = file_capture_time(path).unwrap_or_else(chrono::Utc::now);
+    let plan = cosmon_core::plan_observation::codex_plan(&energy_events, captured_at).plan;
+    Some((
+        codex_energy_from_session(&energy_events)?,
+        latest_model,
+        plan,
+    ))
 }
 
 /// **Always-on realized-model capture** at the completion seam
@@ -1667,13 +1821,42 @@ mod tests {
         )
         .unwrap();
 
-        let (snapshot, model) = read_codex_rollout_energy(&rollout).unwrap();
+        let (snapshot, model, _plan) = read_codex_rollout_energy(&rollout).unwrap();
         assert_eq!(snapshot.usage.input_tokens, 3_663_232);
         assert_eq!(snapshot.usage.cached_input_tokens, 3_515_520);
         assert_eq!(snapshot.usage.output_tokens, 9_813);
         assert_eq!(snapshot.usage.reasoning_output_tokens, 1_903);
         assert_eq!(snapshot.subscription.unwrap().used_percent, 7.0);
         assert_eq!(model.as_deref(), Some("gpt-5.6-terra"));
+    }
+
+    #[test]
+    fn unchanged_rollout_produces_the_same_canonical_observation() {
+        let root = tempfile::TempDir::new().unwrap();
+        let rollout = root.path().join("rollout.jsonl");
+        std::fs::write(
+            &rollout,
+            concat!(
+                r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra"}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":300,"reasoning_output_tokens":50,"total_tokens":1500}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let worker = WorkerId::new("quartz").unwrap();
+
+        let first = read_codex_worker_energy(&rollout, &worker)
+            .unwrap()
+            .usage
+            .unwrap();
+        let second = read_codex_worker_energy(&rollout, &worker)
+            .unwrap()
+            .usage
+            .unwrap();
+
+        assert_eq!(first, second, "an unchanged poll must not emit again");
+        assert!(first.tokens.provenance.captured_at.is_some());
     }
 
     #[test]
@@ -1686,6 +1869,7 @@ mod tests {
             cost: cosmon_observability::EnergyCost::ReferenceUsd { usd: 0.25 },
             api_equivalent: None,
             subscription: None,
+            usage: None,
             context_window: Some(1_000),
         };
         let (i, cached, o, reasoning) = e.token_tuple();

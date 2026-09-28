@@ -81,6 +81,7 @@ pub fn canonical_snapshot() -> FleetSnapshot {
             cost: crate::worker::EnergyCost::Unknown,
             api_equivalent: None,
             subscription: None,
+            usage: None,
             context_window: Some(1_000_000),
         },
         live: "working".into(),

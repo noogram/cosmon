@@ -384,8 +384,7 @@ fn scan_events(path: &Path, cutoff: DateTime<Utc>, now: DateTime<Utc>) -> (u64, 
     };
 
     let mut progress_count: u64 = 0;
-    let mut energy_first: Option<u64> = None;
-    let mut energy_last: Option<u64> = None;
+    let mut usage_samples: Vec<(String, Option<String>, u64)> = Vec::new();
     let mut scanned: u64 = 0;
 
     for line in content.lines() {
@@ -414,17 +413,14 @@ fn scan_events(path: &Path, cutoff: DateTime<Utc>, now: DateTime<Utc>) -> (u64, 
                 let Some(total) = energy_total(&val) else {
                     continue;
                 };
-                energy_first.get_or_insert(total);
-                energy_last = Some(total);
+                let (worker, history) = usage_sample_identity(&val);
+                usage_samples.push((worker, history, total));
             }
             _ => {}
         }
     }
 
-    let fuel_debit = match (energy_first, energy_last) {
-        (Some(first), Some(last)) => last.saturating_sub(first),
-        _ => 0,
-    };
+    let fuel_debit = cumulative_history_debit(&usage_samples);
 
     (progress_count, fuel_debit, scanned)
 }
@@ -527,7 +523,7 @@ fn derive_fuel_pct(path: &Path, now: DateTime<Utc>) -> f64 {
     };
 
     let cutoff = now - Duration::days(30);
-    let mut last_total: u64 = 0;
+    let mut usage_samples: Vec<(String, Option<String>, u64)> = Vec::new();
 
     for line in content.lines() {
         if line.is_empty() {
@@ -544,11 +540,28 @@ fn derive_fuel_pct(path: &Path, now: DateTime<Utc>) -> f64 {
             let Some(total) = energy_total(&val) else {
                 continue;
             };
-            if total > last_total {
-                last_total = total;
-            }
+            let (worker, history) = usage_sample_identity(&val);
+            usage_samples.push((worker, history, total));
         }
     }
+
+    let aliases: std::collections::HashMap<&str, &str> = usage_samples
+        .iter()
+        .filter_map(|(worker, history, _)| history.as_deref().map(|h| (worker.as_str(), h)))
+        .collect();
+    let mut latest = std::collections::HashMap::<String, u64>::new();
+    for (worker, history, total) in &usage_samples {
+        let key = history
+            .clone()
+            .or_else(|| {
+                aliases
+                    .get(worker.as_str())
+                    .map(|value| (*value).to_owned())
+            })
+            .unwrap_or_else(|| format!("legacy-worker:{worker}"));
+        latest.insert(key, *total);
+    }
+    let last_total = latest.into_values().fold(0_u64, u64::saturating_add);
 
     #[allow(clippy::cast_precision_loss)]
     let ratio = last_total as f64 / FUEL_CAP_TOKENS as f64;
@@ -592,6 +605,62 @@ fn energy_total(val: &Value) -> Option<u64> {
         )
     };
     Some(input.saturating_add(output))
+}
+
+/// Worker and cumulative-history identity from either durable generation.
+fn usage_sample_identity(val: &Value) -> (String, Option<String>) {
+    if event_kind(val) == "usage_observed" {
+        let usage = val.get("usage");
+        let worker = usage
+            .and_then(|value| value.pointer("/subject/worker_id"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        let history = usage
+            .and_then(|value| value.pointer("/subject/history"))
+            .filter(|value| value.get("kind").and_then(Value::as_str) == Some("known"))
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        (worker, history)
+    } else {
+        (
+            val.get("worker_id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned(),
+            None,
+        )
+    }
+}
+
+/// Difference cumulative samples independently per history. A legacy sample
+/// followed by a canonical sample for the same worker is correlated to the
+/// canonical history so a migration journal cannot count both generations.
+fn cumulative_history_debit(samples: &[(String, Option<String>, u64)]) -> u64 {
+    let aliases: std::collections::HashMap<&str, &str> = samples
+        .iter()
+        .filter_map(|(worker, history, _)| history.as_deref().map(|h| (worker.as_str(), h)))
+        .collect();
+    let mut bounds = std::collections::HashMap::<String, (u64, u64)>::new();
+    for (worker, history, total) in samples {
+        let key = history
+            .clone()
+            .or_else(|| {
+                aliases
+                    .get(worker.as_str())
+                    .map(|value| (*value).to_owned())
+            })
+            .unwrap_or_else(|| format!("legacy-worker:{worker}"));
+        bounds
+            .entry(key)
+            .and_modify(|(_, last)| *last = *total)
+            .or_insert((*total, *total));
+    }
+    bounds
+        .into_values()
+        .map(|(first, last)| last.saturating_sub(first))
+        .fold(0_u64, u64::saturating_add)
 }
 
 /// Read one canonical measured-token object from the raw JSON surface.
@@ -916,6 +985,53 @@ mod tests {
             "cumulative samples must be differenced, not summed"
         );
         assert_eq!(scanned, 2, "each JSONL sample must be visited exactly once");
+    }
+
+    #[test]
+    fn raw_reader_deduplicates_interleaved_cumulative_histories() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let now = Utc::now();
+        let fixture =
+            include_str!("../../../cosmon-core/tests/fixtures/usage/usage_observed_v1.json").trim();
+        let sample = |seq: u64, minutes: i64, worker: &str, history: &str, input: u64| {
+            fixture
+                .replace(
+                    "2026-09-28T08:00:00Z",
+                    &(now - Duration::minutes(minutes)).to_rfc3339(),
+                )
+                .replace("\"seq\":7", &format!("\"seq\":{seq}"))
+                .replace("\"quartz\"", &format!("\"{worker}\""))
+                .replace("rollout-sanitized-a", history)
+                .replace("\"tokens\":1200", &format!("\"tokens\":{input}"))
+        };
+        let lines = [
+            sample(10, 4, "worker-a", "history-a", 1_000),
+            sample(11, 3, "worker-b", "history-b", 2_000),
+            sample(12, 2, "worker-a", "history-a", 1_100),
+            sample(13, 1, "worker-b", "history-b", 2_200),
+        ];
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let (_progress, debit, _scanned) = scan_events(&path, now - Duration::minutes(5), now);
+        assert_eq!(
+            debit, 300,
+            "each cumulative history contributes only its own first-to-last delta"
+        );
+    }
+
+    #[test]
+    fn migration_reader_correlates_legacy_and_canonical_samples_by_worker() {
+        let samples = vec![
+            ("worker-a".to_owned(), None, 1_000),
+            ("worker-a".to_owned(), Some("history-a".to_owned()), 1_250),
+            ("worker-a".to_owned(), Some("history-a".to_owned()), 1_300),
+        ];
+        assert_eq!(
+            cumulative_history_debit(&samples),
+            300,
+            "a legacy-to-canonical cutover must remain one cumulative history"
+        );
     }
 
     #[test]
