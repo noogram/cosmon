@@ -263,13 +263,19 @@ pub enum ControlPlaneSignal {
     },
 }
 
+/// Shared grace before a worker with no durable progress is a boot-stall.
+///
+/// The health Witness and `cs patrol --nudge` both consume this domain policy,
+/// so their observations stay aligned during normal worker startup.
+pub const BOOT_STALL_GRACE: Duration = Duration::seconds(120);
+
 /// Tunable thresholds for the Witness scan (ADR-137 §4 defaults). In
 /// production these come from `patrols.toml`; [`Default`] supplies the §4
 /// defaults so the scan and its tests are self-contained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HealthThresholds {
     /// A1 — grace after tackle before a no-event-growth slot is a boot-stall
-    /// (default 90 s).
+    /// (default [`BOOT_STALL_GRACE`]).
     pub boot_grace: Duration,
     /// A5 — fallback per-step stall budget when a view carries no explicit
     /// `step_timeout` (default 30 min).
@@ -282,7 +288,7 @@ pub struct HealthThresholds {
 impl Default for HealthThresholds {
     fn default() -> Self {
         Self {
-            boot_grace: Duration::seconds(90),
+            boot_grace: BOOT_STALL_GRACE,
             default_step_timeout: Duration::minutes(30),
             output_stall_timeout: Duration::minutes(30),
         }
