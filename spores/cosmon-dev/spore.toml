@@ -375,11 +375,38 @@ The JURY FLOOR, and nothing else — the rehearsal matrix no longer reads it (it
 unconditional). `normal` => the committee's two ballot-carrying families (anthropic \
 via `claude` + openai via `codex-sol`). `security` => a THIRD distinct family, \
 conjunctive, named concretely so nobody has to invent one under pressure: the \
-`openai` adapter with `base_url = https://api.mistral.ai` and \
-`default_model = mistral-large-latest` — the EU-sovereign warm standby already \
-declared in ../../.cosmon/config.toml, which `provider_diversity` resolves to family \
-`mistral`, distinct from both `anthropic` and `openai`. It needs MISTRAL_API_KEY \
-exported and no new adapter, no new spawn arm.
+`openai` adapter with `base_url = https://openrouter.ai/api/v1` and \
+`default_model = google/gemini-2.5-flash` — the OpenRouter seat already declared in \
+../../.cosmon/config.toml (issue #99). OpenRouter is OpenAI-compatible, so it costs \
+no new adapter and no new spawn arm; it is the DEFAULT third seat precisely because \
+it is reachable with credentials operators plausibly already hold (an OpenRouter API \
+key) rather than a vendor-specific one nobody has provisioned. \
+`provider_diversity::family_from_model` resolves an OpenRouter-routed model id by its \
+`<vendor>/<model>` prefix — `google/…` to family `google` — never from the router's \
+own host or the adapter section's name, so a THIRD seat that instead got routed to an \
+`openai/…` or `anthropic/…` model correctly collapses onto the family it actually is \
+and does NOT satisfy this floor (that misroute is the exact proxy-costume ADR-147 \
+exists to catch, just reached through a router instead of a bare `base_url` \
+override). `google/gemini-2.5-flash` is the default because Google is a distinct lab \
+from both Anthropic and OpenAI (own training stack, own weights) and cheap on \
+OpenRouter for a warm-standby seat; `deepseek/…` is an equally valid third family and \
+the model is OVERRIDABLE per-galaxy via `[adapters.openai].default_model`. It needs \
+OPENROUTER_API_KEY exported.
+
+Mistral remains a documented ALTERNATIVE, never a requirement: an operator who holds \
+MISTRAL_API_KEY instead may override the SAME `[adapters.openai]` section — \
+`base_url = https://api.mistral.ai`, `default_model = mistral-large-latest` — which \
+`provider_diversity` resolves to family `mistral`, equally distinct from `anthropic` \
+and `openai`. The two overrides are mutually exclusive on one section; OpenRouter is \
+the wired default because it is the credential an operator is more likely to already \
+hold, not because Mistral stopped working.
+
+A missing key is a REFUSAL, never a silent downgrade: `cs tackle --adapter openai` \
+resolves the credential from `[adapters.openai].api_key_env` alone once that key is \
+declared (no fallback to a sibling vendor's env var), and if it is unset the dispatch \
+refuses by naming that exact variable — `OPENROUTER_API_KEY` under this default, \
+`MISTRAL_API_KEY` under the Mistral override — instead of quietly seating the jury \
+with fewer families than the stake demands.
 
 ENTRY IS MECHANICAL, NEVER THE PILOT'S JUDGEMENT (operator decision D1 amendment 2 \
 on delib-20260729-1d4e). `security` is DERIVED FROM WHAT THE DIFF TOUCHES, not from \

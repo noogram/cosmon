@@ -200,33 +200,54 @@ forbidden_substrings = []
 forbidden_substrings = []
 publish_globs = []
 
-# EU-sovereign Mistral Large warm standby (task-20260614-62bc, parent
-# delib-20260614-61f9 — posture "diversify-now").
+# Third-provider-family warm standby for the `risk = security` jury floor
+# (issue #99, superseding the Mistral-only wiring from task-20260614-62bc /
+# delib-20260614-61f9).
 #
-# WHY: the cheap, reversible hedge against a US export-control order of the
-# Fable-5/Mythos-5 shape (2026-06-12). Mistral is EU-domiciled → outside US
-# EAR reach → the natural sovereign hedge, and the second remote frontier leg
-# that makes "switch provider" a credible pre-wired threat.
+# WHY: `spores/cosmon-dev/spore.toml`'s `risk = security` requires a THIRD
+# provider family, distinct from anthropic (`claude`) and openai (`codex-sol`
+# / this same `openai` section). The prior wiring named ONLY Mistral, which
+# is unsatisfiable for an operator who holds Anthropic + OpenAI + OpenRouter
+# credentials but no MISTRAL_API_KEY — the exact gap issue #99 reports.
 #
-# HOW: Mistral's API is OpenAI-compatible, so it is reached through the
-# EXISTING `openai` adapter with `base_url` overridden — ZERO new adapter,
-# ZERO new spawn arm. The egress classifier follows this base_url and stamps
-# `api.mistral.ai` on the RemoteEgressOptIn audit atom (cosmon-core::egress
-# resolve_remote_endpoint), so the audit is honest about the sovereign leg.
+# HOW: OpenRouter is OpenAI-compatible, so it is reached through the EXISTING
+# `openai` adapter with `base_url` overridden — ZERO new adapter, ZERO new
+# spawn arm, same mechanism the Mistral hedge used. `default_model` is a
+# ROUTED model id in OpenRouter's `<vendor>/<model>` form; `provider_diversity`
+# resolves the vendor segment first (`google/…` → family `google`), never the
+# router's own host or this section's name, so a model pinned here that
+# instead named `openai/…` or `anthropic/…` would correctly collapse onto
+# that family and fail the floor rather than silently pass it (the
+# proxy-costume ADR-147 exists to catch). `google/gemini-2.5-flash` is the
+# default: Google is a distinct lab from both Anthropic and OpenAI, and cheap
+# on OpenRouter for a warm-standby seat; override `default_model` here for a
+# different third family (e.g. `deepseek/deepseek-chat`). The egress
+# classifier follows `base_url` and stamps `openrouter.ai` on the
+# RemoteEgressOptIn audit atom, so the audit is honest about the leg.
 #
 # This is a WARM STANDBY: the fleet default stays `claude` (global
 # ~/.config/cosmon/config.toml), so this only activates on an explicit
-# `cs tackle --adapter openai`. Activate by exporting MISTRAL_API_KEY;
-# revert the whole hedge by deleting this block (reversible in seconds —
-# carnot's audit).
+# `cs tackle --adapter openai`. Activate by exporting OPENROUTER_API_KEY. A
+# missing key REFUSES the dispatch naming `OPENROUTER_API_KEY` by name (never
+# a silent fall-through to a sibling vendor's env var, since `api_key_env` is
+# declared) — it does not silently downgrade the jury to fewer seats.
+#
+# MISTRAL REMAINS A DOCUMENTED ALTERNATIVE, not a requirement: an operator
+# who holds MISTRAL_API_KEY instead may override this SAME section —
+# `api_key_env = "MISTRAL_API_KEY"`, `base_url = "https://api.mistral.ai"`,
+# `default_model = "mistral-large-latest"` — which resolves to family
+# `mistral`, equally distinct from `anthropic` and `openai`. The two
+# overrides are mutually exclusive on one `[adapters.openai]` section;
+# reverting to either hedge (or removing both) is reversible in seconds —
+# carnot's audit.
 [adapters]
 # Galaxy adapter default (bootstrap for the resident dispatcher, issue #21).
 default = "claude"
 
 [adapters.openai]
-api_key_env = "MISTRAL_API_KEY"
-base_url = "https://api.mistral.ai"
-default_model = "mistral-large-latest"
+api_key_env = "OPENROUTER_API_KEY"
+base_url = "https://openrouter.ai/api/v1"
+default_model = "google/gemini-2.5-flash"
 
 # Galaxy-level model pin for claude workers (the "galaxy config" rung of the
 # intention ladder: cli → formula-step → env → HERE → global → builtin floor).

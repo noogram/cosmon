@@ -6623,13 +6623,8 @@ fn spawn_openai_session(
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
 ) -> anyhow::Result<InprocessWork> {
-    let (api_key, base_url) = openai_credentials(adapter_entry).ok_or_else(|| {
-        anyhow::anyhow!(
-            "cs tackle: --adapter openai requires one of OPENAI_API_KEY / \
-             XAI_API_KEY / MOONSHOT_API_KEY to be set in the environment \
-             (or [adapters.openai].api_key_env in .cosmon/config.toml)"
-        )
-    })?;
+    let (api_key, base_url) = openai_credentials(adapter_entry)
+        .ok_or_else(|| anyhow::anyhow!(missing_openai_credentials_message(adapter_entry)))?;
     // `--model` / formula-pin (delib-20260704-b476 C1) is the top tier,
     // above the config `default_model`, so a per-molecule pin wins.
     let model = preferred_model
@@ -8577,6 +8572,28 @@ fn openai_credentials(adapter_entry: Option<&AdapterEntry>) -> Option<(String, O
         }
     }
     None
+}
+
+/// The refusal message for a missing `--adapter openai` credential —
+/// (issue #99) names the SPECIFIC env var the operator configured instead of
+/// a generic vendor list, so a security-jury seat pointed at `OpenRouter` (or
+/// any other OpenAI-compatible vendor via `[adapters.openai].api_key_env`)
+/// fails loudly with the one variable that would actually unblock it, rather
+/// than a message that only ever mentions `OPENAI_API_KEY` / `XAI_API_KEY` /
+/// `MOONSHOT_API_KEY` regardless of what is configured. A missing key must
+/// refuse the dispatch, never silently downgrade the jury to fewer seats.
+fn missing_openai_credentials_message(adapter_entry: Option<&AdapterEntry>) -> String {
+    match adapter_entry.and_then(|e| e.api_key_env.as_deref()) {
+        Some(key_env) => format!(
+            "cs tackle: --adapter openai requires {key_env} to be set in the \
+             environment (declared by [adapters.openai].api_key_env in \
+             .cosmon/config.toml)"
+        ),
+        None => "cs tackle: --adapter openai requires one of OPENAI_API_KEY / \
+                  XAI_API_KEY / MOONSHOT_API_KEY to be set in the environment \
+                  (or [adapters.openai].api_key_env in .cosmon/config.toml)"
+            .to_owned(),
+    }
 }
 
 /// `Anthropic` branch of [`spawn_and_prompt`] — the second **Direct-API** path
@@ -14666,5 +14683,42 @@ prompt = "Custom fleet prompt."
         std::env::remove_var("OPENAI_API_KEY");
         assert!(pass);
         assert!(warned.borrow().is_empty());
+    }
+
+    // -- Missing-credential refusal names the configured variable (#99) --
+
+    /// RED before the fix: a security-jury seat declared with
+    /// `[adapters.openai].api_key_env = "OPENROUTER_API_KEY"` and no such
+    /// key set got a refusal that only ever mentioned `OPENAI_API_KEY` /
+    /// `XAI_API_KEY` / `MOONSHOT_API_KEY` — none of which is the variable
+    /// that would actually unblock it. The pilot reading the refusal has no
+    /// way to tell which var to export.
+    #[test]
+    fn missing_credential_message_names_the_configured_var() {
+        let entry = AdapterEntry {
+            api_key_env: Some("OPENROUTER_API_KEY".to_owned()),
+            base_url: Some("https://openrouter.ai/api/v1".to_owned()),
+            ..Default::default()
+        };
+        let msg = missing_openai_credentials_message(Some(&entry));
+        assert!(
+            msg.contains("OPENROUTER_API_KEY"),
+            "refusal must name the configured variable, got: {msg}"
+        );
+        assert!(
+            !msg.contains("XAI_API_KEY") && !msg.contains("MOONSHOT_API_KEY"),
+            "refusal must not paper over the configured var with the generic \
+             vendor scan list, got: {msg}"
+        );
+    }
+
+    /// With no `api_key_env` declared, the historical generic scan message is
+    /// still the honest answer — there is nothing more specific on record.
+    #[test]
+    fn missing_credential_message_falls_back_to_the_generic_scan_when_undeclared() {
+        let msg = missing_openai_credentials_message(None);
+        assert!(msg.contains("OPENAI_API_KEY"));
+        assert!(msg.contains("XAI_API_KEY"));
+        assert!(msg.contains("MOONSHOT_API_KEY"));
     }
 }
