@@ -97,9 +97,10 @@ fn nucleate(repo: &Path, extra: &[&str]) -> Output {
         .expect("cs nucleate")
 }
 
-/// Nucleate a molecule protecting `ref/` and bring it to a terminal state.
-fn protected_molecule(repo: &Path) -> String {
-    let out = nucleate(repo, &["--protect", "./ref/"]);
+/// Nucleate a molecule, optionally protecting one path, and make it terminal.
+fn terminal_molecule(repo: &Path, protected: Option<&str>) -> String {
+    let extra = protected.map_or_else(Vec::new, |path| vec!["--protect", path]);
+    let out = nucleate(repo, &extra);
     assert!(
         out.status.success(),
         "nucleate --protect failed: {}",
@@ -117,11 +118,18 @@ fn protected_molecule(repo: &Path) -> String {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        state["protected_paths"],
-        serde_json::json!(["ref"]),
-        "--protect must persist the normalised path on the molecule"
-    );
+    if let Some(path) = protected {
+        let expected = path
+            .trim_start_matches("./")
+            .trim_end_matches('/')
+            .to_owned();
+        assert_eq!(state["protected_paths"], serde_json::json!([expected]));
+    } else {
+        assert!(
+            state["protected_paths"].is_null(),
+            "an undeclared protection remains absent from the persisted JSON"
+        );
+    }
 
     let col = cs_isolated(repo)
         .args([
@@ -135,6 +143,11 @@ fn protected_molecule(repo: &Path) -> String {
         .expect("cs collapse");
     assert!(col.status.success(), "collapse failed");
     mol_id
+}
+
+/// Nucleate a molecule protecting `ref/` and bring it to a terminal state.
+fn protected_molecule(repo: &Path) -> String {
+    terminal_molecule(repo, Some("./ref/"))
 }
 
 /// The worker's branch: a legitimate change plus, when `overwrite_reference`,
@@ -280,5 +293,125 @@ fn nucleate_refuses_a_protected_path_outside_the_repository() {
                 .next()
                 .is_none(),
         "no molecule may be created for a refused --protect"
+    );
+}
+
+/// NUL-delimited Git output preserves every byte of unusual UTF-8 names.
+#[cfg(unix)]
+#[test]
+fn done_refuses_exact_protected_paths_with_git_quoted_characters() {
+    for path in [
+        "ref/référence.csv",
+        "ref/a \"quoted\" reference.csv",
+        "ref/a reference\nwith two lines.csv",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        setup_repo(repo);
+        fs::write(repo.join(path), "original\n").unwrap();
+        git_ok(repo, &["add", path]);
+        git_ok(repo, &["commit", "-qm", "add unusual reference name"]);
+
+        let mol_id = terminal_molecule(repo, Some(path));
+        git_ok(
+            repo,
+            &["checkout", "-q", "-b", &format!("feat/{mol_id}"), "main"],
+        );
+        fs::write(repo.join(path), "worker output\n").unwrap();
+        git_ok(repo, &["commit", "-qam", "rewrite unusual reference"]);
+        git_ok(repo, &["checkout", "-q", "main"]);
+
+        let refused = done(repo, &mol_id, &[]);
+        assert_eq!(
+            refused.status.code(),
+            Some(78),
+            "{path:?} must be detected through the real command: {}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains(path),
+            "the refusal must name {path:?}: {}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+    }
+}
+
+/// Renaming a protected file changes its old path and must be refused.
+#[test]
+fn done_refuses_renaming_a_protected_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo(repo);
+    let mol_id = terminal_molecule(repo, Some(REFERENCE));
+    git_ok(
+        repo,
+        &["checkout", "-q", "-b", &format!("feat/{mol_id}"), "main"],
+    );
+    git_ok(repo, &["mv", REFERENCE, "renamed-reference.csv"]);
+    git_ok(repo, &["commit", "-qm", "rename protected reference"]);
+    git_ok(repo, &["checkout", "-q", "main"]);
+
+    let refused = done(repo, &mol_id, &[]);
+    assert_eq!(
+        refused.status.code(),
+        Some(78),
+        "renaming the protected file must be refused: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
+
+/// Molecules with no protection retain the pre-protection harvest behaviour.
+#[test]
+fn done_allows_changes_when_the_molecule_declared_no_protection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo(repo);
+    let mol_id = terminal_molecule(repo, None);
+    worker_branch(repo, &mol_id, true);
+
+    let merged = done(repo, &mol_id, &[]);
+    assert!(
+        merged.status.success(),
+        "an unprotected molecule must remain unrestricted: {}",
+        String::from_utf8_lossy(&merged.stderr)
+    );
+}
+
+/// Batch declarations cannot silently discard a command-line protection.
+#[test]
+fn nucleate_refuses_protect_with_from_before_creating_a_molecule() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo(repo);
+    let declarations = repo.join("declarations");
+    fs::create_dir_all(&declarations).unwrap();
+    fs::write(
+        declarations.join("one.toml"),
+        "id_prefix = \"batch\"\nformula = \"task-work\"\ndescription = \"one\"\n\n[variables]\ntopic = \"one\"\n",
+    )
+    .unwrap();
+
+    let out = cs_isolated(repo)
+        .args(["nucleate", "--from"])
+        .arg(&declarations)
+        .args(["--protect", REFERENCE])
+        .output()
+        .expect("cs nucleate --from --protect");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "--protect must not be accepted and discarded with --from"
+    );
+    assert!(
+        stderr.contains("--protect") && stderr.contains("--from"),
+        "the refusal must name both incompatible flags: {stderr}"
+    );
+    assert!(
+        !repo.join(".cosmon/state/fleets/default/molecules").exists()
+            || fs::read_dir(repo.join(".cosmon/state/fleets/default/molecules"))
+                .unwrap()
+                .next()
+                .is_none(),
+        "the refused combination must not create a molecule"
     );
 }

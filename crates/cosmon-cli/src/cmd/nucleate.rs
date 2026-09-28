@@ -322,7 +322,9 @@ pub struct Args {
     /// `cs done --allow-protected-change`.
     ///
     /// An absolute path or one containing `..` is refused here, before any
-    /// molecule is created.
+    /// molecule is created. This flag cannot be combined with `--from`:
+    /// declaration files do not carry per-molecule protected paths, so the
+    /// combination is refused rather than silently dropping the protection.
     #[arg(long = "protect", value_name = "PATH")]
     pub(crate) protect: Vec<String>,
 }
@@ -463,6 +465,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .as_deref()
         .map(validate_base_at_birth)
         .transpose()?;
+
+    if args.from.is_some() && !args.protect.is_empty() {
+        anyhow::bail!(
+            "--protect cannot be used with --from: declaration files do not carry \
+             per-molecule protected paths; nucleate each protected molecule directly"
+        );
+    }
 
     // Validate `--protect` before anything is written, for the same reason:
     // a protected path that can never match would make the harvest gate pass

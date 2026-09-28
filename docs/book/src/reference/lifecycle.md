@@ -293,7 +293,7 @@ SEE ALSO: cs tackle (launch a worker on the molecule you just nucleated).
 
    Ground truth the work is checked against — expected outputs, golden files, a reference dataset — which the worker must read and never modify. The path is relative to the repository root and may name a file or a directory (a directory protects everything below it). Persisted on the molecule and read three times: the worker's brief lists the paths as read-only with the reason, `cs tackle` clears their write bits in the worktree, and `cs done` refuses the merge (`protected_path_modified`, exit 78) when the worker branch changed any of them, naming each one. The operator overrides that refusal with `cs done --allow-protected-change`.
 
-   An absolute path or one containing `..` is refused here, before any molecule is created.
+   An absolute path or one containing `..` is refused here, before any molecule is created. This flag cannot be combined with `--from`: declaration files do not carry per-molecule protected paths, so the combination is refused rather than silently dropping the protection.
 
 
 
