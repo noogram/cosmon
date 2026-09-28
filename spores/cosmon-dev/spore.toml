@@ -31,7 +31,9 @@
 #                                    over the full semantic surface = OUR closure gate.
 #                                    Since the coverage amendment it runs ASYNCHRONOUSLY,
 #                                    after the polymer has already landed a candidate.
-#   Only TWO formulas are genuinely NEW and ship in formulas/ here:
+#   Formulas that are genuinely NEW and ship in formulas/ here (this list drifted
+#   behind the node set before now — see `lane-triage`, added with the lane
+#   predicate and never added to this paragraph; not repeated here):
 #     * `clean-room-repro`      — the G2 reproduction gate (deterministic red, frozen
 #                                  before the fix branch, differential refutation,
 #                                  false-green / false-red modes). Emits verdict.json.
@@ -43,6 +45,19 @@
 #                                  never into a FINDINGS verdict — and computes CLEAN as
 #                                  the conjunction over the BALLOT-CARRYING seats only.
 #                                  No round counter, no round ledger, no third verdict.
+#     * `gate-evidence`         — (noogram/cosmon#110) the MEASUREMENT-ONLY leg for
+#                                  every node whose job is to observe or judge the
+#                                  tree, not change it: trace, route, intake,
+#                                  contract, falsify, green, ci-gate, rehearsal,
+#                                  release. `task-work`'s "implement + all gates
+#                                  green" framing, handed to a node whose real job
+#                                  was "write a report", is what let `trace`,
+#                                  `intake` and `contract` commit product-code fixes
+#                                  before `reproduce` had even frozen a RED. This
+#                                  formula's second step proves — `git status
+#                                  --porcelain` + `git diff --name-only`, both
+#                                  empty — that the worktree carries no such
+#                                  change, instead of merely intending it.
 #
 # THE GATE DAG (blueprint §3, diamond topology — NOT a pipeline; a pipeline
 # diffuses responsibility by construction):
@@ -526,7 +541,12 @@ name            = "default"
 # --------------------------------------------------------------------------
 [spore.formulas.task-work]
 path          = "../../.cosmon/formulas/task-work.formula.toml"
-description   = "Generic agentic gate leg (referenced repo primitive). The gate's verdict contract lives in each node's topic; task-work is not modified."
+description   = "Generic agentic gate leg (referenced repo primitive). The gate's verdict contract lives in each node's topic; task-work is not modified. Used by exactly ONE node in this spore: `implement` — the only node whose job is a product-code change."
+deterministic = false
+
+[spore.formulas.gate-evidence]
+path          = "formulas/gate-evidence.formula.toml"
+description   = "NEW (noogram/cosmon#110) — the MEASUREMENT-ONLY leg: produce this node's evidence under ${output_dir}, then PROVE (git status --porcelain + git diff --name-only against base, both empty) that no product code moved and nothing was committed as a ritual. Used by trace, route, intake, contract, falsify, green, ci-gate, rehearsal, release — every task-work node except implement."
 deterministic = false
 
 [spore.formulas.clean-room-repro]
@@ -561,7 +581,7 @@ deterministic = false
 [[spore.node]]
 id          = "trace"
 kind        = "fixed"
-formula     = "task-work"
+formula     = "gate-evidence"
 description = "Always-on append-only trace sidecar (raw events + per-node briefs + artifact hashes). Root+leaf: survives a downstream stall."
 [spore.node.vars]
 topic = """
@@ -597,7 +617,7 @@ worker dies, ${output_dir}/ must let a third party reconstruct what ran.
 [[spore.node]]
 id          = "route"
 kind        = "fixed"
-formula     = "task-work"
+formula     = "gate-evidence"
 description = "AUTHOR-INDEPENDENT INSTALL ROUTE (BLOCK, gates release): a second root with no incoming edge, forbidden from naming the issue, that installs the PUBLISHED artefact by the DOCUMENTED route on a substrate that has never run cosmon and records every deviation between what the docs promise and what happens. Unscoped execution of our own claims — not adversarial reading. Emits verdict.json."
 [spore.node.vars]
 topic = """
@@ -655,7 +675,7 @@ provenance gate that printed `skip` and exited 0.
 [[spore.node]]
 id          = "intake"
 kind        = "fixed"
-formula     = "task-work"
+formula     = "gate-evidence"
 description = "G0 intake integrity (BLOCK): minimal reproduction evidence present — tag, OS/UID/arch, transcript, is-it-deterministic. Emits verdict.json."
 [spore.node.vars]
 topic = """
@@ -693,7 +713,7 @@ this verdict.json — NO SIDE LEDGER — and the consumer recomputes `gate_key`.
 [[spore.node]]
 id          = "contract"
 kind        = "fixed"
-formula     = "task-work"
+formula     = "gate-evidence"
 description = "G1 behavioural contract (BLOCK): state what cosmon PROMISES, decided BEFORE the test exists, so a fix cannot 'pass' by changing the promise. Emits verdict.json."
 [spore.node.vars]
 topic = """
@@ -743,7 +763,7 @@ risk           = "${params.risk}"
 [[spore.node]]
 id          = "falsify"
 kind        = "fixed"
-formula     = "task-work"
+formula     = "gate-evidence"
 description = "G3 falsification (BLOCK): mutate the EXPECTED fix -> the red test must go red (anti-tautology). A test that stays green under a mutated fix is not an oracle. Emits verdict.json."
 [spore.node.vars]
 topic = """
@@ -835,7 +855,12 @@ must reach one of the CONTRACT-approved outcomes, never keep the unsafe shortcut
 Keep the domain core I/O-free (ports stay injectable). Return Result; no unwrap /
 expect. Document every public item. Update the CLI/UI parity audit if a
 user-facing command changed. This node has NO authority to relax any gate. Emit
-${output_dir}/implement.md (the patch summary + the files touched) AND
+${output_dir}/implement.md: a patch summary, and a "files touched" list that IS
+the verbatim output of `git diff --name-only <this-branch's-base>...HEAD` run
+AFTER your last commit — pasted, not typed from memory. A hand-recalled list
+drifts from the real diff (noogram/cosmon#110: an earlier run's implement.md
+claimed files the branch's diff did not contain); the command is the only
+source `subject_digest` below may be computed from. AND
 ${output_dir}/verdict.json in the §8 ADMISSION SHAPE below. FAIL-CLOSED.
 
 §8 ADMISSION SHAPE — verdict.json is {verdict: PASS|BLOCKED, count, population,
@@ -843,8 +868,9 @@ findings[], base_sha, subject_digest, negative_control{gate_key, mutation, targe
 observed_verdict, evidence_digest}}, and A PASS MISSING ANY KEY IS INADMISSIBLE
 (the consumer reads it as BLOCKED). `population` = the number of contract clauses
 from G1 your patch had to satisfy; count 0 over population 0 is a vacuous green.
-`subject_digest` = a content hash of the files you touched, recomputed by the
-consumer. `base_sha` = the commit THIS verdict was computed on — and it is NOT the
+`subject_digest` = a content hash of the files named in `git diff --name-only`
+above (never of a hand-written list), recomputed by the consumer from that same
+command. `base_sha` = the commit THIS verdict was computed on — and it is NOT the
 same fact as the reproduction's `parent_commit`, which is what the red was RED on.
 NEGATIVE CONTROL: reach green by EDITING THE FROZEN TEST instead of the code and
 re-run — the recorded verdict MUST flip to BLOCKED; observed_verdict == verdict
@@ -859,7 +885,7 @@ consumer recomputes `gate_key`.
 [[spore.node]]
 id          = "green"
 kind        = "fixed"
-formula     = "task-work"
+formula     = "gate-evidence"
 description = "G5 green on the frozen red (BLOCK): the SAME frozen test/fixture/command/timeout now passes UNCHANGED. No substituted test. Emits verdict.json."
 [spore.node.vars]
 topic = """
@@ -894,15 +920,15 @@ verdict.json — NO SIDE LEDGER — and the consumer recomputes `gate_key`.
 [[spore.node]]
 id          = "ci-gate"
 kind        = "fixed"
-formula     = "task-work"
-description = "G8 CI (BLOCK, NOT-RUN blocks, BLOCKED-INCOMPLETE is its own outcome): check + test --no-fail-fast + clippy -Dwarnings + fmt + doc, BEFORE the dear judgement loop. Waits on a NAMED run id, never on an empty query. Result files are keyed per gate and per attempt; a duplicate key BLOCKS. Emits verdict.json."
+formula     = "gate-evidence"
+description = "G8 CI (BLOCK, NOT-RUN blocks, BLOCKED-INCOMPLETE is its own outcome, RETRYABLE — a timeout is never grounds to collapse this molecule): check + test --no-fail-fast + clippy -Dwarnings + fmt + doc, BEFORE the dear judgement loop, bounded at 1800s (CLAUDE.md's documented cold figure, with margin, not the 600s that fired on load alone). Waits on a NAMED run id, never on an empty query. Result files are keyed per gate and per attempt; a duplicate key BLOCKS. Emits verdict.json."
 [spore.node.vars]
 topic = """
 COSMON-DEV ${params.issue} — G8 CI GATE (fail-closed, cheap-before-dear). Run the
 repo's configured gates and record each exit status to a FILE (never read an exit
 code through a pipe):
   cargo check --workspace
-  cargo test --workspace --no-fail-fast   (wrap in `timeout 600`; a timeout is a FINDING)
+  cargo test --workspace --no-fail-fast   (wrap in `timeout 1800`; see BOUND below)
   cargo clippy --workspace -- -D warnings
   cargo fmt --all -- --check
   RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
@@ -922,6 +948,34 @@ DISTINCT OUTCOME THAT MUST NEVER BE REPORTED AS "the CI gate found a bug". A run
 that stopped early found out less than it was asked to; calling that a finding
 converts a measurement failure into a quality verdict, which is the exact
 substitution the convergence's VOID rule refuses elsewhere.
+
+THE BOUND (noogram/cosmon#110). 1800s, not 600s, and not a number picked to
+"feel generous": the project's own CLAUDE.md records `just gates` (which is
+`cargo test --workspace` plus the other four gates, and the test suite is ~90%
+of the wall-clock) at ≈15.4 min COLD on this machine's fleet, ambient load
+12–250 on 16 cores — and a run under load is exactly the case a fixed 600s bound
+fires on for no defect at all: three germinations of this very spore saw
+`ci-gate` stop 301/411 suites in with the tree passing cleanly when the SAME
+command ran without the bound. 1800s is a floor with margin over the documented
+cold figure, not the true ceiling; if a future measurement moves the documented
+cold figure, raise this bound to match it rather than re-deriving a number.
+
+A TIMEOUT FIRING IS BLOCKED-INCOMPLETE, NEVER A REASON TO COLLAPSE THIS
+MOLECULE. `just gates`/`cargo test --workspace` taking a long time under load is
+not a hang and not a gate failure — CLAUDE.md already says so for the ordinary
+edit-and-verify loop, and it is doubly true here where a collapsed node stops
+the whole spore (a collapsed molecule cannot be re-dispatched, per this repo's
+own CLAUDE.md, so a `ci-gate` collapse stranded `converge`, `rehearsal` and
+everything downstream — the exact failure this paragraph exists to prevent). On
+a timeout: (1) check `suites_run`/`suites_total` from the partial run — if the
+tree is plainly compiling and the suites that DID run are green, this is load,
+not a defect; (2) retry the SAME command once, immediately, against the SAME
+tree; (3) if the retry also does not finish within the bound, do NOT collapse —
+record BLOCKED-INCOMPLETE via `cs note` naming the two attempts and their
+`suites_run`/`suites_total`, and STOP without calling `cs collapse` or `cs
+complete`. A `ci-gate` molecule left `running` with a note attached is a signal
+a pilot can act on (re-tackle with a larger bound, or on quieter hardware); a
+collapsed one is a dead end the DAG cannot route around.
 
 BIND THE RESULT FILENAME, PER GATE AND PER ATTEMPT. Each gate's captured status
 goes to ${output_dir}/gates/<gate>/<attempt>.json — never one shared file, never
@@ -1080,7 +1134,7 @@ risk         = "${params.risk}"
 [[spore.node]]
 id          = "rehearsal"
 kind        = "fixed"
-formula     = "task-work"
+formula     = "gate-evidence"
 description = "G9 rehearsal (BLOCK): install the SIGNED packaged artefact (not the dev build) and re-run the frozen red green across the UNCONDITIONAL matrix root+non-root x amd64+arm64, regardless of risk. Each cell writes its own verdict at a cell-keyed path; a cell that did not run is BLOCKED, never skipped. Fed by ci-gate in parallel with converge. Emits verdict.json."
 [spore.node.vars]
 topic = """
@@ -1147,7 +1201,7 @@ is copied INTO this verdict.json — NO SIDE LEDGER — and the consumer recompu
 [[spore.node]]
 id          = "release"
 kind        = "fixed"
-formula     = "task-work"
+formula     = "gate-evidence"
 description = "G10 release (BLOCK, and the §8 ADMISSION ENFORCEMENT POINT — the one check whose absence is the absence of the release): assemble the signed manifest (commit, red-hash, image digest, versions, CI ids, all verdicts, the four-cell matrix, the route deviations, the declared-surface comparison, and the folded dissent field with its non-empty arms_not_run[]). Refuses any upstream verdict lacking population / subject_digest / base_sha / negative_control; BLOCKS on a vacuous green (count 0 over population 0), on a colour-blind gate (observed_verdict == verdict), on a recomputed digest or gate_key that disagrees, and on any upstream base_sha that is NOT an ancestor of the release commit. Fed by converge, rehearsal AND route. PASS here is the polymer's terminal success state, CANDIDATE-LANDED. NO agent pushes to any remote — the human gate is the only door. Emits verdict.json."
 [spore.node.vars]
 topic = """

@@ -1,0 +1,122 @@
+formula = "gate-evidence"
+version = 1
+description = """
+The MEASUREMENT-ONLY leg of the `cosmon-dev` spore — for every gate whose job is
+to observe, check or judge the tree, never to change it.
+
+WHY A NEW FORMULA (not `task-work` with a topic). `task-work`'s two steps are
+titled "Implement the solution" and its acceptance criterion is "cargo check +
+test + clippy + fmt + doc all pass" — an IMPLEMENTATION contract. Handing that
+contract to a node whose actual job is "write intake.md" or "run the CI gates and
+report" tells the worker, in the one place it reads before anything else, that it
+is here to make code changes and that success looks like a clean `cargo` run. A
+worker that read `task-work`'s framing and a node topic that says "you have no
+authority to change code" is being told two different things, and on
+noogram/cosmon#110 the framing won three germinations running: `trace`, `intake`
+and `contract` each committed product-code fixes before `reproduce` had even
+frozen a RED, contaminating the exact pristine-repro guarantee the spore exists
+to give.
+
+WHAT THIS FORMULA DOES INSTEAD. Both its steps are about the WORKTREE, not about
+the code: produce the node's declared evidence (which — per every node topic in
+this spore — lives under `${output_dir}`, the run-scoped home ADR-161 hands the
+node, never inside the git worktree), then PROVE the worktree carries no product
+change by checking it, mechanically, rather than by intending to leave it alone.
+A node that finds it genuinely needs a permanent code change has found a bug in
+its own scope, not a task: that change belongs to `implement`, and this formula's
+second step is what turns "I didn't mean to touch anything" into a checked fact
+instead of a hope.
+
+NODES ON THIS FORMULA (spore.toml): `trace`, `route`, `intake`, `contract`,
+`falsify`, `green`, `ci-gate`, `rehearsal`, `release`. NOT `implement` — that node
+keeps `task-work`, because it is the one node in the DAG whose whole job is a
+product-code change, and it is the ONLY one. `reproduce` (clean-room-repro),
+`triage` (lane-triage) and `converge` (converge-clean-room) already have their
+own dedicated formulas for the same reason this one exists — a generic
+"implement" contract handed to a non-implementing node — and are not touched
+here.
+
+A TRANSIENT EDIT IS NOT A VIOLATION, AN UNREVERTED ONE IS. `falsify` mutates the
+fix under test to confirm the red's colour moves (diagnosis-discipline CLAUSE 4);
+that mutation must exist only DURING the step and be reverted before the node
+finishes. The self-check below cannot distinguish "never touched" from "touched
+and cleanly reverted" — both read as an empty diff — which is exactly the
+distinction that matters here and the one a node NEVER gets to skip proving.
+
+VARIABLES:
+  - topic : the node's own concrete task, exactly as the spore's per-node
+            `[spore.node.vars] topic` field states it (this formula adds no
+            variables of its own — the role constraint is generic, the task is
+            not).
+
+ARTIFACT PATHS — unchanged from every other node in this spore: `${output_dir}`
+(ADR-161), never the worktree, never `spores/cosmon-dev/`, never the repo root.
+"""
+id_prefix = "gate"
+freeze_on_last_step = false
+
+[vars.topic]
+description = "The node's concrete task, stated in one or more sentences (interpolated by the spore from the node's own topic)."
+required = true
+
+# Tier 0 — a leaf gate. It measures; it does not nucleate children.
+[tier]
+level = 0
+
+[[steps]]
+id = "produce-evidence"
+title = "Produce the node's evidence — the worktree stays as you found it"
+description = """
+Do exactly what the topic above asks, and nothing that changes a tracked file in
+this git worktree. Every artifact this node owes — a report, a `verdict.json`, a
+declared surface, a lane decision — is written under `${output_dir}`, the
+run-scoped output home germination handed this node (ADR-161), which is outside
+the worktree and outside git entirely. If the topic tells you to run commands
+(cargo, an install script, a mutation-and-revert like `falsify`'s), that is fine;
+what is not fine is a command whose visible effect survives as a diff in this
+worktree once the step ends.
+
+If doing this node's job honestly seems to REQUIRE a permanent product-code
+change — the evidence cannot be produced without fixing something first — that
+is not this node's authority. STOP, record the need as a finding in your
+`verdict.json` (severity, location, what needs to change and why), and let
+`implement` make the change. A gate that fixes what it is measuring has stopped
+measuring.
+"""
+acceptance = "The node's declared artifacts exist under ${output_dir}, matching its own topic; no step here edited, created, or deleted a tracked file in the worktree without reverting it before the step ended."
+
+[[steps]]
+id = "prove-the-worktree-is-clean"
+title = "Prove — do not assert — that no product code moved"
+description = """
+Run, and record the output of, both:
+
+  git status --porcelain
+  git diff --name-only <this-branch's-base>...HEAD
+
+(the base is whatever `cs status` names for this molecule — the branch this
+node's worktree was cut from; a worktree with no commits of its own reads the
+second command as empty by construction.) Both MUST be empty. This is the check the formula exists to make
+mechanical: "I only wrote evidence" is a claim a worker can be wrong about
+without meaning to (an editor autosave, a generated lockfile touch, a `cargo fmt
+--all` run instead of `--check`); a command a stranger can re-run is not.
+
+If either command is non-empty:
+  * Do NOT commit the changes. Leave them exactly as they are — uncommitted,
+    inspectable, revertible by a human.
+  * Set this node's own verdict to BLOCKED (or the equivalent your topic's §8
+    admission shape names) with a finding of severity `role-violation` per
+    changed path, quoting `git diff --stat` for each.
+  * Name the changed paths in ${output_dir}/role-violation.md so a human finds
+    them without re-deriving the command.
+
+If both are empty: record that fact plainly (the two command outputs, verbatim,
+are the evidence) and proceed to whatever this node's own topic asks you to emit
+next (its `verdict.json`, in the §8 admission shape the topic already specifies).
+
+Never create a commit — empty or otherwise — as a ritual close to this step. A
+clean `git status --porcelain` means there is nothing to commit; recording that
+in ${output_dir} is the deliverable, not a commit message.
+"""
+needs = ["produce-evidence"]
+acceptance = "git status --porcelain and git diff --name-only against this branch's base are both recorded verbatim; if either is non-empty the node is BLOCKED with a role-violation finding per changed path and nothing was committed; if both are empty the node proceeds to its own topic's verdict with no ritual commit."
