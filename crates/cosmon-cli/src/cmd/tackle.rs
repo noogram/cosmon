@@ -4831,8 +4831,15 @@ impl ReceiptOverlay {
 /// the measurement recommends: not an interpreter, and above all not through a
 /// version-manager shim, whose startup cost was 368 ms median and over a second
 /// at the tail before a single line of the hook ran.
-fn mint_briefing_receipt_overlay(wid: &cosmon_core::id::WorkerId) -> ReceiptOverlay {
-    mint_briefing_receipt_overlay_in(&cosmon_transport::briefing_receipt::receipt_root(), wid)
+fn mint_briefing_receipt_overlay(
+    wid: &cosmon_core::id::WorkerId,
+    work_member: bool,
+) -> ReceiptOverlay {
+    mint_briefing_receipt_overlay_in(
+        &cosmon_transport::briefing_receipt::receipt_root(),
+        wid,
+        work_member,
+    )
 }
 
 /// [`mint_briefing_receipt_overlay`] against an explicit receipt root.
@@ -4843,6 +4850,7 @@ fn mint_briefing_receipt_overlay(wid: &cosmon_core::id::WorkerId) -> ReceiptOver
 fn mint_briefing_receipt_overlay_in(
     root: &std::path::Path,
     wid: &cosmon_core::id::WorkerId,
+    work_member: bool,
 ) -> ReceiptOverlay {
     use cosmon_transport::briefing_receipt as receipt;
 
@@ -4860,7 +4868,9 @@ fn mint_briefing_receipt_overlay_in(
         station.prune(std::time::Duration::from_secs(0));
 
         let overlay = station.dir().join("settings.json");
-        if receipt::write_settings_overlay(&overlay, &cs_bin, &station).is_err() {
+        if receipt::write_settings_overlay_for_work(&overlay, &cs_bin, &station, work_member)
+            .is_err()
+        {
             return ReceiptOverlay::Unavailable("overlay_write");
         }
         ReceiptOverlay::Installed(overlay)
@@ -5094,9 +5104,9 @@ fn spawn_claude_and_prompt(
     // uses, so the two agree by construction. `None` (no `.cosmon/` ancestor)
     // leaves the grant empty and the command byte-identical. Mirrors codex
     // dcba4e0.
-    let writable_roots = cosmon_filestore::walk_up_find_cosmon_dir_from(worktree_path)
+    let writable_roots: Vec<_> = cosmon_filestore::walk_up_find_cosmon_dir_from(worktree_path)
         .into_iter()
-        .collect::<Vec<_>>();
+        .collect();
 
     // Grant-reachability parity (issue #20 point 2). The `--add-dir` grant above
     // is emitted on every spawn path for every permission mode — that part has
@@ -5237,7 +5247,8 @@ fn spawn_claude_and_prompt(
     // `receipt_overlay=installed|unavailable` on `cosmon::dispatch` before it
     // returns, so the absence of a receipt later can be attributed to a hook
     // that was never installed rather than to a prompt that was never accepted.
-    let receipt_mint = mint_briefing_receipt_overlay(wid);
+    let receipt_mint =
+        mint_briefing_receipt_overlay(wid, cosmon_cli::work_hook::is_current_member(mol_state_dir));
     let receipt_overlay = receipt_mint.path();
 
     let claude_cmd = cosmon_cli::tackle_env::build_claude_command(
@@ -6214,6 +6225,25 @@ fn warn_codex_api_key_stripped(var: &str) {
     );
 }
 
+fn mint_codex_work_hook_home(mol_state_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    if !cosmon_cli::work_hook::is_current_member(mol_state_dir) {
+        return None;
+    }
+    let home = mol_state_dir.join("codex-work-home");
+    match std::env::current_exe()
+        .map_err(anyhow::Error::from)
+        .and_then(|bin| {
+            cosmon_transport::codex::write_work_hook_home(&home, &bin).map_err(Into::into)
+        }) {
+        Ok(()) => Some(home),
+        Err(error) => {
+            tracing::warn!(target: "cosmon::dispatch", %error,
+                "Codex work hook unavailable; member retains pull delivery");
+            None
+        }
+    }
+}
+
 /// Codex branch of [`spawn_and_prompt`].
 ///
 /// codex is `OpenAI`'s external CLI — a Node.js wrapper around a native
@@ -6315,8 +6345,6 @@ fn spawn_codex_and_prompt(
 
     // Codex-worker API-key posture (observed 2026-09-26): `false` unless the
     // operator opted in via `[adapters.codex].pass_api_key = true`.
-    let pass_api_key = resolve_codex_pass_api_key(adapter_entry, warn_codex_api_key_stripped);
-
     let config = codex::CodexSessionConfig {
         socket: backend.socket().to_owned(),
         session_name: session_name.to_owned(),
@@ -6331,7 +6359,8 @@ fn spawn_codex_and_prompt(
         git_identity,
         writable_roots,
         harness_args: harness_args.to_vec(),
-        pass_api_key,
+        pass_api_key: resolve_codex_pass_api_key(adapter_entry, warn_codex_api_key_stripped),
+        work_hook_home: mint_codex_work_hook_home(mol_state_dir),
     };
 
     codex::spawn_codex_session(&config)
@@ -14557,7 +14586,8 @@ prompt = "Custom fleet prompt."
         let root = unusable_receipt_root(&tmp);
         let wid = WorkerId::new("receipt-overlay-unavailable").unwrap();
 
-        let (outcome, trace) = capture_trace(|| mint_briefing_receipt_overlay_in(&root, &wid));
+        let (outcome, trace) =
+            capture_trace(|| mint_briefing_receipt_overlay_in(&root, &wid, false));
 
         assert_eq!(
             outcome.status(),
@@ -14589,7 +14619,8 @@ prompt = "Custom fleet prompt."
         let root = tmp.path().join("receipts");
         let wid = WorkerId::new("receipt-overlay-installed").unwrap();
 
-        let (outcome, trace) = capture_trace(|| mint_briefing_receipt_overlay_in(&root, &wid));
+        let (outcome, trace) =
+            capture_trace(|| mint_briefing_receipt_overlay_in(&root, &wid, false));
 
         assert_eq!(outcome.status(), "installed");
         let overlay = outcome.path().expect("installed carries its overlay path");
@@ -14609,9 +14640,10 @@ prompt = "Custom fleet prompt."
         let wid = WorkerId::new("receipt-overlay-target").unwrap();
 
         let bad = unusable_receipt_root(&tmp);
-        let (_, failed) = capture_trace(|| mint_briefing_receipt_overlay_in(&bad, &wid));
-        let (_, ok) =
-            capture_trace(|| mint_briefing_receipt_overlay_in(&tmp.path().join("receipts"), &wid));
+        let (_, failed) = capture_trace(|| mint_briefing_receipt_overlay_in(&bad, &wid, false));
+        let (_, ok) = capture_trace(|| {
+            mint_briefing_receipt_overlay_in(&tmp.path().join("receipts"), &wid, false)
+        });
 
         for trace in [&failed, &ok] {
             assert!(

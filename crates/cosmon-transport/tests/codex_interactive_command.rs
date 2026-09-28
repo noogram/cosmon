@@ -49,7 +49,27 @@ fn config(mode: CodexMode, prompt: Option<&str>, extra_args: Vec<String>) -> Cod
         writable_roots: vec![],
         harness_args: vec![],
         pass_api_key: false,
+        work_hook_home: None,
     }
+}
+
+#[test]
+fn hook_trust_bypass_is_member_only() {
+    let ordinary = config(CodexMode::Interactive, None, vec![]);
+    let baseline = build_codex_command(&ordinary);
+    assert!(!baseline.contains("--dangerously-bypass-hook-trust"));
+    let mut member = ordinary;
+    member.work_hook_home = Some(std::path::PathBuf::from("/tmp/work hooks"));
+    let command = build_codex_command(&member);
+    assert!(
+        command.contains("CODEX_HOME='/tmp/work hooks'"),
+        "{command}"
+    );
+    assert!(command.contains("COSMON_MOL_DIR=/tmp"), "{command}");
+    assert!(
+        command.contains("--dangerously-bypass-hook-trust"),
+        "{command}"
+    );
 }
 
 /// The default (`CodexMode::Interactive`) command is the steerable TUI:

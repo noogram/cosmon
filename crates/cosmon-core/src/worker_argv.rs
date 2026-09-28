@@ -263,6 +263,17 @@ pub fn compose_launch(
 /// selects. Named for the same reason as [`CLAUDE_ADAPTER`].
 pub const CODEX_ADAPTER: &str = "codex";
 
+/// Codex hook trust bypass, required only when a declared work member runs
+/// with its isolated `hooks.json` home. W0 measured this flag on Codex 0.157.1.
+#[must_use]
+pub fn codex_work_hook_args(work_member: bool) -> Vec<String> {
+    if work_member {
+        vec!["--dangerously-bypass-hook-trust".to_owned()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Prefix of the per-worker codex profile an interactive codex worker
 /// launches with (issue #84). See [`codex_worker_profile_name`].
 pub const CODEX_WORKER_PROFILE_PREFIX: &str = "cosmon-worker-";
