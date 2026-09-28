@@ -55,9 +55,11 @@ Cosmon ships `cs whisper` as a **6th communication channel** — a
 | Substrate | tmux `load-buffer` + `paste-buffer` + Enter×2 into the worker pane |
 | Authority | **advisory only** — cannot abort, cannot modify `state.json`, cannot modify the DAG |
 | Regime | **Propelled only** — forbidden in **Autonomous** (ADR-016 Phase 3+), meaningless in **Inert** |
-| Caller | **human pilot only** — workers MUST NOT whisper (would be inter-agent messaging; the DAG owns inter-molecule control) |
-| Delivery | **no ACK** — undecidable by Rice's theorem; logged sender-side only |
+| Caller | **Human pilot only for `cs whisper`.** Workers use the separately authorized ADR-182 advisory contract for peer evidence; they do not gain permission to invoke this steering command. |
+| Delivery | Sender-side submission is observable; context delivery and recipient consumption require distinct evidence. This command does not currently establish those stronger facts. Semantic understanding is not implied by a receipt. |
 | Target check | `pane_current_command == "claude"` — **fail-closed**, no `--force` escape in v0 |
+
+ADR-182 proposes a separate, provider-neutral advisory evidence contract. It does not expand `cs whisper` into a peer control command. Messages cannot retask, interrupt or integrate a peer's work. The existing command's caller and regime restrictions remain in force unless separately amended.
 
 ### Persistence
 
@@ -106,11 +108,7 @@ of the oracle's context. The asymmetry is the headline, not a bug.
   whispers can produce different outcomes. This is a regime boundary signal
   — whisper lives outside the "twice = once" invariant that governs state
   transitions (einstein).
-- **Delivery is undecidable.** Rice's theorem forbids a correct, general
-  confirmation protocol. The worker may be in tool-use, REPL-input-wait, or
-  on a shell prompt after a crash; only the last is dangerous, and the
-  `pane_current_command` check catches it. Anything beyond this is a lie
-  (turing, hawking).
+- **Delivery observations are limited.** Storage admission, transport submission, insertion into model input and an explicit recipient consumption report are separately observable protocol events when the relevant adapter supports them. No general receipt proves understanding or changed reasoning. Record only the stage actually observed; terminal paste alone is not proof of context delivery.
 - **Attribution cost for verifiers.** A future verifier that compares a
   molecule's `synthesis.md` against its `prompt.md` will detect drift but
   cannot, from `events.jsonl` alone, attribute that drift to a whisper. The
@@ -154,8 +152,7 @@ of the oracle's context. The asymmetry is the headline, not a bug.
   the molecule directory, reachable by the same walk-up discovery as any
   other artifact.
 - **Stateless CLI.** `cs whisper` is one-shot: validate → paste → log → exit.
-- **Worker/human boundary.** Workers cannot whisper. This is enforced at the
-  CLI layer (caller must be the human pilot), not by convention.
+- **Worker/pilot boundary.** `cs whisper` remains pilot-to-worker steering. Declared peer evidence exchange follows ADR-182 and does not reuse whisper as an implicit worker permission. Caller role, shared uid and process shape do not establish authorization; any claimed denial requires an effect-boundary check.
 
 **Explicitly violated (by design).**
 - **Idempotence.** Speech acts are not idempotent. This is documented, not

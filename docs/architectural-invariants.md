@@ -410,6 +410,8 @@ stop and ask whether Y already has its own command.
    infrastructure around it. These are distinct commands with distinct
    perimeters. Do not merge them.
 
+Declared advisory attempts do not inherit the owning worker's lifecycle or integration authority. The owner remains responsible for formula progress, required reviewers, acceptance, retries and aggregate limits. Advisory evidence exchange among the agents of a declared work, on one provider or several, uses ADR-182's scoped contract and does not authorize peer retasking, interruption or harvest. Effect boundaries must enforce any claimed denial; roles, shared uid and sibling-shell shape are not authorization. Existing operator reservations and ADR-172 remain binding.
+
 ---
 
 ## 3b. The Write-Read Asymmetry
@@ -771,12 +773,7 @@ through the existing interactions:
 - **Surface** — alive deliberations project onto `DELIBERATIONS.md` via
   the `project.deliberations` referent, symmetric to `IDEAS.md`.
 
-No new command perimeter is required: `cs nucleate`, `cs tackle`, `cs evolve`,
-`cs complete`, `cs done` all apply unchanged. The worker inside the
-deliberation worktree is responsible for invoking the panel (via its
-available Claude Code subagents) during the `dispatch` step. From the
-runtime's perspective, a deliberation is just another molecule that
-happens to produce a synthesis document and decay products.
+Deliberations retain the existing molecule lifecycle commands. A worker may invoke declared advisory attempts only under an accepted ADR-182 contract, with required seats, canonical evidence and explicit capability fallback. Native provider tools are optional adapters. Independent permission, lifecycle or recovery requirements use separate molecules in the same declared work scope; advisory exchange among them follows the provider-neutral contract whatever provider each runs on. A panel that needs independent judgment declares provider diversity on its seats. A native terminal notice does not complete a formula step or satisfy a reviewer requirement.
 
 ---
 
@@ -809,6 +806,7 @@ Cosmon relies on is the **Markov property**:
   those links correctly. If a link is missing on disk, the resumed runtime
   will reach a different state than the interrupted one. Link fidelity is
   part of the Markov state; treat it as such.
+- **No provider-only advisory truth.** Accepted responses, required seats, dispatch uncertainty, retry budgets and communication dispositions must be recoverable from canonical molecule evidence without provider history. Attempt observations and message receipts cannot declare molecule completion. Restart tests cover the dispatch, output-publication, acceptance and message-delivery crash windows; stochastic response equality is not the claimed invariant.
 
 ### The restart-fidelity test (mandatory for any new policy or runtime code)
 
@@ -939,11 +937,7 @@ to be fixed — it is a deliberate separation of concerns.
 - **Ordering on the filesystem.** Do not rely on file mtimes, directory
   scans, or lock files to express dependency ordering. The DAG is the
   single authority on "what comes after what".
-- **Mailbox reinvention.** The thesis deliberately eliminated mailboxes
-  in favor of DAG edges precisely because conflating control and data
-  produced an unbounded-bandwidth async channel that nothing in the
-  system could reason about. Do not reintroduce mailboxes under another
-  name.
+- **No mailbox as control plane.** Any agent in a declared work scope may send advisory evidence to any other member under ADR-182, whether both run on the same provider or on different ones. No communication graph is required. Scope, payloads, admission, context-delivery observations, consumption reports, quotas and retention remain canonical and bounded. No mailbox, file scan or message acknowledgment changes dependency readiness, claims work, advances a formula or grants lifecycle or integration authority.
 - **Mixed-plane commands.** A command may read or write the control
   plane, or the data plane, but should not silently do both without
   making the distinction explicit in its doc comment. Agents reading

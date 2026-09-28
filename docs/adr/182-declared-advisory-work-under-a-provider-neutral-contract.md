@@ -2,12 +2,12 @@
 
 # ADR-182 — Declared advisory work under a provider-neutral contract
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Date:** 2026-09-28  
 **Authoring molecule:** `task-20260928-c463`  
 **Revising molecule:** `task-20260928-db65` (operator review of 2026-09-28)  
 **Source deliberation:** `delib-20260928-3e5d`  
-**Decider:** Noogram
+**Decider:** the operator (accepted 2026-09-28)
 
 ## Decision requested
 
