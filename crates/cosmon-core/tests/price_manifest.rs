@@ -61,20 +61,20 @@ fn estimated(value: ApiEquivalent) -> (f64, PricingCoverage, String) {
 }
 
 #[test]
-fn current_manifest_matches_independent_standard_arithmetic() {
+fn current_manifest_matches_independent_gpt_5_6_sol_standard_arithmetic() {
     let manifest = bundled_price_manifest().expect("bundled manifest must validate");
     let card = manifest.current_card().expect("current revision exists");
-    let usage = segment("gpt-5.3-codex", 1_000_000, 800_000, 0, 100_000, 60_000);
+    let usage = segment("gpt-5.6-sol", 1_000_000, 800_000, 0, 100_000, 60_000);
 
     let (amount, coverage, revision) =
         estimated(value_model_segments(card, &[usage], true, provenance()));
 
-    // Independent oracle from the official Standard rates:
-    // 200k fresh * $1.75 + 800k cached * $0.175 + 100k output * $14.
-    let expected = 0.35 + 0.14 + 1.40;
+    // Independent oracle from the official Standard short-context rates:
+    // 200k fresh * $4 + 800k cached * $0.40 + 100k output * $20.
+    let expected = 0.80 + 0.32 + 2.00;
     assert!((amount - expected).abs() < 1e-12);
     assert_eq!(coverage, PricingCoverage::Complete);
-    assert_eq!(revision, "standard-2026-09-28");
+    assert_eq!(revision, "standard-2026-09-28-codex");
 }
 
 #[test]
@@ -165,6 +165,11 @@ fn historical_revision_is_selectable_and_does_not_gain_new_models() {
         .unwrap()
         .rate_for("gpt-5.3-codex")
         .is_some());
+    assert!(manifest
+        .current_card()
+        .unwrap()
+        .rate_for("gpt-5.6-sol")
+        .is_some());
 }
 
 #[test]
@@ -174,5 +179,6 @@ fn exact_model_matching_never_guesses_an_alias() {
     assert!(current.rate_for("claude-opus-4-6").is_some());
     assert!(current.rate_for("opus-4-6").is_none());
     assert!(current.rate_for("CLAUDE-OPUS-4-6").is_none());
-    assert!(current.rate_for("gpt-5.6-sol").is_none());
+    assert!(current.rate_for("gpt-5.6-sol").is_some());
+    assert!(current.rate_for("gpt-5.6-sol-preview").is_none());
 }
