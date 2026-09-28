@@ -239,3 +239,6 @@ docs/specs/openjdk.jdk
 # per-step NDJSON. Run-local by construction — the record that matters
 # travels as the CI artifact, never as a tracked file.
 .rpp-remote-e2e/
+
+# Detached gate runs outside a molecule (scripts/run-gates-bg.sh, #112)
+.cosmon-gates-runs/
