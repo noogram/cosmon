@@ -156,6 +156,7 @@ fn event_type_tag(event: &EventV2) -> &'static str {
         EventV2::WorkerSpawned { .. } => "worker_spawned",
         EventV2::WorkerKilled { .. } => "worker_killed",
         EventV2::EnergyTick { .. } => "energy_tick",
+        EventV2::UsageObserved { .. } => "usage_observed",
         EventV2::WorkerHeartbeat { .. } => "worker_heartbeat",
         EventV2::Expired { .. } => "expired",
         _ => "unknown",
