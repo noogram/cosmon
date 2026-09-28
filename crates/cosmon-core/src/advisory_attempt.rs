@@ -890,6 +890,17 @@ pub struct AdvisoryReconstruction {
     pub uncertain_spawn: BTreeSet<AdvisorySeatId>,
 }
 
+impl AdvisoryReconstruction {
+    /// Report whether every required seat has an accepted artifact.
+    ///
+    /// Missing and pending dispositions remain unsatisfied because
+    /// reconstruction places both in [`Self::missing_required`].
+    #[must_use]
+    pub fn all_required_accepted(&self) -> bool {
+        self.missing_required.is_empty()
+    }
+}
+
 /// Rebuild accepted and missing seats without provider history.
 ///
 /// # Errors
@@ -1094,6 +1105,20 @@ mod tests {
         }
     }
 
+    fn ready_record() -> (AdvisoryAttemptRecord, Hash) {
+        let mut record = AdvisoryAttemptRecord::new(declaration(true), capabilities()).unwrap();
+        record.record_effective_execution(effective()).unwrap();
+        let digest = Hash::of_bytes(b"response");
+        record
+            .record_output(PersistedAttemptOutput {
+                digest,
+                bytes: 8,
+                persisted_at: Utc::now(),
+            })
+            .unwrap();
+        (record, digest)
+    }
+
     #[test]
     fn invalid_protocol_tool_combination_is_clear() {
         let mut request = declaration(true).capability_request;
@@ -1162,6 +1187,62 @@ mod tests {
             })
             .unwrap();
         assert_eq!(record.accept(acceptance).unwrap(), AttemptMutation::Applied);
+    }
+
+    #[test]
+    fn acceptance_refuses_digest_that_differs_from_persisted_output() {
+        let (mut record, persisted_digest) = ready_record();
+        let acceptance_digest = Hash::of_bytes(b"different response");
+
+        assert_eq!(
+            record
+                .accept(AttemptAcceptance {
+                    artifact_digest: acceptance_digest,
+                    accepted_by: "owner".to_owned(),
+                    checks: vec!["digest and rubric".to_owned()],
+                    limitations: Vec::new(),
+                    accepted_at: Utc::now(),
+                })
+                .unwrap_err(),
+            AdvisoryAttemptError::ArtifactDigestMismatch {
+                expected: persisted_digest,
+                observed: acceptance_digest,
+            }
+        );
+        assert_eq!(record.disposition, AttemptDisposition::Pending);
+    }
+
+    #[test]
+    fn acceptance_requires_owner_and_validation_check() {
+        let (mut no_owner, digest) = ready_record();
+        assert_eq!(
+            no_owner
+                .accept(AttemptAcceptance {
+                    artifact_digest: digest,
+                    accepted_by: "  ".to_owned(),
+                    checks: vec!["digest and rubric".to_owned()],
+                    limitations: Vec::new(),
+                    accepted_at: Utc::now(),
+                })
+                .unwrap_err(),
+            AdvisoryAttemptError::EmptyAcceptanceEvidence
+        );
+        assert_eq!(no_owner.disposition, AttemptDisposition::Pending);
+
+        let (mut no_checks, digest) = ready_record();
+        assert_eq!(
+            no_checks
+                .accept(AttemptAcceptance {
+                    artifact_digest: digest,
+                    accepted_by: "owner".to_owned(),
+                    checks: Vec::new(),
+                    limitations: Vec::new(),
+                    accepted_at: Utc::now(),
+                })
+                .unwrap_err(),
+            AdvisoryAttemptError::EmptyAcceptanceEvidence
+        );
+        assert_eq!(no_checks.disposition, AttemptDisposition::Pending);
     }
 
     #[test]
@@ -1245,6 +1326,21 @@ mod tests {
         assert!(reconstruction
             .missing_required
             .contains(&AdvisorySeatId::new("turing").unwrap()));
+        assert!(!reconstruction.all_required_accepted());
+    }
+
+    #[test]
+    fn missing_or_pending_required_seat_never_counts_as_fully_accepted() {
+        let mut missing = AdvisoryAttemptRecord::new(declaration(true), capabilities()).unwrap();
+        missing
+            .mark_missing("provider returned no artifact".to_owned(), Utc::now())
+            .unwrap();
+        let missing_reconstruction = reconstruct_attempts(&[missing]).unwrap();
+        assert!(!missing_reconstruction.all_required_accepted());
+
+        let pending = AdvisoryAttemptRecord::new(declaration(true), capabilities()).unwrap();
+        let pending_reconstruction = reconstruct_attempts(&[pending]).unwrap();
+        assert!(!pending_reconstruction.all_required_accepted());
     }
 
     #[test]
