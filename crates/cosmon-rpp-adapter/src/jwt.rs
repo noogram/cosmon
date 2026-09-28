@@ -75,6 +75,10 @@ pub struct JwksStore {
     /// provenance lets a file-stage reload preserve fetched keys while
     /// still removing file-staged issuers whose files were deleted.
     remote_issuers: HashSet<String>,
+    /// Issuers still present in the current HTTP-fetch configuration.
+    /// Kept in the same atomically published snapshot as the keys so a
+    /// stale refresh cannot race a SIGHUP revocation and restore trust.
+    configured_remote_issuers: HashSet<String>,
 }
 
 /// One key record carried by the store.
@@ -354,8 +358,8 @@ impl JwksStore {
     /// HTTP-fetch provenance survive from the live snapshot; their keys
     /// and audience pins replace any same-issuer file entry because the
     /// HTTP path is the primary source when configured.
-    fn preserve_remote_issuers_from(&mut self, live: &Self) {
-        for issuer in &live.remote_issuers {
+    fn preserve_remote_issuers_from(&mut self, live: &Self, configured: &HashSet<String>) {
+        for issuer in live.remote_issuers.intersection(configured) {
             self.by_iss_kid.retain(|(iss, _kid), _| iss != issuer);
             self.by_iss_kid.extend(
                 live.by_iss_kid
@@ -368,7 +372,29 @@ impl JwksStore {
                     .insert(issuer.clone(), audiences.clone());
             }
         }
-        self.remote_issuers.clone_from(&live.remote_issuers);
+        self.remote_issuers = live
+            .remote_issuers
+            .intersection(configured)
+            .cloned()
+            .collect();
+        self.configured_remote_issuers.clone_from(configured);
+    }
+
+    /// Remove HTTP-fetched material for issuers outside the current
+    /// configuration while leaving file-backed issuers untouched.
+    fn retain_configured_remote_issuers(&mut self, configured: &HashSet<String>) {
+        let revoked: HashSet<_> = self
+            .remote_issuers
+            .difference(configured)
+            .cloned()
+            .collect();
+        self.by_iss_kid
+            .retain(|(iss, _kid), _record| !revoked.contains(iss));
+        self.allowed_audiences
+            .retain(|iss, _audiences| !revoked.contains(iss));
+        self.remote_issuers
+            .retain(|issuer| configured.contains(issuer));
+        self.configured_remote_issuers.clone_from(configured);
     }
 }
 
@@ -448,6 +474,34 @@ impl SharedJwksStore {
         self.0.store(Arc::new(store));
     }
 
+    /// Set the initial HTTP-fetch allowlist in the same snapshot as the
+    /// live keys. [`crate::jwks_fetch::JwksProvider`] calls this when it
+    /// takes ownership of a store.
+    pub(crate) fn configure_remote_issuers(&self, configured: &HashSet<String>) {
+        self.0.rcu(|live| {
+            let mut next = (**live).clone();
+            next.retain_configured_remote_issuers(configured);
+            Arc::new(next)
+        });
+    }
+
+    /// Whether the current snapshot still authorises HTTP refreshes for
+    /// `issuer`.
+    pub(crate) fn is_remote_issuer_configured(&self, issuer: &str) -> bool {
+        self.load().configured_remote_issuers.contains(issuer)
+    }
+
+    /// Publish a store produced by an HTTP refresh without allowing a
+    /// stale refresh snapshot to overwrite a concurrent SIGHUP revocation.
+    pub(crate) fn store_remote_refresh(&self, refreshed: &JwksStore) {
+        self.0.rcu(|live| {
+            let configured = &live.configured_remote_issuers;
+            let mut next = refreshed.clone();
+            next.retain_configured_remote_issuers(configured);
+            Arc::new(next)
+        });
+    }
+
     /// Publish a freshly loaded file-stage store without dropping issuers
     /// populated by the HTTP-fetch path.
     ///
@@ -455,10 +509,10 @@ impl SharedJwksStore {
     /// publishes while the reload is being committed, so the reload never
     /// restores an older fetched-key snapshot merely because the two paths
     /// crossed.
-    pub(crate) fn store_file_stage(&self, file_store: &JwksStore) {
+    pub(crate) fn store_file_stage(&self, file_store: &JwksStore, configured: &HashSet<String>) {
         self.0.rcu(|live| {
             let mut merged = file_store.clone();
-            merged.preserve_remote_issuers_from(live);
+            merged.preserve_remote_issuers_from(live, configured);
             Arc::new(merged)
         });
     }
