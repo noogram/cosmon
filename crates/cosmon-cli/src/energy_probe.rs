@@ -109,8 +109,6 @@ pub fn load_worker_energy(
     backends: &[cosmon_transport::TmuxBackend],
     fleet: &cosmon_state::Fleet,
 ) -> HashMap<WorkerId, WorkerEnergy> {
-    let mut map: HashMap<WorkerId, WorkerEnergy> = HashMap::new();
-
     // Fold the global journal **once** into a `mol_id -> last adapter` map,
     // then read the per-worker adapter from that map. The previous shape
     // called `last_adapter_for` inside the loop, and each call re-read and
@@ -121,6 +119,21 @@ pub fn load_worker_energy(
     // question one fold of 80k answers). See
     // `docs/design/peek-fold-cost.md`.
     let adapters = fold_last_adapters(state_dir);
+    load_worker_energy_with_adapters(state_dir, backends, fleet, &adapters)
+}
+
+/// [`load_worker_energy`] with the `mol_id -> last adapter` map supplied by
+/// the caller — the refresh-loop form. `cs peek` keeps that map current from
+/// an incremental [`JournalFold`] instead of re-parsing `events.jsonl` on
+/// every refresh (issue #116).
+#[must_use]
+pub fn load_worker_energy_with_adapters(
+    state_dir: &Path,
+    backends: &[cosmon_transport::TmuxBackend],
+    fleet: &cosmon_state::Fleet,
+    adapters: &HashMap<MoleculeId, String>,
+) -> HashMap<WorkerId, WorkerEnergy> {
+    let mut map: HashMap<WorkerId, WorkerEnergy> = HashMap::new();
 
     // Resolve every live Codex cwd first, then join all of them to the
     // session history in one newest-first pass. Rebuilding and sorting the
@@ -171,13 +184,12 @@ pub fn load_worker_energy(
 
 /// Fold the global `events.jsonl` **once** into a `mol_id -> last adapter`
 /// map: for every [`EventV2::AdapterSelected`], the last one wins (forward
-/// scan, overwrite). This is the batched form of [`last_adapter_for`] — one
-/// journal read answers the adapter question for *every* molecule at once,
+/// scan, overwrite). One journal read answers the adapter question for *every* molecule at once,
 /// so callers with many workers avoid re-parsing the whole journal per
 /// worker.
 ///
-/// Returns an empty map on read error (same fail-soft contract as
-/// [`last_adapter_for`], whose `None` the caller treats as "legacy → claude").
+/// Returns an empty map on read error; a molecule absent from it is treated
+/// by the caller as "legacy → claude".
 #[must_use]
 fn fold_last_adapters(state_dir: &Path) -> HashMap<MoleculeId, String> {
     let log_path = cosmon_state::event_log::resolve_events_log_path(state_dir);
@@ -198,12 +210,113 @@ fn fold_last_adapters(state_dir: &Path) -> HashMap<MoleculeId, String> {
     out
 }
 
+/// The part of one state dir's `events.jsonl` that `cs peek` displays,
+/// folded incrementally: per molecule, only the events
+/// [`AdapterAttribution::fold`](cosmon_core::adapter_attribution::AdapterAttribution::fold)
+/// reads.
+///
+/// # Why it exists (issue #116)
+///
+/// Every peek refresh parsed the whole journal twice — once for the adapter
+/// column, once for the adapter routing of the energy probe. At one to four
+/// refreshes a second against a 170 MB journal, an idle TUI held 2–3 GB and
+/// most of a core. A fold kept across refreshes reads each journal byte once
+/// and retains only the attribution events, a few per dispatch (91 k of 554 k
+/// lines on that journal), never the rest of the history.
+#[derive(Debug)]
+pub struct JournalFold {
+    tail: cosmon_state::event_log::EventLogTail,
+    events: HashMap<MoleculeId, Vec<EventV2>>,
+}
+
+impl JournalFold {
+    /// A fold over `state_dir`'s journal; nothing is read before
+    /// [`Self::catch_up`].
+    #[must_use]
+    pub fn new(state_dir: &Path) -> Self {
+        Self {
+            tail: cosmon_state::event_log::EventLogTail::new(
+                cosmon_state::event_log::resolve_events_log_path(state_dir),
+            ),
+            events: HashMap::new(),
+        }
+    }
+
+    /// Fold what was appended since the last call. A missing or unreadable
+    /// journal leaves the fold as it was (the display degrades to its
+    /// placeholder, never to an error).
+    pub fn catch_up(&mut self) {
+        let events = &mut self.events;
+        let _ = self.tail.read_new(|item| match item {
+            cosmon_state::event_log::TailItem::Restarted => events.clear(),
+            cosmon_state::event_log::TailItem::Envelope(env) => {
+                if !cosmon_core::adapter_attribution::AdapterAttribution::folds(&env.event) {
+                    return;
+                }
+                if let Some(mol) = env.event.molecule_id().cloned() {
+                    events.entry(mol).or_default().push(env.event);
+                }
+            }
+        });
+    }
+
+    /// The honest adapter/model attribution for `mol`, or `None` when no
+    /// relevant event names it.
+    #[must_use]
+    pub fn attribution(
+        &self,
+        mol: &MoleculeId,
+    ) -> Option<cosmon_core::adapter_attribution::AdapterAttribution> {
+        self.events
+            .get(mol)
+            .map(cosmon_core::adapter_attribution::AdapterAttribution::fold)
+    }
+
+    /// `mol_id -> last selected adapter`, the input of
+    /// [`load_worker_energy_with_adapters`] — the same answer
+    /// [`fold_last_adapters`] gives, from the retained events.
+    #[must_use]
+    pub fn last_adapters(&self) -> HashMap<MoleculeId, String> {
+        self.events
+            .iter()
+            .filter_map(|(mol, events)| {
+                events.iter().rev().find_map(|e| match e {
+                    EventV2::AdapterSelected { adapter_name, .. } => {
+                        Some((mol.clone(), adapter_name.clone()))
+                    }
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+}
+
+/// One [`JournalFold`] per state dir, shared by the peek UI thread and its
+/// background reload thread.
+pub type SharedJournalFolds = std::sync::Arc<std::sync::Mutex<HashMap<PathBuf, JournalFold>>>;
+
+/// Catch the fold for `state_dir` up and run `f` on it.
+pub fn with_journal_fold<T>(
+    folds: &SharedJournalFolds,
+    state_dir: &Path,
+    f: impl FnOnce(&JournalFold) -> T,
+) -> T {
+    let mut guard = folds
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fold = guard
+        .entry(state_dir.to_path_buf())
+        .or_insert_with(|| JournalFold::new(state_dir));
+    fold.catch_up();
+    f(fold)
+}
+
 /// Probe a single worker's current energy values, **adapter-aware**.
 ///
 /// The `adapter` that ran the worker's molecule (the last
 /// [`EventV2::AdapterSelected`] on `events.jsonl`, resolved by the caller —
-/// batched once via [`fold_last_adapters`], or for one molecule via
-/// [`last_adapter_for`]) selects the chain: `codex` reads the codex rollout
+/// batched once via [`fold_last_adapters`], or for one molecule by a
+/// [`RealizedCapture`]) selects the chain: `codex` reads the codex rollout
 /// log via [`probe_codex_worker_energy`]; `claude` — and the legacy case
 /// where no selection was ever recorded (`adapter == None`) — reads the
 /// Claude Code session log via the PID-sidecar chain, unchanged. In-process
@@ -554,96 +667,296 @@ pub fn capture_realized_from_cwd_under(
     cwd: &Path,
     claude_projects_root: Option<&Path>,
 ) {
-    let adapter = last_adapter_for(state_dir, mol_id);
-    // Fail-closed worker scoping (round-3 / F-02): every new observation must
-    // be attached to the worker that produced it. No resolvable worker → no
-    // emission — an unscoped line would be ambiguous forever.
-    let Some(worker) = last_worker_for(state_dir, mol_id) else {
-        return;
-    };
-    let (observed, source) = match adapter.as_deref() {
-        // Subprocess adapters whose model lives in a session log on disk.
-        Some("claude") | None => (
-            match claude_projects_root {
-                Some(root) => resolve_claude_session_by_cwd_under(root, cwd),
-                None => resolve_claude_session_by_cwd(cwd),
-            }
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|c| realized_models_from_claude_jsonl(&c))
-            .unwrap_or_default(),
-            ModelObservationSource::ClaudeStreamJson,
-        ),
-        Some("codex") => {
-            let content = resolve_codex_session_by_cwd(cwd)
-                .and_then(|p| std::fs::read_to_string(p).ok())
-                .unwrap_or_default();
-            // The ex-post half of ADR-177 Decision 5, read from the same bytes
-            // the model axis already reads: codex names the effort on the
-            // session-opening `turn_context` and on every later
-            // `thread_settings_applied`. Emitted here rather than beside the
-            // model emission below because an effort trajectory can be present
-            // while the model trajectory is empty (and vice versa), and neither
-            // axis may be inferred from the other.
-            emit_realized_efforts(state_dir, mol_id, &worker, &content);
-            (
-                realized_models_from_codex_session(&content),
-                ModelObservationSource::CodexSessionMeta,
-            )
-        }
-        // In-process providers emit at their own response seam.
-        _ => return,
-    };
-    if observed.is_empty() {
-        return;
-    }
-    let adapter_name = adapter.as_deref().unwrap_or("claude");
-    // task-20260729-7dd4 — a session-log adapter reports a model id and nothing
-    // else about the method, so it says exactly that rather than leaving the
-    // provenance question unanswered.
-    let provenance =
-        cosmon_core::algorithmic_provenance::AlgorithmicProvenance::adapter_silent(adapter_name);
-    cosmon_state::events::worker_spawn::emit_new_model_observations(
-        state_dir,
-        mol_id,
-        &worker,
-        adapter_name,
-        &observed,
-        source,
-        &provenance,
-    );
+    RealizedCapture::new(state_dir, mol_id, cwd, claude_projects_root).tick();
 }
 
-/// Emit the newly-observed tail of the realized **reasoning-effort**
-/// trajectory a codex session log reports (ADR-177 / issue #65).
+thread_local! {
+    static SESSION_LOG_BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Bytes of worker session logs this thread has read for realized-model
+/// capture — the session-log sibling of
+/// [`cosmon_state::event_log::journal_bytes_read_by_this_thread`], so a test
+/// can measure what a watcher tick re-reads (issue #116).
+#[cfg(test)]
+#[must_use]
+pub fn session_log_bytes_read_by_this_thread() -> u64 {
+    SESSION_LOG_BYTES_READ.with(std::cell::Cell::get)
+}
+
+fn note_session_log_bytes_read(n: u64) {
+    SESSION_LOG_BYTES_READ.with(|c| c.set(c.get().saturating_add(n)));
+}
+
+/// Largest slice of a session log read into memory at once.
 ///
-/// Separate from the model emission on purpose: the two axes are disjoint. A
-/// session may name an effort and no model, or a model and no effort, and
-/// neither is ever back-filled from the other — nor from the pin, which is the
-/// `reasoning_effort_is_never_inferred` discipline applied to the axis it was
-/// named after.
+/// A first read of a long codex rollout or claude transcript can be hundreds of
+/// megabytes; reading it in bounded slices keeps the watcher's peak memory at
+/// this size rather than at the size of the file (issue #116).
+const SESSION_READ_CHUNK: usize = 4 * 1024 * 1024;
+
+/// How many ticks a resolved codex rollout is trusted before the session
+/// history is walked again to look for a newer one (a resume or retry in the
+/// same worktree). Walking `~/.codex/sessions` touches every rollout the user
+/// ever ran, so it is not a per-tick cost.
+const CODEX_RESOLVE_EVERY_TICKS: u32 = 30;
+
+/// The realized-model capture of **one dispatch**, kept across ticks.
 ///
-/// An empty trajectory emits nothing. That silence is the honest floor: what
-/// remains for the reader is the ex-ante `harness_setting_selected` receipt,
-/// whose wording is *dispatched at*, never *ran at*.
-fn emit_realized_efforts(
-    state_dir: &Path,
-    mol_id: &MoleculeId,
-    worker: &cosmon_core::id::WorkerId,
-    content: &str,
-) {
-    let efforts = cosmon_core::model_realization::realized_efforts_from_codex_session(content);
-    cosmon_state::events::worker_spawn::emit_new_effort_observations(
-        state_dir,
-        mol_id,
-        worker,
-        "codex",
-        &efforts,
-        ModelObservationSource::CodexSessionMeta,
-    );
+/// # Why it holds state (issue #116)
+///
+/// [`capture_realized_from_cwd_under`] used to be the whole tick: resolve the
+/// adapter and the worker by parsing all of `events.jsonl` (twice), read the
+/// entire session log into one `String`, parse every line of it, then parse the
+/// journal again for the dedup. The detached `cs realized-watch` runs that once
+/// a second for up to six hours. Measured against a 170 MB journal and a 20 MB
+/// session log growing 50 KB/s, one watcher peaked at 4.4 GB resident and
+/// used 47 s of CPU in 90 s. With the journal cut to the molecule's own eleven
+/// lines the same watcher stayed under 40 MB, so the journal re-parses, not the
+/// session-log re-read, carried the growth; the session log is read
+/// incrementally anyway, since it grows for the whole run.
+///
+/// Holding the journal fold ([`ObservationLedger`]) and the session-log offset
+/// here makes each tick proportional to what was **appended** since the last
+/// one, and keeps only the realized trajectories — a handful of ids — in memory.
+/// The trajectory an incremental parse builds is the one a whole-file parse
+/// builds: collapsing consecutive duplicates over a concatenation is the same
+/// as collapsing each part and then collapsing across the seam.
+///
+/// [`ObservationLedger`]: cosmon_state::events::worker_spawn::ObservationLedger
+pub struct RealizedCapture {
+    cwd: PathBuf,
+    claude_projects_root: Option<PathBuf>,
+    ledger: cosmon_state::events::worker_spawn::ObservationLedger,
+    session: Option<SessionLogTail>,
+    ticks_since_resolve: u32,
+}
+
+/// Incremental read position and parsed trajectories of one session log.
+struct SessionLogTail {
+    path: PathBuf,
+    adapter: String,
+    offset: u64,
+    models: Vec<cosmon_core::model_realization::ModelId>,
+    efforts: Vec<cosmon_core::model_realization::EffortLevel>,
+}
+
+impl RealizedCapture {
+    /// A capture for `mol_id`'s worker running in `cwd`. `claude_projects_root`
+    /// names the Claude `projects/` root (`None` = this process's environment).
+    #[must_use]
+    pub fn new(
+        state_dir: &Path,
+        mol_id: &MoleculeId,
+        cwd: &Path,
+        claude_projects_root: Option<&Path>,
+    ) -> Self {
+        Self {
+            cwd: cwd.to_path_buf(),
+            claude_projects_root: claude_projects_root.map(Path::to_path_buf),
+            ledger: cosmon_state::events::worker_spawn::ObservationLedger::new(state_dir, mol_id),
+            session: None,
+            ticks_since_resolve: 0,
+        }
+    }
+
+    /// The adapter that most recently ran for the molecule (last
+    /// `AdapterSelected`), folded incrementally.
+    pub fn last_adapter(&mut self) -> Option<String> {
+        self.ledger.last_adapter()
+    }
+
+    /// The current attempt's worker — the incremental form of
+    /// [`last_worker_for`].
+    pub fn last_worker(&mut self) -> Option<WorkerId> {
+        self.ledger.last_worker()
+    }
+
+    /// Say once that this dispatch's session-log root is missing, deduped
+    /// against the journal fold this capture already holds.
+    pub fn emit_model_observation_unavailable_once(
+        &mut self,
+        worker: &WorkerId,
+        adapter: &str,
+        expected_root: &Path,
+    ) {
+        self.ledger
+            .emit_model_observation_unavailable_once(worker, adapter, expected_root);
+    }
+
+    /// Byte offset consumed in the current session log, `0` when none is
+    /// resolved yet. Exposed so a test can assert that a tick read only the
+    /// appended bytes rather than trusting the observations alone.
+    #[cfg(test)]
+    #[must_use]
+    pub fn session_offset(&self) -> u64 {
+        self.session.as_ref().map_or(0, |s| s.offset)
+    }
+
+    /// One capture: read what the session log gained since the last tick and
+    /// emit the newly-observed tail of the realized trajectories (D4:
+    /// first observation emits, unchanged emits nothing, change re-emits).
+    pub fn tick(&mut self) {
+        let adapter = self.ledger.last_adapter();
+        // Fail-closed worker scoping (round-3 / F-02): every new observation
+        // must be attached to the worker that produced it. No resolvable
+        // worker → no emission — an unscoped line would be ambiguous forever.
+        let Some(worker) = self.ledger.last_worker() else {
+            return;
+        };
+        let (adapter_name, source) = match adapter.as_deref() {
+            // Subprocess adapters whose model lives in a session log on disk.
+            Some("claude") | None => ("claude", ModelObservationSource::ClaudeStreamJson),
+            Some("codex") => ("codex", ModelObservationSource::CodexSessionMeta),
+            // In-process providers emit at their own response seam.
+            _ => return,
+        };
+        let Some(path) = self.resolve_session(adapter_name) else {
+            return;
+        };
+        let session = match self.session.take() {
+            Some(s) if s.path == path && s.adapter == adapter_name => s,
+            _ => SessionLogTail {
+                path,
+                adapter: adapter_name.to_owned(),
+                offset: 0,
+                models: Vec::new(),
+                efforts: Vec::new(),
+            },
+        };
+        let session = self.session.insert(session);
+        session.read_new();
+        if adapter_name == "codex" {
+            // The ex-post half of ADR-177 Decision 5, read from the same bytes
+            // the model axis already reads. Emitted separately from the model
+            // emission below because an effort trajectory can be present while
+            // the model trajectory is empty (and vice versa), and neither axis
+            // may be inferred from the other.
+            self.ledger.emit_new_effort_observations(
+                &worker,
+                "codex",
+                &session.efforts,
+                ModelObservationSource::CodexSessionMeta,
+            );
+        }
+        if session.models.is_empty() {
+            return;
+        }
+        // task-20260729-7dd4 — a session-log adapter reports a model id and
+        // nothing else about the method, so it says exactly that rather than
+        // leaving the provenance question unanswered.
+        let provenance = cosmon_core::algorithmic_provenance::AlgorithmicProvenance::adapter_silent(
+            adapter_name,
+        );
+        self.ledger.emit_new_model_observations(
+            &worker,
+            adapter_name,
+            &session.models,
+            source,
+            &provenance,
+        );
+    }
+
+    /// The session log to read this tick. Claude's per-cwd directory is small
+    /// and is listed every tick; codex's history is walked only while nothing
+    /// is resolved and then every [`CODEX_RESOLVE_EVERY_TICKS`].
+    fn resolve_session(&mut self, adapter: &str) -> Option<PathBuf> {
+        if adapter == "claude" {
+            return match self.claude_projects_root.as_deref() {
+                Some(root) => resolve_claude_session_by_cwd_under(root, &self.cwd),
+                None => resolve_claude_session_by_cwd(&self.cwd),
+            };
+        }
+        if let Some(s) = self.session.as_ref().filter(|s| s.adapter == adapter) {
+            if self.ticks_since_resolve < CODEX_RESOLVE_EVERY_TICKS {
+                self.ticks_since_resolve += 1;
+                return Some(s.path.clone());
+            }
+        }
+        self.ticks_since_resolve = 0;
+        resolve_codex_session_by_cwd(&self.cwd)
+    }
+}
+
+impl SessionLogTail {
+    /// Parse the complete lines appended since the last read, in bounded
+    /// slices, and extend the trajectories. A file that shrank (rewritten)
+    /// is re-read from the start.
+    fn read_new(&mut self) {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+
+        let Ok(mut file) = std::fs::File::open(&self.path) else {
+            return;
+        };
+        let Ok(len) = file.metadata().map(|m| m.len()) else {
+            return;
+        };
+        if len < self.offset {
+            self.offset = 0;
+            self.models.clear();
+            self.efforts.clear();
+        }
+        if len == self.offset || file.seek(SeekFrom::Start(self.offset)).is_err() {
+            return;
+        }
+        let mut remaining = len - self.offset;
+        let mut buf: Vec<u8> = Vec::new();
+        while remaining > 0 {
+            let want = usize::try_from(remaining)
+                .unwrap_or(SESSION_READ_CHUNK)
+                .min(SESSION_READ_CHUNK);
+            let start = buf.len();
+            buf.resize(start + want, 0);
+            let Ok(got) = file.read(&mut buf[start..]) else {
+                return;
+            };
+            note_session_log_bytes_read(got as u64);
+            buf.truncate(start + got);
+            if got == 0 {
+                break;
+            }
+            remaining -= got as u64;
+            // Parse up to the last complete line; carry the torn remainder.
+            let Some(end) = buf.iter().rposition(|b| *b == b'\n') else {
+                if buf.len() >= SESSION_READ_CHUNK * 4 {
+                    // A single line this long carries no model record worth
+                    // the memory; skip it rather than grow without bound.
+                    self.offset += buf.len() as u64;
+                    buf.clear();
+                }
+                continue;
+            };
+            self.absorb(&buf[..=end]);
+            self.offset += end as u64 + 1;
+            buf.drain(..=end);
+        }
+    }
+
+    fn absorb(&mut self, bytes: &[u8]) {
+        let text = String::from_utf8_lossy(bytes);
+        if self.adapter == "codex" {
+            extend_collapsed(&mut self.models, realized_models_from_codex_session(&text));
+            extend_collapsed(
+                &mut self.efforts,
+                cosmon_core::model_realization::realized_efforts_from_codex_session(&text),
+            );
+        } else {
+            extend_collapsed(&mut self.models, realized_models_from_claude_jsonl(&text));
+        }
+    }
+}
+
+/// Append an already-collapsed trajectory, collapsing across the seam.
+fn extend_collapsed<T: PartialEq>(into: &mut Vec<T>, more: Vec<T>) {
+    for item in more {
+        if into.last() != Some(&item) {
+            into.push(item);
+        }
+    }
 }
 
 /// The session-log **root directory** the realized-model observer will read
-/// for `mol_id`, given the Claude `projects/` root this process was told to
+/// for a dispatch run by `adapter`, given the Claude `projects/` root this process was told to
 /// use (`None` = resolve from the environment).
 ///
 /// This is the directory whose *absence* means no observation can ever
@@ -657,13 +970,16 @@ fn emit_realized_efforts(
 /// first seconds of every run — the worker creates it when it writes its
 /// first turn — so treating *its* absence as a broken seam would cry wolf on
 /// every healthy dispatch.
+///
+/// The adapter is passed in rather than looked up: the watcher already holds
+/// it in its incremental journal fold and must not re-parse the journal to
+/// learn it again (issue #116).
 #[must_use]
-pub fn session_log_root_for(
-    state_dir: &Path,
-    mol_id: &MoleculeId,
+pub fn session_log_root_for_adapter(
+    adapter: Option<&str>,
     claude_projects_root: Option<&Path>,
 ) -> Option<PathBuf> {
-    match last_adapter_for(state_dir, mol_id).as_deref() {
+    match adapter {
         Some("claude") | None => {
             Some(claude_projects_root.map_or_else(claude_projects_dir, Path::to_path_buf))
         }
@@ -672,32 +988,11 @@ pub fn session_log_root_for(
     }
 }
 
-/// The adapter that most recently ran for `mol_id`, folded from the last
-/// [`EventV2::AdapterSelected`] on `events.jsonl`. `None` on read error or when
-/// no selection was recorded (legacy → treated as claude by the caller).
-///
-/// Public so the detached watcher can scope its own diagnostics to the
-/// adapter that actually ran, without re-implementing the fold.
-#[must_use]
-pub fn last_adapter_for(state_dir: &Path, mol_id: &MoleculeId) -> Option<String> {
-    let log_path = cosmon_state::event_log::resolve_events_log_path(state_dir);
-    let envelopes = cosmon_state::event_log::read_all(&log_path).ok()?;
-    envelopes.into_iter().rev().find_map(|env| match env.event {
-        EventV2::AdapterSelected {
-            mol_id: ref m,
-            adapter_name,
-            ..
-        } if m == mol_id => Some(adapter_name),
-        _ => None,
-    })
-}
-
 /// The worker most recently spawned for `mol_id` (the current attempt), from the
 /// last [`EventV2::WorkerSpawned`]. Scopes the emitted observations (F-02).
 ///
-/// Public for the same reason as [`last_adapter_for`]: the watcher's
-/// broken-seam diagnostic is scoped to the same attempt as the observations
-/// it replaces, and must resolve that scope the same way.
+/// One-shot form for callers that do not hold a [`RealizedCapture`]; it
+/// parses the whole journal, so nothing that ticks may call it (issue #116).
 #[must_use]
 pub fn last_worker_for(state_dir: &Path, mol_id: &MoleculeId) -> Option<WorkerId> {
     let log_path = cosmon_state::event_log::resolve_events_log_path(state_dir);

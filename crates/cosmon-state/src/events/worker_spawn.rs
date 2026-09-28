@@ -525,22 +525,13 @@ pub fn emit_new_model_observations(
     observed_source: ModelObservationSource,
     provenance: &AlgorithmicProvenance,
 ) {
-    if observed.is_empty() {
-        return;
-    }
-    let _guard = ObservationEmitLock::acquire(state_dir);
-    let recorded = recorded_model_observations(state_dir, mol_id, worker_id, adapter_name);
-    for model in newly_observed(&recorded, observed) {
-        emit_model_observed(
-            state_dir,
-            mol_id,
-            worker_id,
-            adapter_name,
-            model.as_str(),
-            observed_source,
-            provenance,
-        );
-    }
+    ObservationLedger::new(state_dir, mol_id).emit_new_model_observations(
+        worker_id,
+        adapter_name,
+        observed,
+        observed_source,
+        provenance,
+    );
 }
 
 /// Emit the **newly-observed tail** of a realized-effort trajectory for one
@@ -571,54 +562,12 @@ pub fn emit_new_effort_observations(
     observed: &[cosmon_core::model_realization::EffortLevel],
     observed_source: ModelObservationSource,
 ) {
-    if observed.is_empty() {
-        return;
-    }
-    let _guard = ObservationEmitLock::acquire(state_dir);
-    let recorded = recorded_effort_observations(state_dir, mol_id, worker_id, adapter_name);
-    for effort in newly_observed(&recorded, observed) {
-        emit_effort_observed(
-            state_dir,
-            mol_id,
-            worker_id,
-            adapter_name,
-            effort.as_str(),
-            observed_source,
-        );
-    }
-}
-
-/// The realized-effort trajectory already on the wire for one dispatch scope.
-///
-/// Legacy unscoped lines (`worker_id: None`) are matched fail-closed exactly as
-/// on the model axis: they belong to no identifiable attempt and therefore
-/// suppress nothing.
-#[must_use]
-fn recorded_effort_observations(
-    state_dir: &Path,
-    mol_id: &MoleculeId,
-    worker_id: &WorkerId,
-    adapter_name: &str,
-) -> Vec<cosmon_core::model_realization::EffortLevel> {
-    let log_path = resolve_events_log_path(state_dir);
-    let Ok(envelopes) = crate::event_log::read_all(&log_path) else {
-        return Vec::new();
-    };
-    envelopes
-        .into_iter()
-        .filter_map(|env| match env.event {
-            EventV2::EffortObserved {
-                mol_id: ref m,
-                worker_id: Some(ref w),
-                adapter_name: ref a,
-                ref effort,
-                ..
-            } if m == mol_id && a == adapter_name && w == worker_id => {
-                cosmon_core::model_realization::EffortLevel::new(effort)
-            }
-            _ => None,
-        })
-        .collect()
+    ObservationLedger::new(state_dir, mol_id).emit_new_effort_observations(
+        worker_id,
+        adapter_name,
+        observed,
+        observed_source,
+    );
 }
 
 /// Emit an [`EventV2::ModelObservationUnavailable`] **at most once** for one
@@ -647,48 +596,11 @@ pub fn emit_model_observation_unavailable_once(
     adapter_name: &str,
     expected_root: &Path,
 ) {
-    let _guard = ObservationEmitLock::acquire(state_dir);
-    if already_reported_unavailable(state_dir, mol_id, worker_id, adapter_name) {
-        return;
-    }
-    let event = EventV2::ModelObservationUnavailable {
-        mol_id: mol_id.clone(),
-        worker_id: Some(worker_id.clone()),
-        adapter_name: adapter_name.to_owned(),
-        expected_root: expected_root.to_string_lossy().into_owned(),
-        detected_at: Utc::now(),
-    };
-    write_event(state_dir, event);
-}
-
-/// Whether `(mol_id, worker_id, adapter_name)` already carries an
-/// [`EventV2::ModelObservationUnavailable`] line.
-///
-/// An unreadable log answers `true` — see
-/// [`emit_model_observation_unavailable_once`] for why the failure mode of a
-/// diagnostic is silence, not repetition. Legacy unscoped lines
-/// (`worker_id: None`) are matched fail-closed, as elsewhere: they belong to
-/// no identifiable attempt and therefore suppress nothing.
-#[must_use]
-fn already_reported_unavailable(
-    state_dir: &Path,
-    mol_id: &MoleculeId,
-    worker_id: &WorkerId,
-    adapter_name: &str,
-) -> bool {
-    let log_path = resolve_events_log_path(state_dir);
-    let Ok(envelopes) = crate::event_log::read_all(&log_path) else {
-        return true;
-    };
-    envelopes.into_iter().any(|env| match env.event {
-        EventV2::ModelObservationUnavailable {
-            mol_id: ref m,
-            worker_id: Some(ref w),
-            adapter_name: ref a,
-            ..
-        } => m == mol_id && w == worker_id && a == adapter_name,
-        _ => false,
-    })
+    ObservationLedger::new(state_dir, mol_id).emit_model_observation_unavailable_once(
+        worker_id,
+        adapter_name,
+        expected_root,
+    );
 }
 
 /// RAII guard making the dedup read-back + emission in
@@ -727,39 +639,251 @@ impl Drop for ObservationEmitLock {
     }
 }
 
-/// The realized models already on the wire for exactly `(mol_id, worker_id,
-/// adapter_name)`, in append order — folded from the matching
-/// [`EventV2::ModelObserved`] events. **Fail-closed** (round-3 / F-02): a
-/// legacy observation carrying no `worker_id` is ambiguous and matches **no**
-/// requested worker — it must never suppress (dedup away) a properly-scoped
-/// new observation, nor be counted as this attempt's prefix. Any read error
-/// yields an empty list (best-effort), so a first observation is emitted.
-#[must_use]
-fn recorded_model_observations(
-    state_dir: &Path,
-    mol_id: &MoleculeId,
-    worker_id: &WorkerId,
-    adapter_name: &str,
-) -> Vec<cosmon_core::model_realization::ModelId> {
-    let log_path = resolve_events_log_path(state_dir);
-    let Ok(envelopes) = crate::event_log::read_all(&log_path) else {
-        return Vec::new();
-    };
-    envelopes
-        .into_iter()
-        .filter_map(|env| match env.event {
-            EventV2::ModelObserved {
-                mol_id: ref m,
-                worker_id: Some(ref w),
-                adapter_name: ref a,
-                ref model,
+/// `(worker, adapter)` — the dispatch scope an observation belongs to (F-02).
+type Scope = (WorkerId, String);
+
+/// What `events.jsonl` says about **one** molecule's dispatch, folded
+/// incrementally: the current adapter and worker, and the realized
+/// model/effort trajectories and unavailability findings already recorded per
+/// `(worker, adapter)` scope.
+///
+/// # Why a ledger rather than a read-back per call (issue #116)
+///
+/// The dedup behind [`emit_new_model_observations`] and its siblings used to
+/// re-read and re-parse the whole journal on every call, and the detached
+/// `cs realized-watch` makes those calls once a second for up to six hours —
+/// together with the adapter/worker lookups, four to five full parses per tick.
+/// On a 170 MB journal that kept a core at 50–90 % and the process at gigabytes
+/// resident. The ledger reads the journal through an
+/// [`EventLogTail`](crate::event_log::EventLogTail), so a long-lived caller pays
+/// for the history once and afterwards only for appended bytes, and it keeps
+/// just this molecule's lines — memory is bounded by one dispatch's
+/// observations, not by the galaxy's history.
+///
+/// The one-shot free functions build a fresh ledger per call, which reads the
+/// journal once, exactly as before: one definition of the dedup for both.
+///
+/// Atomicity is unchanged: every `emit_*` method catches up **under** the
+/// cross-process observation-emit lock, so the read-back still sees every line
+/// a concurrent emitter wrote before it (round-4 / COND-1).
+#[derive(Debug)]
+pub struct ObservationLedger {
+    state_dir: std::path::PathBuf,
+    mol_id: MoleculeId,
+    tail: crate::event_log::EventLogTail,
+    folded: LedgerFold,
+}
+
+/// The part of the journal an [`ObservationLedger`] keeps: this molecule's
+/// dispatch scope and what was already recorded in it.
+#[derive(Debug, Default)]
+struct LedgerFold {
+    adapter: Option<String>,
+    worker: Option<WorkerId>,
+    models: std::collections::HashMap<Scope, Vec<cosmon_core::model_realization::ModelId>>,
+    efforts: std::collections::HashMap<Scope, Vec<cosmon_core::model_realization::EffortLevel>>,
+    unavailable: std::collections::HashSet<Scope>,
+}
+
+impl LedgerFold {
+    /// Fold one journal event; only lines naming `own` are kept.
+    fn apply(&mut self, own: &MoleculeId, event: EventV2) {
+        match event {
+            EventV2::AdapterSelected {
+                mol_id,
+                adapter_name,
                 ..
-            } if m == mol_id && a == adapter_name && w == worker_id => {
-                cosmon_core::model_realization::ModelId::new(model)
+            } if mol_id == *own => self.adapter = Some(adapter_name),
+            EventV2::WorkerSpawned {
+                molecule: Some(mol_id),
+                worker_id,
+                ..
+            } if mol_id == *own => self.worker = Some(worker_id),
+            // Legacy unscoped lines (`worker_id: None`) are fail-closed: they
+            // belong to no identifiable attempt and suppress nothing (F-02).
+            EventV2::ModelObserved {
+                mol_id,
+                worker_id: Some(worker_id),
+                adapter_name,
+                model,
+                ..
+            } if mol_id == *own => {
+                if let Some(model) = cosmon_core::model_realization::ModelId::new(&model) {
+                    self.models
+                        .entry((worker_id, adapter_name))
+                        .or_default()
+                        .push(model);
+                }
             }
-            _ => None,
+            EventV2::EffortObserved {
+                mol_id,
+                worker_id: Some(worker_id),
+                adapter_name,
+                effort,
+                ..
+            } if mol_id == *own => {
+                if let Some(effort) = cosmon_core::model_realization::EffortLevel::new(&effort) {
+                    self.efforts
+                        .entry((worker_id, adapter_name))
+                        .or_default()
+                        .push(effort);
+                }
+            }
+            EventV2::ModelObservationUnavailable {
+                mol_id,
+                worker_id: Some(worker_id),
+                adapter_name,
+                ..
+            } if mol_id == *own => {
+                self.unavailable.insert((worker_id, adapter_name));
+            }
+            _ => {}
+        }
+    }
+}
+
+impl ObservationLedger {
+    /// An empty ledger for `mol_id`; nothing is read until the first
+    /// [`Self::catch_up`] (every query and emit method catches up itself).
+    #[must_use]
+    pub fn new(state_dir: &Path, mol_id: &MoleculeId) -> Self {
+        Self {
+            state_dir: state_dir.to_path_buf(),
+            mol_id: mol_id.clone(),
+            tail: crate::event_log::EventLogTail::new(resolve_events_log_path(state_dir)),
+            folded: LedgerFold::default(),
+        }
+    }
+
+    /// Fold the lines appended since the last call.
+    ///
+    /// # Errors
+    ///
+    /// Returns the journal's read error; the ledger keeps what it had folded.
+    pub fn catch_up(&mut self) -> std::io::Result<()> {
+        let mol_id = &self.mol_id;
+        let folded = &mut self.folded;
+        self.tail.read_new(|item| match item {
+            crate::event_log::TailItem::Restarted => *folded = LedgerFold::default(),
+            crate::event_log::TailItem::Envelope(env) => folded.apply(mol_id, env.event),
         })
-        .collect()
+    }
+
+    /// The adapter most recently selected for the molecule (last
+    /// [`EventV2::AdapterSelected`]); `None` when none was recorded or the
+    /// journal has never been readable.
+    pub fn last_adapter(&mut self) -> Option<String> {
+        let _ = self.catch_up();
+        self.folded.adapter.clone()
+    }
+
+    /// The worker most recently spawned for the molecule (last
+    /// [`EventV2::WorkerSpawned`]) — the current attempt's scope (F-02).
+    pub fn last_worker(&mut self) -> Option<WorkerId> {
+        let _ = self.catch_up();
+        self.folded.worker.clone()
+    }
+
+    /// Ledger form of [`emit_new_model_observations`].
+    pub fn emit_new_model_observations(
+        &mut self,
+        worker_id: &WorkerId,
+        adapter_name: &str,
+        observed: &[cosmon_core::model_realization::ModelId],
+        observed_source: ModelObservationSource,
+        provenance: &AlgorithmicProvenance,
+    ) {
+        if observed.is_empty() {
+            return;
+        }
+        let _guard = ObservationEmitLock::acquire(&self.state_dir);
+        // An unreadable log counts as "nothing new recorded": the first
+        // observation is still emitted (trace-not-lock).
+        let _ = self.catch_up();
+        let scope = (worker_id.clone(), adapter_name.to_owned());
+        let recorded = self
+            .folded
+            .models
+            .get(&scope)
+            .map_or(&[][..], Vec::as_slice);
+        let fresh = newly_observed(recorded, observed).to_vec();
+        for model in fresh {
+            emit_model_observed(
+                &self.state_dir,
+                &self.mol_id,
+                worker_id,
+                adapter_name,
+                model.as_str(),
+                observed_source,
+                provenance,
+            );
+        }
+        // Fold our own lines back from the wire, still under the lock. A write
+        // that failed is therefore not recorded, and the next tick retries it
+        // exactly as the read-back-per-call shape did.
+        let _ = self.catch_up();
+    }
+
+    /// Ledger form of [`emit_new_effort_observations`].
+    pub fn emit_new_effort_observations(
+        &mut self,
+        worker_id: &WorkerId,
+        adapter_name: &str,
+        observed: &[cosmon_core::model_realization::EffortLevel],
+        observed_source: ModelObservationSource,
+    ) {
+        if observed.is_empty() {
+            return;
+        }
+        let _guard = ObservationEmitLock::acquire(&self.state_dir);
+        let _ = self.catch_up();
+        let scope = (worker_id.clone(), adapter_name.to_owned());
+        let recorded = self
+            .folded
+            .efforts
+            .get(&scope)
+            .map_or(&[][..], Vec::as_slice);
+        let fresh = newly_observed(recorded, observed).to_vec();
+        for effort in fresh {
+            emit_effort_observed(
+                &self.state_dir,
+                &self.mol_id,
+                worker_id,
+                adapter_name,
+                effort.as_str(),
+                observed_source,
+            );
+        }
+        let _ = self.catch_up();
+    }
+
+    /// Ledger form of [`emit_model_observation_unavailable_once`]. An
+    /// unreadable log counts as "already said": a diagnostic that cannot be
+    /// deduped must not become a per-tick flood.
+    pub fn emit_model_observation_unavailable_once(
+        &mut self,
+        worker_id: &WorkerId,
+        adapter_name: &str,
+        expected_root: &Path,
+    ) {
+        let _guard = ObservationEmitLock::acquire(&self.state_dir);
+        if self.catch_up().is_err() {
+            return;
+        }
+        let scope = (worker_id.clone(), adapter_name.to_owned());
+        if self.folded.unavailable.contains(&scope) {
+            return;
+        }
+        let event = EventV2::ModelObservationUnavailable {
+            mol_id: self.mol_id.clone(),
+            worker_id: Some(worker_id.clone()),
+            adapter_name: adapter_name.to_owned(),
+            expected_root: expected_root.to_string_lossy().into_owned(),
+            detected_at: Utc::now(),
+        };
+        write_event(&self.state_dir, event);
+        let _ = self.catch_up();
+    }
 }
 
 /// The suffix of `observed` not yet present in `recorded` — the models to emit.

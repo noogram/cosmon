@@ -1247,6 +1247,10 @@ struct App {
     /// Mtime-gated enrichment cache: `mol_id -> (mtime, cached)`.
     /// Skips re-reading state.json + formula TOML for unchanged molecules.
     enrichment_cache: std::collections::HashMap<String, (SystemTime, CachedEnrichment)>,
+    /// Incremental journal folds, one per state dir, shared with the
+    /// background reload thread: each refresh reads only what `events.jsonl`
+    /// gained since the last one (issue #116).
+    journal_folds: crate::energy_probe::SharedJournalFolds,
 
     /// Formula TOML cache: `path -> (mtime, parsed)`. Formulas rarely
     /// change mid-session, but when the operator edits one (e.g. bumping a
@@ -1371,6 +1375,7 @@ impl App {
             last_refresh: Instant::now() - Duration::from_secs(60),
             status_msg: String::new(),
             enrichment_cache: std::collections::HashMap::new(),
+            journal_folds: crate::energy_probe::SharedJournalFolds::default(),
             formula_cache: std::collections::HashMap::new(),
             idle_ticks: 0,
             bg_rx,
@@ -1401,11 +1406,12 @@ impl App {
     /// Synchronous reload — builds snapshot, enriches rows, sorts.
     /// Used by `App::new()`, `R` (manual refresh), `a` (scope toggle).
     fn reload(&mut self) -> anyhow::Result<()> {
-        let (snapshot, state_dirs) = build_snapshot(
+        let (snapshot, state_dirs) = build_snapshot_with_folds(
             &self.state_dir,
             &self.socket,
             self.project_id.as_ref(),
             self.all_projects,
+            &self.journal_folds,
         )?;
         let rows = snapshot_to_rows(&snapshot);
         let census = worker_census(&snapshot);
@@ -1562,8 +1568,10 @@ impl App {
     ///
     /// The `AdapterSelected` / `ModelSelected` events live in the
     /// **fleet-level** `events.jsonl` under each state dir (not per-molecule),
-    /// so we read each distinct state dir at most once per reload, filter each
-    /// envelope by molecule id, and fold the honest attribution with the pure
+    /// so each distinct state dir keeps one incremental
+    /// [`JournalFold`](crate::energy_probe::JournalFold) across reloads — a
+    /// reload reads only what the journal gained (issue #116) — and each row
+    /// is folded into the honest attribution with the pure
     /// [`cosmon_core::adapter_attribution::AdapterAttribution::fold`]. Any I/O
     /// error (missing / unreadable log) simply yields no attribution for that
     /// dir — the column falls back to the empty placeholder, never an error.
@@ -1573,7 +1581,6 @@ impl App {
     ) -> std::collections::HashMap<String, cosmon_core::adapter_attribution::AdapterAttribution>
     {
         use cosmon_core::adapter_attribution::AdapterAttribution;
-        use cosmon_core::event_v2::EventV2;
 
         // Distinct state dirs backing the currently visible rows.
         let mut dirs: Vec<std::path::PathBuf> = Vec::new();
@@ -1588,24 +1595,19 @@ impl App {
         let mut out: std::collections::HashMap<String, AdapterAttribution> =
             std::collections::HashMap::new();
         for sd in dirs {
-            let log_path = cosmon_state::event_log::resolve_events_log_path(&sd);
-            let Ok(envelopes) = cosmon_state::event_log::read_all(&log_path) else {
-                continue;
-            };
-            // Group each molecule's events (in append order) then fold once.
-            let mut by_mol: std::collections::HashMap<String, Vec<EventV2>> =
-                std::collections::HashMap::new();
-            for env in envelopes {
-                if let Some(mid) = env.event.molecule_id() {
-                    by_mol.entry(mid.to_string()).or_default().push(env.event);
+            crate::energy_probe::with_journal_fold(&self.journal_folds, &sd, |fold| {
+                for row in rows {
+                    if self.row_state_dirs.get(&row.mol_id) != Some(&sd) {
+                        continue;
+                    }
+                    let Ok(mid) = cosmon_core::id::MoleculeId::new(row.mol_id.clone()) else {
+                        continue;
+                    };
+                    if let Some(att) = fold.attribution(&mid).filter(|a| !a.is_empty()) {
+                        out.insert(row.mol_id.clone(), att);
+                    }
                 }
-            }
-            for (mid, events) in by_mol {
-                let att = AdapterAttribution::fold(&events);
-                if !att.is_empty() {
-                    out.insert(mid, att);
-                }
-            }
+            });
         }
         out
     }
@@ -1798,10 +1800,15 @@ impl App {
         let project_id = self.project_id.clone();
         let all_projects = self.all_projects;
         let tx = self.bg_tx.clone();
+        let folds = self.journal_folds.clone();
         std::thread::spawn(move || {
-            if let Ok((snapshot, state_dirs)) =
-                build_snapshot(&state_dir, &socket, project_id.as_ref(), all_projects)
-            {
+            if let Ok((snapshot, state_dirs)) = build_snapshot_with_folds(
+                &state_dir,
+                &socket,
+                project_id.as_ref(),
+                all_projects,
+                &folds,
+            ) {
                 let rows = snapshot_to_rows(&snapshot);
                 let census = worker_census(&snapshot);
                 let _ = tx.send(BgReloadResult {
@@ -2378,8 +2385,19 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> anyhow::Result<()> {
+        // Redraw on input, on an applied reload, and otherwise once a second
+        // for the clock-driven columns. Redrawing every 100 ms tick rebuilt
+        // the whole table ten times a second while nothing changed — about a
+        // tenth of a core for an idle TUI (issue #116).
+        const IDLE_REDRAW: Duration = Duration::from_secs(1);
+        let mut dirty = true;
+        let mut last_draw = Instant::now();
         loop {
-            terminal.draw(|f| self.draw(f))?;
+            if dirty || last_draw.elapsed() >= IDLE_REDRAW {
+                terminal.draw(|f| self.draw(f))?;
+                last_draw = Instant::now();
+                dirty = false;
+            }
 
             let timeout = self
                 .refresh
@@ -2387,6 +2405,7 @@ impl App {
                 .unwrap_or_else(|| Duration::from_millis(0));
             let tick = Duration::from_millis(100).min(timeout);
             if event::poll(tick)? {
+                dirty = true;
                 if let Event::Key(k) = event::read()? {
                     if k.kind != KeyEventKind::Press {
                         continue;
@@ -2587,8 +2606,11 @@ impl App {
             }
 
             // Background reload: check for completed results.
-            if self.poll_bg_reload() && self.active_is_live() {
-                self.refresh_detail();
+            if self.poll_bg_reload() {
+                dirty = true;
+                if self.active_is_live() {
+                    self.refresh_detail();
+                }
             }
 
             // Adaptive polling: use effective_refresh() instead of the
@@ -4706,6 +4728,29 @@ pub(crate) fn build_snapshot(
     FleetSnapshot,
     std::collections::HashMap<String, std::path::PathBuf>,
 )> {
+    build_snapshot_with_folds(
+        state_dir,
+        socket,
+        project_id,
+        all,
+        &crate::energy_probe::SharedJournalFolds::default(),
+    )
+}
+
+/// [`build_snapshot`] reading adapter routing from `folds`, which the TUI
+/// keeps across refreshes so each one reads only what the journals gained
+/// (issue #116). A fresh `folds` reads each journal once, as a one-shot
+/// caller needs.
+pub(crate) fn build_snapshot_with_folds(
+    state_dir: &std::path::Path,
+    socket: &str,
+    project_id: Option<&cosmon_core::id::ProjectId>,
+    all: bool,
+    folds: &crate::energy_probe::SharedJournalFolds,
+) -> anyhow::Result<(
+    FleetSnapshot,
+    std::collections::HashMap<String, std::path::PathBuf>,
+)> {
     let mut snap = FleetSnapshot::new();
     let mut state_dirs: std::collections::HashMap<String, std::path::PathBuf> =
         std::collections::HashMap::new();
@@ -4785,7 +4830,14 @@ pub(crate) fn build_snapshot(
             for m in &molecules {
                 state_dirs.insert(m.id.to_string(), sd.clone());
             }
-            let energy_by_worker = crate::energy_probe::load_worker_energy(&sd, &backends, &fleet);
+            let adapters = crate::energy_probe::with_journal_fold(
+                folds,
+                &sd,
+                crate::energy_probe::JournalFold::last_adapters,
+            );
+            let energy_by_worker = crate::energy_probe::load_worker_energy_with_adapters(
+                &sd, &backends, &fleet, &adapters,
+            );
             populate_snapshot(
                 &mut snap,
                 &store,
@@ -4821,8 +4873,14 @@ pub(crate) fn build_snapshot(
             .into_iter()
             .map(|(s, a)| (socket.to_owned(), s, a))
             .collect();
-        let energy_by_worker =
-            crate::energy_probe::load_worker_energy(state_dir, &backends, &fleet);
+        let adapters = crate::energy_probe::with_journal_fold(
+            folds,
+            state_dir,
+            crate::energy_probe::JournalFold::last_adapters,
+        );
+        let energy_by_worker = crate::energy_probe::load_worker_energy_with_adapters(
+            state_dir, &backends, &fleet, &adapters,
+        );
         populate_snapshot(
             &mut snap,
             &store,
@@ -5151,6 +5209,7 @@ impl App {
             last_refresh: Instant::now(),
             status_msg: String::new(),
             enrichment_cache: std::collections::HashMap::new(),
+            journal_folds: crate::energy_probe::SharedJournalFolds::default(),
             formula_cache: std::collections::HashMap::new(),
             idle_ticks: 0,
             bg_rx,
@@ -7399,5 +7458,68 @@ mod tests {
         assert_eq!(att.compact_cell(), "claude/claude-opus-4-8 [cli] ?");
         // Honest silence: the disk record carried no effort, so none surfaces.
         assert_eq!(att.reasoning_effort, None);
+    }
+
+    /// Issue #116: a peek refresh reads only what the journal **gained**.
+    ///
+    /// Every refresh used to parse the whole `events.jsonl` twice (the
+    /// adapter column and the energy probe's adapter routing); an idle TUI on
+    /// a 170 MB journal held 2–3 GB and most of a core. Twenty refreshes while
+    /// the journal grows must read it about once in total — the probe counts
+    /// the bytes this thread actually read — and the adapter column must still
+    /// show what was selected.
+    #[test]
+    fn peek_refresh_reads_only_what_the_journal_gained() {
+        use crate::energy_probe::test_support::{seed_dispatch, seed_running_molecule};
+
+        let root = tempfile::TempDir::new().unwrap();
+        let state_dir = root.path().join(".cosmon").join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let other = root.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        seed_dispatch(
+            &other,
+            &cosmon_core::id::MoleculeId::new("task-20260101-0000").unwrap(),
+            "codex",
+            "worker-0",
+        );
+        let filler =
+            std::fs::read_to_string(cosmon_state::event_log::resolve_events_log_path(&other))
+                .unwrap();
+        let log = cosmon_state::event_log::resolve_events_log_path(&state_dir);
+        std::fs::write(&log, filler.repeat(1_000_000 / filler.len())).unwrap();
+        let mol = cosmon_core::id::MoleculeId::new("task-20260928-b116").unwrap();
+        seed_running_molecule(&state_dir, &mol);
+        seed_dispatch(&state_dir, &mol, "claude", "worker-1");
+
+        let mut app = App::for_test(Vec::new(), std::collections::HashMap::new());
+        app.state_dir.clone_from(&state_dir);
+        app.socket = "cosmon-issue-116-no-such-socket".to_owned();
+
+        let before = cosmon_state::event_log::journal_bytes_read_by_this_thread();
+        for _ in 0..20 {
+            app.reload().unwrap();
+            use std::io::Write as _;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log)
+                .unwrap()
+                .write_all(filler.as_bytes())
+                .unwrap();
+        }
+        app.reload().unwrap();
+        let read = cosmon_state::event_log::journal_bytes_read_by_this_thread() - before;
+        let len = std::fs::metadata(&log).unwrap().len();
+        assert!(
+            read <= 2 * len,
+            "21 refreshes read {read} journal bytes for a {len}-byte journal — \
+             every refresh re-reads the history"
+        );
+        let row = app
+            .rows
+            .iter()
+            .find(|r| r.mol_id == mol.as_str())
+            .expect("the seeded molecule is displayed");
+        assert_eq!(row.adapter.adapter.as_deref(), Some("claude"));
     }
 }

@@ -424,6 +424,28 @@ pub fn model_report_capability(adapter: &str) -> ModelReportCapability {
 }
 
 impl AdapterAttribution {
+    /// Whether [`Self::fold`] reads `event` at all.
+    ///
+    /// A long-lived reader (the `cs peek` refresh loop) keeps only these
+    /// events per molecule instead of the whole journal, so its memory grows
+    /// by a few events per dispatch rather than with every journal line
+    /// (issue #116). Folding the retained subset gives the same
+    /// result as folding everything, because every other event falls through
+    /// the fold's catch-all arm. Keep this list and the fold's arms in step.
+    #[must_use]
+    pub fn folds(event: &EventV2) -> bool {
+        matches!(
+            event,
+            EventV2::AdapterSelected { .. }
+                | EventV2::WorkerSpawned { .. }
+                | EventV2::ModelSelected { .. }
+                | EventV2::ModelObserved { .. }
+                | EventV2::ModelObservationUnavailable { .. }
+                | EventV2::MoleculeCompleted { .. }
+                | EventV2::WorkerExited { .. }
+        )
+    }
+
     /// Fold an ordered slice of events into the honest attribution.
     ///
     /// The events must belong to a **single** molecule (the caller filters by

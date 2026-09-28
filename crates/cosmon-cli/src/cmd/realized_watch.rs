@@ -135,10 +135,14 @@ pub fn watch_realized(
     // the emitter's scoped dedup, at most once per dispatch across watchers).
     let mut reported_missing_root = false;
     let mut sentinel = backend.map(SessionSentinel::new);
+    // One capture for the whole watch: it keeps the journal fold and the
+    // session-log offset between ticks, so a tick costs what was appended
+    // since the last one, not the size of either file (issue #116).
+    let mut capture = crate::energy_probe::RealizedCapture::new(state_dir, mol_id, cwd, root);
     while Instant::now() < deadline && molecule_is_live(&store, mol_id) {
-        crate::energy_probe::capture_realized_from_cwd_under(state_dir, mol_id, cwd, root);
+        capture.tick();
         if !reported_missing_root {
-            reported_missing_root = report_missing_session_log_root(state_dir, mol_id, root);
+            reported_missing_root = report_missing_session_log_root(&mut capture, root);
         }
         if let Some(s) = sentinel.as_mut() {
             if s.tick(&store, state_dir, mol_id) {
@@ -151,9 +155,9 @@ pub fn watch_realized(
     }
     // Final sweep: anything the worker wrote after the last tick — or, when
     // it crashed, the durable turns its dead pane can no longer report.
-    crate::energy_probe::capture_realized_from_cwd_under(state_dir, mol_id, cwd, root);
+    capture.tick();
     if !reported_missing_root {
-        report_missing_session_log_root(state_dir, mol_id, root);
+        report_missing_session_log_root(&mut capture, root);
     }
 }
 
@@ -180,12 +184,12 @@ pub fn watch_realized(
 /// the fold turns this line into `x (unobservable)` instead of an eternal
 /// `... (pending)`.
 fn report_missing_session_log_root(
-    state_dir: &Path,
-    mol_id: &MoleculeId,
+    capture: &mut crate::energy_probe::RealizedCapture,
     claude_projects_root: Option<&Path>,
 ) -> bool {
+    let adapter = capture.last_adapter();
     let Some(root) =
-        crate::energy_probe::session_log_root_for(state_dir, mol_id, claude_projects_root)
+        crate::energy_probe::session_log_root_for_adapter(adapter.as_deref(), claude_projects_root)
     else {
         // An adapter with no on-disk session log: nothing to miss.
         return false;
@@ -195,14 +199,11 @@ fn report_missing_session_log_root(
     }
     // Fail-closed scoping, as for observations: an unscoped diagnostic would
     // be ambiguous forever, so no resolvable worker means no line.
-    let Some(worker) = crate::energy_probe::last_worker_for(state_dir, mol_id) else {
+    let Some(worker) = capture.last_worker() else {
         return false;
     };
-    let adapter =
-        crate::energy_probe::last_adapter_for(state_dir, mol_id).unwrap_or_else(|| "claude".into());
-    cosmon_state::events::worker_spawn::emit_model_observation_unavailable_once(
-        state_dir, mol_id, &worker, &adapter, &root,
-    );
+    let adapter = adapter.unwrap_or_else(|| "claude".into());
+    capture.emit_model_observation_unavailable_once(&worker, &adapter, &root);
     // The condition is a property of the deployment, not of this tick: once
     // seen, stop looking. `true` even when the emitter deduped it away — the
     // caller's latch is about not re-checking, not about who wrote the line.
@@ -754,5 +755,130 @@ mod tests {
             store.load_molecule(&mol).unwrap().status,
             MoleculeStatus::Running
         );
+    }
+
+    /// Issue #116: a watcher's work per tick is bounded by what was
+    /// **appended**, not by the size of the journal or the session log.
+    ///
+    /// Before the fix every tick parsed the whole `events.jsonl` four times
+    /// and read the whole session log once; against a 170 MB journal one
+    /// watcher peaked at 4.4 GB resident and used 47 s of CPU in 90 s. The probe
+    /// here counts the bytes the watcher thread actually read, so the
+    /// assertion is on the reads themselves: over many ticks while both files
+    /// grow, the total stays under twice their final size (one initial pass
+    /// plus the appends). A per-tick re-read exceeds that after two ticks.
+    ///
+    /// The observations must be unchanged by the incremental parse: one line
+    /// for the stable model, one more when the model changes mid-run.
+    #[test]
+    fn watcher_reads_only_what_was_appended_while_journal_and_session_grow() {
+        let root = tempfile::TempDir::new().unwrap();
+        let mol = MoleculeId::new("task-20260928-a116").unwrap();
+        let state_dir = root.path().join(".cosmon").join("state");
+        let wt = root.path().join(".worktrees").join(mol.as_str());
+        let projects = root.path().join("claude").join("projects");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+
+        // A journal already long with other molecules' history (~2 MB).
+        let other = root.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        seed_dispatch(
+            &other,
+            &MoleculeId::new("task-20260101-0000").unwrap(),
+            "claude",
+            "worker-0",
+        );
+        let filler =
+            std::fs::read_to_string(cosmon_state::event_log::resolve_events_log_path(&other))
+                .unwrap();
+        let log = cosmon_state::event_log::resolve_events_log_path(&state_dir);
+        std::fs::write(&log, filler.repeat(2_000_000 / filler.len())).unwrap();
+        let store = seed_running_molecule(&state_dir, &mol);
+        seed_dispatch(&state_dir, &mol, "claude", "worker-1");
+
+        // A session log already long (~1 MB) naming one model.
+        let session_dir = projects.join(sanitize_path(&wt.to_string_lossy()));
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let session = session_dir.join("sess.jsonl");
+        let turn = |model: &str| {
+            format!(
+                "{{\"type\":\"assistant\",\"message\":{{\"model\":\"{model}\",\"content\":\"{}\"}}}}\n",
+                "x".repeat(1000)
+            )
+        };
+        std::fs::write(&session, turn("claude-opus-4-8").repeat(1000)).unwrap();
+
+        let watcher = {
+            let (state_dir, mol, wt, projects) =
+                (state_dir.clone(), mol.clone(), wt.clone(), projects.clone());
+            std::thread::spawn(move || {
+                watch_realized(
+                    &state_dir,
+                    &mol,
+                    &wt,
+                    Duration::from_millis(5),
+                    Duration::from_secs(60),
+                    Some(&projects),
+                    None,
+                );
+                (
+                    cosmon_state::event_log::journal_bytes_read_by_this_thread(),
+                    crate::energy_probe::session_log_bytes_read_by_this_thread(),
+                )
+            })
+        };
+
+        // Both files keep growing while the watcher ticks.
+        let append = |path: &std::path::Path, text: &str| {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            f.write_all(text.as_bytes()).unwrap();
+        };
+        for _ in 0..40 {
+            append(&session, &turn("claude-opus-4-8"));
+            append(&log, &filler);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // The worker's model changes mid-run: the trajectory must extend.
+        append(&session, &turn("claude-sonnet-5"));
+        let observed_change = std::iter::repeat_with(|| {
+            std::thread::sleep(Duration::from_millis(20));
+            fold_from_log(&state_dir, &mol).realized
+                == cosmon_core::adapter_attribution::Realized::Observed(vec![
+                    "claude-opus-4-8".to_owned(),
+                    "claude-sonnet-5".to_owned(),
+                ])
+        })
+        .take(500)
+        .any(|seen| seen);
+        assert!(observed_change, "a model change must still be observed");
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let mut data = store.load_molecule(&mol).unwrap();
+        data.status = MoleculeStatus::Collapsed;
+        store.save_molecule(&mol, &data).unwrap();
+        let (journal_read, session_read) = watcher.join().unwrap();
+
+        let journal_len = std::fs::metadata(&log).unwrap().len();
+        let session_len = std::fs::metadata(&session).unwrap().len();
+        assert!(
+            journal_read <= 2 * journal_len,
+            "the watcher read {journal_read} journal bytes for a {journal_len}-byte \
+             journal — it re-reads the history on every tick"
+        );
+        assert!(
+            session_read <= 2 * session_len,
+            "the watcher read {session_read} session-log bytes for a \
+             {session_len}-byte log — it re-reads the transcript on every tick"
+        );
+        let observed = cosmon_state::event_log::read_all(&log)
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(&e.event, EventV2::ModelObserved { mol_id, .. } if *mol_id == mol))
+            .count();
+        assert_eq!(observed, 2, "one line per trajectory element, no repeats");
     }
 }
