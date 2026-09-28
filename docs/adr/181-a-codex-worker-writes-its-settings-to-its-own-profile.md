@@ -35,10 +35,49 @@ An interactive codex worker launches with `-p cosmon-worker-<session>`, where
 accepts one profile and the explicit choice wins. `codex exec` does not get it;
 it has no TUI to persist from.
 
+Both launch paths render the tokens from one builder,
+`cosmon_core::worker_argv::codex_worker_profile_args`: `cs tackle` quotes them
+into the tmux command string (`build_codex_command`), and the in-process
+`LibraryExecutor` used by `cs run --resident` and the RPP executor hands them
+to the transport as argv. The first cut applied the overlay only on the
+`cs tackle` path, and an independent review found the in-process path still
+launching codex bare.
+
 The overlay is keyed by session name, which is per molecule, so a re-tackle of
-the same molecule keeps its adjustment. cosmon never creates or deletes the
-file; codex creates it on the first write. Deleting it resets the molecule to
-the machine defaults.
+the same molecule keeps its adjustment. cosmon never creates the file; codex
+creates it on its first config write. That write is not only an operator's
+change: codex also records startup acknowledgements there (a model-migration
+notice, the screen-reader check, new-model announcement counts) when the base
+file does not already hold them. Deleting the file resets the molecule to the
+machine defaults.
+
+### Harvest and collapse leave the overlay in place
+
+`cs done`, `cs collapse` and the resident harvest do not remove
+`cosmon-worker-<session>.config.toml`. Four reasons:
+
+1. **It is the record of the drift.** The issue's minimum acceptable
+   behaviour was to make a worker-side change visible. The overlay is exactly
+   that record, keyed by molecule; deleting it at harvest would erase the
+   evidence at the moment the work is judged.
+2. **It has no effect once the molecule is terminal.** The session name
+   carries the molecule id, so no later worker selects that profile. A
+   leftover overlay changes no behaviour.
+3. **cosmon does not own `CODEX_HOME`, and the harvester cannot name it
+   reliably.** Harvest runs in `cs done`, the patrol, or the resident loop,
+   each resolving `CODEX_HOME` from its own environment, which is not
+   guaranteed to be the one the worker's pane was launched with (the tmux
+   server freezes its environment at first start). An automatic delete could
+   miss the file or remove a same-named file in another home. This follows
+   ADR-178's stance that no automatic path deletes what it cannot prove it
+   owns.
+4. **The cost is small and the files are easy to clear.** Each overlay is a
+   few hundred bytes with a fixed prefix; `rm ~/.codex/cosmon-worker-*.config.toml`
+   clears them all, and removing one for a running worker is safe (codex
+   recreates it on its next write).
+
+Revisit this if overlays are found to affect a later worker, or if cosmon
+comes to own a per-dispatch `CODEX_HOME` value it can pass to the harvester.
 
 ## Alternatives rejected
 
@@ -57,10 +96,14 @@ the machine defaults.
 
 - The global `~/.codex/config.toml` stays the default that workers read.
   cosmon's own write to it, the exact-path project pre-trust, is unchanged.
-- Adjustments made inside workers accumulate as small
-  `~/.codex/cosmon-worker-*.config.toml` files, one per molecule where someone
-  changed a setting. They are an honest record of those changes and can be
-  removed at any time.
+- Small `~/.codex/cosmon-worker-*.config.toml` files accumulate, at most one
+  per codex molecule. A file appears only when codex writes config during
+  that worker's run, whether because an operator changed a setting or because
+  codex recorded a startup acknowledgement.
+- An acknowledgement a worker records (for example, dismissing a new-model
+  notice) stays in its overlay, so the next worker can show the same notice
+  until the operator acknowledges it in their own codex session, which
+  writes the base file.
 - This depends on codex's profile-v2 `-p` semantics. A codex version where
   `-p` names a legacy `[profiles.<name>]` table in `config.toml` would refuse
   to start with an unknown profile. The worker then fails the readiness probe

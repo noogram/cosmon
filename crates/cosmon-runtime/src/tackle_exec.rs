@@ -436,10 +436,14 @@ pub trait SpawnPreflight: std::fmt::Debug + Send + Sync {
 ///
 /// The claude arm renders `cosmon_core::worker_argv::ClaudeLaunch` — the same
 /// builder `cs tackle`'s string path renders — and then composes the
-/// root-spawn decision at the binary token. Every other adapter carries its
-/// harness tokens and nothing else: their launch surfaces are their own
-/// (`build_codex_command` and friends), and inventing flags for them here
-/// would be the second builder this fix exists to remove.
+/// root-spawn decision at the binary token. The codex arm appends the
+/// worker's own profile overlay after its harness tokens, from
+/// `cosmon_core::worker_argv::codex_worker_profile_args`, the builder
+/// `build_codex_command` renders too (issue #84, ADR-181): without it an
+/// in-process codex worker writes a setting changed in its TUI into the
+/// machine-wide codex config. Every other adapter carries its harness tokens
+/// and nothing else: their launch surfaces are their own, and inventing flags
+/// for them here would be the second builder #75 exists to remove.
 ///
 /// The writable roots are resolved with the SAME
 /// [`cosmon_filestore::walk_up_find_cosmon_dir_from`] redirect the worker's
@@ -449,6 +453,7 @@ fn worker_launch_argv(
     adapter: &str,
     model: Option<&str>,
     worktree: &Path,
+    session_name: &str,
     harness_args: &[String],
     posture: &LaunchPosture,
     root_spawn: &RootSpawnDecision,
@@ -467,6 +472,13 @@ fn worker_launch_argv(
             .with_receipt_overlay(posture.receipt_overlay.as_deref())
             .with_harness_args(harness_args)
             .render()
+    } else if adapter == cosmon_core::worker_argv::CODEX_ADAPTER {
+        let mut args = harness_args.to_vec();
+        args.extend(cosmon_core::worker_argv::codex_worker_profile_args(
+            session_name,
+            &[harness_args],
+        ));
+        args
     } else {
         harness_args.to_vec()
     };
@@ -1420,6 +1432,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             plan.adapter.as_str(),
             plan.preferred_model.as_deref(),
             worktree_path,
+            &session_name,
             &harness_args,
             &posture,
             &root_spawn,

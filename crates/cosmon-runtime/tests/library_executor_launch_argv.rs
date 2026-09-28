@@ -625,3 +625,34 @@ fn a_failed_consent_pregrant_creates_no_worker() {
         "the refusal must roll back this attempt's worktree"
     );
 }
+
+/// **Issue #84, library/resident path.** A codex worker dispatched in-process
+/// (`cs run --resident`, the RPP executor) launches with its own profile-v2
+/// overlay, exactly as a `cs tackle`d one does. Without `-p <worker-profile>`
+/// the codex TUI writes a setting an operator changes inside the worker into
+/// the machine-wide `$CODEX_HOME/config.toml`, and every later codex worker on
+/// the machine inherits it.
+#[test]
+fn library_dispatch_selects_the_codex_worker_profile_overlay() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260928-c084");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+    let pin = DispatchPin {
+        adapter: Some("codex".to_owned()),
+        ..claude_pin()
+    };
+    executor
+        .dispatch_with_pin(&mol.id, &pin)
+        .expect("the dispatch must reach the spawn");
+
+    let (command, argv) = recorded_launch(&backend, &mol.id);
+    assert_eq!(command, "codex", "the codex arm was exercised: {argv:?}");
+    let flag = position(&argv, "-p");
+    assert_eq!(
+        argv.get(flag + 1).map(String::as_str),
+        Some(format!("cosmon-worker-{}", mol.id.as_str()).as_str()),
+        "the in-process codex launch must select the worker's own profile \
+         overlay, named from its session as on the `cs tackle` path: {argv:?}"
+    );
+}
