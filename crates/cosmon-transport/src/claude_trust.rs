@@ -355,9 +355,10 @@ where
 /// each Claude Code process from its own in-memory state, so a pre-grant is not
 /// storage that stays put; see the module docs.
 ///
-/// Each write is atomic (temp file in the same directory, then rename), so a
-/// crash mid-write cannot leave the operator with a truncated `.claude.json` —
-/// the file that also holds their account and MCP state.
+/// Each write uses a temp file in the same directory plus rename by default.
+/// A directly bind-mounted file cannot be replaced, so that deployment shape
+/// falls back to an in-place write which keeps the old length until all new
+/// bytes have been written, then truncates and syncs the file.
 ///
 /// # Errors
 ///
@@ -437,6 +438,14 @@ fn grant_onboarding_and_trust(
     config_path: &Path,
     workspace_key: String,
 ) -> Result<ConsentPregrant, TrustError> {
+    grant_onboarding_and_trust_with_writer(config_path, workspace_key, &RealAtomicWriter)
+}
+
+fn grant_onboarding_and_trust_with_writer<W: AtomicWriter>(
+    config_path: &Path,
+    workspace_key: String,
+    writer: &W,
+) -> Result<ConsentPregrant, TrustError> {
     let mut root = read_json_object(config_path)?;
     let not_an_object = || TrustError::NotAnObject {
         path: config_path.to_string_lossy().into_owned(),
@@ -471,7 +480,7 @@ fn grant_onboarding_and_trust(
     if !onboarding_missing && !trust_missing {
         return Ok(ConsentPregrant::AlreadyGranted);
     }
-    write_json_atomically(config_path, &serde_json::Value::Object(root))?;
+    write_json_with_atomic_writer(config_path, &serde_json::Value::Object(root), writer)?;
     Ok(ConsentPregrant::Granted)
 }
 
@@ -541,9 +550,42 @@ fn read_json_object(
     }
 }
 
-/// Write `value` to `config_path` via a temp file in the same directory plus a
-/// rename, so a reader never observes a partial config.
+/// Write `value` atomically when possible, with a narrow in-place fallback for
+/// a directly bind-mounted `config_path`.
 fn write_json_atomically(config_path: &Path, value: &serde_json::Value) -> Result<(), TrustError> {
+    write_json_with_atomic_writer(config_path, value, &RealAtomicWriter)
+}
+
+/// The two filesystem operations whose failures distinguish an ordinary file
+/// from a file mounted directly into a container.
+trait AtomicWriter {
+    fn create_temp(&self, dir: &Path) -> std::io::Result<tempfile::NamedTempFile>;
+
+    fn persist_temp(&self, tmp: tempfile::NamedTempFile, config_path: &Path)
+        -> std::io::Result<()>;
+}
+
+struct RealAtomicWriter;
+
+impl AtomicWriter for RealAtomicWriter {
+    fn create_temp(&self, dir: &Path) -> std::io::Result<tempfile::NamedTempFile> {
+        tempfile::NamedTempFile::new_in(dir)
+    }
+
+    fn persist_temp(
+        &self,
+        tmp: tempfile::NamedTempFile,
+        config_path: &Path,
+    ) -> std::io::Result<()> {
+        tmp.persist(config_path).map(|_| ()).map_err(|e| e.error)
+    }
+}
+
+fn write_json_with_atomic_writer<W: AtomicWriter>(
+    config_path: &Path,
+    value: &serde_json::Value,
+    writer: &W,
+) -> Result<(), TrustError> {
     let err = |source: std::io::Error| TrustError::Write {
         path: config_path.to_string_lossy().into_owned(),
         source,
@@ -554,20 +596,71 @@ fn write_json_atomically(config_path: &Path, value: &serde_json::Value) -> Resul
         path: config_path.to_string_lossy().into_owned(),
         source: std::io::Error::other(e),
     })?;
-    // `tempfile` in the same directory keeps the rename on one filesystem.
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(err)?;
+    // tempfile in the same directory keeps the rename on one filesystem.
+    // A read-only container root may still expose this target as a writable
+    // file bind mount, while refusing creation of siblings.
+    let Ok(mut tmp) = writer.create_temp(dir) else {
+        return rewrite_json_in_place(config_path, &serialized).map_err(err);
+    };
     std::io::Write::write_all(&mut tmp, &serialized).map_err(err)?;
-    tmp.persist(config_path)
-        .map_err(|e| TrustError::Write {
-            path: config_path.to_string_lossy().into_owned(),
-            source: e.error,
-        })
-        .map(|_| ())
+    match writer.persist_temp(tmp, config_path) {
+        Ok(()) => Ok(()),
+        Err(source) if rename_requires_in_place(&source) => {
+            rewrite_json_in_place(config_path, &serialized).map_err(err)
+        }
+        Err(source) => Err(err(source)),
+    }
+}
+
+fn rename_requires_in_place(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(errno)
+            if errno == nix::errno::Errno::EBUSY as i32
+                || errno == nix::errno::Errno::EXDEV as i32
+    )
+}
+
+/// Rewrite an existing file without first truncating it.
+///
+/// This is deliberately narrower than the atomic path: it never creates the
+/// target. It exists only for file bind mounts, where the target is writable
+/// but its parent directory or mount point cannot participate in replacement.
+fn rewrite_json_in_place(config_path: &Path, serialized: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new().write(true).open(config_path)?;
+    std::io::Write::write_all(&mut file, serialized)?;
+    file.set_len(serialized.len() as u64)?;
+    file.sync_all()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct RefusingAtomicWriter {
+        create_error: Option<std::io::ErrorKind>,
+        persist_errno: Option<i32>,
+    }
+
+    impl AtomicWriter for RefusingAtomicWriter {
+        fn create_temp(&self, dir: &Path) -> std::io::Result<tempfile::NamedTempFile> {
+            match self.create_error {
+                Some(kind) => Err(std::io::Error::from(kind)),
+                None => tempfile::NamedTempFile::new_in(dir),
+            }
+        }
+
+        fn persist_temp(
+            &self,
+            _tmp: tempfile::NamedTempFile,
+            _config_path: &Path,
+        ) -> std::io::Result<()> {
+            match self.persist_errno {
+                Some(errno) => Err(std::io::Error::from_raw_os_error(errno)),
+                None => Ok(()),
+            }
+        }
+    }
 
     /// A `ConsentPaths` rooted at `dir`, the `CLAUDE_CONFIG_DIR` shape.
     fn paths_in(dir: &Path) -> ConsentPaths {
@@ -839,6 +932,141 @@ mod tests {
         assert_eq!(
             pregrant_startup_consent(&paths, &ws).expect("pre-grant succeeds"),
             ConsentPregrant::Granted
+        );
+    }
+
+    fn assert_bind_mount_rename_falls_back(errno: nix::errno::Errno) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join(".claude.json");
+        std::fs::write(
+            &config_path,
+            format!(r#"{{"numStartups":7}}{}"#, " ".repeat(512)),
+        )
+        .expect("seed");
+        let writer = RefusingAtomicWriter {
+            create_error: None,
+            persist_errno: Some(errno as i32),
+        };
+        let workspace_key = "/srv/worktree".to_owned();
+
+        grant_onboarding_and_trust_with_writer(&config_path, workspace_key.clone(), &writer)
+            .expect("a writable bind-mounted file can be rewritten in place");
+
+        let config = read_json(&config_path);
+        assert_eq!(config["numStartups"], 7);
+        assert_eq!(config["hasCompletedOnboarding"], true);
+        assert_eq!(
+            config["projects"][workspace_key]["hasTrustDialogAccepted"],
+            true
+        );
+        assert_eq!(
+            std::fs::read(&config_path).expect("read bytes"),
+            serde_json::to_vec(&config).expect("serialize expected config"),
+            "the in-place write must truncate the old file to its new length"
+        );
+    }
+
+    /// A file bind mount cannot be replaced by rename(2): Linux reports
+    /// EBUSY even when the mounted file itself is writable. The pre-grant
+    /// retains unrelated operator state and rewrites that file in place.
+    #[test]
+    fn bind_mounted_config_falls_back_when_rename_is_busy() {
+        assert_bind_mount_rename_falls_back(nix::errno::Errno::EBUSY);
+    }
+
+    /// A cross-device replacement has the same constraint as a bind-mount
+    /// replacement and therefore uses the same narrow in-place fallback.
+    #[test]
+    fn bind_mounted_config_falls_back_when_rename_crosses_devices() {
+        assert_bind_mount_rename_falls_back(nix::errno::Errno::EXDEV);
+    }
+
+    /// A read-only parent can reject the sibling temp file even though the
+    /// existing bind-mounted target remains writable.
+    #[test]
+    fn bind_mounted_config_falls_back_when_parent_rejects_temp_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join(".claude.json");
+        std::fs::write(&config_path, r#"{"numStartups":7}"#).expect("seed");
+        let writer = RefusingAtomicWriter {
+            create_error: Some(std::io::ErrorKind::PermissionDenied),
+            persist_errno: None,
+        };
+
+        grant_onboarding_and_trust_with_writer(&config_path, "/srv/worktree".to_owned(), &writer)
+            .expect("a writable target does not require a writable parent");
+
+        let config = read_json(&config_path);
+        assert_eq!(config["numStartups"], 7);
+        assert_eq!(config["hasCompletedOnboarding"], true);
+        assert_eq!(
+            config["projects"]["/srv/worktree"]["hasTrustDialogAccepted"],
+            true
+        );
+    }
+
+    /// Rename failures other than EBUSY and EXDEV retain the fail-closed
+    /// behavior instead of silently broadening the in-place path.
+    #[test]
+    fn unrelated_rename_failure_does_not_fall_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join(".claude.json");
+        let original = r#"{"numStartups":7}"#;
+        std::fs::write(&config_path, original).expect("seed");
+        let writer = RefusingAtomicWriter {
+            create_error: None,
+            persist_errno: Some(nix::errno::Errno::EACCES as i32),
+        };
+
+        let error = grant_onboarding_and_trust_with_writer(
+            &config_path,
+            "/srv/worktree".to_owned(),
+            &writer,
+        )
+        .expect_err("an unrelated rename failure must refuse");
+
+        assert!(matches!(error, TrustError::Write { .. }), "{error:?}");
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read"),
+            original
+        );
+    }
+
+    /// The fallback changes the parent-directory requirement, not the target
+    /// requirement: a target that is itself read-only still refuses.
+    #[cfg(unix)]
+    #[test]
+    fn read_only_target_still_refuses() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join(".claude.json");
+        let original = r#"{"numStartups":7}"#;
+        std::fs::write(&config_path, original).expect("seed");
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o444))
+            .expect("make target read-only");
+        let writer = RefusingAtomicWriter {
+            create_error: Some(std::io::ErrorKind::PermissionDenied),
+            persist_errno: None,
+        };
+
+        let error = grant_onboarding_and_trust_with_writer(
+            &config_path,
+            "/srv/worktree".to_owned(),
+            &writer,
+        )
+        .expect_err("a read-only target must refuse");
+
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))
+            .expect("restore target permissions");
+        assert!(matches!(error, TrustError::Write { .. }), "{error:?}");
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read"),
+            original
         );
     }
 
