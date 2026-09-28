@@ -355,7 +355,7 @@ pub const STATUS: &str = "EXAMPLES:
 
 BLOCKED-BY: only completion satisfies a dependency. A collapsed or frozen
       blocker keeps pending dependents held. Human status names those dependents;
-      thaw and complete a frozen blocker, or collapse and re-nucleate a
+      finish and harvest a frozen blocker (`cs complete`, then `cs done`), or collapse and re-nucleate a
       dependent with a new --blocked-by edge after its blocker collapses.
 
 STALENESS: the pulse carries derivatives, not only levels — `oldest 39d · 2 >48h`

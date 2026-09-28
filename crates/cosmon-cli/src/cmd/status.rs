@@ -631,7 +631,9 @@ fn release_guidance(
     blocker: &MoleculeId,
 ) -> String {
     if status == MoleculeStatus::Frozen {
-        format!("`cs thaw {blocker}` and complete it to release {dependent}")
+        format!(
+            "finish {blocker}, then `cs complete {blocker} --reason <evidence>` and `cs done {blocker}` to release {dependent}"
+        )
     } else {
         format!("collapse {dependent} and re-nucleate it with --blocked-by <completed-blocker>")
     }
@@ -1689,6 +1691,15 @@ mod tests {
         let guidance = release_guidance(held[0].2, &held[0].0, &held[0].1);
         assert!(guidance.contains(&dependent.id.to_string()));
         assert!(guidance.contains("--blocked-by"));
+    }
+
+    #[test]
+    fn frozen_blocker_guidance_uses_molecule_completion_commands() {
+        let blocker = make_molecule("aaaa", MoleculeStatus::Frozen, None);
+        let dependent = make_molecule("bbbb", MoleculeStatus::Pending, None);
+        let guidance = release_guidance(MoleculeStatus::Frozen, &dependent.id, &blocker.id);
+        assert!(guidance.contains(&format!("cs complete {}", blocker.id)));
+        assert!(guidance.contains(&format!("cs done {}", blocker.id)));
     }
 
     #[test]

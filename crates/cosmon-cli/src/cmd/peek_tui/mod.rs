@@ -3961,7 +3961,7 @@ fn expanded_detail_lines(r: &RowView) -> Vec<Line<'static>> {
         } else if r.blocked_by.iter().any(|(_, status)| status == "frozen") {
             lines.push(field(
                 "release",
-                "thaw and complete the frozen blocker",
+                "finish the frozen blocker, then cs complete and cs done it",
                 false,
             ));
         }
@@ -7549,6 +7549,19 @@ mod tests {
             .join("\n");
         assert!(detail.contains("task-20260928-aaaa [collapsed]"));
         assert!(detail.contains("re-nucleate with --blocked-by"));
+    }
+
+    #[test]
+    fn expanded_pending_dependent_names_frozen_blocker_and_completion() {
+        let mut row = row_with("pending", HeartbeatTier::Active);
+        row.blocked_by = vec![("task-20260928-aaaa".into(), "frozen".into())];
+        let detail = expanded_detail_lines(&row)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(detail.contains("task-20260928-aaaa [frozen]"));
+        assert!(detail.contains("cs complete and cs done"));
     }
 
     #[test]
