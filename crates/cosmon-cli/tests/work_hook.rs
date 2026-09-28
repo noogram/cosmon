@@ -119,8 +119,19 @@ fn hook_delivers_once_and_records_unknown_context() {
     assert!(second.stdout.is_empty());
     let receipts = fs::read_to_string(mol(&state, OWNER).join("work/receipts/finding-1.jsonl"))
         .expect("receipts");
-    assert!(receipts.contains("delivery_attempted") && receipts.contains("context_delivered"));
-    assert!(receipts.contains("unknown") && !receipts.contains("observed"));
+    let stages: Vec<serde_json::Value> = receipts
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("receipt JSON"))
+        .collect();
+    assert!(stages
+        .iter()
+        .any(|r| r["stage"]["stage"] == "delivery_attempted"
+            && r["stage"]["outcome"]["result"] == "submitted"));
+    assert!(stages
+        .iter()
+        .any(|r| r["stage"]["stage"] == "context_delivered"
+            && r["stage"]["observation"]["status"] == "unknown"));
+    assert!(!receipts.contains("observed"));
     let capabilities = fs::read_to_string(mol(&state, OWNER).join("work/capabilities/b.jsonl"))
         .expect("capability");
     assert_eq!(capabilities.lines().count(), 1);

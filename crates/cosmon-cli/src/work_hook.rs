@@ -48,6 +48,19 @@ pub fn intercept() -> Option<i32> {
     };
     let extra = args.next().is_some();
 
+    let mut output = mute_stdout();
+    let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+    if let Some(output) = output.as_mut().filter(|_| !extra) {
+        if let Some(adapter) = adapter {
+            if let Err(error) = run(adapter, output) {
+                eprintln!("work hook: {error:#}");
+            }
+        }
+    }
+    Some(0)
+}
+
+fn mute_stdout() -> Option<fs::File> {
     // SAFETY: the hook process owns stdout. Keep a duplicate solely for the
     // final JSON document, and redirect every other writer to /dev/null.
     let saved = unsafe { libc::dup(1) };
@@ -64,20 +77,12 @@ pub fn intercept() -> Option<i32> {
             libc::close(1);
         }
     }
-    let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
-    if saved >= 0 && !extra {
+    if saved >= 0 {
         // SAFETY: `dup` returned an owned descriptor, consumed exactly once.
-        let mut output = unsafe { fs::File::from_raw_fd(saved) };
-        if let Some(adapter) = adapter {
-            if let Err(error) = run(adapter, &mut output) {
-                eprintln!("work hook: {error:#}");
-            }
-        }
-    } else if saved >= 0 {
-        // SAFETY: no writer will use the saved descriptor on this path.
-        unsafe { libc::close(saved) };
+        Some(unsafe { fs::File::from_raw_fd(saved) })
+    } else {
+        None
     }
-    Some(0)
 }
 
 fn run(adapter: DeliveryAdapter, output: &mut impl std::io::Write) -> Result<()> {
@@ -177,4 +182,34 @@ fn run(adapter: DeliveryAdapter, output: &mut impl std::io::Write) -> Result<()>
         ))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+
+    #[test]
+    fn stray_fd_one_output_is_muted() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", "work_hook::tests::mute_child"])
+            .env("COSMON_WORK_HOOK_MUTE_CHILD", "1")
+            .output()
+            .expect("child output");
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).expect("stdout text");
+        assert!(text.contains("final\n"), "{text}");
+        assert!(!text.contains("stray"), "{text}");
+    }
+
+    #[test]
+    fn mute_child() {
+        if std::env::var_os("COSMON_WORK_HOOK_MUTE_CHILD").is_none() {
+            return;
+        }
+        let mut output = mute_stdout().expect("saved stdout");
+        // SAFETY: fd 1 is the muted stdout of this isolated child process.
+        unsafe { libc::write(1, b"stray\n".as_ptr().cast(), 6) };
+        output.write_all(b"final\n").expect("final document");
+    }
 }
