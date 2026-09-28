@@ -229,8 +229,9 @@ impl JwksReloadOutcome {
     }
 }
 
-/// Re-read the on-disk JWKS (the **authn door**) and atomically publish
-/// the fresh store into `shared`. The symmetric counterpart of [`reload`]
+/// Re-read the on-disk JWKS (the **authn door**), merge it with issuers
+/// populated by the HTTP-fetch path, and atomically publish the result into
+/// `shared`. The symmetric counterpart of [`reload`]
 /// (the **authz door**): adding a federated peer issuer's `<iss>.json`
 /// under `<state_dir>/security/jwks/` — or removing it to revoke — takes
 /// effect on `SIGHUP` with no reboot (ADR-0023 MVP-A, D6).
@@ -256,11 +257,11 @@ pub fn reload_jwks(shared: &SharedJwksStore, state_dir: &Path) -> JwksReloadOutc
         }
     };
 
-    let counts = fresh.key_counts_by_issuer();
+    shared.store_file_stage(&fresh);
+
+    let counts = shared.load().key_counts_by_issuer();
     let issuers_after = counts.len();
     let keys_after = counts.iter().map(|(_, n)| *n).sum();
-
-    shared.store(fresh);
 
     JwksReloadOutcome {
         issuers_before,

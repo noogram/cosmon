@@ -523,6 +523,7 @@ impl JwksProvider {
 mod tests {
     use super::*;
     use crate::jwt::{JwksStore, JwtVerifier};
+    use crate::reload::reload_jwks;
     use crate::Posture;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -812,6 +813,47 @@ mod tests {
         let v = JwtVerifier::validate(&provider.shared().load(), &token, Posture::Prepared)
             .expect("fetched key should validate the token");
         assert_eq!(v.sub, "sub-1");
+    }
+
+    #[tokio::test]
+    async fn fetched_key_survives_sighup_reload() {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+        let td = tempfile::tempdir().unwrap();
+        let priv_pem = include_str!("../tests/fixtures/test_rsa_private.pem");
+        let mock = MockIdp::start(Arc::new(Mutex::new(TEST_JWKS.to_owned()))).await;
+        let provider = provider_for(vec![TrustedIssuer {
+            iss: "https://idp.test".to_owned(),
+            jwks_uri: Some(format!("{}/keys", mock.base())),
+            audiences: vec!["cosmon-rpp-tenant-demo".to_owned()],
+        }]);
+        provider.refresh_all().await;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = serde_json::json!({
+            "iss": "https://idp.test",
+            "sub": "sub-1",
+            "aud": "cosmon-rpp-tenant-demo",
+            "iat": now,
+            "exp": now + 60,
+            "jti": "tok-1",
+        });
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("kid-1".into());
+        let key = EncodingKey::from_rsa_pem(priv_pem.as_bytes()).unwrap();
+        let token = encode(&header, &claims, &key).unwrap();
+
+        JwtVerifier::validate(&provider.shared().load(), &token, Posture::Prepared)
+            .expect("HTTP-fetched key should authenticate before reload");
+
+        let outcome = reload_jwks(&provider.shared(), td.path());
+        assert!(outcome.is_ok());
+
+        JwtVerifier::validate(&provider.shared().load(), &token, Posture::Prepared)
+            .expect("HTTP-fetched key should authenticate after reload");
     }
 
     #[test]

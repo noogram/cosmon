@@ -40,7 +40,7 @@
 //! gesture removed. See smithy spec §4 (posture (b) preserved) and
 //! ADR-0023 (multi-issuer MVP-A).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -71,6 +71,10 @@ pub struct JwksStore {
     /// Allowed (`iss`, `aud`) pairs. The validator rejects requests
     /// whose `iss` is not in this set (clause a — issuer pinning).
     allowed_audiences: HashMap<String, Vec<String>>,
+    /// Issuers whose current keys came from the HTTP-fetch path. This
+    /// provenance lets a file-stage reload preserve fetched keys while
+    /// still removing file-staged issuers whose files were deleted.
+    remote_issuers: HashSet<String>,
 }
 
 /// One key record carried by the store.
@@ -339,7 +343,32 @@ impl JwksStore {
             inserted += 1;
         }
         self.allowed_audiences.insert(issuer.to_owned(), audiences);
+        self.remote_issuers.insert(issuer.to_owned());
         Ok(inserted)
+    }
+
+    /// Overlay the HTTP-fetched issuers from `live` onto this store.
+    ///
+    /// A SIGHUP file-stage reload starts from a new [`Self::load`] result,
+    /// so deleted files remain revoked. Only issuers carrying explicit
+    /// HTTP-fetch provenance survive from the live snapshot; their keys
+    /// and audience pins replace any same-issuer file entry because the
+    /// HTTP path is the primary source when configured.
+    fn preserve_remote_issuers_from(&mut self, live: &Self) {
+        for issuer in &live.remote_issuers {
+            self.by_iss_kid.retain(|(iss, _kid), _| iss != issuer);
+            self.by_iss_kid.extend(
+                live.by_iss_kid
+                    .iter()
+                    .filter(|((iss, _kid), _record)| iss == issuer)
+                    .map(|(key, record)| (key.clone(), record.clone())),
+            );
+            if let Some(audiences) = live.allowed_audiences.get(issuer) {
+                self.allowed_audiences
+                    .insert(issuer.clone(), audiences.clone());
+            }
+        }
+        self.remote_issuers.clone_from(&live.remote_issuers);
     }
 }
 
@@ -417,6 +446,21 @@ impl SharedJwksStore {
     /// it; the next request sees the refreshed key set.
     pub fn store(&self, store: JwksStore) {
         self.0.store(Arc::new(store));
+    }
+
+    /// Publish a freshly loaded file-stage store without dropping issuers
+    /// populated by the HTTP-fetch path.
+    ///
+    /// The read-copy-update loop re-applies the overlay if another writer
+    /// publishes while the reload is being committed, so the reload never
+    /// restores an older fetched-key snapshot merely because the two paths
+    /// crossed.
+    pub(crate) fn store_file_stage(&self, file_store: &JwksStore) {
+        self.0.rcu(|live| {
+            let mut merged = file_store.clone();
+            merged.preserve_remote_issuers_from(live);
+            Arc::new(merged)
+        });
     }
 }
 
