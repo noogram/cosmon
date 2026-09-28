@@ -10,8 +10,8 @@
 use std::collections::BTreeMap;
 
 use cosmon_core::usage::{
-    ApiEquivalent, Availability, ObservationScope, PlanWindowObservation, PricingCoverage,
-    TokenCount, UsageHistory, UsageRecord,
+    ApiEquivalent, Availability, Freshness, ObservationScope, PlanWindowObservation,
+    PricingCoverage, TokenCount, UsageHistory, UsageRecord,
 };
 
 /// Coverage-aware API-equivalent subtotal across distinct usage histories.
@@ -178,8 +178,16 @@ pub fn format_plan_window(window: &PlanWindowObservation) -> String {
             }
         },
     );
+    if window.freshness == Freshness::Reset {
+        return format!("{scope} {duration} reset");
+    }
+    let status = if window.freshness == Freshness::Stale {
+        " stale"
+    } else {
+        ""
+    };
     format!(
-        "{scope} {duration} used {:.0}%",
+        "{scope} {duration} used {:.0}%{status}",
         window.utilization.get() * 100.0
     )
 }

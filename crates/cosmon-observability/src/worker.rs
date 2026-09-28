@@ -186,6 +186,8 @@ fn claude_model_segments(session: &claudion::SessionLog) -> (Vec<ModelUsageSegme
             cache_write_tokens: TokenCount::Measured {
                 tokens: turn.cache_creation_input_tokens.get(),
             },
+            cache_write_5m_tokens: turn.cache_creation_5m_input_tokens,
+            cache_write_1h_tokens: turn.cache_creation_1h_input_tokens,
             output_tokens: TokenCount::Measured {
                 tokens: turn.output_tokens.get(),
             },

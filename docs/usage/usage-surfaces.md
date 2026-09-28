@@ -11,7 +11,7 @@ numeric zero.
 
 | Surface | Audience | Projection contract |
 |---|---|---|
-| `cs peek` TUI | Human, live | The ENERGY cell shows `API equiv.` and every distinct plan window. Account windows retain the `account` label; worker attribution remains `worker plan use unavailable` unless worker-scoped evidence exists. Cumulative histories are deduplicated before token or USD addition. |
+| `cs peek` TUI | Human, live | The ENERGY cell renders token counters, `API equiv.`, every distinct plan window, and worker attribution on separate terminal lines at 80, 120, and 200 columns. Narrow layouts collapse secondary columns to preserve the usage qualifiers. Account windows retain the `account` label; worker attribution remains `worker plan use unavailable` unless worker-scoped evidence exists. Cumulative histories are deduplicated before token or USD addition. |
 | `cs peek --snapshot` | Human, fixed 120 columns | Each worker row is followed by fixed-width usage lines. API coverage, account scope/window and worker-attribution availability are separate lines, so the old 18-column COST cell cannot truncate a qualifier. |
 | `cs ensemble` | Human, fleet aggregate | Worker rows show both dimensions. Fleet and grand USD values are labelled `API equiv.` and report priced/total history coverage. Plan percentages remain per-window observations and are never included in a subtotal. |
 | `cs peek --json` | Machine, molecule view | `molecules[].usage` is an additive array of canonical records, deduplicated by cumulative history. Empty means unobserved, not zero. |
@@ -36,6 +36,19 @@ different readings remain separate when no safe account correlation exists.
 Their percentages are never summed. In particular, two workers that observe
 the same shared account do not each acquire that account percentage as worker
 consumption.
+
+The rollout probe refreshes plan freshness against a ten-minute maximum age.
+Human surfaces label stale windows, and show `reset` in place of a percentage
+once a window's reset time has passed. JSON retains the distinct `freshness`
+state and original observation and reset times. Account scope never becomes
+worker attribution during refresh.
+
+The price card's context band is enforced at valuation: cumulative logs cannot
+establish each request's context length, so a rate limited to a context band is
+a partial short-band estimate with `context_length_unknown` named in coverage.
+Cache writes with a reported five-minute/one-hour split use the corresponding
+rates. Missing splits remain partial. Unsupported reasoning and cache-write
+counters remain unavailable in the canonical record rather than measured zero.
 
 ## Durable compatibility boundary
 
@@ -67,4 +80,3 @@ logs. Claude plan collection remains unavailable unless dispatch can supply a
 supported effective-settings overlay and ordinary authorized activity yields a
 live reading. Rendering that honest unavailable state is not evidence of live
 Claude plan collection.
-

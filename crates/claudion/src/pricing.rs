@@ -110,6 +110,8 @@ mod tests {
             model: Some("claude-opus-4-6".to_string()),
             input_tokens: TokenCount::new(1_000_000), // $15
             cache_creation_input_tokens: TokenCount::new(0),
+            cache_creation_5m_input_tokens: None,
+            cache_creation_1h_input_tokens: None,
             cache_read_input_tokens: TokenCount::new(0),
             output_tokens: TokenCount::new(0),
         };
@@ -127,6 +129,8 @@ mod tests {
             model: None,
             input_tokens: TokenCount::new(0),
             cache_creation_input_tokens: TokenCount::new(0),
+            cache_creation_5m_input_tokens: None,
+            cache_creation_1h_input_tokens: None,
             cache_read_input_tokens: TokenCount::new(1_000_000), // $1.50
             output_tokens: TokenCount::new(0),
         };

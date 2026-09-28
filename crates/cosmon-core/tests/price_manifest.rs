@@ -23,6 +23,8 @@ fn segment(
         input_tokens: measured(input),
         cached_input_tokens: measured(cached),
         cache_write_tokens: measured(cache_write),
+        cache_write_5m_tokens: None,
+        cache_write_1h_tokens: None,
         output_tokens: measured(output),
         reasoning_output_tokens: measured(reasoning),
     }
@@ -73,8 +75,39 @@ fn current_manifest_matches_independent_gpt_5_6_sol_standard_arithmetic() {
     // 200k fresh * $4 + 800k cached * $0.40 + 100k output * $20.
     let expected = 0.80 + 0.32 + 2.00;
     assert!((amount - expected).abs() < 1e-12);
-    assert_eq!(coverage, PricingCoverage::Complete);
+    assert_eq!(
+        coverage,
+        PricingCoverage::Partial {
+            missing: vec!["gpt-5.6-sol:context_length_unknown".to_owned()]
+        }
+    );
     assert_eq!(revision, "standard-2026-09-28-codex");
+}
+
+#[test]
+fn a_limited_context_rate_cannot_claim_complete_without_request_length() {
+    let manifest = bundled_price_manifest().unwrap();
+    let card = manifest.current_card().unwrap();
+    let usage = segment("gpt-5.5", 5_000_000, 0, 0, 0, 0);
+    let (_, coverage, _) = estimated(value_model_segments(card, &[usage], true, provenance()));
+    assert_eq!(
+        coverage,
+        PricingCoverage::Partial {
+            missing: vec!["gpt-5.5:context_length_unknown".to_owned()]
+        }
+    );
+}
+
+#[test]
+fn cache_write_duration_split_uses_each_rate_without_double_charging_input() {
+    let manifest = bundled_price_manifest().unwrap();
+    let card = manifest.current_card().unwrap();
+    let mut usage = segment("claude-opus-5-5", 1_000_000, 0, 1_000_000, 0, 0);
+    usage.cache_write_5m_tokens = Some(400_000);
+    usage.cache_write_1h_tokens = Some(600_000);
+    let (amount, coverage, _) = estimated(value_model_segments(card, &[usage], true, provenance()));
+    assert!((amount - 6.8).abs() < 1e-12);
+    assert_eq!(coverage, PricingCoverage::Complete);
 }
 
 #[test]

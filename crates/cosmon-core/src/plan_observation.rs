@@ -79,8 +79,9 @@ impl PlanObservation {
     pub fn refresh(&mut self, now: DateTime<Utc>, max_age: Duration) {
         for window in &mut self.plan.windows {
             let captured = window.provenance.captured_at.unwrap_or(self.captured_at);
-            window.freshness = if window.window.resets_at.is_some_and(|t| t <= now)
-                || now.signed_duration_since(captured) > max_age
+            window.freshness = if window.window.resets_at.is_some_and(|t| t <= now) {
+                Freshness::Reset
+            } else if now.signed_duration_since(captured) > max_age
                 || window
                     .provenance
                     .observed_at

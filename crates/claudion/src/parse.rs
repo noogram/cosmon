@@ -108,6 +108,12 @@ pub fn parse_session(path: impl AsRef<Path>) -> Result<SessionLog, ClaudionError
             model,
             input_tokens: extract_token_count(usage, "input_tokens"),
             cache_creation_input_tokens: extract_token_count(usage, "cache_creation_input_tokens"),
+            cache_creation_5m_input_tokens: usage
+                .pointer("/cache_creation/ephemeral_5m_input_tokens")
+                .and_then(serde_json::Value::as_u64),
+            cache_creation_1h_input_tokens: usage
+                .pointer("/cache_creation/ephemeral_1h_input_tokens")
+                .and_then(serde_json::Value::as_u64),
             cache_read_input_tokens: extract_token_count(usage, "cache_read_input_tokens"),
             output_tokens: extract_token_count(usage, "output_tokens"),
         };
@@ -191,6 +197,17 @@ mod tests {
         assert_eq!(turn.cache_read_input_tokens, TokenCount::new(2000));
         assert_eq!(turn.output_tokens, TokenCount::new(50));
         assert_eq!(turn.model.as_deref(), Some("claude-opus-4-6"));
+    }
+
+    #[test]
+    fn cache_creation_duration_split_survives_parsing() {
+        let f = write_jsonl(&[
+            r#"{"type":"assistant","sessionId":"s","message":{"model":"model","usage":{"input_tokens":0,"cache_creation_input_tokens":30,"cache_read_input_tokens":0,"output_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":20}}}}"#,
+        ]);
+        let turn = parse_session(f.path()).unwrap().turns.remove(0);
+        let serialized = serde_json::to_value(turn).unwrap();
+        assert_eq!(serialized["cache_creation_5m_input_tokens"], 10);
+        assert_eq!(serialized["cache_creation_1h_input_tokens"], 20);
     }
 
     #[test]

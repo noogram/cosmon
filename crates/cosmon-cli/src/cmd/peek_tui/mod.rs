@@ -3432,7 +3432,12 @@ impl App {
                     ])),
                     pad_cell(Line::from(Span::styled(trust_text, trust_style))),
                     pad_cell(Line::from(age_cell(r.updated_at))),
-                    pad_cell(Line::from(energy)),
+                    Cell::from(ratatui::text::Text::from(
+                        energy
+                            .lines()
+                            .map(|line| Line::from(line.to_owned()))
+                            .collect::<Vec<_>>(),
+                    )),
                     pad_cell(adapter_cell(&r.adapter)),
                 ])
                 .height(row_height)
@@ -3472,7 +3477,21 @@ impl App {
                 .get(i)
                 .is_some_and(|r| self.expanded.contains(&r.mol_id))
         });
-        let widths = if any_expanded {
+        let widths = if area.width <= 120 {
+            [
+                Constraint::Length(2),
+                Constraint::Length(2),
+                Constraint::Length(0),
+                Constraint::Length(0),
+                Constraint::Length(0),
+                Constraint::Min(16),
+                Constraint::Length(4),
+                Constraint::Length(0),
+                Constraint::Length(0),
+                Constraint::Length(49),
+                Constraint::Length(0),
+            ]
+        } else if any_expanded {
             [
                 Constraint::Length(2),
                 Constraint::Length(3),
@@ -3502,6 +3521,7 @@ impl App {
             ]
         };
         let table = Table::new(rows, widths)
+            .column_spacing(u16::from(area.width > 120))
             .header(header)
             .block(Block::default().borders(Borders::ALL).title("Fleet"))
             // REVERSED swaps fg/bg automatically, so every span in the row
@@ -5575,6 +5595,61 @@ mod tests {
                 49,
                 "qualifier line escaped the fixed ENERGY cell: {line:?}"
             );
+        }
+    }
+
+    #[test]
+    fn energy_qualifiers_reach_terminal_at_compact_and_wide_widths() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../cosmon-core/tests/fixtures/usage/usage_observed_v1.json"
+        ))
+        .unwrap();
+        let mut row = row_with("running", HeartbeatTier::Active);
+        row.mol_id = "task-usage-fixture".into();
+        row.energy_in = 1_200;
+        row.energy_cached = 200;
+        row.energy_out = 300;
+        row.energy_reasoning = 50;
+        row.usage
+            .push(serde_json::from_value(fixture["usage"].clone()).unwrap());
+        for width in [80, 120, 200] {
+            let mut app = App::for_test(vec![row.clone()], std::collections::HashMap::new());
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(width, 12)).unwrap();
+            terminal.draw(|f| app.draw_table(f, f.area())).unwrap();
+            let buffer = terminal.backend().buffer();
+            let rendered = (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| {
+                            buffer
+                                .cell((x, y))
+                                .map_or(" ", ratatui::buffer::Cell::symbol)
+                        })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(rendered.contains("API equiv."), "width={width}\n{rendered}");
+            assert!(
+                rendered.contains("account 5h 42%"),
+                "width={width}\n{rendered}"
+            );
+            assert!(
+                rendered.contains("worker plan use unavailable"),
+                "width={width}\n{rendered}"
+            );
+            if width <= 120 {
+                assert!(
+                    !rendered.contains("PROJECT"),
+                    "secondary columns must collapse at width={width}\n{rendered}"
+                );
+            } else {
+                assert!(
+                    rendered.contains("PROJECT"),
+                    "wide table must retain secondary columns\n{rendered}"
+                );
+            }
         }
     }
 

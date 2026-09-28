@@ -125,7 +125,7 @@ fn expired_and_missing_windows_do_not_survive_as_current() {
     let raw = "{\"timestamp\":\"2026-09-28T11:59:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"rate_limits\":{\"primary\":{\"used_percent\":2,\"resets_at\":1}}}}";
     let mut sample = codex_plan(raw, now);
     sample.refresh(now, chrono::Duration::minutes(10));
-    assert_eq!(sample.plan.windows[0].freshness, Freshness::Stale);
+    assert_eq!(sample.plan.windows[0].freshness, Freshness::Reset);
     assert_eq!(sample.unavailable_windows.len(), 1);
     let mut unknown = claude_plan(
         r#"{"rate_limits":{"five_hour":{"used_percentage":0}}}"#,

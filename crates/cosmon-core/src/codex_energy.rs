@@ -364,7 +364,11 @@ fn add_model_delta(segments: &mut Vec<ModelUsageSegment>, model: &str, delta: Co
                 model: model.to_owned(),
                 input_tokens: measured(0),
                 cached_input_tokens: measured(0),
-                cache_write_tokens: measured(0),
+                cache_write_tokens: TokenCount::Unavailable {
+                    reason: crate::usage::UnavailableReason::Unsupported,
+                },
+                cache_write_5m_tokens: None,
+                cache_write_1h_tokens: None,
                 output_tokens: measured(0),
                 reasoning_output_tokens: measured(0),
             });
