@@ -9,7 +9,9 @@
 # galaxy listed under `[drain].galaxies`. One molecule per galaxy per night.
 #
 # Hard preconditions, checked before any per-galaxy work:
-#   1. ~/.cosmon/autopilot.off — kill-switch. If present, exit 0 silently.
+#   1. ~/.cosmon/stand-down.lock (global) or ~/.cosmon/autopilot.off
+#      (autopilot scope) — kill-switches (issue #108). If either is present,
+#      exit 0 silently.
 #   2. ~/.config/cosmon/curate.toml — config. If missing, exit 0 (no drift).
 #
 # Per-galaxy preconditions, checked inside the loop:
@@ -27,6 +29,7 @@ set -euo pipefail
 
 CFG="${COSMON_CURATE_CONFIG:-$HOME/.config/cosmon/curate.toml}"
 KILL_SWITCH="${COSMON_AUTOPILOT_KILL_SWITCH:-$HOME/.cosmon/autopilot.off}"
+STAND_DOWN="$HOME/.cosmon/stand-down.lock"
 LOG_DIR="$HOME/.cosmon"
 LOG="$LOG_DIR/curate.log"
 PEER_HEARTBEAT_THRESHOLD_SEC="${COSMON_PEER_HEARTBEAT_THRESHOLD_SEC:-180}"
@@ -37,7 +40,13 @@ log() {
     printf '[curate-all] %s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG"
 }
 
-# --- precondition 1: kill-switch ------------------------------------------
+# --- precondition 1: kill-switches ----------------------------------------
+# The global stand-down lock stops every autonomous component; autopilot.off
+# stops the autopilot patrols only. Either one halts this sweep.
+if [[ -f "$STAND_DOWN" ]]; then
+    log "stand-down.lock present at $STAND_DOWN — exit"
+    exit 0
+fi
 if [[ -f "$KILL_SWITCH" ]]; then
     log "autopilot.off present at $KILL_SWITCH — exit"
     exit 0
@@ -183,8 +192,12 @@ for G in $GALAXIES; do
 
     log "→ $G pass=$PASS"
 
-    # Re-check the kill-switch before each galaxy — operator may have
-    # touched ~/.cosmon/autopilot.off mid-sweep.
+    # Re-check the kill-switches before each galaxy — operator may have
+    # touched one of them mid-sweep.
+    if [[ -f "$STAND_DOWN" ]]; then
+        log "stand-down.lock appeared mid-sweep — abort remaining galaxies"
+        exit 0
+    fi
     if [[ -f "$KILL_SWITCH" ]]; then
         log "autopilot.off appeared mid-sweep — abort remaining galaxies"
         exit 0

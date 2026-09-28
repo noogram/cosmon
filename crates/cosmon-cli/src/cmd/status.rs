@@ -61,6 +61,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use colored::Colorize;
 use cosmon_core::id::MoleculeId;
+use cosmon_core::kill_switch::{Autonomous, KillSwitch};
 use cosmon_core::kind::MoleculeKind;
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_core::staleness::{self, BacklogAge, BacklogItem};
@@ -105,6 +106,51 @@ struct StatusOutput {
     /// zero; a script can poll this one field instead of re-deriving it
     /// from the three counts.
     hygiene: HygieneInfo,
+    /// Issue #108 — every kill-switch file under `~/.cosmon/`, whether it is
+    /// present, and which autonomous components it stops. Listed even when
+    /// inactive so a reader learns the whole catalogue from one call.
+    kill_switches: Vec<KillSwitchInfo>,
+}
+
+/// One kill-switch as `cs status --json` reports it.
+#[derive(serde::Serialize)]
+struct KillSwitchInfo {
+    /// File name under `~/.cosmon/`.
+    file: &'static str,
+    /// Whether the file exists now.
+    active: bool,
+    /// The components it stops, by [`Autonomous::label`].
+    stops: Vec<&'static str>,
+}
+
+/// The kill-switch catalogue with the live presence of each file.
+fn kill_switch_infos(active: &[KillSwitch]) -> Vec<KillSwitchInfo> {
+    KillSwitch::ALL
+        .into_iter()
+        .map(|s| KillSwitchInfo {
+            file: s.file_name(),
+            active: active.contains(&s),
+            stops: s.scope().into_iter().map(Autonomous::label).collect(),
+        })
+        .collect()
+}
+
+/// The human line naming the active switches, or `None` when none is set —
+/// a quiet fleet prints nothing extra.
+fn render_kill_switch_line(active: &[KillSwitch]) -> Option<String> {
+    if active.is_empty() {
+        return None;
+    }
+    let files: Vec<String> = active
+        .iter()
+        .map(|s| format!("~/.cosmon/{}", s.file_name()))
+        .collect();
+    let note = if active.contains(&KillSwitch::StandDown) {
+        "all autonomous activity stopped"
+    } else {
+        "scoped stop"
+    };
+    Some(format!("kill-switch: {} — {note}", files.join(", ")))
 }
 
 /// Whether `cs status` is clean, as defined by issue #97: no zombie
@@ -420,6 +466,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // --- Hygiene (issue #97) — whether finishing left residue behind.
     let hygiene = HygieneInfo::new(zombie_sessions.len(), harvestable.count, unmerged.branches);
 
+    // --- Kill switches (issue #108) — which stop controls are laid down.
+    let active_switches = cosmon_cli::kill_switches::active();
+
     // --- Output ---
     if ctx.json {
         let output = StatusOutput {
@@ -455,6 +504,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             },
             galaxies,
             hygiene,
+            kill_switches: kill_switch_infos(&active_switches),
         };
         let json = serde_json::to_string_pretty(&output)?;
         println!("{json}");
@@ -483,6 +533,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         render_verbose(&pulse);
     } else {
         render_compact(&pulse);
+    }
+    if let Some(line) = render_kill_switch_line(&active_switches) {
+        println!("{line}");
     }
 
     Ok(())
@@ -1385,6 +1438,22 @@ mod tests {
     use cosmon_filestore::FileStore;
     use cosmon_state::{Fleet, MoleculeData, StateStore};
     use tempfile::TempDir;
+
+    #[test]
+    fn kill_switch_line_is_silent_when_nothing_is_set() {
+        assert_eq!(render_kill_switch_line(&[]), None);
+    }
+
+    #[test]
+    fn kill_switch_line_names_every_active_file_and_the_global_scope() {
+        let line = render_kill_switch_line(&[KillSwitch::StandDown, KillSwitch::Ask]).unwrap();
+        assert_eq!(
+            line,
+            "kill-switch: ~/.cosmon/stand-down.lock, ~/.cosmon/ask.off — all autonomous activity stopped"
+        );
+        let line = render_kill_switch_line(&[KillSwitch::Health]).unwrap();
+        assert_eq!(line, "kill-switch: ~/.cosmon/health.off — scoped stop");
+    }
 
     fn make_store() -> (TempDir, FileStore) {
         let tmp = TempDir::new().unwrap();

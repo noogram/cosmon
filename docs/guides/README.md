@@ -35,6 +35,7 @@ One-line map of the how-to guides in `docs/guides/`. These are goal-oriented rec
 - [Install the Resident Runtime — one TOML block, then flip a bit](install-resident-runtime.md)
 - [ios-pilot — guide utilisateur](ios-pilot.md)
 - [Jobs-track measurement — tenant_auditor 15-min test](jobs-track-measurement-template.md)
+- [Kill switches](kill-switches.md)
 - [LaTeX Convergence Gate (`G_latex`) — operator & worker guide](latex-convergence-gate.md)
 - [LaunchAgent — `cs-api` resident HTTP adapter](launchagent-cs-api.md)
 - [LaunchAgent — `matrix-echo-tick` scheduler](launchagent-matrix-tick.md)

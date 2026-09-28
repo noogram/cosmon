@@ -21,6 +21,8 @@ pub mod visual;
 
 pub mod sensorium;
 
+pub mod kill_switches;
+
 pub mod tackle_env;
 
 pub mod briefing_receipt_hook;

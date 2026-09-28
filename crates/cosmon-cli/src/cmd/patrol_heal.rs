@@ -51,6 +51,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use colored::Colorize;
 use cosmon_core::id::MoleculeId;
+use cosmon_core::kill_switch::Autonomous;
 use cosmon_core::patrol::{
     heal_gate, scan, AnomalyClass, GuardConfig, HealBlockReason, HealGate, HealGuardView,
     HealthFinding, HealthRemedy, HealthThresholds,
@@ -461,12 +462,6 @@ impl HealSweepReport {
     }
 }
 
-/// Resolve `~/.cosmon/health.off` and report whether the global kill-switch is
-/// present (ADR-137 §5.4). Absent home dir ⇒ treat as not set.
-pub(crate) fn global_kill_switch_present() -> bool {
-    dirs::home_dir().is_some_and(|h| h.join(".cosmon").join("health.off").exists())
-}
-
 /// Run one detect → guard → remediate pass over the current galaxy's state
 /// store (ADR-137 §11 P3). Returns the [`HealSweepReport`]; the caller prints
 /// it (human or `--json`).
@@ -481,8 +476,9 @@ pub(crate) fn heal_sweep(
     no_tmux: bool,
     now: DateTime<Utc>,
 ) -> HealSweepReport {
-    // §5.4 — global kill-switch dominates: the whole pass is a no-op.
-    if global_kill_switch_present() {
+    // §5.4 — a kill-switch dominates: the whole pass is a no-op. Either the
+    // global `stand-down.lock` or the scoped `health.off` (issue #108).
+    if cosmon_cli::kill_switches::halting(Autonomous::Heal).is_some() {
         return HealSweepReport {
             kill_switched: true,
             dry_run,
@@ -669,7 +665,9 @@ pub(crate) fn print_plain(report: &HealSweepReport) {
     println!();
     let banner = "HEAL".cyan().bold();
     if report.kill_switched {
-        println!("  {banner} ~/.cosmon/health.off present — heal pass is a no-op");
+        println!(
+            "  {banner} ~/.cosmon/health.off or stand-down.lock present — heal pass is a no-op"
+        );
         return;
     }
     let mode = if report.dry_run { " (dry-run)" } else { "" };

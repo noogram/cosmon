@@ -120,7 +120,8 @@ Decision rule — does the command finish on its own?
   No, runs forever, restart if it dies    \-> cosmon\-daemon\-supervisor
 .PP
 Operator views: cs scheduler status / cs daemons list|status|logs|reload.
-Shared kill\-switch: \*(Aqtouch ~/.cosmon/stand\-down.lock\*(Aq silences both.
+Shared kill\-switch: \*(Aqtouch ~/.cosmon/stand\-down.lock\*(Aq silences both,
+and every other autonomous path (patrol, heal, cs ask \-\-execute).
 .PP
 SCHEDULER DRY\-RUN OUTPUT — four row types, one per patrol:
   FIRE     patrol is due; dispatch would spawn the command now

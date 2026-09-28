@@ -193,7 +193,9 @@ Registering a service — two métiers, two tools:
     No, it runs forever and must be restarted if it dies -> supervisor (daemons.toml)
 
   Both share one kill-switch: `touch ~/.cosmon/stand-down.lock` silences every
-  patrol and SIGTERMs every supervised daemon until the file is removed.
+  patrol and SIGTERMs every supervised daemon until the file is removed. The
+  same file stops `cs patrol`, healing and `cs ask --execute`; `cs status`
+  lists every switch (docs/guides/kill-switches.md).
 
   See 'cs help scheduler' and 'cs help daemons' for config examples, hot-reload,
   and the canonical 'réveil / veilleur de nuit' image (chronicle

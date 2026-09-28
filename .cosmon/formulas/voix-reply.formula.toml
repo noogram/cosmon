@@ -82,7 +82,7 @@ LOAD-BEARING INVARIANTS (restated per step for crash-proof reading):
       not "operator has forbidden sending".
 
   (e) KILL-SWITCH GENERALITY. Each step checks
-      `~/.cosmon/autopilot.off` at start. If present, the step
+      `~/.cosmon/autopilot.off` (or the global `~/.cosmon/stand-down.lock`) at start. If present, the step
       writes a one-line abort marker to `MOLECULE_DIR/abort.log`
       and exits 0 cleanly without firing any side effect. Per
       godin's generosity-preserving order, VOIX is the FIRST
@@ -234,7 +234,7 @@ Resolve MOLECULE_DIR from `cs --json observe {this_mol_id}` (the \
 MOLECULE_DIR) because the operator reviews it from the worktree the \
 same way they review any other worker output.
 
-KILL-SWITCH CHECK. If `~/.cosmon/autopilot.off` exists, write one \
+KILL-SWITCH CHECK. If `~/.cosmon/autopilot.off` or `~/.cosmon/stand-down.lock` exists, write one \
 line to `MOLECULE_DIR/abort.log` (`draft aborted: autopilot.off`) \
 and exit 0. Honored at the start of every step. VOIX is the FIRST \
 organ silenced — godin's generosity-preserving order.
@@ -323,7 +323,7 @@ non-empty body. If the parent tile declared `embargo: <text>`, the \
 embargo is folded into the draft body as a leading courtesy line — \
 not appended as a postscript. `MOLECULE_DIR/provenance.ndjson` has \
 one SparkedBy row pointing at the parent tile. If \
-`~/.cosmon/autopilot.off` was present at step start, \
+`~/.cosmon/autopilot.off` or `~/.cosmon/stand-down.lock` was present at step start, \
 `MOLECULE_DIR/abort.log` exists and the draft file was NOT written.
 """
 
@@ -335,7 +335,7 @@ one SparkedBy row pointing at the parent tile. If \
 id = "permit"
 title = "Consult permissions.ndjson + kitchen-window guard; abort if no permit"
 description = """
-KILL-SWITCH CHECK (autopilot.off → write abort.log, exit 0). Honored \
+KILL-SWITCH CHECK (autopilot.off or stand-down.lock → write abort.log, exit 0). Honored \
 per-molecule per the kahneman invariant.
 
 PERMISSION LEDGER. Read `.cosmon/state/voix/permissions.ndjson` line \
@@ -427,7 +427,7 @@ execute step 3 in this session.
 id = "send"
 title = "Dispatch via sec_send_email (operator-gated; worker NEVER auto-sends)"
 description = """
-KILL-SWITCH CHECK (autopilot.off → write abort.log, exit 0).
+KILL-SWITCH CHECK (autopilot.off or stand-down.lock → write abort.log, exit 0).
 
 OPERATOR-APPROVAL GATE — THE LOAD-BEARING DRAFT-BLOCKING INVARIANT. \
 This step MUST refuse to run unless `MOLECULE_DIR/operator-approved.flag` \

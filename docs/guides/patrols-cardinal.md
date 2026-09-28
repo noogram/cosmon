@@ -125,7 +125,9 @@ enabled          = false
 
 - **Global stand-down**: `touch ~/.cosmon/stand-down.lock` — the scheduler
   skips every patrol at the next tick until the file is removed. No child is
-  killed; already-firing patrols finish on their own.
+  killed; already-firing patrols finish on their own, and a `cs patrol` run
+  that starts while the file exists performs no sweep. The full catalogue of
+  switches is in [kill-switches.md](kill-switches.md).
 - **Per-patrol kill-switch**: set `kill_switch = "~/.cosmon/skip-foo.lock"`
   on a single `[[patrol]]` to silence it alone.
 - **Galaxy scope**: a patrol's reach is its `working_dir` + the `command` it
@@ -232,7 +234,7 @@ dispatch         = "detached"
 enabled          = false
 ```
 
-Kill-switches, unchanged: `~/.cosmon/health.off` stops it globally, a
+Kill-switches: `~/.cosmon/health.off` or `~/.cosmon/stand-down.lock` stops it globally, a
 `health:hold` tag or a `.no-heal` sentinel stops it per molecule, and
 `enabled = false` stops the patrol itself.
 

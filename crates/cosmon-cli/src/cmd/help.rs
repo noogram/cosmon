@@ -371,7 +371,9 @@ fn print_grouped_reference() {
     );
     println!();
     println!("  Both share one kill-switch: `touch ~/.cosmon/stand-down.lock` silences every");
-    println!("  patrol and SIGTERMs every supervised daemon until the file is removed.");
+    println!("  patrol and SIGTERMs every supervised daemon until the file is removed. The");
+    println!("  same file stops `cs patrol`, healing and `cs ask --execute`; `cs status`");
+    println!("  lists every switch (docs/guides/kill-switches.md).");
     println!();
     println!("  See 'cs help scheduler' and 'cs help daemons' for config examples, hot-reload,");
     println!("  and the canonical 'réveil / veilleur de nuit' image (chronicle");
