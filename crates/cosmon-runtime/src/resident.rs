@@ -635,42 +635,26 @@ impl ResidentScheduler for ReadyFrontierScheduler {
         // A blocker is *cleared* (no longer gating its dependents) once it
         // reaches a terminal state whose semantics say "successors may run".
         // This mirrors the effective DEFAULT `cs run` gate: DagPolicy's plan
-        // and `cosmon_state::frontier::compute_from_molecules` are intersected,
-        // so the plan keeps an ordinary non-terminal `Frozen` predecessor
-        // blocking even if the frontier reducer independently surfaces its
-        // dependent. The explicit `freeze_on_last_step` delivered park is the
-        // sole exception in both paths.
+        // and `cosmon_state::frontier::compute_from_molecules` both use the
+        // domain completion predicate. A pause or failed terminal verdict
+        // keeps the dependency edge closed.
         //
-        // - `collapsed` — releases successors unconditionally (the collapse
-        //   cascade frees the lateral axis).
-        // - `frozen` — cleared only for an explicit `freeze_on_last_step`
-        //   delivered park with no `stuck_at` marker. Ordinary `cs freeze` and
-        //   `cs stuck` observations remain blocking pauses.
         // - `completed` — cleared only when its branch is merged
         //   (`merged_at.is_some()`, merge-before-dispatch, frontier.rs:214) so
         //   the dependent's worktree carries the committed output. In the
-        //   resident flow the loop's own `Done` sweep merges-and-tears-down a
-        //   completed blocker; the dependent then chains on the next tick via
-        //   the *absent* path below (`!present`), immediately since the
-        //   teardown fires an FS event.
+        //   resident flow the loop's own `Done` sweep integrates the blocker;
+        //   its retained state supplies the completion verdict on a later tick.
         let cleared: std::collections::HashSet<&str> = snapshot
             .molecules
             .iter()
-            .filter(|m| match m.status.as_str() {
-                "collapsed" => true,
-                "frozen" => m.freeze_on_last_step && m.stuck_at.is_none(),
-                "completed" => m.merged_at.is_some(),
-                _ => false,
+            .filter(|m| {
+                m.status
+                    .parse::<cosmon_core::molecule::MoleculeStatus>()
+                    .is_ok_and(cosmon_core::molecule::MoleculeStatus::satisfies_blocked_by)
+                    && m.merged_at.is_some()
             })
             .map(|m| m.id.as_str())
             .collect();
-        // Ids still present in the snapshot. A blocker absent from this set
-        // has been torn down by `cs done` (which merges before removing), so
-        // it no longer blocks — treating a torn-down blocker as still-blocking
-        // is the BUG-2 drain: `cs run` auto-`cs done`s each stage, so the next
-        // stage's blockers vanish from the ensemble before it can chain.
-        let present: std::collections::HashSet<&str> =
-            snapshot.molecules.iter().map(|m| m.id.as_str()).collect();
         // Re-derive `tackled` from disk state on every tick — a molecule
         // that has ever transitioned past `pending` is structurally
         // tackled regardless of what our in-memory set says.
@@ -709,14 +693,8 @@ impl ResidentScheduler for ReadyFrontierScheduler {
             if reserved_for_human(m) {
                 continue;
             }
-            // A blocker is satisfied when it is cleared (terminal) OR no
-            // longer present (torn down by `cs done`). This is what lets the
-            // loop *chain* across stage boundaries instead of draining the
-            // moment a completed blocker is merged-and-removed.
-            let unblocked = m
-                .blocked_by
-                .iter()
-                .all(|b| cleared.contains(b.as_str()) || !present.contains(b.as_str()));
+            // A missing record does not provide a completion verdict.
+            let unblocked = m.blocked_by.iter().all(|b| cleared.contains(b.as_str()));
             if unblocked {
                 out.push(Decision::Tackle {
                     molecule_id: m.id.clone(),
@@ -2969,36 +2947,22 @@ mod tests {
     }
 
     #[test]
-    fn ready_frontier_chains_past_torn_down_blocker() {
-        // BUG 2 (task-20260604-6056): `cs run` auto-`cs done`s each stage, so
-        // a fan-in node's earlier blockers vanish from the ensemble before
-        // the last one completes. The scheduler must treat an *absent*
-        // blocker as satisfied, or it drains with the fan-in still pending.
+    fn ready_frontier_holds_fan_in_when_one_blocker_is_missing() {
+        // A missing status record does not prove completion. Even a second
+        // completed blocker cannot satisfy the missing predecessor's edge.
         let mut sched = ReadyFrontierScheduler::new();
-        // b1 already torn down (absent). b2 completed AND merged (its branch
-        // landed, teardown pending) — the merge-before-dispatch discriminant
-        // is satisfied, so the fan-in may chain.
+        // b1 is absent; b2 completed and merged.
         let mut b2 = mol("b2", "completed", &[]);
         b2.merged_at = Some("2026-07-12T10:00:00Z".into());
         let snap = EnsembleSnapshot {
             molecules: vec![
                 b2,
-                // fan-in blocked by b1 (gone) and b2 (completed+merged).
+                // fan-in blocked by b1 (unknown) and b2 (completed+merged).
                 mol("redteam", "pending", &["b1", "b2"]),
             ],
         };
         let decisions = sched.next_decisions(&snap);
-        assert!(
-            decisions.contains(&Decision::Tackle {
-                molecule_id: "redteam".into(),
-                // Pin-less, directive-less → no flag; child runs the chain.
-                adapter: None,
-                base: None,
-                harness: cosmon_core::harness_settings::HarnessMap::new(),
-            }),
-            "fan-in must chain when one blocker is torn down and the other \
-             completed, got {decisions:?}"
-        );
+        assert_eq!(decisions, vec![Decision::Done("b2".into())]);
     }
 
     #[test]
@@ -3018,6 +2982,24 @@ mod tests {
             assert!(
                 decisions.is_empty(),
                 "tick {tick}: dependent of a frozen blocker must not dispatch, got {decisions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ready_frontier_holds_dependent_of_collapsed_blocker() {
+        let snap = EnsembleSnapshot {
+            molecules: vec![
+                mol("blocker", "collapsed", &[]),
+                mol("dependent", "pending", &["blocker"]),
+            ],
+        };
+        let mut scheduler = ReadyFrontierScheduler::new();
+        for tick in 1..=2 {
+            let decisions = scheduler.next_decisions(&snap);
+            assert!(
+                decisions.is_empty(),
+                "tick {tick}: collapsed blocker must not dispatch dependent: {decisions:?}"
             );
         }
     }
@@ -3045,7 +3027,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_frontier_releases_explicit_delivered_park() {
+    fn ready_frontier_holds_explicit_delivered_park() {
         let mut sched = ReadyFrontierScheduler::new();
         let mut blocker = mol("mission", "frozen", &[]);
         blocker.freeze_on_last_step = true;
@@ -3053,15 +3035,9 @@ mod tests {
             molecules: vec![blocker, mol("architect", "pending", &["mission"])],
         };
         let decisions = sched.next_decisions(&snap);
-        assert_eq!(
-            decisions,
-            vec![Decision::Tackle {
-                molecule_id: "architect".into(),
-                adapter: None,
-                base: None,
-                harness: cosmon_core::harness_settings::HarnessMap::new(),
-            }],
-            "freeze_on_last_step is a delivered park, not an operator pause"
+        assert!(
+            decisions.is_empty(),
+            "frozen status does not complete BlockedBy"
         );
     }
 

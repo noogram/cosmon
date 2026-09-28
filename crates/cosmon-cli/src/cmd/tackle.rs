@@ -454,6 +454,30 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         ));
     }
 
+    // The operator and resident runtime share this admission boundary. A
+    // terminal failure is still an unsatisfied prerequisite; branch selection
+    // below must never turn a collapsed or frozen blocker into permission to
+    // dispatch its dependent.
+    for blocker_id in mol.blocked_by() {
+        match store.load_molecule(blocker_id) {
+            Ok(blocker) if !blocker.status.satisfies_blocked_by() => {
+                return Err(anyhow::anyhow!(
+                    "molecule {} is blocked by {} ({}) — complete the blocker, or collapse and re-nucleate the dependent with a new --blocked-by edge",
+                    mol_id,
+                    blocker_id,
+                    blocker.status
+                ));
+            }
+            Ok(_) => {}
+            Err(cosmon_core::error::CosmonError::MoleculeNotFound(_)) => {
+                return Err(anyhow::anyhow!(
+                    "molecule {mol_id} is blocked by {blocker_id} (record missing) — restore the blocker or re-nucleate the dependent with a valid --blocked-by edge"
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
     // Root-spawn refusal, hoisted to the entry (COSMON-DEV #20, reported
     // against v0.4.0 by @jdthaler).
     //
@@ -13128,6 +13152,57 @@ mod tests {
         assert!(err
             .to_string()
             .contains("cannot tackle a terminal molecule"));
+    }
+
+    #[test]
+    fn tackle_refuses_dependent_of_collapsed_or_frozen_blocker() {
+        for status in [MoleculeStatus::Collapsed, MoleculeStatus::Frozen] {
+            let (_tmp, state_dir) = make_store();
+            let store = FileStore::new(&state_dir);
+            let blocker = sample_molecule("task-20260928-aaaa", status);
+            let mut dependent = sample_molecule("task-20260928-bbbb", MoleculeStatus::Pending);
+            dependent
+                .typed_links
+                .push(cosmon_core::interaction::MoleculeLink::BlockedBy {
+                    source: blocker.id.clone(),
+                });
+            store.save_molecule(&blocker.id, &blocker).unwrap();
+            store.save_molecule(&dependent.id, &dependent).unwrap();
+            let ctx = Context {
+                verbose: false,
+                json: false,
+                config: Some(state_dir),
+            };
+            let args = Args {
+                molecule: dependent.id.to_string(),
+                fleet: None,
+                workdir: None,
+                base: None,
+                no_worktree: true,
+                dry_run: true,
+                permission_mode: None,
+                force: false,
+                name: None,
+                leaf: false,
+                force_runtime: false,
+                bypass_seal: false,
+                bypass_reason: None,
+                adapter: None,
+                model: None,
+                role_hint: None,
+                reclaim_derived: false,
+                fallback_from_local: None,
+                by: "human".to_owned(),
+                harness: Vec::new(),
+            };
+            let error = run(&ctx, &args).unwrap_err().to_string();
+            assert!(error.contains(&blocker.id.to_string()), "{error}");
+            assert!(error.contains("--blocked-by"), "{error}");
+            assert_eq!(
+                store.load_molecule(&dependent.id).unwrap().status,
+                MoleculeStatus::Pending
+            );
+        }
     }
 
     #[test]

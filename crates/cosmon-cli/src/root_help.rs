@@ -148,6 +148,10 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
                docs/guides/peek-snapshot.md)\n  \
              cs peek --json                  machine view: one JSON document,\n                                  \
                printed once, sorted by molecule id\n  \
+             cs status <id>                  names dependents held by a collapsed\n                                  \
+               or frozen blocker; complete the blocker\n                                   \
+               or re-nucleate the dependent with a new\n                                   \
+               --blocked-by edge\n  \
              cs ensemble --tag temp:hot      actionable backlog snapshot\n  \
              cs wait <id> &                  block on a worker without hanging the pilot\n  \
              cs events journal <id>          one molecule's whole history, projected\n                                  \

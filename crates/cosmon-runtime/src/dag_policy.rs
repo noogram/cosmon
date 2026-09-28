@@ -453,25 +453,10 @@ impl DagPolicy {
     /// `true` if the edge list was mutated (triggering a plan rebuild after
     /// the whole batch is processed).
     ///
-    /// **`Completed` and `Collapsed` are handled identically.** This is the
-    /// load-bearing decision of task-20260706-4d1e:
-    /// **`blocked-by` releases on *done*, not on *verdict*.** A `reproduce`
-    /// molecule that concludes "refuted" (bug not reproducible → collapse)
-    /// still releases the `fix` molecule that was `blocked-by` it — the
-    /// downstream worker reads the "no repro" verdict from disk and decides.
-    /// The DAG edge carries one bit (done / not-done); the verdict is
-    /// content on the data plane, never a second bit on the control plane.
-    ///
-    /// This aligns the policy with
-    /// [`cosmon_state::frontier::compute_from_molecules`], which clears a
-    /// `Collapsed` predecessor. An ordinary `Frozen` observation is
-    /// deliberately excluded: it is a pause, not a terminal verdict, so its
-    /// edges remain blocking until a later `Completed` or `Collapsed`
-    /// observation. The explicit `freeze_on_last_step` delivered-park case is
-    /// still absorbed because it records completed decomposition work rather
-    /// than an operator pause. (Supersedes the forward-`Blocks` half of
-    /// "option B", `DIAGNOSIS-mission-collapse.md`; the lateral
-    /// `DecayProduct` drain it introduced is preserved verbatim.)
+    /// The plan absorbs collapsed molecules to discover lateral decay
+    /// products. Its skip set is not the `BlockedBy` admission verdict: the
+    /// frontier intersection keeps dependents of collapsed and frozen
+    /// blockers pending. Only completed blockers satisfy that edge.
     fn absorb_terminal(&mut self, mol_id: &MoleculeId, typed_links: &[MoleculeLink]) -> bool {
         self.completed.insert(mol_id.clone());
 
@@ -593,11 +578,9 @@ impl Policy for DagPolicy {
         //    An ordinary `Frozen` observation is not terminal and must leave
         //    every dependency edge blocking. The one explicit exception is a
         //    `freeze_on_last_step` delivered park: that molecule completed its
-        //    decomposition work before the runtime parked it. `blocked-by`
-        //    releases on *done*, not on *verdict* (task-20260706-4d1e) — so a
-        //    collapsed blocker unblocks its forward dependents just like a
-        //    clean completion, and the lateral `DecayProduct` axis drains too
-        //    (the surviving half of `DIAGNOSIS-mission-collapse.md`).
+        //    decomposition work before the runtime parked it. The frontier
+        //    below still requires a Completed blocker for `BlockedBy`; this
+        //    absorption retains the lateral `DecayProduct` drain.
         let mut newly_terminal: Vec<(&MoleculeId, &[MoleculeLink])> = Vec::new();
         let mut seen: Vec<&MoleculeId> = self.known_molecules.iter().collect();
         seen.sort();
@@ -650,8 +633,8 @@ impl Policy for DagPolicy {
         //    both conditions into one pass:
         //
         //      (a) cosmon status is `Pending` (the DAG-readiness half), and
-        //      (b) every upstream predecessor has `merged_at.is_some()`
-        //          or is `Collapsed` (the branch-merged half).
+        //      (b) every upstream predecessor completed and has
+        //          `merged_at.is_some()` (the branch-merged half).
         //
         //    Before this refactor the policy emitted a molecule whose
         //    predecessors were cosmon-Completed but whose branches had
@@ -668,7 +651,7 @@ impl Policy for DagPolicy {
         //    graph. The frontier reducer is an additional filter that
         //    gates dispatch on the atomic projection. We intersect the
         //    two so a molecule surfaced by the plan but blocked by an
-        //    unmerged predecessor stays held.
+        //    unmerged or unsuccessful predecessor stays held.
         let frontier_set: HashSet<MoleculeId> =
             cosmon_state::frontier::compute_from_molecules(&snapshot.molecules)
                 .into_iter()
@@ -1811,21 +1794,17 @@ description = "write"
         );
     }
 
-    // -- collapsed parent releases BOTH its DecayProduct and Blocks children --
+    // -- collapse exposes decay work while BlockedBy remains closed --
 
     /// A `reproduce` molecule `M` decomposes into two lateral children `C1`
     /// and `C2` and has a forward-`Blocks` dependent `P` (the `fix`). `M`
     /// then collapses with a **refuted** verdict (bug not reproducible).
     ///
-    /// `blocked-by` releases on *done*, not on *verdict* (task-20260706-4d1e):
-    /// the collapse must splice **both** the lateral `DecayProduct` children
-    /// `C1`/`C2` **and** the forward `Blocks` target `P`, and enter `M` into
-    /// the skip-set. All three dependents become dispatchable — the `fix`
-    /// worker reads the "no repro" verdict from disk and decides. This
-    /// matches [`cosmon_state::frontier::compute_from_molecules`], which
-    /// already clears a `Collapsed` predecessor.
+    /// Collapse exposes lateral `DecayProduct` children for further work,
+    /// while the forward `BlockedBy` dependent remains pending. The policy
+    /// plan may surface it, but the frontier intersection refuses dispatch.
     #[test]
-    fn test_dag_policy_collapsed_parent_releases_decay_and_blocks() {
+    fn test_dag_policy_collapsed_parent_releases_decay_but_holds_blocked_by() {
         let m = mol_id("task-20260410-mcol");
         let c1 = mol_id("task-20260410-cc01");
         let c2 = mol_id("task-20260410-cc02");
@@ -1840,7 +1819,11 @@ description = "write"
         // Tick 1: only M is ready.
         let snap = snapshot(vec![
             make_mol(&m, MoleculeStatus::Pending, Vec::new()),
-            make_mol(&p, MoleculeStatus::Pending, Vec::new()),
+            make_mol(
+                &p,
+                MoleculeStatus::Pending,
+                vec![MoleculeLink::BlockedBy { source: m.clone() }],
+            ),
         ]);
         let _ = policy.next_actions(&snap);
 
@@ -1859,7 +1842,11 @@ description = "write"
             m_collapsed,
             make_mol(&c1, MoleculeStatus::Pending, Vec::new()),
             make_mol(&c2, MoleculeStatus::Pending, Vec::new()),
-            make_mol(&p, MoleculeStatus::Pending, Vec::new()),
+            make_mol(
+                &p,
+                MoleculeStatus::Pending,
+                vec![MoleculeLink::BlockedBy { source: m.clone() }],
+            ),
         ]);
         let actions = policy.next_actions(&snap);
         let ids = evolve_ids(&actions);
@@ -1872,18 +1859,13 @@ description = "write"
             ids.contains(&c2),
             "C2 must be dispatched after M collapses (lateral drain), got {ids:?}"
         );
-        assert!(
-            ids.contains(&p),
-            "P (the fix) MUST be dispatched — blocked-by releases on done, \
-             not on verdict; a refuted reproduce still unblocks the fix, got {ids:?}"
-        );
+        assert!(!ids.contains(&p), "collapsed parent must hold P: {ids:?}");
 
-        // A collapse is a terminal event: M enters the skip-set exactly
-        // like a clean completion, so the forward Blocks edge (M, P) is
-        // cleared and P is released.
+        // The plan absorbs M to splice decay children, but frontier still
+        // refuses the blocked-by dependent P.
         assert!(
             policy.completed().contains(&m),
-            "collapsed M must enter the skip-set so its forward Blocks dependents release"
+            "collapsed M remains in the plan skip-set for lateral splicing"
         );
     }
 
@@ -1948,6 +1930,32 @@ description = "write"
         completed_blocker.merged_at = Some(Utc::now());
         let actions = policy.next_actions(&snapshot(vec![completed_blocker, dependent_pending()]));
         assert_eq!(evolve_ids(&actions), vec![dependent]);
+    }
+
+    #[test]
+    fn test_dag_policy_collapsed_blocker_keeps_dependent_pending() {
+        let blocker = mol_id("task-20260928-block");
+        let dependent = mol_id("task-20260928-depd");
+        let edges = vec![(blocker.clone(), dependent.clone())];
+        let plan = Plan::new(edges.clone(), HashSet::new()).expect("plan");
+        let mut policy = DagPolicy::new(plan, edges);
+        let child = make_mol(
+            &dependent,
+            MoleculeStatus::Pending,
+            vec![MoleculeLink::BlockedBy {
+                source: blocker.clone(),
+            }],
+        );
+        for tick in 1..=2 {
+            let actions = policy.next_actions(&snapshot(vec![
+                make_mol(&blocker, MoleculeStatus::Collapsed, Vec::new()),
+                child.clone(),
+            ]));
+            assert!(
+                !evolve_ids(&actions).contains(&dependent),
+                "tick {tick}: collapsed prerequisite must not dispatch dependent: {actions:?}"
+            );
+        }
     }
 
     // -- ADR-038 Limit 1: refresh_scope absorbs dynamic descendants --

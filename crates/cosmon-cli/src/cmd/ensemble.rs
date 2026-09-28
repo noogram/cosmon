@@ -412,12 +412,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 molecules
                     .iter()
                     .find(|candidate| &&candidate.id == blocker)
-                    .is_none_or(|candidate| {
-                        !matches!(
-                            candidate.status,
-                            MoleculeStatus::Completed | MoleculeStatus::Collapsed
-                        )
-                    })
+                    .is_none_or(|candidate| !candidate.status.satisfies_blocked_by())
             });
             let tags: Vec<String> = m.tags.iter().map(|t| t.as_str().to_owned()).collect();
             let supervision = m

@@ -138,6 +138,11 @@ EXAMPLES:
   cs status task-20260907-b25f        # one molecule: status/phase/updated_at/terminal
   cs status task-20260907-b25f --json # same four fields, machine-readable
 
+BLOCKED-BY: only completion satisfies a dependency. A collapsed or frozen
+      blocker keeps pending dependents held. Human status names those dependents;
+      thaw and complete a frozen blocker, or collapse and re-nucleate a
+      dependent with a new --blocked-by edge after its blocker collapses.
+
 STALENESS: the pulse carries derivatives, not only levels — `oldest 39d · 2 >48h`
       is the age of the oldest waiting molecule and how many are past the
       threshold, from the same arithmetic `cs peek` renders in its vitals

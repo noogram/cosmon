@@ -592,8 +592,49 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     if let Some(line) = render_kill_switch_line(&active_switches) {
         println!("{line}");
     }
+    for (dependent, blocker, status) in held_dependents(&molecules) {
+        println!(
+            "  Blocked: {dependent} waits for {blocker} ({status}); {}",
+            release_guidance(status, &dependent, &blocker)
+        );
+    }
 
     Ok(())
+}
+
+/// Pending dependents whose named blocker has frozen or collapsed.
+fn held_dependents(
+    molecules: &[cosmon_state::MoleculeData],
+) -> Vec<(MoleculeId, MoleculeId, MoleculeStatus)> {
+    let by_id: HashMap<_, _> = molecules.iter().map(|m| (&m.id, m.status)).collect();
+    let mut held = Vec::new();
+    for dependent in molecules
+        .iter()
+        .filter(|m| m.status == MoleculeStatus::Pending)
+    {
+        for blocker in dependent.blocked_by() {
+            if let Some(status @ (MoleculeStatus::Collapsed | MoleculeStatus::Frozen)) =
+                by_id.get(blocker).copied()
+            {
+                held.push((dependent.id.clone(), blocker.clone(), status));
+            }
+        }
+    }
+    held.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+    held
+}
+
+/// Name the operator action that can satisfy or replace a failed dependency.
+fn release_guidance(
+    status: MoleculeStatus,
+    dependent: &MoleculeId,
+    blocker: &MoleculeId,
+) -> String {
+    if status == MoleculeStatus::Frozen {
+        format!("`cs thaw {blocker}` and complete it to release {dependent}")
+    } else {
+        format!("collapse {dependent} and re-nucleate it with --blocked-by <completed-blocker>")
+    }
 }
 
 /// Everything the two renderers read, gathered once.
@@ -1568,8 +1609,10 @@ fn discover_fleet_backends(
 
 /// `cs status <id>` — the one-molecule read.
 ///
-/// Four facts and no more, from the ONE verb the RPP route projects too, so
-/// the local and remote answers cannot diverge. `--json` emits exactly the
+/// The four machine fields come from the one status verb the remote route
+/// projects too, so the local and remote JSON answers cannot diverge. Human
+/// output also names pending dependents held by this blocker. `--json` emits
+/// exactly the
 /// wire shape of `GET /v1/molecules/{id}/status` minus its envelope, which is
 /// what makes a script portable between the two.
 fn run_one(ctx: &Context, id: &str) -> anyhow::Result<()> {
@@ -1590,6 +1633,22 @@ fn run_one(ctx: &Context, id: &str) -> anyhow::Result<()> {
         println!("  phase:      {}", json.phase);
         println!("  updated_at: {}", json.updated_at);
         println!("  terminal:   {}", json.terminal);
+        if matches!(
+            view.status,
+            MoleculeStatus::Collapsed | MoleculeStatus::Frozen
+        ) {
+            let molecules = store.list_molecules(&MoleculeFilter::default())?;
+            for (dependent, blocker, status) in held_dependents(&molecules)
+                .into_iter()
+                .filter(|(_, blocker, _)| blocker == &molecule_id)
+            {
+                println!("  blocked:    {dependent}");
+                println!(
+                    "  release:    {}",
+                    release_guidance(status, &dependent, &blocker)
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1608,6 +1667,29 @@ mod tests {
     use cosmon_filestore::FileStore;
     use cosmon_state::{Fleet, MoleculeData, StateStore};
     use tempfile::TempDir;
+
+    #[test]
+    fn status_names_pending_dependent_held_by_collapsed_blocker() {
+        let blocker = make_molecule("aaaa", MoleculeStatus::Collapsed, None);
+        let mut dependent = make_molecule("bbbb", MoleculeStatus::Pending, None);
+        dependent
+            .typed_links
+            .push(cosmon_core::interaction::MoleculeLink::BlockedBy {
+                source: blocker.id.clone(),
+            });
+        let held = held_dependents(&[blocker.clone(), dependent.clone()]);
+        assert_eq!(
+            held,
+            vec![(
+                dependent.id.clone(),
+                blocker.id.clone(),
+                MoleculeStatus::Collapsed
+            )]
+        );
+        let guidance = release_guidance(held[0].2, &held[0].0, &held[0].1);
+        assert!(guidance.contains(&dependent.id.to_string()));
+        assert!(guidance.contains("--blocked-by"));
+    }
 
     #[test]
     fn kill_switch_line_is_silent_when_nothing_is_set() {
