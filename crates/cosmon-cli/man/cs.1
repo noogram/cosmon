@@ -157,6 +157,11 @@ and every other autonomous path (patrol, heal, cs ask \-\-execute).
 \*(Aqcs patrol\*(Aq waits 120 seconds after a tackle before declaring its
   worker dead; \*(Aq\-\-dead\-worker\-grace\-secs\*(Aq configures that wait.
 .PP
+Every patrol also scans live panes for blocking dialogs and pages
+  the operator for update, reasoning, or rate\-limit menus. \*(Aqcs tackle\*(Aq
+  checks a codex launch menu before sending its briefing. Startup
+  update policy comes from the operator\*(Aqs codex configuration.
+.PP
 SCHEDULER DRY\-RUN OUTPUT — four row types, one per patrol:
   FIRE     patrol is due; dispatch would spawn the command now
   SKIP     gate rejected (disabled, kill\-switch, not\-due\-yet,

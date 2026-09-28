@@ -72,13 +72,18 @@ main-repo `.cosmon/` directory (which contains `state/`) writable via
 `walk_up_find_cosmon_dir_from` redirect `cs evolve` uses to find the state
 store — so the two agree by construction.
 
-The flag is **structural**, like the self-update kill
-(`NO_STARTUP_UPDATE_OVERRIDE`): emitted in both launch modes and *not* part of
-the `DEFAULT_INTERACTIVE_ARGS` set an `extra_args` row replaces. An operator
+The flag is **structural**: emitted in both launch modes and *not* part of the
+`DEFAULT_INTERACTIVE_ARGS` set an `extra_args` row replaces. An operator
 who hardens the sandbox must never thereby re-break the worker's ability to
 write its own completion lock. Empty `writable_roots` (a bare CI checkout with
 no `.cosmon/` ancestor) emits no `--add-dir` and leaves the command
 byte-identical to the pre-fix shape.
+
+Startup update checks follow the operator's codex configuration. During an
+interactive `cs tackle` launch, a detected update, reasoning, or rate-limit
+menu is recorded and reported before the briefing is sent. The pane stays
+available for the operator. Every `cs patrol` run scans running panes for
+these menus by default and does not answer them automatically.
 
 - Struct field: `CodexSessionConfig::writable_roots`
   (`crates/cosmon-transport/src/codex.rs`).

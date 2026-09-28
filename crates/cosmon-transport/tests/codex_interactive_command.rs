@@ -19,16 +19,15 @@
 //! 2. **Exec keeps the legacy shape** — `[adapters.codex].mode = "exec"`
 //!    reproduces the `codex exec '<prompt>'` fire-and-forget shape,
 //!    so the batch path never regresses.
-//! 3. **Self-update is dead for the run** (task-20260718-230a) — every
-//!    assembled command carries `-c check_for_update_on_startup=false`, so
-//!    the standalone codex CLI can never self-update and exit mid-molecule
-//!    (the codex-sol pane death of task-20260718-37fc).
+//! 3. **Update policy remains operator-owned** — command assembly does not
+//!    inject `check_for_update_on_startup`; an explicit harness setting is
+//!    carried unchanged in both launch modes.
 
 use std::path::PathBuf;
 
 use cosmon_transport::codex::{
     build_codex_command, CodexMode, CodexSessionConfig, DEFAULT_INTERACTIVE_ARGS,
-    INTERACTIVE_LOG_LEVEL, NO_STARTUP_UPDATE_OVERRIDE,
+    INTERACTIVE_LOG_LEVEL,
 };
 
 /// Build a config with the shared fixture fields, varying only the axes
@@ -86,7 +85,7 @@ fn interactive_default_is_quiet_steerable_and_promptless() {
     assert_eq!(
         cmd,
         "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
-         -c check_for_update_on_startup=false -p cosmon-worker-polecat-codex \
+         -p cosmon-worker-polecat-codex \
          --dangerously-bypass-approvals-and-sandbox --no-alt-screen"
     );
     // The prompt must never leak onto the interactive command line.
@@ -113,15 +112,13 @@ fn mode_default_is_interactive() {
 }
 
 /// `[adapters.codex].mode = "exec"` reproduces the legacy fire-and-forget
-/// shape (plus the self-update kill), with the prompt baked into the
-/// command line.
+/// shape, with the prompt baked into the command line.
 #[test]
 fn exec_mode_is_byte_identical_legacy_shape() {
     let cmd = build_codex_command(&config(CodexMode::Exec, Some("run the batch job"), vec![]));
     assert_eq!(
         cmd,
-        "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec \
-         -c check_for_update_on_startup=false 'run the batch job'"
+        "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec 'run the batch job'"
     );
 }
 
@@ -132,30 +129,34 @@ fn exec_mode_escapes_prompt_apostrophe() {
     let cmd = build_codex_command(&config(CodexMode::Exec, Some("it's a batch"), vec![]));
     assert_eq!(
         cmd,
-        "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec \
-         -c check_for_update_on_startup=false 'it'\\''s a batch'"
+        "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec 'it'\\''s a batch'"
     );
 }
 
-/// task-20260718-230a: the standalone codex CLI's startup self-update can
-/// install a new release and exit mid-run, leaving a dead pane under an
-/// `active` molecule. Every launch mode — including an `extra_args`
-/// override, which replaces only the flag *set*, not the structural
-/// override — must carry the per-run kill switch.
+/// Startup update policy belongs to the operator. An absent setting must not
+/// be invented, while either explicit value must survive command assembly in
+/// both modes.
 #[test]
-fn every_launch_mode_disables_startup_self_update() {
-    let kill = NO_STARTUP_UPDATE_OVERRIDE.join(" ");
-    let commands = [
-        build_codex_command(&config(CodexMode::Interactive, Some("work"), vec![])),
-        build_codex_command(&config(CodexMode::Exec, Some("work"), vec![])),
-        build_codex_command(&config(
-            CodexMode::Interactive,
-            None,
-            vec!["--sandbox".to_owned(), "workspace-write".to_owned()],
-        )),
-    ];
-    for cmd in commands {
-        assert!(cmd.contains(&kill), "self-update kill missing from {cmd:?}");
+fn startup_update_policy_is_operator_owned() {
+    for mode in [CodexMode::Interactive, CodexMode::Exec] {
+        let bare = build_codex_command(&config(mode, Some("work"), vec![]));
+        assert!(
+            !bare.contains("check_for_update_on_startup"),
+            "got {bare:?}"
+        );
+
+        for value in ["true", "false"] {
+            let mut explicit = config(mode, Some("work"), vec![]);
+            explicit.harness_args = vec![
+                "-c".to_owned(),
+                format!("check_for_update_on_startup={value}"),
+            ];
+            let cmd = build_codex_command(&explicit);
+            assert!(
+                cmd.contains(&format!("-c check_for_update_on_startup={value}")),
+                "operator update policy missing from {cmd:?}"
+            );
+        }
     }
 }
 
@@ -177,7 +178,7 @@ fn interactive_extra_args_override_replaces_defaults() {
     assert_eq!(
         cmd,
         "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
-         -c check_for_update_on_startup=false -p cosmon-worker-polecat-codex \
+         -p cosmon-worker-polecat-codex \
          --sandbox workspace-write -m gpt-5-codex"
     );
     // Overriding drops the nuclear default flag.
@@ -190,8 +191,7 @@ fn interactive_extra_args_override_replaces_defaults() {
 /// main repo's out-of-worktree `.cosmon/state/`. Declaring that dir via
 /// codex's first-class `--add-dir` flag is what lets the worker persist its
 /// own completion under a `workspace-write` sandbox. The flag is emitted in
-/// both launch modes and survives an `extra_args` override (structural,
-/// like the self-update kill).
+/// both launch modes and survives an `extra_args` override (structural).
 #[test]
 fn writable_root_is_declared_in_both_modes_and_survives_override() {
     let root = PathBuf::from("/main-repo/.cosmon");

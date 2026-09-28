@@ -2038,6 +2038,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         );
     }
 
+    if let Some(ref dialogue) = spawn_outcome.codex_launch_dialogue {
+        record_codex_launch_dialogue(&store, &state_dir, &mol_id, &wid, dialogue);
+    }
+
     // 9c. In-process Direct-API completion emit — GAP #6 fix.
     //
     // Direct-API adapters (openai, anthropic) run the agent loop
@@ -2131,6 +2135,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             "adapter": adapter.as_str(),
             "spawned_at": Utc::now().to_rfc3339(),
         });
+        if let Some(ref dialogue) = spawn_outcome.codex_launch_dialogue {
+            out["launch_dialogue"] = serde_json::json!({
+                "class": dialogue.class.as_str(),
+                "codex_dialog": dialogue.evidence.as_deref().and_then(cosmon_core::dialogue::classify_codex_dialog).map(cosmon_core::dialogue::CodexDialogKind::as_str),
+                "evidence": dialogue.evidence.as_deref(),
+                "briefing_sent": false,
+            });
+        }
         if uses_tmux {
             out["tmux_session"] = serde_json::json!(session_name);
             // The attach line carries a UTF-8 locale when the spawn env
@@ -4311,11 +4323,15 @@ fn report_existing_session(
 /// PID was written by a helper that ran when `molecule.process` was still
 /// `None` (a silent no-op) and step 9 then bound a fresh record with
 /// `pid: None`, so a local worker's PID never survived in `state.json` and
-/// `orphan_scan`'s PID axis was inert. Every tmux / in-process arm returns
-/// [`SpawnOutcome::default`] (their liveness is witnessed by tmux or the arm
-/// runs synchronously).
+/// `orphan_scan`'s PID axis was inert. Tmux / in-process arms return
+/// [`SpawnOutcome::default`] except a codex launch with a blocking menu
+/// (their liveness is witnessed by tmux or the arm runs synchronously).
 #[derive(Debug, Default, Clone)]
 pub(super) struct SpawnOutcome {
+    /// A codex menu observed at launch, before the briefing could be sent.
+    /// The pane stays available for the operator; the caller records and pages
+    /// this finding once the dispatch is registered.
+    pub codex_launch_dialogue: Option<cosmon_core::dialogue::DialogueScan>,
     /// The detached local worker's PID and launch fingerprint, to be stamped
     /// on the `MoleculeProcess` so the runtime's PID-axis liveness check can
     /// authenticate it. `None` for every other adapter.
@@ -4533,6 +4549,7 @@ pub(super) fn spawn_and_prompt(
             dispatch_t0,
         )?;
         return Ok(SpawnOutcome {
+            codex_launch_dialogue: None,
             detached_local: None,
             claude_config_dir,
             inprocess_work: None,
@@ -4566,7 +4583,10 @@ pub(super) fn spawn_and_prompt(
             preferred_model,
             &harness_argv(harness_args),
         )
-        .map(|()| SpawnOutcome::default()),
+        .map(|dialogue| SpawnOutcome {
+            codex_launch_dialogue: dialogue,
+            ..SpawnOutcome::default()
+        }),
         // `task-20260615-556a` — opencode joins claude/aider/codex as the
         // fourth external-CLI subprocess adapter. Same tmux-pane shape as
         // codex: spawn `opencode run '<prompt>'` into a pane, then assert
@@ -6292,7 +6312,7 @@ fn spawn_codex_and_prompt(
     // overrides the interactive flags does not thereby lose the effort their
     // formula step pinned. Empty leaves the command byte-identical.
     harness_args: &[String],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<cosmon_core::dialogue::DialogueScan>> {
     use cosmon_transport::codex;
     use cosmon_transport::readiness::LiveProbe as _;
 
@@ -6412,41 +6432,12 @@ fn spawn_codex_and_prompt(
     // submit while it holds the briefing, record the outcome, and fail the
     // spawn rather than report a worker that will never start.
     if mode == codex::CodexMode::Interactive {
-        use cosmon_cli::briefing_delivery::{deliver_briefing, require_delivered};
-        let writer = cosmon_cli::injection_provenance::tackle_briefing(&mol.id, mol_state_dir);
-        let submit =
-            cosmon_cli::injection_provenance::tackle_briefing_submit(&mol.id, mol_state_dir);
-        let started = std::time::Instant::now();
-        let report = deliver_briefing(
-            backend,
-            wid,
-            prompt,
-            CODEX_BRIEFING_DELIVERY_BUDGET,
-            &writer,
-            &submit,
-            &mut || started.elapsed(),
-            &mut || std::thread::sleep(BRIEFING_SUBMIT_POLL),
-        )?;
-        cosmon_state::events::input_injection::emit_briefing_delivery(
-            mol_state_dir,
-            Some(&mol.id),
-            wid,
-            "codex",
-            &writer,
-            report.outcome,
-            report.resubmits,
-            u64::try_from(report.elapsed.as_millis()).unwrap_or(u64::MAX),
-        );
-        if let Err(undelivered) = require_delivered(wid, report) {
-            let _ = backend.terminate(wid);
-            return Err(anyhow::anyhow!(
-                "cs tackle: {undelivered}. Treating as a failed spawn; tearing \
-                 down session {session_name} (issue #40)."
-            ));
-        }
+        return codex_launch_before_briefing(backend, wid, || {
+            deliver_codex_tackle_briefing(backend, wid, prompt, mol, mol_state_dir, session_name)
+        });
     }
 
-    Ok(())
+    Ok(None)
 }
 
 /// How long `cs tackle` observes a codex worker's composer for a submitted
@@ -6460,6 +6451,125 @@ fn spawn_codex_and_prompt(
 /// needs two clear readings one poll apart, so a delivered briefing costs
 /// about two seconds here.
 const CODEX_BRIEFING_DELIVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Persist and page a launch menu after the molecule is registered as running.
+/// The worker pane remains available so the operator can resolve the menu.
+fn record_codex_launch_dialogue(
+    store: &dyn StateStore,
+    state_dir: &std::path::Path,
+    mol_id: &MoleculeId,
+    wid: &WorkerId,
+    dialogue: &cosmon_core::dialogue::DialogueScan,
+) {
+    use cosmon_core::event_v2::EventV2;
+    use cosmon_core::tag::Tag;
+
+    if let (Ok(tag), Ok(mut mol)) = (Tag::new("dialogue-blocked"), store.load_molecule(mol_id)) {
+        if mol.tags.insert(tag) {
+            mol.updated_at = Utc::now();
+            let _ = store.save_molecule(mol_id, &mol);
+        }
+    }
+    let _ = cosmon_state::event_log::emit_one(
+        state_dir.join("events.jsonl"),
+        EventV2::BlockingDialogueDetected {
+            molecule_id: mol_id.clone(),
+            worker_id: Some(wid.clone()),
+            class: dialogue.class.as_str().to_owned(),
+            action: "alerted".to_owned(),
+            blocked_seconds: Some(0),
+        },
+        None,
+    );
+    super::patrol::spawn_notify_for_dialogue(
+        mol_id,
+        Some(wid),
+        dialogue.class,
+        super::patrol::DialogueAction::Alerted,
+        Some(0),
+        dialogue.evidence.as_deref(),
+    );
+    eprintln!(
+        "cs tackle: codex launch is blocked by a {} dialogue ({}); no briefing was sent. \
+         Resolve the menu in the live pane, then retackle with --force to \
+         deliver the briefing.",
+        dialogue.class.as_str(),
+        dialogue.evidence.as_deref().unwrap_or("no evidence line")
+    );
+}
+
+/// Inspect the live codex pane at the tackle briefing boundary.
+fn codex_launch_dialogue(
+    backend: &dyn TransportBackend,
+    wid: &cosmon_core::id::WorkerId,
+) -> anyhow::Result<Option<cosmon_core::dialogue::DialogueScan>> {
+    use cosmon_core::dialogue::{classify_codex_dialog, classify_pane};
+
+    let pane = backend.capture_output(wid, 40)?;
+    Ok(classify_codex_dialog(&pane).map(|_| classify_pane(&pane)))
+}
+
+/// Deliver only when the launch pane has no recognised codex menu.
+/// A detected menu remains open for the operator and is reported by the caller.
+fn codex_launch_before_briefing<F>(
+    backend: &dyn TransportBackend,
+    wid: &WorkerId,
+    deliver: F,
+) -> anyhow::Result<Option<cosmon_core::dialogue::DialogueScan>>
+where
+    F: FnOnce() -> anyhow::Result<()>,
+{
+    let dialogue = codex_launch_dialogue(backend, wid)?;
+    if dialogue.is_some() {
+        return Ok(dialogue);
+    }
+    deliver()?;
+    Ok(None)
+}
+
+/// Deliver the interactive briefing and retain the existing receipt check.
+fn deliver_codex_tackle_briefing(
+    backend: &TmuxBackend,
+    wid: &WorkerId,
+    prompt: &str,
+    mol: &MoleculeData,
+    mol_state_dir: &std::path::Path,
+    session_name: &str,
+) -> anyhow::Result<()> {
+    use cosmon_cli::briefing_delivery::{deliver_briefing, require_delivered};
+
+    let writer = cosmon_cli::injection_provenance::tackle_briefing(&mol.id, mol_state_dir);
+    let submit = cosmon_cli::injection_provenance::tackle_briefing_submit(&mol.id, mol_state_dir);
+    let started = std::time::Instant::now();
+    let report = deliver_briefing(
+        backend,
+        wid,
+        prompt,
+        CODEX_BRIEFING_DELIVERY_BUDGET,
+        &writer,
+        &submit,
+        &mut || started.elapsed(),
+        &mut || std::thread::sleep(BRIEFING_SUBMIT_POLL),
+    )?;
+    cosmon_state::events::input_injection::emit_briefing_delivery(
+        mol_state_dir,
+        Some(&mol.id),
+        wid,
+        "codex",
+        &writer,
+        report.outcome,
+        report.resubmits,
+        u64::try_from(report.elapsed.as_millis()).unwrap_or(u64::MAX),
+    );
+    if let Err(undelivered) = require_delivered(wid, report) {
+        let _ = backend.terminate(wid);
+        return Err(anyhow::anyhow!(
+            "cs tackle: {undelivered}. Treating as a failed spawn; tearing \
+             down session {session_name} (issue #40)."
+        ));
+    }
+    Ok(())
+}
 
 /// The session config the opencode arm spawns with.
 ///
@@ -7384,6 +7494,7 @@ fn spawn_detached_local_worker(
     // Defect 1). Threading the witness up so step 9 binds the record *with*
     // the PID is the durable fix.
     Ok(SpawnOutcome {
+        codex_launch_dialogue: None,
         detached_local: Some(DetachedLocalWitness {
             pid: child.id(),
             pid_start_time: process_start_time(child.id()),
@@ -9540,6 +9651,52 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn tackle_launch_recognises_codex_update_dialogue_before_briefing() {
+        use cosmon_core::dialogue::DialogueClass;
+        use cosmon_transport::mock::MockBackend;
+        use std::cell::Cell;
+
+        let backend = MockBackend::new();
+        let agent = cosmon_core::transport::AgentDefinition {
+            id: cosmon_core::id::AgentId::new("codex-launch-a85").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "codex".to_owned(),
+            args: vec![],
+            cwd: None,
+        };
+        let config = cosmon_core::transport::RuntimeConfig::default();
+        let wid = backend.spawn(&agent, &config).unwrap().id;
+        for (pane, expected) in [
+            (
+                "Update available! 0.154.0 → 0.157.0\nPress enter to update",
+                Some(DialogueClass::Unknown),
+            ),
+            (
+                "Select Reasoning Level for model\n› 1. Medium\n  2. High",
+                Some(DialogueClass::Unknown),
+            ),
+            (
+                "Approaching rate limits\nSwitch to a lower credit usage model?\n› 1. Switch",
+                Some(DialogueClass::MoneyStake),
+            ),
+            (
+                "Update ran successfully! Please restart.\n› Ask codex to do anything",
+                None,
+            ),
+        ] {
+            backend.set_canned_output(pane);
+            let sends = Cell::new(0);
+            let finding = codex_launch_before_briefing(&backend, &wid, || {
+                sends.set(sends.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(finding.map(|scan| scan.class), expected, "pane: {pane}");
+            assert_eq!(sends.get(), usize::from(expected.is_none()), "pane: {pane}");
+        }
+    }
 
     /// COSMON #90 — the writer half of the retackle lease. `acquire` must
     /// write a marker `cosmon_core::retackle_lease` reads back as fresh, and

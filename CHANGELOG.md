@@ -35,6 +35,16 @@ this stage.
 
 ### Changed
 
+- **Codex interactive dialogs are detected without overriding update policy**
+  (GitHub issue #85). `cs tackle` checks the launch pane before sending its
+  briefing and leaves a blocked menu for the operator. Every `cs patrol` run
+  scans live panes for update, reasoning, and rate-limit menus by default;
+  `cs whisper` refuses to paste into them. A
+  `model_reasoning_effort=...` harness pin is carried to Codex as `-c`, which
+  prevents the reasoning picker by selecting the requested level at launch.
+  Cosmon no longer forces `check_for_update_on_startup=false`: the setting is
+  the operator's choice, and an explicit harness value remains supported.
+
 - **The consent path speaks the same language as the rest of `cs`** (GitHub
   issue #76). `cs opt-in-share` — and the once-per-user question `cs init`
   fires on a fresh machine — printed four French strings on an otherwise
