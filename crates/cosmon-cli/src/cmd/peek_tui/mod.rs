@@ -4204,13 +4204,24 @@ fn format_energy(
     }
 
     let charge = match cost {
-        EnergyCost::Unknown => "API equiv. unavailable".to_owned(),
+        EnergyCost::Unknown => "API equiv. —".to_owned(),
         EnergyCost::ReferenceUsd { usd } => format!("API equiv. ${usd:.2}"),
         EnergyCost::Subscription { used_percent, .. } => {
             format!("account used {used_percent:.0}%")
         }
     };
-    pad_to_visible_width(&format!("{bar} {counters} {charge}"), 49)
+    let mut line = format!("{bar} {counters} {charge}");
+    if unicode_width::UnicodeWidthStr::width(line.as_str()) > 49 {
+        let compact_counters = format!(
+            "{}/{}/{}/{}",
+            humanize_tokens_compact(input),
+            humanize_tokens_compact(cached),
+            humanize_tokens_compact(output),
+            humanize_tokens_compact(reasoning),
+        );
+        line = format!("{bar} {compact_counters} {charge}");
+    }
+    pad_to_visible_width(&line, 49)
 }
 
 /// Right-pad `s` with ASCII spaces so its **visual** column width matches
@@ -4245,6 +4256,28 @@ fn humanize_tokens(n: u64) -> String {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
         format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+// Keep the legacy single-line ENERGY cell within its fixed width when the
+// labelled charge and four counters do not fit at one-decimal precision.
+fn humanize_tokens_compact(n: u64) -> String {
+    for (unit, suffix) in [
+        (1_000_000_000_000_000_000, "E"),
+        (1_000_000_000_000_000, "P"),
+        (1_000_000_000_000, "T"),
+        (1_000_000_000, "B"),
+        (1_000_000, "M"),
+        (1_000, "K"),
+    ] {
+        if n >= unit {
+            return format!("{:.0}{suffix}", n as f64 / unit as f64);
+        }
+    }
+    if n == 0 {
+        "-".to_owned()
     } else {
         n.to_string()
     }

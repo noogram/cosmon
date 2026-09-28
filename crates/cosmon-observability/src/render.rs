@@ -502,7 +502,8 @@ fn worker_row(w: &Worker) -> String {
     } else {
         match &w.energy.cost {
             EnergyCost::ReferenceUsd { usd } => format!("API ${usd:.2}"),
-            EnergyCost::Unknown | EnergyCost::Subscription { .. } => "API unavailable".to_owned(),
+            EnergyCost::Unknown => "-".to_owned(),
+            EnergyCost::Subscription { .. } => "API unavailable".to_owned(),
         }
     };
     format!(
