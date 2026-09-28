@@ -52,12 +52,12 @@ import os, subprocess, sys
 os.setsid()
 subprocess.call(["bash", "-c", sys.argv[1]])
 ' "
-    COSMON_RUN_GATES_BG_DIR='$dir2' '$SCRIPT' sleep 0.5
+    COSMON_RUN_GATES_BG_DIR='$dir2' '$SCRIPT' sleep 5
     sleep 3
 " &
 launcher_pid=$!
 # give run-gates-bg.sh time to fork its own detached child and return
-for _ in $(seq 1 20); do [ -f "$dir2/gates.pid" ] && break; sleep 0.05; done
+for _ in $(seq 1 100); do [ -f "$dir2/gates.pid" ] && break; sleep 0.05; done
 launcher_pgid=$(ps -o pgid= -p "$launcher_pid" 2>/dev/null | tr -d ' ')
 gates_pid=$(cat "$dir2/gates.pid" 2>/dev/null || echo "")
 # `ps -o sess=` prints 0 for every process without a controlling tty on
@@ -72,7 +72,7 @@ if [ -n "$launcher_pgid" ]; then
     kill -KILL -- "-$launcher_pgid" 2>/dev/null || true
 fi
 wait "$launcher_pid" 2>/dev/null
-for _ in $(seq 1 20); do [ -f "$dir2/gates.exit" ] && break; sleep 0.1; done
+for _ in $(seq 1 100); do [ -f "$dir2/gates.exit" ] && break; sleep 0.1; done
 [ -f "$dir2/gates.exit" ] \
     && ok "the exit-code file is written after the launcher's group was killed" \
     || ko "exit-code file appears after launcher group killed" "never appeared"
