@@ -1524,13 +1524,20 @@ fn check_protected_paths(
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_root)
-        .args(["diff", "--name-only", "--no-renames", &range])
+        // `-z` disables Git's path quoting and makes every separator
+        // unambiguous, including when a filename itself contains a newline.
+        .args(["diff", "--name-only", "--no-renames", "-z", &range])
         .output();
     let changed: Vec<String> = match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
+        Ok(o) if o.status.success() => String::from_utf8(o.stdout)
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "cs done aborts: git returned a non-UTF-8 path while checking the \
+                     molecule's protected paths"
+                )
+            })?
+            .split('\0')
+            .filter(|path| !path.is_empty())
             .map(str::to_owned)
             .collect(),
         Ok(o) => {
