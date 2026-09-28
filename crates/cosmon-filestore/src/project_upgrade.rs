@@ -441,9 +441,16 @@ at dispatch until you run `cs done <id>` (keep the partial work) or `cs collapse
 branch, recorded worktree (including overrides), and concrete `cs done` command. A collapse \
 preserves the branch for audit; it never licenses unaudited deletion.\n\
 \n\
+Branch audit is concrete: inspect `git log --oneline <base>..<branch>` and `git diff \
+--stat <base>...<branch>`. Integrate completed work with `cs done <id>`; for abandoned \
+active work, put the reviewed disposition in `cs collapse <id> --reason \"<verdict>\"`. \
+Retain the branch unless deletion is separately reviewed. `cs status` shows live branches \
+as active work and collapsed or deliberately unmerged branches with their recorded disposition.\n\
+\n\
 Finishing a mission means `cs status` reads clean afterward — no zombie session, no \
-un-harvested `Completed` molecule, no molecule branch without a harvest or an audit verdict. \
-`cs status` says `clean` or names what still needs `cs done`/`cs collapse`.\n\
+un-harvested `Completed` molecule, and no unresolved molecule branch. Active work and retained \
+branches with a recorded audit disposition are visible, but are not residue. `cs status` says \
+`clean` or names every unresolved item.\n\
 \n\
 Who does what — you decide the mission and protected inputs (`cs nucleate --protect`) and \
 accept or drop each result; the pilot drives the cycle above; workers do the work. Full \
@@ -1239,6 +1246,25 @@ mod orchestration_source_tests {
                     .contains("stop early"),
             "must address stopping a mission early explicitly, not just the happy path"
         );
+    }
+
+    /// Issue #97 — the shared first-contact source must turn branch audit
+    /// into executable probes and lifecycle outcomes, while distinguishing
+    /// active or deliberately retained work from unresolved residue.
+    #[test]
+    fn orchestration_body_carries_the_branch_audit_rule() {
+        for required in [
+            "git log --oneline <base>..<branch>",
+            "git diff --stat <base>...<branch>",
+            "cs done <id>",
+            "cs collapse <id> --reason \"<verdict>\"",
+            "not residue",
+        ] {
+            assert!(
+                COSMON_ORCHESTRATION_BODY.contains(required),
+                "missing actionable branch-audit text: {required}"
+            );
+        }
     }
 
     /// Issue #96 — a new user finished a mission and still could not say

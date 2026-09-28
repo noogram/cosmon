@@ -83,9 +83,16 @@ at dispatch until you run `cs done <id>` (keep the partial work) or `cs collapse
 branch, recorded worktree (including overrides), and concrete `cs done` command. A collapse
 preserves the branch for audit; it never licenses unaudited deletion.
 
+Branch audit is concrete: inspect `git log --oneline <base>..<branch>` and `git diff
+--stat <base>...<branch>`. Integrate completed work with `cs done <id>`; for abandoned
+active work, put the reviewed disposition in `cs collapse <id> --reason "<verdict>"`.
+Retain the branch unless deletion is separately reviewed. `cs status` shows live branches
+as active work and collapsed or deliberately unmerged branches with their recorded disposition.
+
 Finishing a mission means `cs status` reads clean afterward — no zombie session, no
-un-harvested `Completed` molecule, no molecule branch without a harvest or an audit
-verdict. `cs status` says `clean` or names what still needs `cs done`/`cs collapse`.
+un-harvested `Completed` molecule, and no unresolved molecule branch. Active work and retained
+branches with a recorded audit disposition are visible, but are not residue. `cs status` says
+`clean` or names every unresolved item.
 
 Who does what — you decide the mission and protected inputs (`cs nucleate --protect`) and
 accept or drop each result; the pilot drives the cycle above; workers do the work. Full

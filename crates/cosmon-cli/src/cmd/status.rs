@@ -100,11 +100,9 @@ struct StatusOutput {
     /// Keyed by kind token (`infra | project | social-hub | editorial
     /// | nascent`) to totals, plus a flat `total` and `nascent`.
     galaxies: GalaxiesSummary,
-    /// Issue #97 — whether finishing a mission left residue behind: a
-    /// zombie session, an un-harvested `Completed` molecule, or a molecule
-    /// branch still unmerged. `clean` is `true` only when all three are
-    /// zero; a script can poll this one field instead of re-deriving it
-    /// from the three counts.
+    /// Issue #97 — whether finishing a mission left unresolved residue.
+    /// Active molecule branches and branches retained with a lifecycle audit
+    /// disposition are visible but do not make this false.
     hygiene: HygieneInfo,
     /// Issue #108 — every kill-switch file under `~/.cosmon/`, whether it is
     /// present, and which autonomous components it stops. Listed even when
@@ -153,27 +151,38 @@ fn render_kill_switch_line(active: &[KillSwitch]) -> Option<String> {
     Some(format!("kill-switch: {} — {note}", files.join(", ")))
 }
 
-/// Whether `cs status` is clean, as defined by issue #97: no zombie
-/// session, no un-harvested `Completed` molecule, no un-merged molecule
-/// branch. A lease, a pending backlog molecule, or an active session are
-/// not residue and do not count against this.
+/// Whether `cs status` is clean, as defined by issue #97: no zombie session,
+/// no un-harvested `Completed` molecule, and no unresolved molecule branch.
+/// Active work and branches retained with a recorded disposition remain
+/// visible without being mislabeled as residue.
 #[derive(serde::Serialize)]
 struct HygieneInfo {
     clean: bool,
     zombie_sessions: usize,
     harvestable: usize,
+    /// Backward-compatible key: now counts unresolved branches, rather than
+    /// every live or deliberately retained molecule branch.
     unmerged_branches: usize,
+    active_branches: usize,
+    retained_audited_branches: usize,
 }
 
 impl HygieneInfo {
-    /// The one predicate everything else in this struct is derived from:
-    /// clean means none of the three residue counts are non-zero.
-    fn new(zombie_sessions: usize, harvestable: usize, unmerged_branches: usize) -> Self {
+    /// Build the single clean predicate from unresolved residue only.
+    fn new(
+        zombie_sessions: usize,
+        harvestable: usize,
+        unmerged_branches: usize,
+        active_branches: usize,
+        retained_audited_branches: usize,
+    ) -> Self {
         Self {
             clean: zombie_sessions == 0 && harvestable == 0 && unmerged_branches == 0,
             zombie_sessions,
             harvestable,
             unmerged_branches,
+            active_branches,
+            retained_audited_branches,
         }
     }
 }
@@ -253,10 +262,10 @@ struct HarvestableInfo {
 /// instead of being flattened by the previous invocation a minute earlier.
 #[derive(serde::Serialize)]
 struct UnmergedGauge {
-    /// Molecule branches (`feat/<id>`) not merged into the trunk and ahead
-    /// of it. Operator refs such as `backup/*` or `spore/*` are excluded —
-    /// see [`is_molecule_branch`] — because they are never harvested by
-    /// `cs done` and would keep this count from ever reaching zero.
+    /// Unresolved molecule branches (`feat/<id>`) not merged into the trunk
+    /// and ahead of it. Active and retained-audited branches are visible in
+    /// `contributions` but excluded from this actionable gauge. Operator refs
+    /// are excluded entirely — see [`is_molecule_branch`].
     branches: usize,
     /// Total commits those branches carry ahead of the trunk.
     commits: usize,
@@ -286,6 +295,29 @@ struct ContributionInfo {
     /// Always a molecule branch (`feat/<id>`) — see [`is_molecule_branch`].
     branch: String,
     commits_ahead: usize,
+    molecule: String,
+    disposition: BranchDisposition,
+    detail: String,
+}
+
+/// The lifecycle meaning of an unmerged molecule branch.
+///
+/// This is a projection of the existing molecule record, not a second audit
+/// store: live status means work in progress, while `Collapsed` and an
+/// explicit `merge-skipped` harvest are durable dispositions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum BranchDisposition {
+    Active,
+    RetainedAudited,
+    Unresolved,
+}
+
+impl ContributionInfo {
+    /// Whether this branch still needs a pilot decision.
+    fn is_unresolved(&self) -> bool {
+        self.disposition == BranchDisposition::Unresolved
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -443,7 +475,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 
     // --- Contributions (git branches) ---
-    let contributions = discover_contributions();
+    let contributions = discover_contributions(&molecules);
     let unmerged = sample_unmerged_gauge(&state_dir, &contributions);
 
     // --- Surfaces ---
@@ -472,7 +504,21 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     });
 
     // --- Hygiene (issue #97) — whether finishing left residue behind.
-    let hygiene = HygieneInfo::new(zombie_sessions.len(), harvestable.count, unmerged.branches);
+    let active_branches = contributions
+        .iter()
+        .filter(|c| c.disposition == BranchDisposition::Active)
+        .count();
+    let retained_audited_branches = contributions
+        .iter()
+        .filter(|c| c.disposition == BranchDisposition::RetainedAudited)
+        .count();
+    let hygiene = HygieneInfo::new(
+        zombie_sessions.len(),
+        harvestable.count,
+        unmerged.branches,
+        active_branches,
+        retained_audited_branches,
+    );
 
     // --- Kill switches (issue #108) — which stop controls are laid down.
     let active_switches = cosmon_cli::kill_switches::active();
@@ -529,6 +575,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         by_kind: &by_kind,
         active_sessions: &active_sessions,
         zombie_sessions: &zombie_sessions,
+        contributions: &contributions,
         unmerged: &unmerged,
         surfaces: &surface_status,
         budget,
@@ -566,6 +613,7 @@ struct Pulse<'a> {
     by_kind: &'a HashMap<MoleculeKind, usize>,
     active_sessions: &'a [SessionInfo],
     zombie_sessions: &'a [SessionInfo],
+    contributions: &'a [ContributionInfo],
     unmerged: &'a UnmergedGauge,
     surfaces: &'a SurfaceStatus,
     budget: Option<usize>,
@@ -657,7 +705,7 @@ fn render_unmerged_token(unmerged: &UnmergedGauge) -> Option<String> {
     if unmerged.branches == 0 {
         return None;
     }
-    let mut token = format!("{}\u{1F500} to merge", unmerged.branches);
+    let mut token = format!("{}\u{1F500} branch residue", unmerged.branches);
     if let (Some(delta), Some(since)) = (unmerged.delta, unmerged.since_seconds) {
         if delta != 0 {
             let window = staleness::format_age(chrono::Duration::seconds(since));
@@ -671,6 +719,36 @@ fn render_unmerged_token(unmerged: &UnmergedGauge) -> Option<String> {
         }
     }
     Some(token)
+}
+
+/// Human-readable branch rows. Every unresolved branch is named, active work
+/// is explicitly non-residue, and retained branches show the audit
+/// disposition already recorded on the molecule.
+fn render_contribution_lines(contributions: &[ContributionInfo]) -> Vec<String> {
+    contributions
+        .iter()
+        .map(|item| match item.disposition {
+            BranchDisposition::Active => format!(
+                "  {} {} — active ({}) · not residue",
+                "Branch".bold(),
+                item.branch,
+                item.detail
+            ),
+            BranchDisposition::RetainedAudited => format!(
+                "  {} {} — retained · audit disposition: {}",
+                "Branch".bold(),
+                item.branch,
+                item.detail
+            ),
+            BranchDisposition::Unresolved => format!(
+                "  {} {} — {}; run `cs done {}` after resolving it",
+                "Resolve".bold(),
+                item.branch,
+                item.detail,
+                item.molecule
+            ),
+        })
+        .collect()
 }
 
 /// Render compact one-line status.
@@ -791,6 +869,27 @@ fn render_compact(p: &Pulse) {
     for line in render_harvestable_lines(p.harvestable) {
         println!("{}", line.yellow());
     }
+    render_branch_and_zombie_lines(p);
+}
+
+/// Name every non-summary hygiene item beneath the compact pulse.
+fn render_branch_and_zombie_lines(p: &Pulse<'_>) {
+    for s in p.zombie_sessions {
+        println!(
+            "{}",
+            format!(
+                "  {} zombie {} ({}) — run `cs purge {} --force`",
+                "Resolve".bold(),
+                s.worker,
+                s.molecule,
+                s.worker
+            )
+            .red()
+        );
+    }
+    for line in render_contribution_lines(p.contributions) {
+        println!("{line}");
+    }
 }
 
 /// Render verbose dashboard.
@@ -888,15 +987,19 @@ fn render_verbose(p: &Pulse) {
         }
     }
 
-    // Contributions section
-    if p.unmerged.branches > 0 {
+    // Contributions section — all molecule branches stay visible, but only
+    // unresolved ones count against hygiene.
+    if !p.contributions.is_empty() {
         println!();
         println!(
-            "  {}: {} branches, {} commits ahead",
+            "  {}: {} molecule branches, {} unresolved",
             "Contributions".bold(),
-            p.unmerged.branches,
-            p.unmerged.commits
+            p.contributions.len(),
+            p.unmerged.branches
         );
+        for line in render_contribution_lines(p.contributions) {
+            println!("{line}");
+        }
         // A movement of zero is not news, and a gauge that prints an empty
         // accusation every run is a gauge nobody reads.
         if let (Some(delta), Some(since)) = (p.unmerged.delta, p.unmerged.since_seconds) {
@@ -926,7 +1029,7 @@ fn render_verbose(p: &Pulse) {
         println!("  {}: {}", "Hygiene".bold(), "clean".green());
     } else {
         println!(
-            "  {}: {} zombie session(s), {} un-harvested, {} branch(es) to merge",
+            "  {}: {} zombie session(s), {} un-harvested, {} unresolved branch(es)",
             "Hygiene".bold(),
             p.hygiene.zombie_sessions,
             p.hygiene.harvestable,
@@ -1031,7 +1134,7 @@ fn is_molecule_branch(branch: &str) -> bool {
 /// [`is_molecule_branch`]. Other unmerged refs (`backup/*`, `spore/*`,
 /// release bake branches) are operator state, not molecule work, and are
 /// reported nowhere by `cs status` rather than inflated into this count.
-fn discover_contributions() -> Vec<ContributionInfo> {
+fn discover_contributions(molecules: &[cosmon_state::MoleculeData]) -> Vec<ContributionInfo> {
     let output = std::process::Command::new("git")
         .args(["branch", "--no-merged", "main", "--format=%(refname:short)"])
         .output();
@@ -1070,14 +1173,66 @@ fn discover_contributions() -> Vec<ContributionInfo> {
             .unwrap_or(0);
 
         if ahead > 0 {
+            let Some(molecule) = branch.strip_prefix("feat/") else {
+                continue;
+            };
+            let (disposition, detail) = classify_branch(
+                molecules
+                    .iter()
+                    .find(|candidate| candidate.id.as_str() == molecule),
+            );
             contributions.push(ContributionInfo {
                 branch: branch.to_owned(),
                 commits_ahead: ahead,
+                molecule: molecule.to_owned(),
+                disposition,
+                detail,
             });
         }
     }
 
     contributions
+}
+
+/// Read the disposition of a branch from the molecule's existing lifecycle
+/// record. No branch-side marker or parallel audit database is introduced.
+fn classify_branch(molecule: Option<&cosmon_state::MoleculeData>) -> (BranchDisposition, String) {
+    let Some(molecule) = molecule else {
+        return (
+            BranchDisposition::Unresolved,
+            "no molecule state; restore or audit the state before deciding".to_owned(),
+        );
+    };
+
+    if molecule.status.is_alive() {
+        return (BranchDisposition::Active, molecule.status.to_string());
+    }
+
+    if molecule.status == MoleculeStatus::Collapsed {
+        let detail = molecule.collapse_reason.as_deref().map_or_else(
+            || "collapsed (legacy record has no reason)".to_owned(),
+            |reason| format!("collapsed — {reason}"),
+        );
+        return (BranchDisposition::RetainedAudited, detail);
+    }
+
+    if molecule
+        .non_integration
+        .as_ref()
+        .is_some_and(|record| record.reason == cosmon_state::NonIntegrationReason::MergeSkipped)
+    {
+        let detail = molecule.harvest_reason.as_deref().map_or_else(
+            || "harvested with merge deliberately skipped".to_owned(),
+            |reason| format!("harvested with merge skipped — {reason}"),
+        );
+        return (BranchDisposition::RetainedAudited, detail);
+    }
+
+    let detail = molecule.non_integration.as_ref().map_or_else(
+        || format!("{} with no recorded harvest", molecule.status),
+        |record| format!("harvest unresolved: {}", record.reason.as_str()),
+    );
+    (BranchDisposition::Unresolved, detail)
 }
 
 /// Check surface freshness from the snapshot file.
@@ -1192,8 +1347,12 @@ fn sample_unmerged_gauge(
     state_dir: &std::path::Path,
     contributions: &[ContributionInfo],
 ) -> UnmergedGauge {
-    let branches = contributions.len();
-    let commits: usize = contributions.iter().map(|c| c.commits_ahead).sum();
+    let unresolved: Vec<_> = contributions
+        .iter()
+        .filter(|contribution| contribution.is_unresolved())
+        .collect();
+    let branches = unresolved.len();
+    let commits: usize = unresolved.iter().map(|c| c.commits_ahead).sum();
     let now = chrono::Utc::now();
     let path = state_dir.join(GAUGE_FILE);
 
@@ -1767,14 +1926,23 @@ mod tests {
             ContributionInfo {
                 branch: "a".to_owned(),
                 commits_ahead: 2,
+                molecule: "task-20260101-aaaa".to_owned(),
+                disposition: BranchDisposition::Unresolved,
+                detail: "completed with no recorded harvest".to_owned(),
             },
             ContributionInfo {
                 branch: "b".to_owned(),
                 commits_ahead: 1,
+                molecule: "task-20260101-bbbb".to_owned(),
+                disposition: BranchDisposition::Unresolved,
+                detail: "completed with no recorded harvest".to_owned(),
             },
             ContributionInfo {
                 branch: "c".to_owned(),
                 commits_ahead: 5,
+                molecule: "task-20260101-cccc".to_owned(),
+                disposition: BranchDisposition::Unresolved,
+                detail: "completed with no recorded harvest".to_owned(),
             },
         ];
 
@@ -1870,18 +2038,86 @@ mod tests {
     /// branch each independently make it `false` (issue #97).
     #[test]
     fn hygiene_is_clean_only_with_no_residue() {
-        assert!(HygieneInfo::new(0, 0, 0).clean);
+        assert!(HygieneInfo::new(0, 0, 0, 2, 3).clean);
         assert!(
-            !HygieneInfo::new(1, 0, 0).clean,
+            !HygieneInfo::new(1, 0, 0, 0, 0).clean,
             "a zombie session is residue"
         );
         assert!(
-            !HygieneInfo::new(0, 1, 0).clean,
+            !HygieneInfo::new(0, 1, 0, 0, 0).clean,
             "an un-harvested molecule is residue"
         );
         assert!(
-            !HygieneInfo::new(0, 0, 1).clean,
+            !HygieneInfo::new(0, 0, 1, 0, 0).clean,
             "an unmerged molecule branch is residue"
         );
+    }
+
+    /// Branch classification consumes the lifecycle record that already owns
+    /// the audit facts: live work is active, collapse carries its disposition,
+    /// and a completed branch with no harvest remains actionable.
+    #[test]
+    fn branch_disposition_uses_existing_lifecycle_evidence() {
+        let active = make_molecule("live", MoleculeStatus::Running, None);
+        assert_eq!(classify_branch(Some(&active)).0, BranchDisposition::Active);
+
+        let mut retained = make_molecule("kept", MoleculeStatus::Collapsed, None);
+        retained.collapse_reason = Some("superseded after review".to_owned());
+        let (disposition, detail) = classify_branch(Some(&retained));
+        assert_eq!(disposition, BranchDisposition::RetainedAudited);
+        assert!(detail.contains("superseded after review"), "{detail}");
+
+        let unresolved = make_molecule("done", MoleculeStatus::Completed, None);
+        assert_eq!(
+            classify_branch(Some(&unresolved)).0,
+            BranchDisposition::Unresolved
+        );
+        assert_eq!(
+            classify_branch(None).0,
+            BranchDisposition::Unresolved,
+            "a branch with no molecule record must never be guessed clean"
+        );
+    }
+
+    /// Human status must name the branch in every class and expose the
+    /// retained verdict, rather than reducing all three to one count.
+    #[test]
+    fn branch_rows_name_unresolved_active_and_retained_work() {
+        colored::control::set_override(false);
+        let rows = render_contribution_lines(&[
+            ContributionInfo {
+                branch: "feat/task-20260101-aaaa".to_owned(),
+                commits_ahead: 1,
+                molecule: "task-20260101-aaaa".to_owned(),
+                disposition: BranchDisposition::Active,
+                detail: "running".to_owned(),
+            },
+            ContributionInfo {
+                branch: "feat/task-20260101-bbbb".to_owned(),
+                commits_ahead: 2,
+                molecule: "task-20260101-bbbb".to_owned(),
+                disposition: BranchDisposition::RetainedAudited,
+                detail: "collapsed — duplicate".to_owned(),
+            },
+            ContributionInfo {
+                branch: "feat/task-20260101-cccc".to_owned(),
+                commits_ahead: 3,
+                molecule: "task-20260101-cccc".to_owned(),
+                disposition: BranchDisposition::Unresolved,
+                detail: "completed with no recorded harvest".to_owned(),
+            },
+        ]);
+        assert!(
+            rows[0].contains("active (running) · not residue"),
+            "{:?}",
+            rows
+        );
+        assert!(
+            rows[1].contains("audit disposition: collapsed — duplicate"),
+            "{:?}",
+            rows
+        );
+        assert!(rows[2].contains("cs done task-20260101-cccc"), "{:?}", rows);
+        colored::control::unset_override();
     }
 }

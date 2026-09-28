@@ -143,17 +143,19 @@ STALENESS: the pulse carries derivatives, not only levels — `oldest 39d · 2 >
       threshold, from the same arithmetic `cs peek` renders in its vitals
       line. `surfaces ✅ reconciled 2h ago` tells hash-drift from
       projection age: the tick is about the hashes and has never said
-      anything about when the projection ran. `28🔀 to merge (+8 in 3h)`
-      counts only molecule branches (`feat/<id>`, never `backup/*` or
-      `spore/*`) and compares against a sample in `<state>/status-gauge.json`,
-      refreshed at most hourly so the window stays wide enough to show
-      movement.
+      anything about when the projection ran. `3🔀 branch residue (+1 in 3h)`
+      counts unresolved molecule branches (`feat/<id>`, never `backup/*` or
+      `spore/*`). Active branches and retained branches with a recorded
+      lifecycle disposition remain visible but do not inflate that gauge. It
+      compares against `<state>/status-gauge.json`, refreshed at most hourly.
 
 HYGIENE: a `clean` token (or, in `--verbose`, a `Hygiene:` line) reports
       whether finishing left residue behind — a zombie session, an
-      un-harvested `Completed` molecule, or an unmerged molecule branch.
+      un-harvested `Completed` molecule, or an unresolved molecule branch.
       `--json`'s `hygiene.clean` is the same verdict for a script to poll;
-      `cs done`/`cs collapse` are what clear each kind of residue.
+      human output names every unresolved item. Active work is not residue;
+      retained branches show the lifecycle audit disposition that justified
+      keeping them.
 
 LEASES: a molecule named by the pilot-lease ledger carries the cockpit
       between sessions and converges by design never, so it is excluded from
