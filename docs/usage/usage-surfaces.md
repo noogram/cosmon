@@ -74,9 +74,9 @@ cross-worker subtraction.
 
 ## Known collection boundary
 
-Codex rollout plan windows are integrated through the supported parser and
-remain account-scoped. Claude API-equivalent usage is integrated from session
-logs. Claude plan collection remains unavailable unless dispatch can supply a
-supported effective-settings overlay and ordinary authorized activity yields a
-live reading. Rendering that honest unavailable state is not evidence of live
-Claude plan collection.
+Rollout windows and stored status-line windows enter the same canonical worker
+record as API-equivalent USD. The stored window path is scoped to the molecule
+attempt, refreshed at read time, and remains account-scoped. A status-line
+overlay is installed only when local settings resolve without a separate
+launch settings flag. A live reading still requires an ordinary callback;
+source code and synthetic fixtures alone do not establish that witness.

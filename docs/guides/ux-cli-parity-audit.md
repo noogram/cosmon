@@ -14,6 +14,15 @@ scoped to the patrol dead-worker policy; it is not a full command inventory.
 The dead-worker policy and dialogue scan are applied by the patrol command.
 These native controls and Reveal CLI actions remain parity gaps under ADR-068.
 
+## Scoped plan observations (issue #111)
+
+| Capability | CLI | Native UI | Other CLI views |
+|---|---|---|---|
+| Read an attempt-scoped status-line plan sample beside API-equivalent USD | `cs peek` TUI, snapshot and `--json` use the shared worker probe; each window retains account scope, freshness and reset state | No separate native reader audited | `cs ensemble` and `--json` use the same worker probe; numerical worker attribution remains unavailable |
+
+The dispatch overlay records a sample only after an ordinary status-line
+callback. An absent sample remains unavailable on every surface.
+
 ## Resident config reload (issue #91)
 
 | Capability | CLI | Native UI | Other CLI views |

@@ -83,3 +83,23 @@ fn read_missing_store_is_side_effect_free() {
         .is_none());
     assert!(!root.exists());
 }
+
+#[test]
+fn reused_worker_name_starts_without_the_previous_reading() {
+    let tmp = tempfile::tempdir().expect("temp");
+    let store = FilePlanObservationStore::new(tmp.path().join("samples"));
+    let worker = WorkerId::new("quartz").expect("worker");
+    let sample = claude_plan(
+        r#"{"rate_limits":{"five_hour":{"used_percentage":42}}}"#,
+        PlanSource::ClaudeStatusLine,
+        chrono::Utc::now(),
+    );
+    store.save(&worker, &sample).expect("save");
+    store
+        .retire(&worker, PlanSource::ClaudeStatusLine)
+        .expect("retire");
+    assert!(store
+        .load(&worker, PlanSource::ClaudeStatusLine)
+        .expect("load")
+        .is_none());
+}

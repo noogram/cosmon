@@ -54,7 +54,8 @@ pub use cosmon_core::worker_argv::OPERATOR_BOUND_BROWSER_MCPS;
 /// single quotes with embedded single quotes escaped as `'\''` (the
 /// standard POSIX dance). A path with spaces, `$`, or quotes survives
 /// the outer shell round-trip without losing or gaining tokens.
-fn shell_quote(s: &str) -> String {
+#[must_use]
+pub fn shell_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_owned();
     }
