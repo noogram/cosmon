@@ -73,6 +73,7 @@ use cosmon_core::worktree_reclaim::{
 use cosmon_filestore::harvest_authority::{FileConsumptionLedger, FileHarvestJournal};
 use cosmon_filestore::FileStore;
 
+use crate::authorization_facts::{AuthorizationFacts, AuthorizationSources};
 use crate::worktree_reclaim::observe_dirty;
 use cosmon_state::{MoleculeData, StateStore};
 use cosmon_transport::TmuxBackend;
@@ -1963,6 +1964,17 @@ fn collect_confidential_blocklist_violations(
 /// Execute the `done` command.
 #[allow(clippy::too_many_lines)]
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
+    run_with_before_lock(ctx, args, || {})
+}
+
+// The closure is a deterministic test seam between preliminary gates and the
+// effect lock. Production passes an empty closure; no second lock is taken.
+#[allow(clippy::too_many_lines)]
+fn run_with_before_lock(
+    ctx: &Context,
+    args: &Args,
+    before_lock: impl FnOnce(),
+) -> anyhow::Result<()> {
     // Guard: require project identity before touching transport.
     require_project_identity(ctx)?;
 
@@ -2113,43 +2125,55 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Trace the caller's reason on the molecule BEFORE anything can fail.
-    //
-    // Deliberately not folded into the `merged_at` stamp: that stamp only
-    // happens when the merge landed, and the harvest whose reason a later
-    // reader most needs is precisely the one that did not. A conflicted
-    // harvest leaves `non_integration` explaining *what the repository did*
-    // and `harvest_reason` explaining *what the caller wanted* — the two
-    // halves of the same event.
-    //
-    // "Before anything can fail" is not "before anything is decided":
-    // this write sits **after** the `--dry-run` return above, because a
-    // dry run promises no side effects and a durable field is a side
-    // effect whatever else the run avoided. `cs done <id> --dry-run
-    // --reason …` is how an operator inspects a plan before committing to
-    // it, and the reason they were trying out must not become the reason
-    // of record for a harvest they did not perform (PR #62 review).
-    if let Some(reason) = (!has_prior_attempt)
-        .then_some(args)
-        .and_then(|a| a.reason.as_deref())
-        .map(str::trim)
-        .filter(|r| !r.is_empty())
-    {
-        match store.load_molecule(&mol_id) {
-            Ok(mut latest) => {
-                latest.harvest_reason = Some(reason.to_owned());
-                if let Err(e) = store.save_molecule(&mol_id, &latest) {
-                    eprintln!("⚠ recording the harvest reason failed: {e}");
-                }
-            }
-            Err(e) => eprintln!("⚠ reloading the molecule to record the reason failed: {e}"),
-        }
-    }
-
     let branch_name = format!("feat/{mol_id}");
     let wid = WorkerId::new(&session_name)?;
     let repo_root = find_repo_root(ctx)?;
     let worktree_path = repo_root.join(".worktrees").join(mol_id.as_str());
+
+    // Gates below inspect a preliminary view. Capture it before they run and
+    // compare it with a fresh read under the effect lock; a changed input
+    // invalidates the entire gated transaction, even when the newly resolved
+    // base happens to have the same name.
+    let project_config_path = resolve_config_from_context(ctx);
+    let fact_sources = AuthorizationSources {
+        store: &store,
+        config_path: &project_config_path,
+        galaxy_root: &galaxy_root,
+        repo_root: &repo_root,
+        molecule: &mol_id,
+    };
+    let preliminary_facts = if args.no_merge {
+        None
+    } else {
+        let facts = AuthorizationFacts::load(&fact_sources)?;
+        facts.require_same_molecule(&mol)?;
+        Some(facts)
+    };
+    let preliminary_git = if args.no_merge {
+        None
+    } else {
+        Some((
+            git_head(&repo_root)?,
+            branch_head_oid(&repo_root, &branch_name)?,
+        ))
+    };
+    let preliminary_mission = if preliminary_facts
+        .as_ref()
+        .is_some_and(|facts| facts.config.harvest_authority.is_required())
+        && cosmon_filestore::harvest_authority::load_authorizations(&state_dir)?
+            .iter()
+            .any(|candidate| {
+                matches!(
+                    candidate.grant().scope,
+                    cosmon_core::harvest_authorization::HarvestScope::Mission { .. }
+                )
+            }) {
+        Some(crate::authorization_facts::strict_mission_ancestry(
+            &store, &mol_id,
+        ))
+    } else {
+        None
+    };
 
     // Detect "ghost teardown": every teardown resource is already absent.
     // Branch gone, worktree gone, fleet entry gone, tmux session dead. In
@@ -2189,9 +2213,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //     Probed against `repo_root` (the cosmon checkout itself, not the
     //     worker's `.worktrees/<mol>` worktree) because shared remotes are
     //     visible from every worktree of the same repository.
-    let project_config_path = resolve_config_from_context(ctx);
-    let project_cfg = cosmon_filestore::load_project_config(&project_config_path)
-        .unwrap_or_else(|_| ProjectConfig::default());
+    let project_cfg = match preliminary_facts.as_ref() {
+        Some(facts) => facts.config.clone(),
+        None => cosmon_filestore::load_project_config(&project_config_path)?,
+    };
     check_git_remote_blocklist(&repo_root, &project_cfg.git_remote_blocklist)?;
 
     // 1c. Publish-identity gate (ADR-128 §V1 — the D7 publish-closure
@@ -2356,6 +2381,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 // `cs trust` first.
                 crate::trust::ensure_trusted(&repo_root)?;
                 run_pre_done_hook(&repo_root, hook_cmd, &mol_id).inspect_err(|e| {
+                    // The refusal is now known, so its reason can be kept
+                    // without writing ahead of authority freshness checks.
+                    record_harvest_reason(&store, &mol_id, args, has_prior_attempt);
                     // Persist the refusal BEFORE reporting it. This is the
                     // one non-integration the event journal can never
                     // reconstruct: the gate aborts ahead of the merge block,
@@ -2451,6 +2479,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //
     // `--no-merge` keeps the lock unacquired: nothing in this branch touches
     // the trunk, so contention would be a false signal.
+    if !args.no_merge {
+        before_lock();
+    }
     let trunk_guard = if args.no_merge {
         None
     } else {
@@ -2477,8 +2508,15 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let mut harvest_progress: Option<HarvestJournalRecord> = None;
     let mut resuming_integrated = false;
     if let Some(guard) = trunk_guard.as_deref() {
+        let current_facts = AuthorizationFacts::load_under_trunk(guard, &fact_sources)?;
+        if let Some(preliminary) = preliminary_facts.as_ref() {
+            preliminary.require_unchanged(&current_facts)?;
+        }
         let pre_merge_base = git_head(&repo_root)?;
         let branch_head = branch_head_oid(&repo_root, &branch_name)?;
+        if preliminary_git.as_ref() != Some(&(pre_merge_base.clone(), branch_head.clone())) {
+            anyhow::bail!("harvest_facts_changed: Git head changed; restart the gated transaction");
+        }
         let options_digest = harvest_options_digest(args)?;
         let hook_digest = harvest_hook_digest(&project_cfg)?;
         let invocation_id = format!(
@@ -2486,37 +2524,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             mol_id.as_str(),
             chrono::Utc::now().timestamp_millis()
         );
-        let mission = crate::lineage::mission_root(&store, &mol_id);
-        // Re-read the tags HERE rather than reusing the snapshot taken before
-        // the gates ran. A reservation added while `cs done` was working its
-        // way down the perimeter is a fact that changed, and D3 says the facts
-        // are the ones true inside the lock — the earlier `mol` would let a
-        // grant signed for an unreserved harvest cross a reservation that now
-        // exists.
-        let tags: Vec<String> = store
-            .load_molecule(&mol_id)
-            .as_ref()
-            .unwrap_or(&mol)
-            .tags
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        match crate::done_authority::authorize_harvest(
+        match crate::done_authority::authorize_harvest_from_facts(
             guard,
-            &project_cfg.harvest_authority,
-            &crate::done_authority::HarvestRequest {
-                galaxy_root: &galaxy_root,
+            &current_facts,
+            &crate::done_authority::LockedHarvestRequest {
+                store: &store,
                 state_root: &state_dir,
-                galaxy: project_cfg
-                    .project
-                    .project_id
-                    .as_ref()
-                    .map_or("<galaxy>", |id| id.as_str()),
                 molecule: &mol_id,
-                mission: Some(mission),
-                tags: &tags,
-                base: &base_branch,
                 invocation_id: &invocation_id,
+                preliminary_mission: preliminary_mission.as_ref(),
+                clock: &cosmon_core::harness::RealClock,
             },
         )? {
             crate::done_authority::HarvestDecision::NotInForce => {}
@@ -2621,6 +2638,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             }
         }
     }
+
+    // A caller-supplied reason is recorded only after current authority facts
+    // and, when required, the grant have passed under the effect lock. It
+    // still precedes the first Git mutation and survives a later conflict.
+    record_harvest_reason(&store, &mol_id, args, has_prior_attempt);
 
     // Capture the exact pre-merge revision before `cs done` emits its merge
     // event. The merge helper may flush that event into a bookkeeping commit
@@ -4498,6 +4520,31 @@ enum ContradictsStamp {
 /// Best-effort, like [`record_escalation`]: a failure to record the reason
 /// must never turn a merge refusal into a teardown abort. The caller is
 /// already returning its own loud error on the failing paths.
+fn record_harvest_reason(
+    store: &dyn StateStore,
+    molecule: &MoleculeId,
+    args: &Args,
+    has_prior_attempt: bool,
+) {
+    let Some(reason) = (!has_prior_attempt)
+        .then_some(args)
+        .and_then(|a| a.reason.as_deref())
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+    else {
+        return;
+    };
+    match store.load_molecule(molecule) {
+        Ok(mut latest) => {
+            latest.harvest_reason = Some(reason.to_owned());
+            if let Err(error) = store.save_molecule(molecule, &latest) {
+                eprintln!("⚠ recording the harvest reason failed: {error}");
+            }
+        }
+        Err(error) => eprintln!("⚠ reloading the molecule to record the reason failed: {error}"),
+    }
+}
+
 fn record_non_integration(
     store: &FileStore,
     mol_id: &MoleculeId,
@@ -7753,6 +7800,277 @@ mod tests {
         let args = Args::from_harvest_options(molecule.as_str().to_owned(), &options);
         let ctx = Context::at(&state, root.path());
         (root, ctx, args, molecule)
+    }
+
+    #[test]
+    fn post_precheck_fact_changes_refuse_before_the_first_harvest_mutation() {
+        use cosmon_core::interaction::MoleculeLink;
+        use cosmon_core::tag::Tag;
+
+        for change in [
+            "required",
+            "project",
+            "base",
+            "status",
+            "reservation",
+            "parent",
+            "epoch",
+            "policy",
+            "key",
+            "config_read",
+            "state_read",
+            "branch_head",
+        ] {
+            let (root, ctx, args, molecule) = recovery_fixture();
+            let head_before = git_head(root.path()).expect("precheck head");
+            let state = root.path().join(".cosmon/state");
+            let error = run_with_before_lock(&ctx, &args, || {
+                let store = FileStore::new(&state);
+                match change {
+                    "required" => std::fs::write(
+                        root.path().join(".cosmon/config.toml"),
+                        "[project]\nproject_id = \"fixture-0000\"\n[harvest_authority]\nrequired = false\n",
+                    ).expect("required edit"),
+                    "project" => std::fs::write(
+                        root.path().join(".cosmon/config.toml"),
+                        "[project]\nproject_id = \"other-0000\"\n[harvest_authority]\nrequired = true\n",
+                    ).expect("identity edit"),
+                    "base" | "status" | "reservation" | "parent" => {
+                        let mut current = store.load_molecule(&molecule).expect("load");
+                        match change {
+                            "base" => current.base_branch = Some("release".to_owned()),
+                            "status" => current.status = MoleculeStatus::Collapsed,
+                            "reservation" => {
+                                current.tags.insert(Tag::new("security:high").expect("tag"));
+                            }
+                            "parent" => current.typed_links.push(MoleculeLink::BlockedBy {
+                                source: MoleculeId::new("task-20260929-dead").expect("parent"),
+                            }),
+                            _ => unreachable!(),
+                        }
+                        store.save_molecule(&molecule, &current).expect("save");
+                    }
+                    "epoch" => std::fs::write(root.path().join(".cosmon/harvest.epoch"), "2\n").expect("epoch"),
+                    "policy" => std::fs::write(root.path().join(".cosmon/harvest-policy.toml"), "limit = 1\n").expect("policy"),
+                    "key" => std::fs::write(
+                        root.path().join(".cosmon/harvest.pub"),
+                        cosmon_minisign_testkit::Operator::from_seed(8).public_key_file(),
+                    ).expect("rotate root"),
+                    "config_read" => std::fs::remove_file(root.path().join(".cosmon/config.toml")).expect("remove config"),
+                    "state_read" => std::fs::remove_file(store.molecule_dir(&molecule).join("state.json")).expect("remove state"),
+                    "branch_head" => {
+                        assert!(git(root.path(), &["branch", "-f", &format!("feat/{molecule}"), "main"])
+                            .status.success());
+                    }
+                    _ => unreachable!(),
+                }
+            })
+            .expect_err(change);
+            assert!(
+                error.to_string().contains("harvest_facts_changed")
+                    || error.to_string().contains("harvest_facts_unavailable")
+                    || (change == "state_read" && error.to_string().contains("molecule")),
+                "{change}: {error}"
+            );
+            assert_eq!(
+                git_head(root.path()).expect("unmutated head"),
+                head_before,
+                "{change}"
+            );
+            assert!(
+                !FileConsumptionLedger::at_state_root(&state)
+                    .has_receipt_for(&molecule)
+                    .expect("ledger"),
+                "{change} must not reserve a permit"
+            );
+            assert!(
+                !FileHarvestJournal::at_state_root(&state)
+                    .has_attempt_for(&molecule)
+                    .expect("journal"),
+                "{change} must not journal an effect"
+            );
+            if change != "state_read" {
+                assert!(
+                    FileStore::new(&state)
+                        .load_molecule(&molecule)
+                        .expect("unchanged molecule")
+                        .harvest_reason
+                        .is_none(),
+                    "{change} must not record a reason before fresh authority"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mission_parent_edit_with_the_same_root_refuses_before_integration() {
+        use cosmon_core::harvest_authorization::{
+            policy_digest, DelegatedHarvestCapability, DoneAuthorization, GrantEpoch,
+            HarvestAction, HarvestGrant, HarvestScope,
+        };
+        use cosmon_core::interaction::MoleculeLink;
+        use cosmon_core::operator_attestation::{OperatorAttestation, OperatorKeyId};
+
+        let (root, ctx, args, molecule) = recovery_fixture();
+        let state = root.path().join(".cosmon/state");
+        let store = FileStore::new(&state);
+        let parent = MoleculeId::new("task-20260929-abcd").expect("parent");
+        let second = MoleculeId::new("task-20260929-ef12").expect("second");
+        let mission = MoleculeId::new("task-20260929-3456").expect("mission");
+        let mut target = store.load_molecule(&molecule).expect("target");
+        target.typed_links.push(MoleculeLink::BlockedBy {
+            source: parent.clone(),
+        });
+        store
+            .save_molecule(&molecule, &target)
+            .expect("target parent");
+        let mut first_parent = sample_mol(parent.as_str(), MoleculeStatus::Completed);
+        first_parent.typed_links.push(MoleculeLink::BlockedBy {
+            source: mission.clone(),
+        });
+        store.save_molecule(&parent, &first_parent).expect("parent");
+        let mut second_parent = sample_mol(second.as_str(), MoleculeStatus::Completed);
+        second_parent.typed_links.push(MoleculeLink::BlockedBy {
+            source: mission.clone(),
+        });
+        store
+            .save_molecule(&second, &second_parent)
+            .expect("second parent");
+        store
+            .save_molecule(
+                &mission,
+                &sample_mol(mission.as_str(), MoleculeStatus::Completed),
+            )
+            .expect("root");
+
+        let grant = HarvestGrant::new(
+            "fixture-0000",
+            HarvestScope::Mission {
+                mission: mission.clone(),
+                policy_digest: policy_digest(&[]),
+            },
+            "main",
+            HarvestAction::Done,
+            Vec::<String>::new(),
+            GrantEpoch::first(),
+            None,
+        )
+        .expect("mission grant");
+        let operator = cosmon_minisign_testkit::Operator::from_seed(7);
+        let signature = operator.sign(&grant.canonical_bytes());
+        let mut lines = signature.lines();
+        let attestation = OperatorAttestation {
+            key_id: OperatorKeyId::parse(&operator.key_id_display()).expect("key"),
+            untrusted_comment: lines
+                .next()
+                .expect("comment")
+                .trim_start_matches("untrusted comment: ")
+                .to_owned(),
+            signature: lines.next().expect("signature").to_owned(),
+            trusted_comment: lines
+                .next()
+                .expect("trusted")
+                .trim_start_matches("trusted comment: ")
+                .to_owned(),
+            global_signature: lines.next().expect("global signature").to_owned(),
+        };
+        cosmon_filestore::harvest_authority::store_authorization(
+            &state,
+            &molecule,
+            &DoneAuthorization::Delegated(DelegatedHarvestCapability::new(grant, attestation)),
+        )
+        .expect("delegation");
+        let head_before = git_head(root.path()).expect("head");
+        let error = run_with_before_lock(&ctx, &args, || {
+            let mut changed = store.load_molecule(&parent).expect("parent");
+            changed.typed_links.push(MoleculeLink::BlockedBy {
+                source: second.clone(),
+            });
+            store
+                .save_molecule(&parent, &changed)
+                .expect("edited parent");
+        })
+        .expect_err("same root, changed graph");
+        assert!(
+            error.to_string().contains("harvest_facts_changed"),
+            "{error}"
+        );
+        assert_eq!(git_head(root.path()).expect("head after"), head_before);
+        assert!(!FileConsumptionLedger::at_state_root(&state)
+            .has_receipt_for(&molecule)
+            .expect("ledger"));
+    }
+
+    #[test]
+    fn two_harvests_and_a_policy_writer_serialize_on_one_trunk_lock() {
+        let (root, ctx, _args, molecule) = recovery_fixture();
+        let state = root.path().join(".cosmon/state");
+        let store = FileStore::new(&state);
+        let writer_guard = store
+            .lock_trunk("authority writer fixture")
+            .expect("writer lock");
+        let head_before = git_head(root.path()).expect("head");
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let ctx = ctx.clone();
+                let molecule = molecule.clone();
+                let ready = ready_tx.clone();
+                std::thread::spawn(move || {
+                    let mut options = HarvestOptions::new("close the completed work");
+                    options.no_kill = true;
+                    options.no_worktree_remove = true;
+                    options.no_branch_delete = true;
+                    options.no_auto_propel = true;
+                    let args = Args::from_harvest_options(molecule.as_str().to_owned(), &options);
+                    run_with_before_lock(&ctx, &args, || ready.send(()).expect("ready"))
+                })
+            })
+            .collect();
+        for _ in 0..2 {
+            ready_rx
+                .recv_timeout(Duration::from_secs(20))
+                .expect("both harvests reached the lock");
+        }
+        std::fs::write(
+            root.path().join(".cosmon/config.toml"),
+            "[project]\nproject_id = \"fixture-0000\"\n[harvest_authority]\nrequired = false\n",
+        )
+        .expect("cooperating policy write while holding the trunk lock");
+        drop(writer_guard);
+        for handle in handles {
+            let error = handle
+                .join()
+                .expect("harvest thread")
+                .expect_err("stale facts");
+            assert!(
+                error.to_string().contains("harvest_facts_changed"),
+                "{error}"
+            );
+        }
+        assert_eq!(git_head(root.path()).expect("head after"), head_before);
+        assert!(!FileConsumptionLedger::at_state_root(&state)
+            .has_receipt_for(&molecule)
+            .expect("ledger"));
+    }
+
+    #[test]
+    fn molecule_grant_does_not_depend_on_unreadable_mission_parent() {
+        use cosmon_core::interaction::MoleculeLink;
+
+        let (root, ctx, args, molecule) = recovery_fixture();
+        let state = root.path().join(".cosmon/state");
+        let store = FileStore::new(&state);
+        let mut target = store.load_molecule(&molecule).expect("target");
+        target.typed_links.push(MoleculeLink::BlockedBy {
+            source: MoleculeId::new("task-20260929-dead").expect("missing parent"),
+        });
+        store
+            .save_molecule(&molecule, &target)
+            .expect("persist parent reference");
+        let before = git_head(root.path()).expect("head");
+        run(&ctx, &args).expect("the signed molecule grant is independent of ancestry");
+        assert_ne!(git_head(root.path()).expect("landed head"), before);
     }
 
     /// Simulate the durable reservation already written by the crashed run.
