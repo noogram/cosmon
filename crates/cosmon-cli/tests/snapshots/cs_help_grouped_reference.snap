@@ -127,6 +127,9 @@ Pilot workflow — the full cycle is nucleate → tackle → wait → done:
                                # pilot stays free for other work
   cs done <id>                 # merge branch + teardown (required!)
 
+  The task and bound variables live in the molecule's briefing.md.
+  cs tackle points the worker there when it has a Task section.
+
   For a DAG of N≥1 nodes (one node = leaf, N nodes = orchestration):
   cs run <root> --poll-interval 5     # walks the DAG, dispatches each
                                        # ready node via cs tackle, calls

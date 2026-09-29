@@ -124,6 +124,8 @@ pub mod avatar;
 #[doc(hidden)]
 pub mod bead;
 #[doc(hidden)]
+pub mod briefing;
+#[doc(hidden)]
 pub mod calibration;
 #[doc(hidden)]
 pub mod capability;

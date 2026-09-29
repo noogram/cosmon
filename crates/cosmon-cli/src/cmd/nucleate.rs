@@ -1865,6 +1865,7 @@ fn write_briefing(
     if let Some(ref worker) = result.assigned_worker {
         let _ = write!(md, "**Assigned to:** {worker}\n\n");
     }
+    md.push_str(&cosmon_core::briefing::render_task(&result.variables));
     md.push_str("## Steps\n\n");
     for (i, step) in formula.steps.iter().enumerate() {
         let _ = write!(md, "### Step {} — {}\n\n", i + 1, step.title);

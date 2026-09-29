@@ -2,6 +2,15 @@
 
 # CLI and UI parity audit
 
+## Durable task briefing (issue #124)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Recover the task from a molecule directory | `cs nucleate` writes the topic and all bound variables into `briefing.md`; `cs tackle` points the worker to that file | No equivalent authoring surface audited | Molecule creation writes the same durable task section before dispatch |
+
+The pasted worker prompt names `briefing.md` as the task source of truth and
+does not repeat its topic or variables when that file has a Task section.
+
 ## Whisper pane dialogue guard (issue #121)
 
 | Capability | CLI | Native UI | Other CLI |

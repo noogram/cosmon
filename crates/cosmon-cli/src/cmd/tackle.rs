@@ -13535,15 +13535,16 @@ mod tests {
         let prompt = build_prompt(
             &mol,
             None,
-            Some("# Mission\nDo something great."),
+            Some("## Task\n\n### topic\n\nDo something great."),
             &ProjectConfig::default(),
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
             "claude",
             None,
         );
 
-        assert!(prompt.contains("## Briefing"));
-        assert!(prompt.contains("Do something great."));
+        assert!(prompt.contains("`briefing.md`"));
+        assert!(prompt.contains("source of truth"));
+        assert!(!prompt.contains("Do something great."));
     }
 
     #[test]

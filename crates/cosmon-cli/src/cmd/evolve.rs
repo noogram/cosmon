@@ -1130,7 +1130,8 @@ The molecule has NOT advanced — its state is unchanged, so this is recoverable
     // Write briefing.md (or remove if completed).
     let briefing_path = mol_dir.join("briefing.md");
     if let Some(ref briefing) = outcome.briefing {
-        fs::write(&briefing_path, briefing)
+        let task = cosmon_core::briefing::render_task(&updated.variables);
+        fs::write(&briefing_path, format!("{task}{briefing}"))
             .map_err(|e| anyhow::anyhow!("failed to write briefing.md: {e}"))?;
     } else {
         // Molecule completed — write a final briefing.
