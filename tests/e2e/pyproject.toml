@@ -28,6 +28,7 @@ addopts = "-ra --strict-markers --tb=short"
 markers = [
     "stack: needs the real docker compose stack (docker daemon required; never skipped, see conftest.py)",
     "requires_dispatch: needs `tackle` to have SUCCEEDED; deselected when RPP_E2E_EXPECT_TACKLE_LABEL pins a refusal",
+    "contract_pending: acceptance case for a proposed contract not yet implemented (docs/specs/remote-harvest-contract.md §14); deselected unless RPP_E2E_CONTRACT_PENDING=1",
 ]
 junit_family = "xunit2"
 # The suite's own log stream is the debugging channel: `-o log_cli=true`

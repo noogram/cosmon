@@ -1,6 +1,6 @@
 # ADR-176 — Remote harvest authority is a sealed capability, and the closed list forbids degrees of freedom
 
-**Status:** Accepted (2026-08-31).
+**Status:** Accepted (2026-08-31). D1 narrowed 2026-09-29 (issue #120, §13).
 **Date:** 2026-08-31.
 **Decider:** Noogram.
 **Authoring molecule:** `task-20260831-6745` — child C4 of the deliberation.
@@ -525,6 +525,12 @@ This decision is violated if any of these becomes true:
    effect receives rather than at the field that parsed.
 2. A harvest is authorised by a JWT claim, an authorship record, a session id,
    a cwd, or any other value the requester can author (D1, D5).
+   **Amended 2026-09-29 (§13):** on a galaxy whose administrator explicitly
+   selected `remote = "scoped"`, the administrator-issued
+   `cosmon:molecule:harvest` scope, checked against that explicit policy, is
+   the authority; the falsifier then reads *a harvest is authorised by
+   anything other than that issued scope and that explicit policy*. Where
+   the scope may be sourced from is open (contract §13).
 3. A grant issued against one base authorises an effect on another, or survives
    a change to a covered field (ADR-172 D3, inherited).
 4. A closure that did not merge deletes the branch (D3).
@@ -878,3 +884,43 @@ than the `harvest_effect_unavailable` it replaces, which proved only that the
 door reached an effect that did not exist. The real merge is asserted where a
 seal *can* be minted: the adapter's integration test, whose test operator
 lives in the `publish = false`, dev-only `cosmon-minisign-testkit`.
+
+---
+
+## 13 · Amendment (2026-09-29, issue #120 W0) — D1 is the sealed profile, not the only one
+
+**Status:** adopted as contract; **not implemented**. Full contract:
+[`docs/specs/remote-harvest-contract.md`](../specs/remote-harvest-contract.md).
+
+**D1 is narrowed, not superseded.** Its universal statement — remote harvest
+authority is an operator-sealed capability — now holds for the **sealed**
+remote policy and for the **legacy** state (a galaxy with
+`[harvest_authority] required = true` and no `remote` key). It does not hold
+for a galaxy whose administrator explicitly provisioned
+`remote = "scoped"`, where a dedicated `cosmon:molecule:harvest` credential
+deliberately delegates ordinary integration without a grant. The
+deliberation behind #120 found that this delegation gives up the seal's
+protection against a stolen API credential; it is offered because an
+operator-owned service may accept that trade and must be able to see it was
+made, not because the two are equivalent.
+
+**What stands.** Tenant routing, one verb and one implementation, D2's
+separation predicate, D3's branch preservation, the honest synchronous
+outcomes of §12, D7's backlog bound and refusals, and D6's spend control
+(`cosmon:worker:spawn` for auto-propel) are unchanged on every profile. No
+new numbered ADR is needed for this bounded change.
+
+**Options, alongside the D4 reversal.** The legacy profile keeps D4-reversal
+parity. On an explicit `scoped` or `sealed` profile, `force`,
+`skip_pre_done_hook` and `deploy_off_trunk` are refused
+`harvest_override_requires_ratification` until an exact-override signing
+format exists: the harvest scope does not sign them and neither does a v1
+grant. This is the condition D4's "what would bring D4 back" paragraph
+named — a requester who may not be the operator — applied only where the
+administrator has opted into the new profiles, so no existing deployment
+loses an option it uses today.
+
+**§8 falsifier 6 (arming-time `base_not_fast_forward`)** stays recorded as
+unmet until the grant challenge route exists; that route is where an
+arming-time check can live, and the unit adding it owns the decision.
+

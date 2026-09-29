@@ -434,19 +434,30 @@ def sealed(stack: ComposeStack, sealer_binary: Path, molecule: str) -> str:
 
 
 def pytest_collection_modifyitems(config, items):  # noqa: D401 - pytest hook
-    """Deselect the post-dispatch tests when a tackle refusal is pinned.
+    """Deselect what this run cannot or must not judge.
 
-    ``RPP_E2E_EXPECT_TACKLE_LABEL`` points the suite at an image whose
-    dispatch must REFUSE. A worker, a completion and the harvest door's
-    effect half are then unreachable by construction. Deselecting them —
-    rather than skipping — keeps the module's no-skip contract intact:
-    nothing here prints green without having run.
+    Two cases, both by deselection rather than skip, which keeps the
+    module's no-skip contract intact: nothing here prints green without
+    having run.
+
+    * ``RPP_E2E_EXPECT_TACKLE_LABEL`` points the suite at an image whose
+      dispatch must REFUSE. A worker, a completion and the harvest door's
+      effect half are then unreachable by construction, so the
+      ``requires_dispatch`` tests are deselected.
+    * ``contract_pending`` cases specify a contract that is not
+      implemented yet (``test_harvest_profiles.py``). They run only when
+      ``RPP_E2E_CONTRACT_PENDING=1`` asks for them, so a default run —
+      the nightly included — never carries a red for code that does not
+      exist.
     """
-    if not os.environ.get("RPP_E2E_EXPECT_TACKLE_LABEL"):
-        return
+    pinned_refusal = bool(os.environ.get("RPP_E2E_EXPECT_TACKLE_LABEL"))
+    want_pending = os.environ.get("RPP_E2E_CONTRACT_PENDING") == "1"
     kept, removed = [], []
     for item in items:
-        (removed if item.get_closest_marker("requires_dispatch") else kept).append(item)
+        drop = (pinned_refusal and item.get_closest_marker("requires_dispatch")) or (
+            not want_pending and item.get_closest_marker("contract_pending")
+        )
+        (removed if drop else kept).append(item)
     if removed:
         config.hook.pytest_deselected(items=removed)
         items[:] = kept
