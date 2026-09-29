@@ -175,15 +175,14 @@ pub struct Args {
     /// `~/.config/cosmon/config.toml`) at launch and re-checks it before
     /// every dispatch. An on-disk edit is then one of:
     ///
-    /// - **Reloaded** (no halt) — the edit does not touch the `[adapters]`
-    ///   table (e.g. `[worker]`, `[attribution]`, `[hooks]`, comments), or it
-    ///   does but no molecule is currently `running` to be affected. The
-    ///   loop adopts the fresh config for its next dispatch and keeps going;
-    ///   a `config-reloaded` line lands in `runtime-trace.jsonl` and the
-    ///   final summary counts it.
-    /// - **Halted fail-closed** — the `[adapters]` table changed *and* a
-    ///   molecule is currently `running`. The loop refuses to form its next
-    ///   dispatch, emits `EventV2::ConfigDriftDetected`, and exits non-zero
+    /// - **Reloaded** (no halt) — no running molecule's effective adapter
+    ///   settings changed. This includes edits outside `[adapters]`, edits to
+    ///   an adapter no running worker uses, and edits while none is running.
+    ///   The loop adopts the fresh config for its next dispatch and records
+    ///   a `config-reloaded` trace line and summary count.
+    /// - **Halted fail-closed** — a running molecule's effective adapter
+    ///   settings changed, or its adapter cannot be identified. The loop
+    ///   refuses to form its next dispatch, emits `EventV2::ConfigDriftDetected`, and exits non-zero
     ///   (`EX_TEMPFAIL`, 75) so a supervisor relaunches a fresh process that
     ///   re-derives everything from disk — it never merges the new config
     ///   into a live process.

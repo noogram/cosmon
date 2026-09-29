@@ -14,6 +14,14 @@ scoped to the patrol dead-worker policy; it is not a full command inventory.
 The dead-worker policy and dialogue scan are applied by the patrol command.
 These native controls and Reveal CLI actions remain parity gaps under ADR-068.
 
+## Resident config reload (issue #91)
+
+| Capability | CLI | Native UI | Other CLI views |
+|---|---|---|---|
+| Continue after an edit to an unused adapter | `cs run --resident` reloads the config and records `config-reloaded` in its trace and summary | No equivalent control audited | No equivalent action audited |
+| Halt when a running molecule's adapter settings change or its adapter is unknown | `cs run --resident` records `config-drift-halt` and exits with code 75 | No equivalent control audited | No equivalent action audited |
+| Inspect the adapter recorded on a running process | `cs ensemble --json` includes `dispatched_adapter` separately from the durable `adapter` pin | No equivalent field audited | No equivalent field audited |
+
 ## Concurrent tackle claim (issue #119)
 
 | Capability | CLI | Native UI | Other CLI views |

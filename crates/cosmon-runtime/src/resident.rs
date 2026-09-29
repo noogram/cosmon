@@ -187,10 +187,17 @@ pub struct EnsembleMolecule {
     /// and merged blocker does. Defaults to `false` for older projections.
     #[serde(default)]
     pub freeze_on_last_step: bool,
-    /// Adapter chosen before this runtime tick by a directional routing
-    /// policy. The runtime carries it through to `cs tackle` unchanged.
+    /// Adapter pin chosen by a directional routing policy, falling back to
+    /// the process adapter after dispatch. The scheduler carries this through
+    /// to `cs tackle` unchanged for pending molecules.
     #[serde(default)]
     pub adapter: Option<String>,
+    /// Adapter recorded on the running process by `cs ensemble --json`.
+    /// Unlike [`Self::adapter`], this is the actual dispatched choice when a
+    /// durable pin and process disagree. Absent before dispatch or when the
+    /// process record lacks an adapter.
+    #[serde(default)]
+    pub dispatched_adapter: Option<String>,
     /// The molecule's persisted integration base (`cs nucleate --base`,
     /// `cs tackle --base`), projected by `cs ensemble --json`. Its presence is
     /// the per-molecule base pin: a `cs run --base` directive fills in only
@@ -216,8 +223,8 @@ impl EnsembleSnapshot {
     ///
     /// * `molecules` — a `MoleculeStatus → count` summary dict for the
     ///   operator dashboard ("how many running?").
-    /// * `molecule_states` — an array of `{id, status, blocked_by}` for
-    ///   machine readers ("which IDs are pending, with which blockers?").
+    /// * `molecule_states` — an array of per-molecule status, dependencies,
+    ///   and the recorded process adapter for machine readers.
     ///
     /// This parser tries the array forms in order:
     ///
@@ -301,6 +308,10 @@ impl EnsembleSnapshot {
                 .get("adapter")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned);
+            let dispatched_adapter = entry
+                .get("dispatched_adapter")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
             let base_branch = entry
                 .get("base_branch")
                 .and_then(serde_json::Value::as_str)
@@ -320,6 +331,7 @@ impl EnsembleSnapshot {
                 stuck_at,
                 freeze_on_last_step,
                 adapter,
+                dispatched_adapter,
                 base_branch,
             });
         }
@@ -1239,16 +1251,11 @@ impl RuntimeLoop {
                 // means nothing to re-derive — proceed. A drifted seal is
                 // classified by `affects_dispatched_molecules`:
                 //
-                // - **Safe** (reload): the `[adapters]` dispatch surface is
-                //   unchanged (only an unrelated section — comments,
-                //   `[worker]`, `[attribution]`, … — moved), OR no molecule
-                //   is currently `running` to be affected by a changed
-                //   default. The loop adopts the fresh config for *future*
-                //   dispatches and keeps going — carnot's irreversibility
-                //   boundary is respected because nothing that depends on the
-                //   old surface is in flight.
-                // - **Unsafe** (halt): a `running` molecule exists and the
-                //   dispatch surface changed under it. We never let the
+                // - **Safe** (reload): the adapter settings of every running
+                //   molecule remain effective, or no molecule is running.
+                //   The loop adopts the fresh config for future dispatches.
+                // - **Unsafe** (halt): a running molecule's effective adapter
+                //   settings changed, or its adapter is unknown. We never let the
                 //   wrong request exist rather than catching it after it is
                 //   sent (godel: a running process cannot prove "I am
                 //   currently fresh" while still running) — refuse to FORM
@@ -1275,6 +1282,8 @@ impl RuntimeLoop {
                     }
                     let basis = if current_surface == self.launch_dispatch_surface {
                         "config-seal-reload-unaffected-surface"
+                    } else if snapshot.molecules.iter().any(|m| m.status == "running") {
+                        "config-seal-reload-unaffected-adapters"
                     } else {
                         "config-seal-reload-no-running-molecules"
                     };
@@ -2132,11 +2141,9 @@ fn dispatch_surface(config: &RuntimeLoopConfig) -> DispatchSurface {
 /// Classify a detected config-seal drift (issue #91): does it need to halt
 /// the loop, or can the fresh config be adopted in place?
 ///
-/// **Halt** iff the `[adapters]` dispatch surface actually changed *and* at
-/// least one molecule is currently `running` — i.e. already dispatched under
-/// the old surface. A running molecule's worker was already spawned with
-/// whatever adapter/model the old surface resolved to baked into its own
-/// session; it cannot be affected by a config edit landing after the fact.
+/// **Halt** iff a running molecule's effective adapter settings changed.
+/// A running worker was already spawned with its adapter/model baked into its
+/// session; an edit to some other adapter cannot affect it.
 /// What the halt protects against is *this runtime* forming its next
 /// decision — a `Tackle` for a still-pending sibling, or eventually a
 /// `Done` for the running one — while the fleet is left in a state where a
@@ -2148,8 +2155,8 @@ fn dispatch_surface(config: &RuntimeLoopConfig) -> DispatchSurface {
 /// resolution the issue asked for.
 ///
 /// A drift confined to a section outside `[adapters]` never reaches this
-/// question — [`DispatchSurface`] equality is `true` and the loop reloads
-/// unconditionally, regardless of what is running.
+/// question. If the ensemble projection does not identify a running
+/// molecule's adapter, the comparison halts fail-closed.
 fn affects_dispatched_molecules(
     launch: &DispatchSurface,
     current: &DispatchSurface,
@@ -2158,7 +2165,59 @@ fn affects_dispatched_molecules(
     if launch == current {
         return false;
     }
-    snapshot.molecules.iter().any(|m| m.status == "running")
+    let launch_default = launch
+        .per_galaxy
+        .default_adapter()
+        .or_else(|| launch.global.default_adapter())
+        .unwrap_or(cosmon_core::config::BUILTIN_FLOOR_ADAPTER);
+    let current_default = current
+        .per_galaxy
+        .default_adapter()
+        .or_else(|| current.global.default_adapter())
+        .unwrap_or(cosmon_core::config::BUILTIN_FLOOR_ADAPTER);
+    snapshot
+        .molecules
+        .iter()
+        .filter(|m| m.status == "running")
+        .any(|m| {
+            let Some(adapter) = m.dispatched_adapter.as_deref() else {
+                return true;
+            };
+            // Selection provenance is absent from this projection. A worker
+            // on the former default may have inherited it, so a changed
+            // default still halts in that case.
+            (adapter == launch_default && launch_default != current_default)
+                || launch.per_galaxy.entry(adapter) != current.per_galaxy.entry(adapter)
+                || effective_global_model(launch, adapter)
+                    != effective_global_model(current, adapter)
+                || cosmon_core::tackle_plan::adapter_strong_set(
+                    Some(&launch.per_galaxy),
+                    Some(&launch.global),
+                    adapter,
+                ) != cosmon_core::tackle_plan::adapter_strong_set(
+                    Some(&current.per_galaxy),
+                    Some(&current.global),
+                    adapter,
+                )
+        })
+}
+
+/// The global model row applies only when the per-galaxy row supplies no
+/// non-empty model pin, as in the tackle resolver's precedence chain.
+fn effective_global_model<'a>(surface: &'a DispatchSurface, adapter: &str) -> Option<&'a str> {
+    if surface
+        .per_galaxy
+        .entry(adapter)
+        .and_then(|row| row.default_model.as_deref())
+        .is_some_and(|model| !model.is_empty())
+    {
+        return None;
+    }
+    surface
+        .global
+        .entry(adapter)
+        .and_then(|row| row.default_model.as_deref())
+        .filter(|model| !model.is_empty())
 }
 
 fn collect_state(dir: &Path, out: &mut Vec<(PathBuf, u64, i128)>) {
@@ -2321,6 +2380,115 @@ impl TraceWriter {
 mod tests {
     use super::*;
 
+    /// The comparison follows the running molecule's selected adapter row.
+    /// A changed row must halt; a sibling row is irrelevant to that worker.
+    #[test]
+    fn drift_compares_the_running_adapters_effective_row() {
+        let running = EnsembleSnapshot::from_json(
+            r#"{"molecules":[{"id":"task-20260531-dddd","status":"running","adapter":"local","dispatched_adapter":"local"}]}"#,
+        )
+        .unwrap();
+        let adapters = |source: &str| {
+            cosmon_core::config::ProjectConfig::parse(source)
+                .unwrap()
+                .adapters
+                .unwrap()
+        };
+        let before = DispatchSurface {
+            per_galaxy: adapters(
+                "[adapters]\ndefault = \"local\"\n[adapters.local]\ndefault_model = \"model-a\"\n",
+            ),
+            global: Default::default(),
+        };
+        let unused = DispatchSurface {
+            per_galaxy: adapters("[adapters]\ndefault = \"local\"\n[adapters.local]\ndefault_model = \"model-a\"\n[adapters.unused]\nmode = \"exec\"\n"),
+            global: Default::default(),
+        };
+        let used = DispatchSurface {
+            per_galaxy: adapters(
+                "[adapters]\ndefault = \"local\"\n[adapters.local]\ndefault_model = \"model-b\"\n",
+            ),
+            global: Default::default(),
+        };
+        assert!(!affects_dispatched_molecules(&before, &unused, &running));
+        assert!(affects_dispatched_molecules(&before, &used, &running));
+    }
+
+    /// A durable pin can differ from the adapter on the live process. Drift
+    /// protection follows the process that was actually dispatched.
+    #[test]
+    fn drift_uses_the_dispatched_adapter_when_a_pin_differs() {
+        let running = EnsembleSnapshot::from_json(
+            r#"{"molecules":[{"id":"task-20260531-dddd","status":"running","adapter":"unused","dispatched_adapter":"local"}]}"#,
+        )
+        .unwrap();
+        let adapters = |source: &str| {
+            cosmon_core::config::ProjectConfig::parse(source)
+                .unwrap()
+                .adapters
+                .unwrap()
+        };
+        let before = DispatchSurface {
+            per_galaxy: adapters("[adapters.local]\ndefault_model = \"model-a\"\n"),
+            global: Default::default(),
+        };
+        let changed = DispatchSurface {
+            per_galaxy: adapters("[adapters.local]\ndefault_model = \"model-b\"\n"),
+            global: Default::default(),
+        };
+        assert!(affects_dispatched_molecules(&before, &changed, &running));
+    }
+
+    /// Without a process adapter, the runtime cannot prove a changed row is
+    /// unrelated to the running worker, even if a durable pin is present.
+    #[test]
+    fn drift_halts_when_running_process_adapter_is_unrecorded() {
+        let running = EnsembleSnapshot::from_json(
+            r#"{"molecules":[{"id":"task-20260531-dddd","status":"running","adapter":"local"}]}"#,
+        )
+        .unwrap();
+        let before = DispatchSurface::default();
+        let mut changed = before.clone();
+        changed.per_galaxy.entries.insert(
+            "unused".to_owned(),
+            cosmon_core::config::AdapterEntry::default(),
+        );
+        assert!(affects_dispatched_molecules(&before, &changed, &running));
+    }
+
+    /// Global model defaults matter only while no per-galaxy model masks
+    /// them; the comparison follows that same precedence.
+    #[test]
+    fn drift_compares_the_effective_global_model() {
+        let running = EnsembleSnapshot::from_json(
+            r#"{"molecules":[{"id":"task-20260531-dddd","status":"running","dispatched_adapter":"local"}]}"#,
+        )
+        .unwrap();
+        let adapters = |source: &str| {
+            cosmon_core::config::ProjectConfig::parse(source)
+                .unwrap()
+                .adapters
+                .unwrap()
+        };
+        let before = DispatchSurface {
+            per_galaxy: adapters("[adapters]\ndefault = \"local\"\n"),
+            global: adapters("[adapters.local]\ndefault_model = \"model-a\"\n"),
+        };
+        let mut changed = before.clone();
+        changed.global = adapters("[adapters.local]\ndefault_model = \"model-b\"\n");
+        assert!(affects_dispatched_molecules(&before, &changed, &running));
+
+        let mut masked_before = before;
+        masked_before.per_galaxy = adapters("[adapters.local]\ndefault_model = \"model-p\"\n");
+        let mut masked_changed = changed;
+        masked_changed.per_galaxy = masked_before.per_galaxy.clone();
+        assert!(!affects_dispatched_molecules(
+            &masked_before,
+            &masked_changed,
+            &running,
+        ));
+    }
+
     /// The retry schedule doubles, so the *time* spent retrying a failure that
     /// cannot resolve itself is bounded by a handful of attempts rather than
     /// by how fast the FS watcher can wake the loop. The observed defect was
@@ -2382,6 +2550,7 @@ mod tests {
             stuck_at: None,
             freeze_on_last_step: false,
             adapter: None,
+            dispatched_adapter: None,
             base_branch: None,
         }
     }

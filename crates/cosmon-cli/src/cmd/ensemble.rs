@@ -137,6 +137,10 @@ pub(crate) struct MoleculeStateEntry {
     /// this directional routing choice rather than substituting its local floor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) adapter: Option<String>,
+    /// Adapter recorded on the dispatched process. Kept separate from the
+    /// durable pin above so drift checks inspect what the live worker uses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dispatched_adapter: Option<String>,
     /// The molecule's persisted integration base
     /// ([`MoleculeData::base_branch`](cosmon_state::MoleculeData::base_branch)).
     /// The resident scheduler reads it as the per-molecule base pin, so a
@@ -185,6 +189,10 @@ pub(crate) fn build_molecule_states(
                         .as_ref()
                         .and_then(|process| process.adapter_name.clone())
                 }),
+                dispatched_adapter: m
+                    .process
+                    .as_ref()
+                    .and_then(|process| process.adapter_name.clone()),
                 base_branch: m.base_branch.clone(),
             }
         })
@@ -1801,6 +1809,9 @@ mod tests {
         assert_eq!(states[0].adapter.as_deref(), Some("mistral"));
         assert_eq!(states[1].adapter.as_deref(), Some("claude"));
         assert_eq!(states[2].adapter.as_deref(), Some("mistral"));
+        assert_eq!(states[0].dispatched_adapter, None);
+        assert_eq!(states[1].dispatched_adapter, states[1].adapter);
+        assert_eq!(states[2].dispatched_adapter, states[1].adapter);
     }
 
     /// The persisted base is projected verbatim, and a base-less molecule
