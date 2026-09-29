@@ -573,6 +573,48 @@ same reason ADR-124 gave: the requester closes *its own* molecule in *its
 own* galaxy. There is no operator authority being delegated — the operator's
 seal authorises the class of effect once, at arming time, not per request.
 
+#### 5.4.1 Amendment (2026-09-29, issue #120 W0) — the tenant selects disabled, scoped or sealed
+
+**Status:** adopted as contract; **not implemented**. Full contract:
+[`docs/specs/remote-harvest-contract.md`](../specs/remote-harvest-contract.md).
+
+`done` stays one lifecycle operation using the shared library transaction.
+What gates its effect is now a per-tenant **remote policy**,
+`[harvest_authority] remote = "disabled" | "scoped" | "sealed"`, selected
+explicitly by the administrator:
+
+- **scoped** — a standing `cosmon:molecule:harvest` credential deliberately
+  delegates ordinary integration. No key, no grant. This is a real
+  delegation of authority to whoever holds that credential, made visible by
+  a dedicated scope and an explicit policy, not a free equivalent of the
+  seal.
+- **sealed** — the scope plus an independently issued, bounded grant
+  (ADR-172 as amended 2026-09-29).
+- **disabled** — refused, even with a valid grant.
+
+Absence of `remote` preserves today's behaviour exactly: refused when
+`required` is off, legacy sealed (write scope or harvest scope, plus a
+grant) when it is on. That compatibility has no clock; it ends when the
+administrator writes `remote`. Upgrade, restart, image initialisation and
+binding reload never select a profile and never add the harvest scope to an
+existing binding.
+
+On an explicit profile, `force`, `skip_pre_done_hook` and `deploy_off_trunk`
+are refused `harvest_override_requires_ratification`, because neither the
+scope nor a v1 grant signs them; the legacy profile keeps D4-reversal parity
+and discloses that its seal does not bind options. Reserved molecules stay
+refused on the remote door. An explicitly configured `cs` binary executor
+is refused `harvest_effect_unsupported` on an explicit profile.
+
+Refusals gain an additive, typed `harvest_authorization` object (gate,
+reason, action) beside the unchanged `error` label and status; the existing
+hiding rules for unknown tenants and foreign molecules are kept. Grant
+challenge, import and status are tenant-scoped routes; policy and public-key
+administration uses the existing disjoint admin credential. There is no
+service signing route. The four route additions are registered under §8p in
+the same change that adds them (`api-cli-coverage.md`, OpenAPI,
+`api_surface_freeze.rs`, surface canon).
+
 ### 5.5 The `cs run` exit path — bounded drain (resolved 2026-06-11)
 
 `cs run` left the closed list via the successor path of §5.2:
@@ -643,6 +685,24 @@ The whitelist is enforced at parse time, *before* the `kid` lookup. JWKS rotatio
 | `active` | 15 min | **YubiKey-bound DPoP required** (RFC 7800 §3.2 + RFC 9449) | enforced | post-Day-J production flow; no-fallback |
 
 `cs security activate` (operator-only, §5) switches between them. The RPP re-reads the posture file (`.cosmon/state/security/posture.toml`) on every request (cached ≤ 30 s); switching does not require a redeploy.
+
+### 6.6 Scope catalog *(added 2026-09-29, issue #120 W0)*
+
+The scope grid lives in `crates/cosmon-rpp-adapter/src/auth/scopes.rs`,
+whose module comment cites "ADR-080 §6.5" — a section that describes
+posture switching, not scopes. This subsection is the document that
+citation should name; the unit that adds the harvest scope constant
+(W4 of #120) corrects the citation to §6.6 in the same change.
+
+| Scope | Gates | Implied by | Status |
+|---|---|---|---|
+| `cosmon:molecule:read` | observe, ensemble, vitals, `GET /v1/harvest/status` | `write` | exists |
+| `cosmon:molecule:write` | nucleate, tag, freeze, collapse, stuck; remote `done` **only** on a legacy sealed galaxy (§5.4.1) | — | exists |
+| `cosmon:worker:spawn` | tackle (with `write`); arming auto-propel or retries on `done` | — | exists |
+| `cosmon:molecule:harvest` | remote `done` on an explicit profile, including closure, no-op and retry; grant challenge and import | nothing — `write` does not imply it, and it implies neither `write` nor `spawn` | **proposed** (#120) |
+
+Where the harvest scope may be sourced from (binding, token, or both) is an
+open question of the contract (its §13), decided in a follow-up.
 
 ---
 

@@ -1,6 +1,7 @@
 # ADR-172 — `cs done` authority is an operator-sealed capability
 
-**Status:** Accepted (2026-08-05).
+**Status:** Accepted (2026-08-05). Amended 2026-09-29 (issue #120, see the
+last section).
 **Date:** 2026-08-05.
 **Decider:** Noogram.
 **Authoring task:** `task-20260727-7f01`.
@@ -255,8 +256,67 @@ The decision is violated if any of these is true:
 3. Changing a covered field after signing still verifies.
 4. Deleting the trust root changes refusal into permission.
 5. A consumed grant authorises a second, different effect.
-6. Any shipped `cs` path can produce the operator seal.
+6. ~~Any shipped `cs` path can produce the operator seal.~~ **Replaced by
+   the 2026-09-29 amendment:** *a shipped unattended beneficiary, worker or
+   service path can mint accepted authority without independent operator
+   signing custody.* The current assertion
+   (`cosmon-cli/tests/done_authorization_unforgeable.rs`) stays in force
+   unchanged until the unit that ships operator-side signing tooling
+   replaces it with denied-signing, denied-import and admin-route tests plus
+   a custody witness; unrelated takeover-signing assertions are not weakened.
 7. A broker is later treated as authority without presenting the same typed
    grant.
 8. Documentation claims this prevents direct same-uid git mutation before
    repository custody has actually been separated.
+
+## Amendment (2026-09-29, issue #120 W0) — operator-side tooling, scoped remote policy, and what the effect boundary must truthfully claim
+
+**Status:** adopted as contract; **not implemented**. The implementation
+status section above stays accurate for the code as it is. The contract
+these clauses belong to is
+[`docs/specs/remote-harvest-contract.md`](../specs/remote-harvest-contract.md).
+
+**Why.** An external operator of the remote service reported that the sealed
+remote `done` cannot be completed from shipped tooling: cosmon verifies a
+grant and ships no production path to create the key, the challenge, the
+signature or the installed grant. The first custody sentence of D2 ("ships no
+path that can produce it") made that gap a doctrine. The deliberation behind
+#120 kept the seal's purpose — bounded authority that possession of the API
+credential cannot create — and moved the prohibition to where the purpose
+lives: the unattended beneficiary.
+
+**D2 custody, replaced.** In sealed policy, authority is independently
+issued. Operator-side cosmon tooling may construct challenges and orchestrate
+an external signer on an operator device. The unattended beneficiary, the
+worker and the service receive no private signing material and expose no
+signing operation. Trust-root administration (public key, policy, epoch) is
+separate from tenant harvest authority and uses the existing disjoint admin
+credential. The sealed sum stays closed: the new remote `scoped` policy is
+its own typed decision on the remote path, not a third `DoneAuthorization`
+variant.
+
+**D2 semantics, made explicit.** Receipt identity derives from the signed
+scope, not from the unsigned outer variant: a molecule grant uses its
+fingerprint, a mission grant derives a per-member identity. Decoding
+enforces the variant invariants (no mission-scoped ratification, no
+delegated reservation). The v1 canonical bytes are unchanged and legacy
+receipt aliases are read. v1 signs neither arbitrary request options nor a
+reviewed commit: `base` is a branch name. A molecule ratification names its
+reservations exactly (normalized, sorted equality, not containment).
+
+**D3, replaced as the target contract.** The transaction reloads the
+required authorization facts under its effect lock, refuses unavailable or
+changed facts, and durably reserves authority before integration.
+Reservation is not evidence of success. Durable effect and finalization
+records, with verified Git and state evidence, decide retry behaviour; an
+ambiguous recovery refuses (`harvest_recovery_required`). Cosmon never infers
+"landed" from a receipt alone and never erases a spend to retry. Legacy
+receipts are treated as reserved-with-unknown-outcome until other evidence
+establishes the outcome. The lock excludes cooperating writers only.
+
+**Unchanged.** D1's reservation list, D4, and D5's bound — this is
+"authorized cosmon harvest"; a same-uid process can still call Git directly.
+Claims in the implementation status section about facts, epoch monotonicity
+and replay are corrected by the units that implement them, when they have
+evidence, and not before.
+
