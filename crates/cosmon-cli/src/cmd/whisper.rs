@@ -75,7 +75,8 @@ pub enum WhisperError {
     DialogueBlocked {
         class: cosmon_core::dialogue::DialogueClass,
         codex_kind: Option<cosmon_core::dialogue::CodexDialogKind>,
-        evidence: Option<String>,
+        rule: &'static str,
+        matched_tail_lines: Vec<String>,
     },
 }
 
@@ -104,22 +105,23 @@ impl std::fmt::Display for WhisperError {
             Self::DialogueBlocked {
                 class,
                 codex_kind,
-                evidence,
+                rule,
+                matched_tail_lines,
             } => {
                 let kind = codex_kind
                     .map(|k| format!(" ({})", k.as_str()))
                     .unwrap_or_default();
-                let ev = evidence
-                    .as_deref()
-                    .map(|e| format!(" — “{e}”"))
-                    .unwrap_or_default();
                 write!(
                     f,
-                    "target pane shows a blocking dialogue [{}]{kind}{ev}; refusing to paste \
-                     (it could select a menu option). Resolve the dialog first, e.g. `cs patrol \
-                     --dialogue-scan`.",
+                    "target pane shows a blocking dialogue [{}]{kind}; refusing to paste \
+                     (it could select a menu option). Rule: {rule}. Resolve the dialog first; \
+                     inspect with `cs patrol --dialogue-scan`.",
                     class.as_str()
-                )
+                )?;
+                for line in matched_tail_lines {
+                    write!(f, "\n  matched tail: {line}")?;
+                }
+                Ok(())
             }
         }
     }
@@ -383,10 +385,19 @@ fn fail(ctx: &Context, err: &WhisperError) -> anyhow::Result<()> {
         WhisperError::DialogueBlocked { .. } => "dialogue_blocked",
     };
     if ctx.json {
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "error": kind,
             "message": err.to_string(),
         });
+        if let WhisperError::DialogueBlocked {
+            rule,
+            matched_tail_lines,
+            ..
+        } = err
+        {
+            out["rule"] = serde_json::json!(rule);
+            out["matched_tail_lines"] = serde_json::json!(matched_tail_lines);
+        }
         eprintln!("{out}");
     } else {
         eprintln!("cs whisper: {err}");
@@ -533,16 +544,13 @@ const DIALOGUE_CHECK_LINES: usize = 40;
 /// react to arbitrary pasted text as menu-navigation keystrokes, so a whisper
 /// payload can silently pick an option instead of being read by the worker.
 /// `MoneyStake` and `Unknown` classes refuse; `Permission` and `None` do not
-/// — a routine tool-permission prompt is not one of these steal-the-paste
-/// menus, and blocking every permission prompt would make `cs whisper`
-/// useless on an ordinarily busy worker.
+/// under the existing delivery policy. The permission class remains visible
+/// to callers even though this command does not refuse it.
 ///
 /// Best-effort: a capture failure (dead pane, socket gone) is not this
 /// check's job to report — [`check_pane_signature`] already covers pane
 /// liveness, so a capture error here is treated as "nothing to refuse on".
 fn check_pane_not_blocked(socket: &str, session_name: &str) -> Result<(), WhisperError> {
-    use cosmon_core::dialogue::{classify_codex_dialog, classify_pane, DialogueClass};
-
     let Ok(worker_id) = WorkerId::new(session_name) else {
         return Ok(());
     };
@@ -550,18 +558,61 @@ fn check_pane_not_blocked(socket: &str, session_name: &str) -> Result<(), Whispe
     let Ok(pane) = backend.capture_output(&worker_id, DIALOGUE_CHECK_LINES) else {
         return Ok(());
     };
-    let scan = classify_pane(&pane);
+    whisper_pane_verdict(&pane)
+}
+
+/// Decide whether a captured pane can receive a whisper. An ordinary tail is
+/// deliverable; a money-stake or unknown dialogue is refused before the payload
+/// is persisted or sent.
+fn whisper_pane_verdict(pane: &str) -> Result<(), WhisperError> {
+    use cosmon_core::dialogue::{classify_codex_dialog, classify_pane, DialogueClass};
+
+    let scan = classify_pane(pane);
     if matches!(
         scan.class,
         DialogueClass::MoneyStake | DialogueClass::Unknown
     ) {
         return Err(WhisperError::DialogueBlocked {
             class: scan.class,
-            codex_kind: classify_codex_dialog(&pane),
-            evidence: scan.evidence,
+            codex_kind: classify_codex_dialog(pane),
+            rule: scan.rule.unwrap_or("blocking dialogue"),
+            matched_tail_lines: matched_tail_lines(pane, scan.evidence.as_deref()),
         });
     }
     Ok(())
+}
+
+/// Keep up to four lines around the match, including two preceding lines when
+/// available, so the operator can see the question and selected option. Bound
+/// every line because pane output is uncontrolled text.
+fn matched_tail_lines(pane: &str, evidence: Option<&str>) -> Vec<String> {
+    const MAX_LINES: usize = 4;
+    const MAX_CHARS: usize = 160;
+    let lines: Vec<&str> = pane
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let matched = evidence
+        .and_then(|needle| {
+            lines
+                .iter()
+                .rposition(|line| line.trim().starts_with(needle.trim_end_matches('…')))
+        })
+        .unwrap_or_else(|| lines.len().saturating_sub(MAX_LINES));
+    let start = matched.saturating_sub(2);
+    lines
+        .iter()
+        .skip(start)
+        .take(MAX_LINES)
+        .map(|line| {
+            let trimmed = line.trim();
+            if trimmed.chars().count() > MAX_CHARS {
+                format!("{}…", trimmed.chars().take(MAX_CHARS).collect::<String>())
+            } else {
+                trimmed.to_owned()
+            }
+        })
+        .collect()
 }
 
 /// A single line in `whispers.jsonl` — fact only, no payload body.
@@ -839,6 +890,90 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn ordinary_reported_tails_are_whisperable() {
+        let tails = [
+            "⏺ I'll verify the result, then confirm the inputs; I'll add the\n\
+             • Working (42s • esc to interrupt)\n\
+             › Ask <...> to do anything\n\
+             high · ~/…worktr…  ⚠ 2 warnings · f2 to view",
+            "⏺ The CPU token is held but heavy.sh is waiting for headroom (1-min load is 53).\n\
+             ✻ Working…",
+            "⏺ The holding is <…>\n✻ Working…",
+            "⏺ The result is ready\n\
+             ✻ Baked for 1s · done 10:35 PM\n\
+             ✔ Update installed · Restart to update\n\
+             ❯",
+        ];
+        for tail in tails {
+            assert!(whisper_pane_verdict(tail).is_ok(), "tail: {tail}");
+        }
+    }
+
+    #[test]
+    fn recognised_dialogues_refuse_with_rule_and_matched_lines() {
+        let panes = [
+            "cosmon wants to run `ls`\nDo you want to proceed?\n❯ 1. Yes",
+            "Update available! 0.154.0 → 0.157.0\n❯ 1. Update\n  2. Later",
+            "Select Reasoning Level for <model>\n❯ 1. High\n  2. Low",
+            "Approaching rate limits. Switch to <model> for lower credit usage?\n\
+             1) Switch model\n2) Keep current model",
+            "Overwrite existing config? [y/n]",
+        ];
+        for pane in panes {
+            // A routine permission has its own class and is intentionally
+            // whisperable; the remaining widgets must refuse.
+            if pane.starts_with("cosmon wants") {
+                assert!(whisper_pane_verdict(pane).is_ok());
+                continue;
+            }
+            let Err(err) = whisper_pane_verdict(pane) else {
+                panic!("dialogue accepted: {pane}");
+            };
+            let rendered = err.to_string();
+            assert!(rendered.contains("Rule:"), "{rendered}");
+            assert!(rendered.contains("matched tail:"), "{rendered}");
+            assert!(
+                rendered.contains(pane.lines().next().unwrap_or("")),
+                "{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn bordered_and_cursor_widgets_still_refuse() {
+        let panes = [
+            "╭──────────────────────────────╮\n\
+             │ Overwrite existing config?   │\n\
+             │ ❯ 1. Overwrite               │\n\
+             │   2. Cancel                  │\n\
+             ╰──────────────────────────────╯",
+            "Proceed? ❯ 1. Yes",
+            "Overwrite existing config? [y/n] ▌",
+            "Force push to main? ›",
+            "? Are you sure you want to continue? (Use arrow keys)\n❯ Yes\n  No",
+            "⚠ Are you sure you want to switch branches?\n  1. Switch\n❯ 2. Stay",
+            "Overwrite existing config?\n  1. Overwrite\n❯ 2. Cancel",
+            "Overwrite existing config?\n❯ Overwrite\n  Cancel",
+        ];
+        for pane in panes {
+            let Err(err) = whisper_pane_verdict(pane) else {
+                panic!("visible widget accepted: {pane}");
+            };
+            assert_eq!(err.exit_code(), 5);
+            let rendered = err.to_string();
+            assert!(rendered.contains("Rule:"), "{rendered}");
+            assert!(rendered.contains("matched tail:"), "{rendered}");
+            if pane.contains("Are you sure") || pane.contains("Overwrite existing config?   │") {
+                assert!(
+                    rendered.contains("Are you sure")
+                        || rendered.contains("Overwrite existing config?"),
+                    "{rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn sha256_hex_stable() {
         assert_eq!(
             sha256_hex(b"hello"),
@@ -861,7 +996,8 @@ mod tests {
         let err = WhisperError::DialogueBlocked {
             class: cosmon_core::dialogue::DialogueClass::MoneyStake,
             codex_kind: Some(cosmon_core::dialogue::CodexDialogKind::RateLimitSwitch),
-            evidence: Some("Approaching rate limits.".to_owned()),
+            rule: "money-stake marker",
+            matched_tail_lines: vec!["Approaching rate limits.".to_owned()],
         };
         assert_eq!(err.exit_code(), 5);
         let msg = err.to_string();

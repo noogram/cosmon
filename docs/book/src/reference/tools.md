@@ -1178,6 +1178,8 @@ CLI seam — both invocations route to the same in-process adapter.
 
 Whisper — inject a perturbation payload into a live worker's tmux pane (v0)
 
+Molecule delivery refuses on money-stake markers and recognised unknown confirmation/menu widgets. Ordinary output and routine permission prompts remain deliverable. A dialogue refusal reports the rule and matched pane tail lines.
+
 **Usage:** `cs whisper [OPTIONS] [MOLECULE_ID]`
 
 EXAMPLES:
@@ -1187,8 +1189,12 @@ EXAMPLES:
   cs whisper <mol> --message "…" --dry-run      # validate, do not paste
 
 Experimental v0. Perturbation port, not a control-plane event.
-Refuses unless the target pane's foreground command is in
-`[whisper] allowed_commands` (default: ["claude"]).
+Refuses unless the target pane's foreground command has an allowed pane
+signature. A money-stake marker or a recognised unknown confirmation/menu
+widget refuses with exit 5; unknown means the widget is real but its choice
+is not safe to infer. Ordinary output without those signals is delivered.
+Routine permission prompts remain deliverable. A refusal prints the matching
+rule and pane tail lines so the operator can inspect the choice.
 
 To wait for the worker's answer, follow with `cs wait <mol>`: even on
 a completed molecule it returns only after a new commit on feat/<mol>.

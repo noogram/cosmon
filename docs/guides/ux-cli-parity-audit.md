@@ -2,6 +2,17 @@
 
 # CLI and UI parity audit
 
+## Whisper pane dialogue guard (issue #121)
+
+| Capability | CLI | Native UI | Other CLI |
+|---|---|---|---|
+| Deliver a whisper through ordinary pane output, including status prose and an informational update banner | `cs whisper` allows the captured tail and records the delivery | No matching pane-dialogue guard audited | No matching pane-dialogue guard audited |
+| Refuse a recognised money-stake or unknown confirmation/menu widget and show the matched rule and tail lines | `cs whisper` exits 5 before persistence or paste; `cs whisper --help` states the policy | No equivalent refusal detail audited | No equivalent refusal detail audited |
+
+Unknown here is a recognised widget whose choice cannot be inferred safely.
+Unrecognised ordinary output is deliverable. The other audited surfaces
+remain parity gaps for this refusal detail.
+
 ## Trusted shell review (issue #74)
 
 | Capability | CLI | Native UI | Reveal CLI |

@@ -113,7 +113,7 @@ Tools:
   notify               Notify — push a one-line message to every configured operator channel
   opt-in-share         Opt-in-share — first-run consent prompt for encrypted developer bundles
   demo                 Demo — one-command end-to-end chatbot surface (first-contact experience)
-  whisper              Whisper — inject a perturbation payload into a live worker's tmux pane (v0)
+  whisper              Whisper — advise a live worker; refuse unsafe pane dialogues
 
 Global options:
   --config <PATH>      Path to configuration file
