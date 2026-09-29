@@ -170,6 +170,17 @@ reload even if the file remains on disk. An existing empty allowlist denies
 every issuer; remove the allowlist file only when intentionally returning to
 the legacy file-stage fallback.
 
+In HTTP-fetch mode, send `SIGHUP` after every edit to
+`trusted-issuers.toml`. The adapter applies issuer additions and removals,
+audience changes, and `jwks_uri` changes, then immediately fetches the current
+issuer set. Removed audiences stop validating as soon as the reload is
+applied. A new issuer or changed key location needs a successful fetch before
+its tokens validate. If a fetch fails, keys already fetched from an unchanged
+location remain available; a changed location does not keep keys from the old
+location. The adapter logs configuration changes and any fetch failure. Fix an
+invalid allowlist file and send `SIGHUP` again; an invalid file leaves the
+prior live configuration in place.
+
 For a production deployment, configure the issuer's `jwks_uri` in
 `trusted-issuers.toml` and keep the issuer and binding rules explicit.
 

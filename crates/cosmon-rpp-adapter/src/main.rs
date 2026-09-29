@@ -237,8 +237,10 @@ async fn main() -> anyhow::Result<()> {
     //     `security/jwks/*.json` and rely on the SIGHUP listener below.
     //     Kept for the test bench and the oidc-mock.
     let trusted = cosmon_rpp_adapter::jwks_fetch::TrustedIssuers::load_optional(&state_dir)?;
-    let jwks = if let Some(trusted) = trusted {
-        load_allowlisted_jwks(&state_dir, trusted, cfg.resolved_jwks_refresh_ttl()).await?
+    let (jwks, jwks_provider) = if let Some(trusted) = trusted {
+        let (store, provider) =
+            load_allowlisted_jwks(&state_dir, trusted, cfg.resolved_jwks_refresh_ttl()).await?;
+        (store, Some(provider))
     } else {
         let store = SharedJwksStore::new(JwksStore::load(&state_dir)?);
         let key_counts = store.load().key_counts_by_issuer();
@@ -264,7 +266,7 @@ async fn main() -> anyhow::Result<()> {
                 "JWKS load summary (file-stage fallback)",
             );
         }
-        store
+        (store, None)
     };
 
     // Nucleon-binding seed (smithy autonomie-pool, task-20260614-f16f):
@@ -344,6 +346,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(cosmon_rpp_adapter::reload::sighup_reload_listener(
         nucleon_map.clone(),
         jwks.clone(),
+        jwks_provider,
         state_dir.clone(),
         image_init.clone(),
     ));
@@ -494,7 +497,7 @@ async fn load_allowlisted_jwks(
     state_dir: &Path,
     trusted: cosmon_rpp_adapter::TrustedIssuers,
     ttl: Duration,
-) -> anyhow::Result<SharedJwksStore> {
+) -> anyhow::Result<(SharedJwksStore, cosmon_rpp_adapter::JwksProvider)> {
     let configured = trusted
         .issuers
         .iter()
@@ -504,7 +507,7 @@ async fn load_allowlisted_jwks(
     let fetcher = cosmon_rpp_adapter::JwksFetcher::new()?;
     let provider = cosmon_rpp_adapter::JwksProvider::new(
         SharedJwksStore::new(staged),
-        trusted.issuers.clone(),
+        &trusted.issuers,
         fetcher,
     );
     let store = provider.shared();
@@ -515,8 +518,8 @@ async fn load_allowlisted_jwks(
         "JWKS HTTP-fetch armed — fetching trusted issuers from their jwks_uri",
     );
     provider.refresh_all().await.log();
-    tokio::spawn(provider.run(ttl));
-    Ok(store)
+    tokio::spawn(provider.clone().run(ttl));
+    Ok((store, provider))
 }
 
 fn refuse_token_sink_override() -> anyhow::Result<()> {

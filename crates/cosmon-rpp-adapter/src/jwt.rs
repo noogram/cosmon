@@ -51,6 +51,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 
 use crate::error::RppRejectReason;
+use crate::jwks_fetch::TrustedIssuer;
 use crate::Posture;
 
 /// Maximum JWT `exp - iat` accepted in `Active` posture (15 min, per
@@ -81,6 +82,9 @@ pub struct JwksStore {
     /// Kept in the same atomically published snapshot as the keys so a
     /// stale refresh cannot race a SIGHUP revocation and restore trust.
     configured_remote_issuers: HashSet<String>,
+    /// Complete HTTP issuer configuration, published with keys and audience
+    /// pins so refreshes can reject a result fetched under an older config.
+    remote_config: HashMap<String, TrustedIssuer>,
     /// Whether trusted-issuers.toml was present for this snapshot. This
     /// distinguishes an empty authoritative list from the file fallback.
     allowlist_present: bool,
@@ -386,11 +390,26 @@ impl JwksStore {
     ///
     /// A SIGHUP file-stage reload starts from a new [`Self::load`] result,
     /// so deleted files remain revoked. Only issuers carrying explicit
-    /// HTTP-fetch provenance survive from the live snapshot; their keys
-    /// and audience pins replace any same-issuer file entry because the
-    /// HTTP path is the primary source when configured.
-    fn preserve_remote_issuers_from(&mut self, live: &Self, configured: &HashSet<String>) {
-        for issuer in live.remote_issuers.intersection(configured) {
+    /// HTTP-fetch provenance and an unchanged key location survive from the
+    /// live snapshot; their keys replace any same-issuer file entry. Audience
+    /// pins always come from the newly loaded host configuration.
+    fn preserve_remote_issuers_from(
+        &mut self,
+        live: &Self,
+        configured: &HashMap<String, TrustedIssuer>,
+    ) {
+        let preserved: HashSet<_> = live
+            .remote_issuers
+            .iter()
+            .filter(|issuer| {
+                matches!(
+                    (live.remote_config.get(*issuer), configured.get(*issuer)),
+                    (Some(old), Some(new)) if old.jwks_uri == new.jwks_uri
+                )
+            })
+            .cloned()
+            .collect();
+        for issuer in &preserved {
             self.by_iss_kid.retain(|(iss, _kid), _| iss != issuer);
             self.by_iss_kid.extend(
                 live.by_iss_kid
@@ -398,17 +417,16 @@ impl JwksStore {
                     .filter(|((iss, _kid), _record)| iss == issuer)
                     .map(|(key, record)| (key.clone(), record.clone())),
             );
-            if let Some(audiences) = live.allowed_audiences.get(issuer) {
+        }
+        self.remote_issuers = preserved;
+        self.configured_remote_issuers = configured.keys().cloned().collect();
+        self.remote_config.clone_from(configured);
+        for (iss, issuer) in configured {
+            if self.allowed_audiences.contains_key(iss) || self.remote_issuers.contains(iss) {
                 self.allowed_audiences
-                    .insert(issuer.clone(), audiences.clone());
+                    .insert(iss.clone(), issuer.audiences.clone());
             }
         }
-        self.remote_issuers = live
-            .remote_issuers
-            .intersection(configured)
-            .cloned()
-            .collect();
-        self.configured_remote_issuers.clone_from(configured);
     }
 
     /// Remove HTTP-fetched material for issuers outside the current
@@ -516,36 +534,62 @@ impl SharedJwksStore {
     /// Set the initial HTTP-fetch allowlist in the same snapshot as the
     /// live keys. [`crate::jwks_fetch::JwksProvider`] calls this when it
     /// takes ownership of a store.
-    pub(crate) fn configure_remote_issuers(&self, configured: &HashSet<String>) {
+    pub(crate) fn configure_remote_issuers(&self, issuers: &[TrustedIssuer]) {
+        let config: HashMap<_, _> = issuers
+            .iter()
+            .map(|issuer| (issuer.iss.clone(), issuer.clone()))
+            .collect();
+        let configured: HashSet<_> = config.keys().cloned().collect();
         self.0.rcu(|live| {
             let mut next = (**live).clone();
-            next.retain_configured_remote_issuers(configured);
-            next.retain_only_issuers(configured);
+            next.retain_configured_remote_issuers(&configured);
+            next.retain_only_issuers(&configured);
+            next.remote_config.clone_from(&config);
+            for (iss, issuer) in &config {
+                if next.allowed_audiences.contains_key(iss) {
+                    next.allowed_audiences
+                        .insert(iss.clone(), issuer.audiences.clone());
+                }
+            }
             next.allowlist_present = true;
             Arc::new(next)
         });
     }
 
-    /// Whether the current snapshot still authorises HTTP refreshes for
-    /// `issuer`.
-    pub(crate) fn is_remote_issuer_configured(&self, issuer: &str) -> bool {
-        self.load().configured_remote_issuers.contains(issuer)
+    /// Current HTTP issuer configuration for the timer and cache-miss paths.
+    pub(crate) fn remote_issuers(&self) -> Vec<TrustedIssuer> {
+        self.load().remote_config.values().cloned().collect()
     }
 
-    /// Publish a store produced by an HTTP refresh without allowing a
-    /// stale refresh snapshot to overwrite a concurrent SIGHUP revocation.
-    pub(crate) fn store_remote_refresh(&self, refreshed: &JwksStore) {
+    /// Current configuration for one issuer, if the HTTP door still permits it.
+    pub(crate) fn remote_issuer(&self, iss: &str) -> Option<TrustedIssuer> {
+        self.load().remote_config.get(iss).cloned()
+    }
+
+    /// Publish one fetched issuer only if the configuration used for that
+    /// fetch is still current. The RCU merge preserves concurrent refreshes
+    /// of other issuers and refuses stale work after a reload.
+    pub(crate) fn store_remote_refresh(
+        &self,
+        issuer: &TrustedIssuer,
+        jwks_json: &str,
+    ) -> Result<usize, serde_json::Error> {
+        let mut fetched = JwksStore::default();
+        let count =
+            fetched.replace_remote_jwks(&issuer.iss, issuer.audiences.clone(), jwks_json)?;
         self.0.rcu(|live| {
-            if !live.allowlist_present {
+            if live.remote_config.get(&issuer.iss) != Some(issuer) {
                 return Arc::clone(live);
             }
-            let configured = &live.configured_remote_issuers;
-            let mut next = refreshed.clone();
-            next.retain_configured_remote_issuers(configured);
-            next.retain_only_issuers(configured);
-            next.allowlist_present = true;
+            let mut next = (**live).clone();
+            next.by_iss_kid.retain(|(iss, _), _| iss != &issuer.iss);
+            next.by_iss_kid.extend(fetched.by_iss_kid.clone());
+            next.allowed_audiences
+                .insert(issuer.iss.clone(), issuer.audiences.clone());
+            next.remote_issuers.insert(issuer.iss.clone());
             Arc::new(next)
         });
+        Ok(count)
     }
 
     /// Publish a freshly loaded file-stage store without dropping issuers
@@ -560,10 +604,15 @@ impl SharedJwksStore {
         file_store: &JwksStore,
         configured: &HashSet<String>,
         allowlist_present: bool,
+        issuers: &[TrustedIssuer],
     ) {
+        let config: HashMap<_, _> = issuers
+            .iter()
+            .map(|issuer| (issuer.iss.clone(), issuer.clone()))
+            .collect();
         self.0.rcu(|live| {
             let mut merged = file_store.clone();
-            merged.preserve_remote_issuers_from(live, configured);
+            merged.preserve_remote_issuers_from(live, &config);
             if allowlist_present {
                 merged.retain_only_issuers(configured);
             }

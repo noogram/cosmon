@@ -46,6 +46,14 @@ this stage.
 
 ### Changed
 
+- **`cosmon-rpp-adapter` applies HTTP issuer edits on SIGHUP** (GitHub issue
+  #45). Audience changes, issuer additions, and `jwks_uri` changes in
+  `security/trusted-issuers.toml` now update the live trust configuration and
+  trigger an immediate HTTP key refresh. A removed audience stops validating
+  at reload; a new issuer or key location becomes usable after its fetch
+  succeeds. The adapter warns when configuration changes or a fetch cannot
+  complete.
+
 - **`cosmon-rpp-adapter` trusted issuer set is identical at boot and after
   reload** (GitHub issue #45). When `security/trusted-issuers.toml` exists, only
   issuers it lists can be loaded from staged JWKS files. A staged file for an
