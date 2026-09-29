@@ -64,6 +64,18 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              'cs work list <owner>' reconstructs each message stage from the \
              owner's canonical evidence. Messages and receipts never advance \
              a molecule or grant lifecycle authority.\n\n\
+             COLLABORATE — 'cs sessions' vs 'cs work'. Two commands cover two \
+             different shapes of collaboration; pick by what you are actually \
+             running. 'cs sessions' is TWO LIVE SESSIONS ON ONE MISSION: one \
+             holds the controls and may change it, the other reads the same \
+             material and advises, and only a human signature ('cs sessions \
+             takeover grant') moves the controls between them. 'cs work' is \
+             SEPARATE MOLECULES — an implementer and a reviewer, say, on the \
+             same provider or on two different ones — each with its own \
+             lifecycle, branch and permissions, visible in 'cs peek' and \
+             harvested on its own, exchanging bounded findings with no \
+             authority over each other. Neither replaces 'cs whisper' \
+             (pilot-to-worker steering only).\n\n\
              Pilots NEVER poll 'cs observe' by hand — always use 'cs wait'. \
              Pilots NEVER skip 'cs done' — without it the branch never merges. \
              Pilots NEVER run 'cs run' in the foreground — wrap it in a detached \

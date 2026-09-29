@@ -112,7 +112,8 @@ enum Command {
     #[command(after_help = cmd::examples::INBOX)]
     Inbox(cmd::inbox::Args),
 
-    /// Exchange bounded evidence within a declared work scope
+    /// Work — separate molecules (e.g. an implementer and a reviewer, same or another provider) exchange findings, recorded and bounded (ADR-182)
+    #[command(long_about = cmd::work::LONG_ABOUT, after_help = cmd::examples::WORK)]
     Work(cmd::work::Args),
 
     /// Spark — capture a one-line operator intent into the Inbox (ADR-061)

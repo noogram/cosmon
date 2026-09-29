@@ -327,6 +327,11 @@ take a seat (attach, list, peers), talk (send, inbox), hand over (checkpoint,
 drift, takeover). `hook` wires the routine ones into the agent itself, so
 they happen without being typed.
 
+Both seats are live sessions of the SAME mission, and only a human signature
+moves the controls between them. For separate molecules — each with its own
+lifecycle, visible in `cs peek` and harvested on its own — exchanging bounded
+findings instead, see `cs work` (ADR-182).
+
 **Usage:** `cs sessions <COMMAND>`
 
 EXAMPLES:
@@ -857,9 +862,56 @@ cs journal (operator carnet that inbox reads as its sticky top line).
 
 ## `cs work`
 
-Exchange bounded evidence within a declared work scope
+Separate molecules — an implementer and a reviewer, say, on the same
+provider or on two different ones — exchange findings under a declared,
+bounded work scope (ADR-182). Each molecule keeps its own lifecycle,
+branch and permissions; it stays visible in `cs peek` and is harvested on
+its own. Messages carry evidence and requests only: they never advance a
+molecule, satisfy a dependency or grant one molecule authority over
+another.
+
+The owning molecule declares a finite seat roster once (`declare`); each
+member then sends bounded evidence to another seat (`send`), pulls what is
+addressed to it (`inbox`), and reports how it treated a message
+(`ack`). `list` rebuilds every message's stage — admitted, delivered,
+consumed — from canonical evidence, for any member or for the owner.
+
+For two live sessions on ONE mission instead, where a human signature
+moves the controls between them, see `cs sessions`.
 
 **Usage:** `cs work <COMMAND>`
+
+EXAMPLES:
+  cs nucleate task-work --title 'review task-2026...-0001'    # reviewer molecule
+  cs tackle <reviewer> --adapter codex --model gpt-5.6-sol    # on another provider
+  cs work declare <owner> --seat impl=<implementer> --seat review=<reviewer>
+  cs work send --to review --text 'finding: the retry loop never backs off'
+  cs work inbox                                                # pull what is addressed to me
+  cs work ack <key> --considered                               # or --deferred / --rejected
+  cs work list <owner>                                         # every message's stage, from evidence
+
+RECIPE — an implementer molecule plus a read-only reviewer, on the same
+or another provider:
+  1. Nucleate the reviewer molecule alongside the implementer.
+  2. `cs tackle <reviewer> --adapter <adapter> --model <model>` spawns it —
+     any provider this fleet supports, same one as the implementer or not.
+  3. `cs work declare <owner> --seat impl=<a> --seat review=<b>` records the
+     two-seat roster under the OWNING molecule (usually the implementer).
+  4. Either seat `cs work send`s bounded evidence to the other; the
+     recipient `cs work inbox`es and `cs work ack`s what it received.
+  5. `cs work list <owner>` reconstructs every message's admitted /
+     delivered / consumed stage from canonical evidence, for an operator
+     checking in later.
+
+Neither molecule's lifecycle moves because of a message: retries,
+acceptance and integration stay with each molecule's own owner. Provider
+diversity, if a formula requires it, is declared on the seat — see ADR-182
+§'Provider diversity is a seat property' — not implied by using `cs work`
+at all.
+
+SEE ALSO: cs sessions (two live sessions on one mission, human-signed
+handover), cs nucleate (create the reviewer molecule), cs tackle (spawn its
+worker).
 
 ###### **Subcommands:**
 

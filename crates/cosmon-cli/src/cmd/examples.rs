@@ -1409,6 +1409,38 @@ EXIT CODES (decide): 0 approve, 2 refuse, 1 error.
 
 SEE ALSO: cs notarize (operator Ed25519 attestation), cs witness (quorum seal).";
 
+pub const WORK: &str = "EXAMPLES:
+  cs nucleate task-work --title 'review task-2026...-0001'    # reviewer molecule
+  cs tackle <reviewer> --adapter codex --model gpt-5.6-sol    # on another provider
+  cs work declare <owner> --seat impl=<implementer> --seat review=<reviewer>
+  cs work send --to review --text 'finding: the retry loop never backs off'
+  cs work inbox                                                # pull what is addressed to me
+  cs work ack <key> --considered                               # or --deferred / --rejected
+  cs work list <owner>                                         # every message's stage, from evidence
+
+RECIPE — an implementer molecule plus a read-only reviewer, on the same
+or another provider:
+  1. Nucleate the reviewer molecule alongside the implementer.
+  2. `cs tackle <reviewer> --adapter <adapter> --model <model>` spawns it —
+     any provider this fleet supports, same one as the implementer or not.
+  3. `cs work declare <owner> --seat impl=<a> --seat review=<b>` records the
+     two-seat roster under the OWNING molecule (usually the implementer).
+  4. Either seat `cs work send`s bounded evidence to the other; the
+     recipient `cs work inbox`es and `cs work ack`s what it received.
+  5. `cs work list <owner>` reconstructs every message's admitted /
+     delivered / consumed stage from canonical evidence, for an operator
+     checking in later.
+
+Neither molecule's lifecycle moves because of a message: retries,
+acceptance and integration stay with each molecule's own owner. Provider
+diversity, if a formula requires it, is declared on the seat — see ADR-182
+§'Provider diversity is a seat property' — not implied by using `cs work`
+at all.
+
+SEE ALSO: cs sessions (two live sessions on one mission, human-signed
+handover), cs nucleate (create the reviewer molecule), cs tackle (spawn its
+worker).";
+
 pub const PRESENCE: &str = "EXAMPLES:
   cs presence ping            # heartbeat for current session
   cs presence ls              # list live sessions

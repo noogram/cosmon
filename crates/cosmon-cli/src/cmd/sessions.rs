@@ -100,7 +100,12 @@ quota, timeout or heuristic moves them.
 The verbs come in the order you meet them: find a session (discover, show),
 take a seat (attach, list, peers), talk (send, inbox), hand over (checkpoint,
 drift, takeover). `hook` wires the routine ones into the agent itself, so
-they happen without being typed.";
+they happen without being typed.
+
+Both seats are live sessions of the SAME mission, and only a human signature
+moves the controls between them. For separate molecules — each with its own
+lifecycle, visible in `cs peek` and harvested on its own — exchanging bounded
+findings instead, see `cs work` (ADR-182).";
 
 /// Top-level arguments for `cs sessions`.
 #[derive(clap::Args)]
