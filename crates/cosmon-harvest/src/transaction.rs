@@ -7761,6 +7761,7 @@ mod tests {
             if_completed: false,
             dry_run: false,
             no_merge: true,
+            review_shell: false,
             no_worktree_remove: true,
             no_branch_delete: true,
             no_kill: true,
