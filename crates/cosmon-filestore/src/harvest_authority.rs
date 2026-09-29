@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 use cosmon_core::error::CosmonError;
 use cosmon_core::harvest_authorization::{
     ConsumptionRecord, DoneAuthorization, GrantEpoch, HarvestConsumptionLedger, HarvestGrant,
-    HarvestSealVerifier, PermitId,
+    HarvestJournalRecord, HarvestJournalStage, HarvestSealVerifier, PermitId,
 };
 use cosmon_core::id::MoleculeId;
 use cosmon_core::operator_attestation::{AttestationError, OperatorAttestation, OperatorKeyId};
@@ -78,6 +78,9 @@ pub const HARVEST_GRANTS_REL: &str = "harvest/grants";
 
 /// The append-only consumption ledger, relative to a cosmon state root.
 pub const HARVEST_CONSUMED_REL: &str = "harvest/consumed.jsonl";
+
+/// Versioned progress records for prepared, integrated and finalized attempts.
+pub const HARVEST_JOURNAL_REL: &str = "harvest/operations.jsonl";
 
 /// Environment variable naming one explicit grant file to use.
 pub const HARVEST_GRANT_ENV: &str = "COSMON_HARVEST_GRANT";
@@ -407,6 +410,26 @@ impl FileConsumptionLedger {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Whether any legacy or current receipt names this molecule. A retry
+    /// must discover this before invoking a non-idempotent pre-hook.
+    ///
+    /// # Errors
+    /// I/O or malformed receipt errors.
+    pub fn has_receipt_for(&self, molecule: &MoleculeId) -> Result<bool, String> {
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(format!("failed to read harvest receipts: {e}")),
+        };
+        let mut found = false;
+        for line in text.lines() {
+            let record: ConsumptionRecord = serde_json::from_str(line)
+                .map_err(|e| format!("malformed harvest receipt: {e}"))?;
+            found |= &record.effect.molecule == molecule;
+        }
+        Ok(found)
+    }
 }
 
 impl HarvestConsumptionLedger for FileConsumptionLedger {
@@ -424,12 +447,10 @@ impl HarvestConsumptionLedger for FileConsumptionLedger {
             if line.trim().is_empty() {
                 continue;
             }
-            // A torn line is a receipt that did not happen; skipping it is the
-            // conservative reading, because the effect check below still
-            // refuses a genuine second spend.
-            let Ok(record) = serde_json::from_str::<ConsumptionRecord>(line) else {
-                continue;
-            };
+            // A torn or malformed line may be the only trace of a spend. Its
+            // permit cannot be determined safely, so every lookup fails closed.
+            let record: ConsumptionRecord = serde_json::from_str(line)
+                .map_err(|e| format!("malformed harvest receipt: {e}"))?;
             if &record.permit == permit {
                 if let Some(previous) = &found {
                     if previous != &record {
@@ -463,6 +484,162 @@ impl HarvestConsumptionLedger for FileConsumptionLedger {
         file.sync_all()
             .map_err(|e| format!("failed to flush {}: {e}", self.path.display()))?;
         Ok(())
+    }
+}
+
+/// The append-only progress journal, separate from historical v1 receipts.
+#[derive(Debug, Clone)]
+pub struct FileHarvestJournal {
+    path: PathBuf,
+}
+
+impl FileHarvestJournal {
+    /// Resolve the journal beneath a state root without changing that state.
+    #[must_use]
+    pub fn at_state_root(state_root: impl AsRef<Path>) -> Self {
+        Self {
+            path: state_root.as_ref().join(HARVEST_JOURNAL_REL),
+        }
+    }
+
+    /// Return the latest transition for one permit; malformed or conflicting
+    /// lines are errors because an unknown operation must never be replayed.
+    ///
+    /// # Errors
+    /// I/O, decoding, version, or transition errors.
+    pub fn latest(&self, permit: &PermitId) -> Result<Option<HarvestJournalRecord>, String> {
+        Ok(self.read_progress()?.remove(permit))
+    }
+
+    fn read_progress(
+        &self,
+    ) -> Result<std::collections::BTreeMap<PermitId, HarvestJournalRecord>, String> {
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(std::collections::BTreeMap::default())
+            }
+            Err(e) => return Err(format!("failed to read harvest journal: {e}")),
+        };
+        let mut progress = std::collections::BTreeMap::<PermitId, HarvestJournalRecord>::new();
+        let mut operations = std::collections::HashMap::<String, PermitId>::new();
+        for (line_number, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                return Err(format!("empty harvest journal line {}", line_number + 1));
+            }
+            let entry: HarvestJournalRecord = serde_json::from_str(line)
+                .map_err(|e| format!("malformed harvest journal line {}: {e}", line_number + 1))?;
+            if entry.version != 1 {
+                return Err(format!(
+                    "unsupported harvest journal version {}",
+                    entry.version
+                ));
+            }
+            let permit = entry.receipt.permit.clone();
+            if let Some(other) =
+                operations.insert(entry.receipt.invocation_id.clone(), permit.clone())
+            {
+                if other != permit {
+                    return Err("harvest operation id belongs to multiple permits".to_owned());
+                }
+            }
+            validate_transition(progress.get(&permit), &entry)?;
+            progress.insert(permit, entry);
+        }
+        Ok(progress)
+    }
+
+    /// Whether this molecule has any recorded attempt. Used only to avoid
+    /// replaying a pre-integration hook before the locked recovery decision.
+    ///
+    /// # Errors
+    /// I/O or malformed journal errors.
+    pub fn has_attempt_for(&self, molecule: &MoleculeId) -> Result<bool, String> {
+        Ok(self
+            .read_progress()?
+            .values()
+            .any(|entry| &entry.receipt.effect.molecule == molecule))
+    }
+
+    /// Append and sync one legal progress transition before its successor may
+    /// act. The caller holds the trunk lock across this read and append.
+    ///
+    /// # Errors
+    /// I/O or invalid transition errors.
+    pub fn append(&self, entry: &HarvestJournalRecord) -> Result<(), String> {
+        use std::io::Write as _;
+        let prior = self.latest(&entry.receipt.permit)?;
+        validate_transition(prior.as_ref(), entry)?;
+        let parent = self.path.parent().ok_or("harvest journal has no parent")?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create harvest journal dir: {e}"))?;
+        let line =
+            serde_json::to_string(entry).map_err(|e| format!("encode harvest journal: {e}"))?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|e| format!("open harvest journal: {e}"))?;
+        writeln!(file, "{line}").map_err(|e| format!("append harvest journal: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("sync harvest journal: {e}"))?;
+        std::fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| format!("sync harvest journal directory: {e}"))?;
+        Ok(())
+    }
+}
+
+fn validate_transition(
+    prior: Option<&HarvestJournalRecord>,
+    entry: &HarvestJournalRecord,
+) -> Result<(), String> {
+    if entry.version != 1
+        || entry.receipt.invocation_id.is_empty()
+        || entry.pre_merge_base.is_empty()
+        || entry.options_digest.is_empty()
+        || entry.hook_digest.is_empty()
+    {
+        return Err("invalid harvest journal identity".to_owned());
+    }
+    match entry.stage {
+        HarvestJournalStage::Prepared if entry.merge_oid.is_some() => {
+            return Err("prepared harvest names a merge".to_owned())
+        }
+        HarvestJournalStage::Integrated if entry.merge_oid.is_none() => {
+            return Err("integrated harvest lacks a merge oid".to_owned())
+        }
+        HarvestJournalStage::Finalized
+            if entry.merge_oid.is_none() && entry.branch_head.is_some() =>
+        {
+            return Err("finalized branch harvest lacks a merge oid".to_owned())
+        }
+        _ => {}
+    }
+    match prior {
+        None if entry.stage == HarvestJournalStage::Prepared => Ok(()),
+        Some(old)
+            if old.receipt == entry.receipt
+                && old.branch_head == entry.branch_head
+                && old.pre_merge_base == entry.pre_merge_base
+                && old.options_digest == entry.options_digest
+                && old.hook_digest == entry.hook_digest
+                && (matches!(
+                    (old.stage, entry.stage),
+                    (
+                        HarvestJournalStage::Prepared,
+                        HarvestJournalStage::Integrated
+                    ) | (
+                        HarvestJournalStage::Integrated,
+                        HarvestJournalStage::Finalized
+                    )
+                ) || (old.stage == HarvestJournalStage::Prepared
+                    && entry.stage == HarvestJournalStage::Finalized
+                    && entry.branch_head.is_none()))
+                && (old.merge_oid.is_none() || old.merge_oid == entry.merge_oid) =>
+        {
+            Ok(())
+        }
+        _ => Err("conflicting or out-of-order harvest journal transition".to_owned()),
     }
 }
 
@@ -607,6 +784,20 @@ mod tests {
         };
         ledger.consume(&record).expect("consume");
         assert_eq!(ledger.recorded(&permit).expect("lookup"), Some(record));
+    }
+
+    #[test]
+    fn a_torn_receipt_cannot_be_read_as_an_unspent_permit() {
+        let dir = tempdir().expect("tempdir");
+        let molecule = mol("task-20260901-6da6");
+        let permit = authorization(&molecule).permit_id(&molecule);
+        let ledger = FileConsumptionLedger::at_state_root(dir.path());
+        std::fs::create_dir_all(ledger.path().parent().expect("parent")).expect("mkdir");
+        std::fs::write(ledger.path(), "{\"permit\":\n").expect("torn receipt");
+        assert!(
+            ledger.recorded(&permit).is_err(),
+            "a torn spend is unknown, never free"
+        );
     }
 
     #[test]

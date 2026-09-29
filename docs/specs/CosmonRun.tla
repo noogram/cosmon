@@ -8,6 +8,14 @@
 \* pure frontier and both runtime scheduler tests provide its executable
 \* witness; extending this spec with a DAG is separate formal work.
 \*
+\* Issue #120 W2 separates a harvest permit reservation from integration and
+\* finalization in an append-only operation journal. This model has no permit,
+\* Git object, hook, or harvest-operation variables: its Done transition is
+\* an abstract lifecycle step and is not a recovery proof for that journal.
+\* The executable crash/retry matrix lives in harvest_recovery.rs and the
+\* transaction tests. A journal-specific model would need those states and
+\* a crash action between every durable transition and Git mutation.
+\*
 \* The spec skeleton was produced by the deliberation
 \* delib-20260419-d34b synthesis.md §(c) (Gödel persona, ~80 LOC).
 \* This file extends it on three points the synthesis omits but which

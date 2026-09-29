@@ -64,11 +64,13 @@ use std::time::{Duration, Instant};
 use cosmon_core::config::{
     ConfidentialBlocklistConfig, GitRemoteBlocklistConfig, ProjectConfig, PublishIdentityConfig,
 };
+use cosmon_core::harvest_authorization::{HarvestJournalRecord, HarvestJournalStage};
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::transport::TransportBackend;
 use cosmon_core::worktree_reclaim::{
     worktree_removal_decision, DirtyObservation, ObservationError, WorktreeRemovalDecision,
 };
+use cosmon_filestore::harvest_authority::{FileConsumptionLedger, FileHarvestJournal};
 use cosmon_filestore::FileStore;
 
 use crate::worktree_reclaim::observe_dirty;
@@ -1999,6 +2001,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .parent()
         .and_then(Path::parent)
         .map_or_else(|| state_dir.clone(), Path::to_path_buf);
+    let harvest_journal = FileHarvestJournal::at_state_root(&state_dir);
+    let has_prior_attempt = harvest_journal
+        .has_attempt_for(&mol_id)
+        .map_err(|e| anyhow::anyhow!("harvest_recovery_required: {e}"))?
+        || FileConsumptionLedger::at_state_root(&state_dir)
+            .has_receipt_for(&mol_id)
+            .map_err(|e| anyhow::anyhow!("harvest_recovery_required: {e}"))?;
     let recorded_worktree = crate::worktree::recorded_worktree_for(&store, &mol, &galaxy_root)
         .map(|p| crate::worktree::canonical_or(&p));
 
@@ -2015,7 +2024,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // already-merged molecule as `running/diverged` indefinitely. Attempt
     // a best-effort purge before returning so the hook/patrol sweep path
     // converges to a clean state even after a partial prior teardown.
-    if args.if_completed {
+    if args.if_completed && !has_prior_attempt {
         use cosmon_core::molecule::MoleculeStatus;
         // Already-terminal short-circuit. `merged_at` is the merged-branch
         // marker; `archived` is the terminal-Inert marker that a `no_branch`
@@ -2120,9 +2129,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // --reason …` is how an operator inspects a plan before committing to
     // it, and the reason they were trying out must not become the reason
     // of record for a harvest they did not perform (PR #62 review).
-    if let Some(reason) = args
-        .reason
-        .as_deref()
+    if let Some(reason) = (!has_prior_attempt)
+        .then_some(args)
+        .and_then(|a| a.reason.as_deref())
         .map(str::trim)
         .filter(|r| !r.is_empty())
     {
@@ -2328,35 +2337,42 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //     touches nothing: no lock contention, no merge, no `merged_at`
     //     stamp, no worktree/branch/tmux teardown. The operator (or worker)
     //     fixes the gap and reruns `cs done`.
+    // A retry must not invoke an external hook before the locked recovery
+    // decision. The journal read is fail-closed even for unrelated torn lines.
     if let Some(ref hook_cmd) = project_cfg.hooks.pre_done {
-        if pre_done_hook_skipped(args.skip_pre_done_hook) {
-            eprintln!(
+        if has_prior_attempt {
+            // The original invocation already passed this gate. A configured
+            // hook can have external effects; it is never replayed blindly.
+        } else {
+            if pre_done_hook_skipped(args.skip_pre_done_hook) {
+                eprintln!(
                 "⚠ pre_done gate skipped by operator kill-switch (--skip-pre-done-hook / COSMON_SKIP_PRE_DONE_HOOK): {hook_cmd}"
             );
-        } else {
-            // Trust gate (B5, RCE-by-clone): the `pre_done` hook is a
-            // repo-supplied shell string. This is a hard gate before any
-            // merge, so refuse `cs done` outright on an untrusted repository
-            // rather than running the hook — the operator is told to
-            // `cs trust` first.
-            crate::trust::ensure_trusted(&repo_root)?;
-            run_pre_done_hook(&repo_root, hook_cmd, &mol_id).inspect_err(|e| {
-                // Persist the refusal BEFORE reporting it. This is the
-                // one non-integration the event journal can never
-                // reconstruct: the gate aborts ahead of the merge block,
-                // so no `MergeCompleted` is ever emitted and the molecule
-                // is byte-identical on disk to one that was simply never
-                // harvested.
-                record_non_integration(
-                    &store,
-                    &mol_id,
-                    cosmon_state::NonIntegrationReason::PreDoneRefused,
-                    Some(&base_branch),
-                    Some(short_detail(&format!("pre_done gate `{hook_cmd}` refused"))),
-                    ContradictsStamp::No,
-                );
-                report_pre_done_failure(ctx, &mol_id, hook_cmd, &e.to_string());
-            })?;
+            } else {
+                // Trust gate (B5, RCE-by-clone): the `pre_done` hook is a
+                // repo-supplied shell string. This is a hard gate before any
+                // merge, so refuse `cs done` outright on an untrusted repository
+                // rather than running the hook — the operator is told to
+                // `cs trust` first.
+                crate::trust::ensure_trusted(&repo_root)?;
+                run_pre_done_hook(&repo_root, hook_cmd, &mol_id).inspect_err(|e| {
+                    // Persist the refusal BEFORE reporting it. This is the
+                    // one non-integration the event journal can never
+                    // reconstruct: the gate aborts ahead of the merge block,
+                    // so no `MergeCompleted` is ever emitted and the molecule
+                    // is byte-identical on disk to one that was simply never
+                    // harvested.
+                    record_non_integration(
+                        &store,
+                        &mol_id,
+                        cosmon_state::NonIntegrationReason::PreDoneRefused,
+                        Some(&base_branch),
+                        Some(short_detail(&format!("pre_done gate `{hook_cmd}` refused"))),
+                        ContradictsStamp::No,
+                    );
+                    report_pre_done_failure(ctx, &mol_id, hook_cmd, &e.to_string());
+                })?;
+            }
         }
     }
 
@@ -2458,7 +2474,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // set it is fail-closed: no trust root means no harvest, and the refusal
     // names every grant it considered. `--no-merge` mutates no trunk and
     // therefore spends no authority.
+    let mut harvest_progress: Option<HarvestJournalRecord> = None;
+    let mut resuming_integrated = false;
     if let Some(guard) = trunk_guard.as_deref() {
+        let pre_merge_base = git_head(&repo_root)?;
+        let branch_head = branch_head_oid(&repo_root, &branch_name)?;
+        let options_digest = harvest_options_digest(args)?;
+        let hook_digest = harvest_hook_digest(&project_cfg)?;
         let invocation_id = format!(
             "cs-done:{}:{}",
             mol_id.as_str(),
@@ -2499,19 +2521,103 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         )? {
             crate::done_authority::HarvestDecision::NotInForce => {}
             crate::done_authority::HarvestDecision::Authorized(receipt) => {
-                actions.push(receipt);
+                let entry = HarvestJournalRecord {
+                    version: 1,
+                    stage: HarvestJournalStage::Prepared,
+                    receipt: *receipt,
+                    branch_head,
+                    pre_merge_base,
+                    options_digest,
+                    hook_digest,
+                    merge_oid: None,
+                };
+                harvest_journal.append(&entry).map_err(|e| {
+                    anyhow::anyhow!(
+                        "harvest_recovery_required: reservation could not be journaled: {e}"
+                    )
+                })?;
+                actions.push(format!(
+                    "harvest_prepared: permit={} invocation={}",
+                    entry.receipt.permit, entry.receipt.invocation_id
+                ));
+                harvest_progress = Some(entry);
             }
             crate::done_authority::HarvestDecision::Refused(message) => {
                 return Err(name_the_authority_refusal(message));
             }
             crate::done_authority::HarvestDecision::AlreadyLanded(record) => {
-                // Idempotent replay: this exact harvest already landed under
-                // this permit. Re-running the merge would be a second effect
-                // for an authority that has none left, so report and stop.
-                actions.push(format!(
-                    "harvest_already_landed: permit={} invocation={}",
-                    record.permit, record.invocation_id
-                ));
+                let recorded = harvest_journal
+                    .latest(&record.permit)
+                    .map_err(|e| anyhow::anyhow!("harvest_recovery_required: {e}"))?;
+                let Some(entry) = recorded else {
+                    let latest_molecule = store.load_molecule(&mol_id)?;
+                    if legacy_landing_evidence(
+                        &repo_root,
+                        &state_dir,
+                        &latest_molecule,
+                        &base_branch,
+                    )? {
+                        actions.push(format!("harvest_legacy_landed: permit={}", record.permit));
+                        report(ctx, &mol_id, &actions, &warnings, mol.nudge_count);
+                        return Ok(());
+                    }
+                    anyhow::bail!(
+                        "harvest_recovery_required: legacy receipt has no verified outcome"
+                    );
+                };
+                if entry.receipt != *record
+                    || entry.options_digest != options_digest
+                    || entry.receipt.effect.base != base_branch
+                {
+                    anyhow::bail!("harvest_recovery_required: retry identity or options changed");
+                }
+                match entry.stage {
+                    HarvestJournalStage::Prepared => {
+                        if entry.hook_digest != hook_digest {
+                            anyhow::bail!("harvest_recovery_required: hook configuration changed");
+                        }
+                        if pre_merge_base != entry.pre_merge_base
+                            || branch_head != entry.branch_head
+                        {
+                            anyhow::bail!(
+                                "harvest_recovery_required: prepared operation changed Git head"
+                            );
+                        }
+                        actions.push(format!("harvest_resumed: permit={}", record.permit));
+                    }
+                    HarvestJournalStage::Integrated | HarvestJournalStage::Finalized => {
+                        if entry.stage == HarvestJournalStage::Integrated
+                            && entry.hook_digest != hook_digest
+                        {
+                            anyhow::bail!("harvest_recovery_required: hook configuration changed");
+                        }
+                        if let Some(oid) = entry.merge_oid.as_deref() {
+                            if !branch_is_ancestor_of(&repo_root, oid, &base_branch) {
+                                anyhow::bail!(
+                                    "harvest_recovery_required: recorded integration is absent from base"
+                                );
+                            }
+                        } else if entry.stage != HarvestJournalStage::Finalized
+                            || entry.branch_head.is_some()
+                        {
+                            anyhow::bail!("harvest_recovery_required: missing integration oid");
+                        }
+                        if entry.stage == HarvestJournalStage::Finalized {
+                            actions.push(format!("harvest_finalized: permit={}", record.permit));
+                            report(ctx, &mol_id, &actions, &warnings, mol.nudge_count);
+                            return Ok(());
+                        }
+                        if project_cfg.hooks.post_merge.is_some() {
+                            anyhow::bail!(
+                                "harvest_recovery_required: post-merge hook outcome is unknown"
+                            );
+                        }
+                        resuming_integrated = true;
+                        merge_succeeded = true;
+                        actions.push(format!("harvest_integrated: permit={}", record.permit));
+                    }
+                }
+                harvest_progress = Some(entry);
             }
         }
     }
@@ -2544,7 +2650,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // first time the route reached the effect (`artifact commit failed: …
     // is outside repository`).
     let events_path = state_dir.join("events.jsonl");
-    let merge_dispatch_seq = if args.no_merge {
+    let merge_dispatch_seq = if args.no_merge || resuming_integrated {
         None
     } else {
         cosmon_state::event_log::emit_one(
@@ -2572,7 +2678,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // `molecule/<mol-id>/<name>` before the merge makes the paths disjoint
     // so parallel landings merge cleanly. Idempotent and non-fatal: already
     // scoped artifacts and missing worktrees are no-ops; failures warn.
-    if !args.no_merge {
+    if !args.no_merge && !resuming_integrated {
         match relocate_workspace_artifacts(&worktree_path, &mol_id) {
             Ok(moved) if !moved.is_empty() => {
                 actions.push(format!("relocated_workspace_artifacts: {}", moved.len()));
@@ -2590,7 +2696,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // resolved the same way: rewrite the worker's branch to a disjoint number
     // *before* the merge so the landing is conflict-free and no manual
     // surgery is needed. Idempotent and non-fatal (see ADR-121).
-    if !args.no_merge {
+    if !args.no_merge && !resuming_integrated {
         match renumber_colliding_adrs(&worktree_path, &base_branch) {
             Ok(plans) if !plans.is_empty() => {
                 for p in &plans {
@@ -2677,7 +2783,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // Mechanical-first escalation: see docs/architectural-invariants.md
     // On conflict, try graduated escalation: ff-only → 3-way merge → propel
     // worker to rebase+resolve → retry, bounded by max_retries.
-    if !args.no_merge {
+    if !args.no_merge && !resuming_integrated {
         let merge_result = try_merge_with_escalation(
             ctx,
             &store,
@@ -2891,7 +2997,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // the exact pre-merge main revision and hard-fail so the runtime forgets
     // this dispatch and retries the molecule instead of advancing dependents
     // past a broken main.
-    if merge_succeeded {
+    if merge_succeeded && !resuming_integrated {
         let mut review_granted = false;
         // Issue #109: a merge that changes the trusted shell surface is refused
         // unless the merged surface is itself trusted — on every gate rung.
@@ -3211,7 +3317,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let config_path = resolve_config_from_context(ctx);
     let project_config = cosmon_filestore::load_project_config(&config_path)
         .unwrap_or_else(|_| ProjectConfig::default());
-    if merge_succeeded {
+    if merge_succeeded && !resuming_integrated {
         let cfg = &project_config;
 
         // 2a'. Confidential-content publish gate (delib-20260617-62ff / ADR-128, D7).
@@ -3250,6 +3356,21 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         let publish_scope = (!publish_scope.is_empty()).then_some(publish_scope);
         let merged_blocklist = effective_confidential_blocklist(&cfg.confidential_blocklist);
         check_confidential_blocklist(&repo_root, &merged_blocklist, publish_scope.as_deref())?;
+
+        // All gates that can refuse integration have passed. Only now may a
+        // prepared reservation become durable integration evidence. The
+        // remaining external hook is never replayed on an interrupted run.
+        if let Some(entry) = harvest_progress.as_mut() {
+            if entry.stage == HarvestJournalStage::Prepared && entry.branch_head.is_some() {
+                entry.stage = HarvestJournalStage::Integrated;
+                entry.merge_oid = Some(git_head(&repo_root)?);
+                harvest_journal.append(entry).map_err(|e| {
+                    anyhow::anyhow!(
+                        "harvest_recovery_required: integration could not be journaled: {e}"
+                    )
+                })?;
+            }
+        }
 
         // Non-blocking reminder: surfaces cosmon does not invoke (the GitHub
         // repo-description via `gh repo edit`, the deployed URL, package
@@ -3734,6 +3855,21 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
+    if let Some(entry) = harvest_progress.as_mut() {
+        if entry.stage != HarvestJournalStage::Finalized {
+            if entry.stage == HarvestJournalStage::Prepared && entry.branch_head.is_some() {
+                anyhow::bail!(
+                    "harvest_recovery_required: branch harvest has no integrated evidence"
+                );
+            }
+            entry.stage = HarvestJournalStage::Finalized;
+            harvest_journal.append(entry).map_err(|e| {
+                anyhow::anyhow!(
+                    "harvest_recovery_required: final outcome could not be journaled: {e}"
+                )
+            })?;
+        }
+    }
     report(ctx, &mol_id, &actions, &warnings, mol.nudge_count);
     Ok(())
 }
@@ -5355,6 +5491,107 @@ fn git_head(repo_root: &Path) -> anyhow::Result<String> {
         anyhow::bail!("could not capture pre-merge HEAD: git returned an empty revision");
     }
     Ok(head)
+}
+
+/// Resolve a feature branch tip without confusing an absent branch with a
+/// failed Git probe. Object IDs are recovery evidence, not signed authority.
+fn branch_head_oid(repo_root: &Path, branch: &str) -> anyhow::Result<Option<String>> {
+    if !branch_exists(repo_root, branch) {
+        return Ok(None);
+    }
+    let output = Command::new("git")
+        .args([
+            "-C",
+            &repo_root.to_string_lossy(),
+            "rev-parse",
+            "--verify",
+            branch,
+        ])
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("harvest_recovery_required: could not resolve branch head");
+    }
+    let oid = String::from_utf8(output.stdout)?.trim().to_owned();
+    if oid.is_empty() {
+        anyhow::bail!("harvest_recovery_required: empty branch head");
+    }
+    Ok(Some(oid))
+}
+
+/// Migrate a historical reservation only when independent state, event, and
+/// Git evidence agree that its molecule landed. A receipt by itself, a stamp
+/// by itself, or mere ancestry is never sufficient.
+fn legacy_landing_evidence(
+    repo_root: &Path,
+    state_dir: &Path,
+    molecule: &MoleculeData,
+    base: &str,
+) -> anyhow::Result<bool> {
+    if molecule.merged_at.is_none() {
+        return Ok(false);
+    }
+    let events = match cosmon_state::event_log::read_all(state_dir.join("events.jsonl")) {
+        Ok(events) => events,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "harvest_recovery_required: event read failed: {e}"
+            ))
+        }
+    };
+    let success_event = events.iter().any(|envelope| {
+        matches!(&envelope.event,
+            cosmon_core::event_v2::EventV2::MergeCompleted { molecule: id, result, .. }
+                if id == &molecule.id && result.to_wire().starts_with("ok"))
+    });
+    if !success_event {
+        return Ok(false);
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["log", base, "--format=%B", "-F"])
+        .arg(format!("--grep=Mol-Id: {}", molecule.id))
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("harvest_recovery_required: Git lineage probe failed");
+    }
+    let trailer = format!("Mol-Id: {}", molecule.id);
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line == trailer))
+}
+
+/// Bind retry to all accepted controls, including options not signed by v1.
+fn harvest_options_digest(args: &Args) -> anyhow::Result<String> {
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "reason": args.reason,
+        "force": args.force,
+        "if_completed": args.if_completed,
+        "no_merge": args.no_merge,
+        "review_shell": args.review_shell,
+        "no_worktree_remove": args.no_worktree_remove,
+        "no_branch_delete": args.no_branch_delete,
+        "no_kill": args.no_kill,
+        "strategy": format!("{:?}", args.strategy),
+        "no_auto_propel": args.no_auto_propel,
+        "propel_message": args.propel_message,
+        "max_retries": args.max_retries,
+        "skip_pre_done_hook": args.skip_pre_done_hook,
+        "deploy_off_trunk": args.deploy_off_trunk,
+        "allow_protected_change": args.allow_protected_change,
+    }))?;
+    Ok(cosmon_hash::Hash::of_bytes(&bytes).to_hex())
+}
+
+/// Bind unfinished recovery to the hook commands that were accepted before
+/// preparation; a changed hook must receive a fresh operator review.
+fn harvest_hook_digest(config: &ProjectConfig) -> anyhow::Result<String> {
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "pre_done": config.hooks.pre_done,
+        "post_merge": config.hooks.post_merge,
+    }))?;
+    Ok(cosmon_hash::Hash::of_bytes(&bytes).to_hex())
 }
 
 /// Bounded integration-gate budget. A timed-out gate is a refusal: the merge
@@ -7420,6 +7657,407 @@ mod tests {
     use cosmon_state::MoleculeData;
     use std::collections::HashMap;
     use tempfile::TempDir;
+
+    /// A real repository and signed grant, kept local to the recovery tests.
+    /// The initial branch and base OIDs are independent Git observations.
+    fn recovery_fixture() -> (TempDir, Context, Args, MoleculeId) {
+        use cosmon_core::harvest_authorization::{
+            DoneAuthorization, GrantEpoch, HarvestAction, HarvestGrant, HarvestScope,
+            OperatorHarvestSeal,
+        };
+        use cosmon_core::operator_attestation::{OperatorAttestation, OperatorKeyId};
+
+        let root = TempDir::new().expect("repository");
+        init_repo(root.path());
+        let state = root.path().join(".cosmon/state");
+        std::fs::create_dir_all(&state).expect("state");
+        std::fs::write(root.path().join(".gitignore"), ".cosmon/\n.worktrees/\n")
+            .expect("ignore runtime state");
+        assert!(git(root.path(), &["add", ".gitignore"]).status.success());
+        assert!(git(root.path(), &["commit", "-qm", "chore: ignore state"])
+            .status
+            .success());
+        std::fs::write(
+            root.path().join(".cosmon/config.toml"),
+            "[project]\nproject_id = \"fixture-0000\"\n\n[harvest_authority]\nrequired = true\n",
+        )
+        .expect("config");
+        let store = FileStore::new(&state);
+        store
+            .save_fleet(&cosmon_state::Fleet::default())
+            .expect("fleet");
+        let molecule = MoleculeId::new("task-20260929-abc1").expect("id");
+        store
+            .save_molecule(
+                &molecule,
+                &sample_mol(molecule.as_str(), MoleculeStatus::Completed),
+            )
+            .expect("molecule");
+
+        let branch = format!("feat/{molecule}");
+        assert!(git(root.path(), &["checkout", "-q", "-b", &branch])
+            .status
+            .success());
+        commit_file(root.path(), "worker.txt", "output\n", "feat: worker output");
+        assert!(git(root.path(), &["checkout", "-q", "main"])
+            .status
+            .success());
+
+        let operator = cosmon_minisign_testkit::Operator::from_seed(7);
+        std::fs::write(
+            root.path().join(".cosmon/harvest.pub"),
+            operator.public_key_file(),
+        )
+        .expect("public root");
+        let grant = HarvestGrant::new(
+            "fixture-0000",
+            HarvestScope::Molecule {
+                molecule: molecule.clone(),
+            },
+            "main",
+            HarvestAction::Done,
+            Vec::<String>::new(),
+            GrantEpoch::first(),
+            None,
+        )
+        .expect("grant");
+        let signature = operator.sign(&grant.canonical_bytes());
+        let mut lines = signature.lines();
+        let attestation = OperatorAttestation {
+            key_id: OperatorKeyId::parse(&operator.key_id_display()).expect("key"),
+            untrusted_comment: lines
+                .next()
+                .expect("comment")
+                .trim_start_matches("untrusted comment: ")
+                .to_owned(),
+            signature: lines.next().expect("signature").to_owned(),
+            trusted_comment: lines
+                .next()
+                .expect("trusted comment")
+                .trim_start_matches("trusted comment: ")
+                .to_owned(),
+            global_signature: lines.next().expect("global signature").to_owned(),
+        };
+        let seal = OperatorHarvestSeal::new(grant, attestation).expect("seal");
+        cosmon_filestore::harvest_authority::store_authorization(
+            &state,
+            &molecule,
+            &DoneAuthorization::Ratified(seal),
+        )
+        .expect("installed grant");
+        let mut options = HarvestOptions::new("close the completed work");
+        options.no_kill = true;
+        options.no_worktree_remove = true;
+        options.no_branch_delete = true;
+        options.no_auto_propel = true;
+        let args = Args::from_harvest_options(molecule.as_str().to_owned(), &options);
+        let ctx = Context::at(&state, root.path());
+        (root, ctx, args, molecule)
+    }
+
+    /// Simulate the durable reservation already written by the crashed run.
+    fn recovery_prepared(root: &Path, args: &Args, molecule: &MoleculeId) -> HarvestJournalRecord {
+        let state = root.join(".cosmon/state");
+        let store = FileStore::new(&state);
+        let guard = store.lock_trunk("recovery fixture").expect("lock");
+        let receipt = match crate::done_authority::authorize_harvest(
+            guard.as_ref(),
+            &cosmon_core::config::HarvestAuthorityConfig {
+                required: true,
+                ..Default::default()
+            },
+            &crate::done_authority::HarvestRequest {
+                galaxy_root: root,
+                state_root: &state,
+                galaxy: "fixture-0000",
+                molecule,
+                mission: Some(molecule.clone()),
+                tags: &[],
+                base: "main",
+                invocation_id: "crashed-operation",
+            },
+        )
+        .expect("authorise")
+        {
+            crate::done_authority::HarvestDecision::Authorized(record) => *record,
+            other => panic!("expected a fresh permit, got {other:?}"),
+        };
+        let entry = HarvestJournalRecord {
+            version: 1,
+            stage: HarvestJournalStage::Prepared,
+            receipt,
+            branch_head: branch_head_oid(root, &format!("feat/{molecule}")).expect("branch"),
+            pre_merge_base: git_head(root).expect("base"),
+            options_digest: harvest_options_digest(args).expect("options"),
+            hook_digest: harvest_hook_digest(
+                &cosmon_filestore::load_project_config(&root.join(".cosmon/config.toml"))
+                    .expect("config"),
+            )
+            .expect("hooks"),
+            merge_oid: None,
+        };
+        FileHarvestJournal::at_state_root(&state)
+            .append(&entry)
+            .expect("prepare");
+        drop(guard);
+        entry
+    }
+
+    #[test]
+    fn crash_after_reservation_can_resume_once_with_unchanged_git_preconditions() {
+        let (root, ctx, args, molecule) = recovery_fixture();
+        let prepared = recovery_prepared(root.path(), &args, &molecule);
+        run(&ctx, &args).expect("resume prepared attempt");
+        let latest = FileHarvestJournal::at_state_root(root.path().join(".cosmon/state"))
+            .latest(&prepared.receipt.permit)
+            .expect("journal")
+            .expect("attempt");
+        assert_eq!(latest.stage, HarvestJournalStage::Finalized);
+        assert_ne!(
+            git_head(root.path()).expect("head"),
+            prepared.pre_merge_base
+        );
+    }
+
+    #[test]
+    fn crash_after_git_merge_without_integrated_record_refuses_second_mutation() {
+        let (root, ctx, args, molecule) = recovery_fixture();
+        let prepared = recovery_prepared(root.path(), &args, &molecule);
+        assert!(git(
+            root.path(),
+            &["merge", "--no-ff", "--no-edit", &format!("feat/{molecule}")]
+        )
+        .status
+        .success());
+        let head = git_head(root.path()).expect("merged head");
+        let events = root.path().join(".cosmon/state/events.jsonl");
+        assert!(!events.exists());
+        let error = run(&ctx, &args).expect_err("ambiguous preparation must refuse");
+        assert!(
+            error.to_string().contains("harvest_recovery_required"),
+            "{error}"
+        );
+        assert_eq!(git_head(root.path()).expect("head"), head);
+        assert!(
+            !events.exists(),
+            "no merge event may be dispatched on replay"
+        );
+        assert_eq!(
+            FileHarvestJournal::at_state_root(root.path().join(".cosmon/state"))
+                .latest(&prepared.receipt.permit)
+                .expect("journal")
+                .expect("attempt")
+                .stage,
+            HarvestJournalStage::Prepared
+        );
+    }
+
+    #[test]
+    fn integrated_record_resumes_teardown_without_a_second_merge() {
+        let (root, ctx, args, molecule) = recovery_fixture();
+        let mut entry = recovery_prepared(root.path(), &args, &molecule);
+        assert!(git(
+            root.path(),
+            &["merge", "--no-ff", "--no-edit", &format!("feat/{molecule}")]
+        )
+        .status
+        .success());
+        let landed = git_head(root.path()).expect("landed oid");
+        entry.stage = HarvestJournalStage::Integrated;
+        entry.merge_oid = Some(landed.clone());
+        FileHarvestJournal::at_state_root(root.path().join(".cosmon/state"))
+            .append(&entry)
+            .expect("integration witness");
+        let events = root.path().join(".cosmon/state/events.jsonl");
+        assert!(!events.exists());
+        run(&ctx, &args).expect("safe teardown recovery");
+        assert_eq!(git_head(root.path()).expect("head"), landed);
+        assert!(
+            !events.exists(),
+            "a resumed integration emits no second dispatch"
+        );
+        assert_eq!(
+            FileHarvestJournal::at_state_root(root.path().join(".cosmon/state"))
+                .latest(&entry.receipt.permit)
+                .expect("journal")
+                .expect("attempt")
+                .stage,
+            HarvestJournalStage::Finalized
+        );
+    }
+
+    #[test]
+    fn finalized_retry_returns_before_any_git_or_event_mutation() {
+        let (root, ctx, mut args, molecule) = recovery_fixture();
+        args.no_branch_delete = false;
+        run(&ctx, &args).expect("first harvest");
+        assert!(!branch_exists(root.path(), &format!("feat/{molecule}")));
+        let head = git_head(root.path()).expect("head");
+        let events = root.path().join(".cosmon/state/events.jsonl");
+        let before = std::fs::read(&events).expect("events");
+        std::fs::write(
+            root.path().join(".cosmon/config.toml"),
+            "[project]\nproject_id = \"fixture-0000\"\n\n[harvest_authority]\nrequired = true\n\n[hooks]\npost_merge = \"touch hook-was-replayed\"\n",
+        )
+        .expect("hook config");
+        run(&ctx, &args).expect("finalized replay");
+        assert_eq!(git_head(root.path()).expect("head"), head);
+        assert_eq!(std::fs::read(events).expect("events"), before);
+        assert!(!root.path().join("hook-was-replayed").exists());
+        let ledger = FileConsumptionLedger::at_state_root(root.path().join(".cosmon/state"));
+        assert!(ledger.has_receipt_for(&molecule).expect("ledger"));
+    }
+
+    #[test]
+    fn changed_feature_head_refuses_a_prepared_retry_before_merge_dispatch() {
+        let (root, ctx, args, molecule) = recovery_fixture();
+        recovery_prepared(root.path(), &args, &molecule);
+        let base = git_head(root.path()).expect("base");
+        assert!(git(
+            root.path(),
+            &["checkout", "-q", &format!("feat/{molecule}")]
+        )
+        .status
+        .success());
+        commit_file(root.path(), "second.txt", "later\n", "feat: later work");
+        assert!(git(root.path(), &["checkout", "-q", "main"])
+            .status
+            .success());
+        let error = run(&ctx, &args).expect_err("changed head");
+        assert!(
+            error.to_string().contains("harvest_recovery_required"),
+            "{error}"
+        );
+        assert_eq!(git_head(root.path()).expect("head"), base);
+        assert!(!root.path().join(".cosmon/state/events.jsonl").exists());
+    }
+
+    #[test]
+    fn rolled_back_merge_with_original_heads_can_resume_prepared_attempt() {
+        let (root, ctx, args, molecule) = recovery_fixture();
+        let prepared = recovery_prepared(root.path(), &args, &molecule);
+        assert!(git(
+            root.path(),
+            &["merge", "--no-ff", "--no-edit", &format!("feat/{molecule}")]
+        )
+        .status
+        .success());
+        assert!(
+            git(root.path(), &["reset", "--hard", &prepared.pre_merge_base])
+                .status
+                .success()
+        );
+        run(&ctx, &args).expect("verified rollback can retry");
+        assert_eq!(
+            FileHarvestJournal::at_state_root(root.path().join(".cosmon/state"))
+                .latest(&prepared.receipt.permit)
+                .expect("journal")
+                .expect("attempt")
+                .stage,
+            HarvestJournalStage::Finalized
+        );
+    }
+
+    #[test]
+    fn legacy_receipt_alone_never_claims_a_landed_merge() {
+        let (root, ctx, args, molecule) = recovery_fixture();
+        recovery_prepared(root.path(), &args, &molecule);
+        std::fs::remove_file(root.path().join(".cosmon/state/harvest/operations.jsonl"))
+            .expect("simulate legacy receipt");
+        let base = git_head(root.path()).expect("base");
+        let error = run(&ctx, &args).expect_err("receipt without effect evidence");
+        assert!(
+            error.to_string().contains("harvest_recovery_required"),
+            "{error}"
+        );
+        assert_eq!(git_head(root.path()).expect("head"), base);
+        assert!(!root.path().join(".cosmon/state/events.jsonl").exists());
+    }
+
+    #[test]
+    fn legacy_receipt_with_state_event_and_git_evidence_returns_without_effect() {
+        let (root, ctx, args, _) = recovery_fixture();
+        run(&ctx, &args).expect("landed historical shape");
+        std::fs::remove_file(root.path().join(".cosmon/state/harvest/operations.jsonl"))
+            .expect("simulate historical receipt format");
+        let head = git_head(root.path()).expect("head");
+        let events = root.path().join(".cosmon/state/events.jsonl");
+        let before = std::fs::read(&events).expect("events");
+        run(&ctx, &args).expect("corroborated historical outcome");
+        assert_eq!(git_head(root.path()).expect("head"), head);
+        assert_eq!(std::fs::read(events).expect("events"), before);
+    }
+
+    #[test]
+    fn interrupted_post_merge_hook_is_not_replayed() {
+        let (root, ctx, args, molecule) = recovery_fixture();
+        std::fs::write(root.path().join(".cosmon/config.toml"),
+            "[project]\nproject_id = \"fixture-0000\"\n\n[harvest_authority]\nrequired = true\n\n[hooks]\npost_merge = \"touch hook-was-replayed\"\n")
+            .expect("hook config");
+        let mut entry = recovery_prepared(root.path(), &args, &molecule);
+        assert!(git(
+            root.path(),
+            &["merge", "--no-ff", "--no-edit", &format!("feat/{molecule}")]
+        )
+        .status
+        .success());
+        let landed = git_head(root.path()).expect("landed");
+        entry.stage = HarvestJournalStage::Integrated;
+        entry.merge_oid = Some(landed.clone());
+        FileHarvestJournal::at_state_root(root.path().join(".cosmon/state"))
+            .append(&entry)
+            .expect("integration witness");
+        let error = run(&ctx, &args).expect_err("hook requires reconciliation");
+        assert!(
+            error.to_string().contains("harvest_recovery_required"),
+            "{error}"
+        );
+        assert!(!root.path().join("hook-was-replayed").exists());
+        assert_eq!(git_head(root.path()).expect("head"), landed);
+    }
+
+    #[test]
+    fn changed_pre_merge_hook_refuses_prepared_recovery() {
+        let (root, ctx, args, molecule) = recovery_fixture();
+        recovery_prepared(root.path(), &args, &molecule);
+        let base = git_head(root.path()).expect("base");
+        std::fs::write(root.path().join(".cosmon/config.toml"),
+            "[project]\nproject_id = \"fixture-0000\"\n\n[harvest_authority]\nrequired = true\n\n[hooks]\npre_done = \"touch hook-was-replayed\"\n")
+            .expect("hook config");
+        let error = run(&ctx, &args).expect_err("changed gate cannot be skipped");
+        assert!(
+            error.to_string().contains("hook configuration changed"),
+            "{error}"
+        );
+        assert!(!root.path().join("hook-was-replayed").exists());
+        assert_eq!(git_head(root.path()).expect("head"), base);
+        assert!(!root.path().join(".cosmon/state/events.jsonl").exists());
+    }
+
+    #[test]
+    fn sealed_no_branch_closure_finalizes_without_claiming_integration() {
+        let (root, ctx, args, molecule) = recovery_fixture();
+        assert!(
+            git(root.path(), &["branch", "-D", &format!("feat/{molecule}")])
+                .status
+                .success()
+        );
+        let base = git_head(root.path()).expect("base");
+        run(&ctx, &args).expect("close branchless molecule");
+        assert_eq!(git_head(root.path()).expect("head"), base);
+        let receipts = FileConsumptionLedger::at_state_root(root.path().join(".cosmon/state"));
+        let text = std::fs::read_to_string(receipts.path()).expect("receipt");
+        let receipt: cosmon_core::harvest_authorization::ConsumptionRecord =
+            serde_json::from_str(text.lines().next().expect("line")).expect("decode");
+        let entry = FileHarvestJournal::at_state_root(root.path().join(".cosmon/state"))
+            .latest(&receipt.permit)
+            .expect("journal")
+            .expect("attempt");
+        assert_eq!(entry.stage, HarvestJournalStage::Finalized);
+        assert!(entry.merge_oid.is_none());
+        run(&ctx, &args).expect("finalized closure replay");
+        assert_eq!(git_head(root.path()).expect("head"), base);
+    }
 
     /// A harvest no operator grant covers is refused **by name**, from both
     /// callers.
