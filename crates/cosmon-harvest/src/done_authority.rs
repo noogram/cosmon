@@ -11,8 +11,9 @@
 //! enough for the facts to change between the decision and the merge.
 //!
 //! So the check lives in one place — under the trunk lock, with every fact
-//! re-derived *there*, and with the permit consumed on the line before the
-//! first git mutation. [`authorize_harvest`] takes the trunk guard as a
+//! re-derived *there*, with a durable reservation before the first Git
+//! mutation. The transaction journals progress separately, so reservation
+//! never claims a merge landed. [`authorize_harvest`] takes the trunk guard as a
 //! parameter it does not use, so the type signature is the statement: this is
 //! not callable outside the lock.
 //!
@@ -49,11 +50,10 @@ pub enum HarvestDecision {
     /// The galaxy has not turned the mechanism on. `cs done` proceeds exactly
     /// as a cosmon that predates ADR-172 would.
     NotInForce,
-    /// A permit was verified against facts re-derived here and consumed. The
-    /// string is the receipt line for the transaction's `actions` list.
-    Authorized(String),
-    /// This exact harvest already landed under this permit. The caller reports
-    /// the recorded outcome and mutates nothing further.
+    /// A permit was verified and reserved; integration remains unproved.
+    Authorized(Box<ConsumptionRecord>),
+    /// Historical variant name for a prior reservation. The transaction must
+    /// inspect its progress journal before reporting any outcome or touching Git.
     AlreadyLanded(Box<ConsumptionRecord>),
     /// No authorisation covers this harvest. The string is the operator-facing
     /// message — every candidate grant and why each was refused.
@@ -104,10 +104,9 @@ pub struct HarvestRequest<'a> {
 /// review comment.
 ///
 /// The order is fixed and load-bearing. Facts are re-derived here, the seal is
-/// checked against them, and the receipt is appended **before** the first git
-/// mutation — because a crash between a landed merge and an unwritten receipt
-/// leaves a spent permit that reads as unspent, which is the double-spend the
-/// ledger exists to prevent.
+/// checked against them, and the reservation is appended before the first Git
+/// mutation. The transaction then syncs a prepared progress record; neither
+/// line alone asserts that integration succeeded.
 ///
 /// # Errors
 ///
@@ -206,10 +205,7 @@ pub fn authorize_harvest(
                 ledger
                     .consume(&record)
                     .map_err(|reason| CosmonError::StateStore { reason })?;
-                return Ok(HarvestDecision::Authorized(format!(
-                    "harvest_authorized: permit={} key={} effect={}",
-                    granted.permit, granted.key_id, granted.effect
-                )));
+                return Ok(HarvestDecision::Authorized(Box::new(record)));
             }
             Err(refusal) => refusals.push(refusal_line(&refusal)),
         }

@@ -784,13 +784,12 @@ impl fmt::Display for HarvestEffect {
     }
 }
 
-/// An append-only receipt that one permit was spent on one effect.
+/// An append-only reservation that one permit was assigned to one effect.
 ///
 /// The ledger this lives in is append-only and the lookup is by
 /// [`PermitId`], which is what makes consumption idempotent rather than
-/// merely once-only: a retried `cs done` after a crash finds its own receipt
-/// and reports the harvest that already landed instead of refusing a caller
-/// who did nothing wrong.
+/// merely once-only: a retried `cs done` after a crash finds its own receipt.
+/// The separate operation journal determines whether integration landed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsumptionRecord {
     /// The permit that was spent.
@@ -804,6 +803,43 @@ pub struct ConsumptionRecord {
     /// The invocation the `cs done` transaction and this receipt share, so the
     /// ledger can join the two.
     pub invocation_id: String,
+}
+
+/// Durable progress of one sealed harvest attempt. A reservation alone never
+/// asserts that a merge landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarvestJournalStage {
+    /// The permit was reserved before the first integration mutation.
+    Prepared,
+    /// The integration passed its rollback-capable gates.
+    Integrated,
+    /// Teardown and the final topology check completed.
+    Finalized,
+}
+
+/// A versioned, append-only observation of one harvest operation.
+///
+/// Git object IDs bind recovery to this attempt; the v1 signature still signs
+/// a branch name rather than a reviewed commit or these request options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarvestJournalRecord {
+    /// Format version, presently one.
+    pub version: u8,
+    /// The transition this line records.
+    pub stage: HarvestJournalStage,
+    /// The permit reservation and stable operation identifier.
+    pub receipt: ConsumptionRecord,
+    /// Feature branch tip before integration, absent if there was no branch.
+    pub branch_head: Option<String>,
+    /// Exact base tip before bookkeeping or merge mutation.
+    pub pre_merge_base: String,
+    /// Digest of the accepted request options, including closure controls.
+    pub options_digest: String,
+    /// Digest of configured pre- and post-merge hooks at preparation time.
+    pub hook_digest: String,
+    /// Resulting base tip after all rollback-capable gates, when integrated.
+    pub merge_oid: Option<String>,
 }
 
 /// A permit that [`authorize`] has just cleared for spending.
@@ -828,8 +864,8 @@ pub struct HarvestPermit {
 pub enum AuthorizedHarvest {
     /// The permit is unspent and covers this effect. Consume it, then mutate.
     Fresh(Box<HarvestPermit>),
-    /// This exact harvest already landed under this permit. The caller reports
-    /// the recorded outcome and mutates nothing.
+    /// Historical variant name for a prior reservation of this effect. The
+    /// caller must inspect durable progress before reporting any outcome.
     AlreadyLanded(Box<ConsumptionRecord>),
 }
 
@@ -967,7 +1003,8 @@ pub trait HarvestConsumptionLedger {
     /// as "unspent", or a crash would turn into a second harvest.
     fn recorded(&self, permit: &PermitId) -> Result<Option<ConsumptionRecord>, String>;
 
-    /// Append `record`. Called immediately before the first git mutation.
+    /// Append `record` before the first integration mutation. The caller also
+    /// syncs a prepared progress record before mutating Git.
     ///
     /// # Errors
     ///
