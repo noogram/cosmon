@@ -125,21 +125,35 @@ pub struct TrustedIssuers {
 
 impl TrustedIssuers {
     /// Load the allowlist from `<state_dir>/security/trusted-issuers.toml`.
-    /// A missing file resolves to an empty allowlist (deny-all) — the
-    /// adapter then relies on the file-stage fallback, or denies every
-    /// token until issuers are configured.
+    /// A missing file resolves to an empty value for callers that only
+    /// need the issuer entries. Boot and reload use [`Self::load_optional`]
+    /// to distinguish absence (legacy file-stage fallback) from an
+    /// existing empty file (authoritative deny-all).
     ///
     /// # Errors
     ///
     /// Returns an IO error if the file exists but cannot be read, or an
     /// `InvalidData` error wrapping the TOML parse failure.
     pub fn load(state_dir: &Path) -> std::io::Result<Self> {
+        Ok(Self::load_optional(state_dir)?.unwrap_or_default())
+    }
+
+    /// Read the allowlist while retaining whether the file exists. An
+    /// existing empty file is an authoritative deny-all configuration;
+    /// absence permits the legacy file-stage fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an IO or TOML parse error for an existing file.
+    pub fn load_optional(state_dir: &Path) -> std::io::Result<Option<Self>> {
         let path = state_dir.join("security/trusted-issuers.toml");
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(None);
         }
         let text = std::fs::read_to_string(&path)?;
-        toml::from_str(&text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        toml::from_str(&text)
+            .map(Some)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
     /// `true` when no issuer is configured (deny-all).

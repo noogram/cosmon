@@ -232,7 +232,9 @@ impl JwksReloadOutcome {
 
 /// Re-read the on-disk JWKS and HTTP issuer allowlist (the **authn door**),
 /// merge file keys with still-configured HTTP issuers, and atomically publish
-/// the result into `shared`. The symmetric counterpart of [`reload`]
+/// the result into `shared`. When trusted-issuers.toml exists, staged files
+/// for absent issuers are refused and logged, as at boot. The symmetric
+/// counterpart of [`reload`]
 /// (the **authz door**): adding a federated peer issuer's `<iss>.json`
 /// under `<state_dir>/security/jwks/` — or removing it to revoke — takes
 /// effect on `SIGHUP` with no reboot (ADR-0023 MVP-A, D6).
@@ -246,7 +248,7 @@ impl JwksReloadOutcome {
 pub fn reload_jwks(shared: &SharedJwksStore, state_dir: &Path) -> JwksReloadOutcome {
     let issuers_before = shared.load().key_counts_by_issuer().len();
 
-    let trusted = match TrustedIssuers::load(state_dir) {
+    let trusted = match TrustedIssuers::load_optional(state_dir) {
         Ok(trusted) => trusted,
         Err(e) => {
             return JwksReloadOutcome {
@@ -261,24 +263,26 @@ pub fn reload_jwks(shared: &SharedJwksStore, state_dir: &Path) -> JwksReloadOutc
         }
     };
     let configured: HashSet<_> = trusted
-        .issuers
+        .as_ref()
         .into_iter()
-        .map(|issuer| issuer.iss)
+        .flat_map(|trusted| &trusted.issuers)
+        .map(|issuer| issuer.iss.clone())
         .collect();
 
-    let fresh = match JwksStore::load(state_dir) {
-        Ok(store) => store,
-        Err(e) => {
-            return JwksReloadOutcome {
-                issuers_before,
-                issuers_after: issuers_before,
-                keys_after: 0,
-                error: Some(format!("read {}/security/jwks: {e}", state_dir.display())),
-            };
-        }
-    };
+    let fresh =
+        match JwksStore::load_with_allowlist(state_dir, trusted.as_ref().map(|_| &configured)) {
+            Ok(store) => store,
+            Err(e) => {
+                return JwksReloadOutcome {
+                    issuers_before,
+                    issuers_after: issuers_before,
+                    keys_after: 0,
+                    error: Some(format!("read {}/security/jwks: {e}", state_dir.display())),
+                };
+            }
+        };
 
-    shared.store_file_stage(&fresh, &configured);
+    shared.store_file_stage(&fresh, &configured, trusted.is_some());
 
     let counts = shared.load().key_counts_by_issuer();
     let issuers_after = counts.len();

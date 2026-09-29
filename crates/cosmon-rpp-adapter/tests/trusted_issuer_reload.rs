@@ -9,6 +9,7 @@ use cosmon_rpp_adapter::{
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::json;
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -52,17 +53,23 @@ fn trusted_issuer_set_is_identical_at_boot_and_after_reload() {
     let td = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(td.path().join("security/jwks")).unwrap();
     write_allowlist(td.path(), &[A]);
+    write_staged_key(td.path(), A, "current.json");
     write_staged_key(td.path(), B, "old.json");
 
-    // Match the HTTP-fetch boot path without making a network request.
+    // Exercise the same file admission rule as the HTTP-fetch boot path,
+    // without making a network request.
     let trusted = TrustedIssuers::load(td.path()).unwrap();
+    let configured = HashSet::from([A.to_owned()]);
+    let staged = JwksStore::load_with_allowlist(td.path(), Some(&configured)).unwrap();
     let provider = JwksProvider::new(
-        SharedJwksStore::new(JwksStore::default()),
+        SharedJwksStore::new(staged),
         trusted.issuers,
         JwksFetcher::new().unwrap(),
     );
     let shared = provider.shared();
+    let a = token(A);
     let b = token(B);
+    assert!(JwtVerifier::validate(&shared.load(), &a, Posture::Active).is_ok());
     assert!(matches!(
         JwtVerifier::validate(&shared.load(), &b, Posture::Active),
         Err(RppRejectReason::IssuerNotPinned)

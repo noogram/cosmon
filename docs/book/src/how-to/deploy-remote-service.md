@@ -160,12 +160,18 @@ EOF
 '
 ```
 
-The pinned JWKS and this nucleon binding are both required: a valid token alone
-does not grant access to a tenant.
+The trusted issuer and this nucleon binding are both required: a valid token
+alone does not grant access to a tenant. With `trusted-issuers.toml` present,
+the adapter fetches keys from each configured `jwks_uri`. It can also read a
+staged `security/jwks/*.json` file for an issuer listed there. Any staged file
+whose `iss` is absent from the list is refused with a warning at startup and
+on every SIGHUP reload. Removing an issuer entry revokes its staged keys on
+reload even if the file remains on disk. An existing empty allowlist denies
+every issuer; remove the allowlist file only when intentionally returning to
+the legacy file-stage fallback.
 
-For a production deployment, replace the mock with your production IdP, pin
-its JWKS under `$COSMON_HOME/state/security`, and keep the issuer and binding
-rules explicit.
+For a production deployment, configure the issuer's `jwks_uri` in
+`trusted-issuers.toml` and keep the issuer and binding rules explicit.
 
 ## Step 3: Start the fente on loopback
 

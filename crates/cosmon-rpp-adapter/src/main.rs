@@ -5,8 +5,9 @@
 
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use cosmon_rpp_adapter::{
@@ -230,13 +231,15 @@ async fn main() -> anyhow::Result<()> {
     //     present, the adapter FETCHES each issuer's JWKS from its
     //     `jwks_uri` and refreshes on a TTL + on-demand cache-miss
     //     (smithy spec jwks-http-fetch-provisioning.md). This replaces
-    //     the v2.4 file-stage + SIGHUP gesture (no debug access needed on
-    //     the protected target).
+    //     the v2.4 file-stage + SIGHUP gesture. Staged files for listed
+    //     issuers are also read; unlisted files are refused and logged.
     //   * File-stage (compat fallback) — no allowlist present: read
     //     `security/jwks/*.json` and rely on the SIGHUP listener below.
     //     Kept for the test bench and the oidc-mock.
-    let trusted = cosmon_rpp_adapter::jwks_fetch::TrustedIssuers::load(&state_dir)?;
-    let jwks = if trusted.is_empty() {
+    let trusted = cosmon_rpp_adapter::jwks_fetch::TrustedIssuers::load_optional(&state_dir)?;
+    let jwks = if let Some(trusted) = trusted {
+        load_allowlisted_jwks(&state_dir, trusted, cfg.resolved_jwks_refresh_ttl()).await?
+    } else {
         let store = SharedJwksStore::new(JwksStore::load(&state_dir)?);
         let key_counts = store.load().key_counts_by_issuer();
         if key_counts.is_empty() {
@@ -261,30 +264,6 @@ async fn main() -> anyhow::Result<()> {
                 "JWKS load summary (file-stage fallback)",
             );
         }
-        store
-    } else {
-        // HTTP-fetch primary path. Build the provider over a fresh store,
-        // do one synchronous initial fetch (best-effort, fail-closed: an
-        // unreachable issuer leaves its keys empty → deny), then spawn the
-        // TTL + boot-backoff refresh loop. The provider holds a clone of
-        // the SAME shared store that goes into AppState, so every handler's
-        // `state.jwks.load()` transparently sees the fetched keys.
-        let fetcher = cosmon_rpp_adapter::jwks_fetch::JwksFetcher::new()?;
-        let provider = cosmon_rpp_adapter::jwks_fetch::JwksProvider::new(
-            SharedJwksStore::new(JwksStore::default()),
-            trusted.issuers.clone(),
-            fetcher,
-        );
-        let store = provider.shared();
-        tracing::info!(
-            event = "boot.jwks",
-            mode = "http-fetch",
-            issuers = trusted.len(),
-            "JWKS HTTP-fetch armed — fetching trusted issuers from their jwks_uri",
-        );
-        provider.refresh_all().await.log();
-        let ttl = cfg.resolved_jwks_refresh_ttl();
-        tokio::spawn(provider.run(ttl));
         store
     };
 
@@ -507,6 +486,36 @@ async fn main() -> anyhow::Result<()> {
 
 /// A server partitions token sinks by tenant directory; a process-wide
 /// override would collapse that boundary and is therefore invalid at boot.
+/// Initialise the same allowlist-filtered staged keys that SIGHUP reloads.
+async fn load_allowlisted_jwks(
+    state_dir: &Path,
+    trusted: cosmon_rpp_adapter::TrustedIssuers,
+    ttl: Duration,
+) -> anyhow::Result<SharedJwksStore> {
+    let configured = trusted
+        .issuers
+        .iter()
+        .map(|issuer| issuer.iss.clone())
+        .collect();
+    let staged = JwksStore::load_with_allowlist(state_dir, Some(&configured))?;
+    let fetcher = cosmon_rpp_adapter::JwksFetcher::new()?;
+    let provider = cosmon_rpp_adapter::JwksProvider::new(
+        SharedJwksStore::new(staged),
+        trusted.issuers.clone(),
+        fetcher,
+    );
+    let store = provider.shared();
+    tracing::info!(
+        event = "boot.jwks",
+        mode = "http-fetch",
+        issuers = trusted.len(),
+        "JWKS HTTP-fetch armed — fetching trusted issuers from their jwks_uri",
+    );
+    provider.refresh_all().await.log();
+    tokio::spawn(provider.run(ttl));
+    Ok(store)
+}
+
 fn refuse_token_sink_override() -> anyhow::Result<()> {
     anyhow::ensure!(
         std::env::var_os("COSMON_TOKEN_INSTRUMENTATION_PATH").is_none(),

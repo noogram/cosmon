@@ -19,10 +19,12 @@
 //!   refreshes it periodically (see [`crate::jwks_fetch`]). This is the
 //!   provisioning path that replaces the file-stage + `SIGHUP` of v2.4
 //!   (smithy spec `jwks-http-fetch-provisioning.md`).
-//! - **File-stage (compat fallback)** — [`JwksStore::load`] reads
-//!   `<state_dir>/security/jwks/*.json` and the `SIGHUP` listener
-//!   ([`crate::reload::reload_jwks`]) re-reads it. Kept for the test
-//!   bench and the `oidc-mock`; superseded by HTTP-fetch in prod.
+//! - **File-stage** — [`JwksStore::load`] reads staged files when no
+//!   allowlist exists. When the allowlist exists, boot and `SIGHUP`
+//!   ([`crate::reload::reload_jwks`]) admit only listed issuers via
+//!   [`JwksStore::load_with_allowlist`]. HTTP-fetched keys take precedence
+//!   for the same issuer. The absent-allowlist fallback remains for the
+//!   test bench and local deployments.
 //!
 //! **The structural defence is the host-side allowlist + the authz
 //! pin, not the absence of a network round-trip.** Earlier this module
@@ -79,6 +81,9 @@ pub struct JwksStore {
     /// Kept in the same atomically published snapshot as the keys so a
     /// stale refresh cannot race a SIGHUP revocation and restore trust.
     configured_remote_issuers: HashSet<String>,
+    /// Whether trusted-issuers.toml was present for this snapshot. This
+    /// distinguishes an empty authoritative list from the file fallback.
+    allowlist_present: bool,
 }
 
 /// One key record carried by the store.
@@ -159,7 +164,24 @@ impl JwksStore {
     /// Returns the underlying IO error if the directory cannot be
     /// enumerated. Per-file failures are tolerated.
     pub fn load(state_dir: &Path) -> std::io::Result<Self> {
-        let mut out = Self::default();
+        Self::load_with_allowlist(state_dir, None)
+    }
+
+    /// Load staged keys, admitting only listed issuers when an allowlist
+    /// exists. Refused files are logged before their keys are parsed.
+    /// `None` preserves the legacy file-stage fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an IO error if the JWKS directory cannot be enumerated.
+    pub fn load_with_allowlist(
+        state_dir: &Path,
+        allowlist: Option<&HashSet<String>>,
+    ) -> std::io::Result<Self> {
+        let mut out = Self {
+            allowlist_present: allowlist.is_some(),
+            ..Self::default()
+        };
         let dir = state_dir.join("security/jwks");
         if !dir.exists() {
             return Ok(out);
@@ -183,6 +205,15 @@ impl JwksStore {
                     continue;
                 }
             };
+            if allowlist.is_some_and(|allowed| !allowed.contains(&file.issuer)) {
+                tracing::warn!(
+                    event = "jwks.file.refused",
+                    path = %path.display(),
+                    issuer = %file.issuer,
+                    "staged JWKS issuer is absent from trusted-issuers.toml; refusing file",
+                );
+                continue;
+            }
             for jwk in file.keys {
                 let Some(alg) = parse_alg(&jwk.alg) else {
                     tracing::warn!(alg = %jwk.alg, "skipping JWK with non-whitelisted alg");
@@ -396,6 +427,14 @@ impl JwksStore {
             .retain(|issuer| configured.contains(issuer));
         self.configured_remote_issuers.clone_from(configured);
     }
+
+    /// Apply the authoritative issuer set to every key delivery path.
+    fn retain_only_issuers(&mut self, configured: &HashSet<String>) {
+        self.by_iss_kid
+            .retain(|(iss, _kid), _| configured.contains(iss));
+        self.allowed_audiences
+            .retain(|iss, _| configured.contains(iss));
+    }
 }
 
 /// A JWKS document fetched over HTTP (RFC 7517 §5 — `{ "keys": [...] }`).
@@ -481,6 +520,8 @@ impl SharedJwksStore {
         self.0.rcu(|live| {
             let mut next = (**live).clone();
             next.retain_configured_remote_issuers(configured);
+            next.retain_only_issuers(configured);
+            next.allowlist_present = true;
             Arc::new(next)
         });
     }
@@ -495,9 +536,14 @@ impl SharedJwksStore {
     /// stale refresh snapshot to overwrite a concurrent SIGHUP revocation.
     pub(crate) fn store_remote_refresh(&self, refreshed: &JwksStore) {
         self.0.rcu(|live| {
+            if !live.allowlist_present {
+                return Arc::clone(live);
+            }
             let configured = &live.configured_remote_issuers;
             let mut next = refreshed.clone();
             next.retain_configured_remote_issuers(configured);
+            next.retain_only_issuers(configured);
+            next.allowlist_present = true;
             Arc::new(next)
         });
     }
@@ -509,10 +555,19 @@ impl SharedJwksStore {
     /// publishes while the reload is being committed, so the reload never
     /// restores an older fetched-key snapshot merely because the two paths
     /// crossed.
-    pub(crate) fn store_file_stage(&self, file_store: &JwksStore, configured: &HashSet<String>) {
+    pub(crate) fn store_file_stage(
+        &self,
+        file_store: &JwksStore,
+        configured: &HashSet<String>,
+        allowlist_present: bool,
+    ) {
         self.0.rcu(|live| {
             let mut merged = file_store.clone();
             merged.preserve_remote_issuers_from(live, configured);
+            if allowlist_present {
+                merged.retain_only_issuers(configured);
+            }
+            merged.allowlist_present = allowlist_present;
             Arc::new(merged)
         });
     }
