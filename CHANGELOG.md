@@ -35,6 +35,14 @@ this stage.
 
 ### Changed
 
+- **`cosmon-rpp-adapter` trusted issuer set is identical at boot and after
+  reload** (GitHub issue #45). When `security/trusted-issuers.toml` exists, only
+  issuers it lists can be loaded from staged JWKS files. A staged file for an
+  absent issuer is refused with a warning at startup and on every SIGHUP;
+  removing the issuer entry revokes its staged keys on reload. An existing
+  empty list denies all issuers. Without the file, the legacy file-stage
+  fallback still applies.
+
 - **Codex interactive dialogs are detected without overriding update policy**
   (GitHub issue #85). `cs tackle` checks the launch pane before sending its
   briefing and leaves a blocked menu for the operator. Every `cs patrol` run
