@@ -318,6 +318,9 @@ pub fn load_authorizations(
             serde_json::from_str(&text).map_err(|e| CosmonError::StateStore {
                 reason: format!("{} is not a harvest authorisation: {e}", path.display()),
             })?;
+        one.validate().map_err(|e| CosmonError::StateStore {
+            reason: format!("{} has invalid harvest semantics: {e}", path.display()),
+        })?;
         return Ok(vec![one]);
     }
 
@@ -335,6 +338,9 @@ pub fn load_authorizations(
             continue;
         };
         if let Ok(parsed) = serde_json::from_str::<DoneAuthorization>(&text) {
+            parsed.validate().map_err(|e| CosmonError::StateStore {
+                reason: format!("{} has invalid harvest semantics: {e}", path.display()),
+            })?;
             out.push(parsed);
         }
     }
@@ -425,6 +431,11 @@ impl HarvestConsumptionLedger for FileConsumptionLedger {
                 continue;
             };
             if &record.permit == permit {
+                if let Some(previous) = &found {
+                    if previous != &record {
+                        return Err(format!("conflicting harvest receipts for permit {permit}"));
+                    }
+                }
                 found = Some(record);
             }
         }
