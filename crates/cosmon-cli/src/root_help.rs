@@ -53,6 +53,11 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
                node; cs run = N≥1 nodes (resident runtime).\n  \
              cs wait <id> &                  background wait, get notified on completion\n  \
              cs done <id>                    merge branch to its base + teardown (required!)\n\n\
+             TASK BRIEFING. 'cs nucleate' writes the task topic and every bound \
+             variable into the molecule's durable briefing.md. 'cs tackle' \
+             points the worker there for the authoritative task and current \
+             step; the pane prompt does not repeat the task text when the \
+             briefing has a Task section.\n\n\
              A branch that changes the trusted shell surface needs an operator \
              review after merging. Run 'cs done <id> --review-shell' to see the \
              merged diff, grant trust over those on-disk files, and run the \

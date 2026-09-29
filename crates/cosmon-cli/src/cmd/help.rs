@@ -287,6 +287,9 @@ fn print_grouped_reference() {
     println!("                               # pilot stays free for other work");
     println!("  cs done <id>                 # merge branch + teardown (required!)");
     println!();
+    println!("  The task and bound variables live in the molecule's briefing.md.");
+    println!("  cs tackle points the worker there when it has a Task section.");
+    println!();
     println!("  For a DAG of N≥1 nodes (one node = leaf, N nodes = orchestration):");
     println!("  cs run <root> --poll-interval 5     # walks the DAG, dispatches each");
     println!("                                       # ready node via cs tackle, calls");

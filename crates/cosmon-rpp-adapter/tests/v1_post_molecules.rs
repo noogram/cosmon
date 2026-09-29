@@ -167,6 +167,16 @@ async fn happy_path_post_returns_201_with_id() {
     // Library-direct nucleate mints the id from the formula's
     // `id_prefix = "task"` (see `minimal_task_work_formula`).
     assert!(id.starts_with("task-"), "expected task-id, got {id}");
+    let briefing_path = tenants
+        .galaxies_root()
+        .join("a/.cosmon/state/fleets/default/molecules")
+        .join(id)
+        .join("briefing.md");
+    let briefing = std::fs::read_to_string(briefing_path).expect("durable task briefing");
+    assert!(
+        briefing.contains("hello-operator-demo"),
+        "remote nucleation must preserve task text in briefing.md"
+    );
 }
 
 #[tokio::test]

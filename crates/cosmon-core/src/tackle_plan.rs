@@ -1093,8 +1093,26 @@ pub fn build_prompt(
          doc (kept out of this brief by Transport ≠ Cognition), not here.\n\n",
     );
 
-    // ── MISSION (from variables) ────────────────────────────────
-    if !mol.variables.is_empty() {
+    // ── MISSION ─────────────────────────────────────────────────
+    // The durable file carries the exact task and formula bindings. Keep
+    // the pane short so there is only one authoritative copy to reread.
+    if crate::egress::adapter_is_local(adapter_name) {
+        if let Some(text) = briefing.filter(|text| !text.is_empty()) {
+            // A local worker has no filesystem tool for the molecule dir;
+            // give it one in-memory snapshot of the authoritative file.
+            let _ = writeln!(out, "## Mission\n\n{text}\n");
+        } else if !mol.variables.is_empty() {
+            out.push_str(&crate::briefing::render_task(mol.variables));
+        }
+    } else if briefing.is_some_and(|text| text.lines().any(|line| line == "## Task")) {
+        out.push_str(
+            "## Mission\n\nRead `briefing.md` in the canonical molecule directory. \
+             Its Task section is the source of truth for the topic and every \
+             bound formula variable; follow its current step.\n\n",
+        );
+    } else if !mol.variables.is_empty() {
+        // Legacy molecules may have no Task section in their briefing.
+        // Preserve their previous inline task until they are re-nucleated.
         out.push_str("## Mission\n\n");
         // Topic/title first (most important).
         if let Some(topic) = mol.variables.get("topic") {
@@ -1112,10 +1130,11 @@ pub fn build_prompt(
         out.push('\n');
     }
 
-    // ── BRIEFING ────────────────────────────────────────────────
-    if let Some(briefing) = briefing {
-        if !briefing.is_empty() {
-            let _ = writeln!(out, "## Briefing\n\n{briefing}\n");
+    if !crate::egress::adapter_is_local(adapter_name) {
+        if let Some(text) =
+            briefing.filter(|text| !text.is_empty() && !text.lines().any(|line| line == "## Task"))
+        {
+            let _ = writeln!(out, "## Briefing\n\n{text}\n");
         }
     }
 
@@ -1674,7 +1693,9 @@ mod tests {
         let prompt_req = PromptRequest {
             molecule,
             formula: None,
-            briefing: Some("Extract the pure half."),
+            briefing: Some(
+                "## Task\n\n### topic\n\nmake the tackle plan pure\n\nExtract the pure half.",
+            ),
             config: &config,
             molecule_dir: Path::new("/galaxy/.cosmon/state/molecules/task-20260904-f4c6"),
             workdir: None,
@@ -1702,10 +1723,51 @@ mod tests {
             Some(Path::new("/galaxy/.worktrees/task-20260904-f4c6"))
         );
         assert_eq!(plan.base_branch.as_deref(), Some("main"));
-        // The prompt is the dry-run rendering: mission + briefing are in it.
-        assert!(plan.prompt.contains("make the tackle plan pure"));
-        assert!(plan.prompt.contains("Extract the pure half."));
+        // The prompt points to the durable task and avoids a second copy.
+        assert!(plan.prompt.contains("`briefing.md`"));
+        assert!(plan.prompt.contains("source of truth"));
+        assert!(!plan.prompt.contains("make the tackle plan pure"));
+        assert!(!plan.prompt.contains("Extract the pure half."));
         assert!(plan.prompt.contains("cs complete task-20260904-f4c6"));
+    }
+
+    #[test]
+    fn local_worker_receives_one_snapshot_of_the_durable_task() {
+        let id = MoleculeId::new("task-20260929-aaaa").unwrap();
+        let formula_id = FormulaId::new("task-work").unwrap();
+        let variables = HashMap::from([("topic".to_owned(), "stored task".to_owned())]);
+        let molecule = brief(&id, &formula_id, &variables);
+        let briefing = "## Task\n\n### topic\n\nstored task\n\n## Steps\n\nDo work.";
+        let prompt = build_prompt(
+            &molecule,
+            None,
+            Some(briefing),
+            &ProjectConfig::default(),
+            Path::new("/galaxy/.cosmon/state/molecules/task-20260929-aaaa"),
+            "local",
+            Some(Path::new("/galaxy/.worktrees/task-20260929-aaaa")),
+        );
+        assert_eq!(prompt.matches("stored task").count(), 1);
+        assert!(prompt.contains("Do work."));
+    }
+
+    #[test]
+    fn legacy_briefing_keeps_its_inline_task_at_dispatch() {
+        let id = MoleculeId::new("task-20260929-bbbb").unwrap();
+        let formula_id = FormulaId::new("task-work").unwrap();
+        let variables = HashMap::from([("topic".to_owned(), "older task".to_owned())]);
+        let molecule = brief(&id, &formula_id, &variables);
+        let prompt = build_prompt(
+            &molecule,
+            None,
+            Some("## Steps\n\nDo work."),
+            &ProjectConfig::default(),
+            Path::new("/galaxy/.cosmon/state/molecules/task-20260929-bbbb"),
+            "claude",
+            None,
+        );
+        assert!(prompt.contains("older task"));
+        assert!(prompt.contains("## Briefing\n\n## Steps"));
     }
 
     /// noogram/cosmon#110: the coding-agent brief used to say "4. Commit your

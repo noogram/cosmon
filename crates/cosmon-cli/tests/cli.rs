@@ -448,6 +448,47 @@ detail = "extra"
     assert_eq!(beta_state["variables"]["detail"], "extra");
     // Beta has no worker → pending.
     assert_eq!(beta_state["status"], "pending");
+    let beta_briefing = fs::read_to_string(
+        state_dir
+            .join("fleets/default/molecules")
+            .join(beta_id)
+            .join("briefing.md"),
+    )
+    .expect("durable local briefing");
+    assert!(beta_briefing.contains("Beta molecule"));
+    assert!(beta_briefing.contains("extra"));
+
+    mark_molecule_running(&state_dir, beta_id);
+    let evolved = cosmon_bin()
+        .args([
+            "evolve",
+            beta_id,
+            "--evidence",
+            "First step done",
+            "--ops-dir",
+            state_dir.to_str().unwrap(),
+            "--formula",
+            formulas_dir
+                .join("decl-test.formula.toml")
+                .to_str()
+                .unwrap(),
+        ])
+        .output()
+        .expect("evolve local task");
+    assert!(
+        evolved.status.success(),
+        "evolve: {}",
+        String::from_utf8_lossy(&evolved.stderr)
+    );
+    let next_briefing = fs::read_to_string(
+        state_dir
+            .join("fleets/default/molecules")
+            .join(beta_id)
+            .join("briefing.md"),
+    )
+    .expect("regenerated local briefing");
+    assert!(next_briefing.contains("Beta molecule"));
+    assert!(next_briefing.contains("extra"));
 }
 
 /// `cs nucleate --blocks` creates a new molecule with a Blocks link and

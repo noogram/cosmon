@@ -596,6 +596,7 @@ fn write_briefing(
     if let Some(ref worker) = result.assigned_worker {
         let _ = write!(md, "**Assigned to:** {worker}\n\n");
     }
+    md.push_str(&cosmon_core::briefing::render_task(&result.variables));
     md.push_str("## Steps\n\n");
     for (i, step) in formula.steps.iter().enumerate() {
         let _ = write!(md, "### Step {} — {}\n\n", i + 1, step.title);
@@ -769,6 +770,38 @@ description = "do it"
         let loaded = store.load_molecule(&view.data.id).unwrap();
         assert_eq!(loaded.id, view.data.id);
         assert!(loaded.prompt_seal.is_some(), "prompt should be sealed");
+    }
+
+    #[test]
+    fn nucleated_task_briefing_reconstructs_the_task_from_disk() {
+        let tmp = TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        let formulas_dir = tmp.path().join("formulas");
+        write_minimal_formula(&formulas_dir, "task-work");
+        let topic = "Repair the lifecycle ledger exactly as described.\nKeep every witness.";
+        let mut request = NucleateRequest::for_formula("task-work");
+        request.variables.insert("topic".into(), topic.into());
+        request
+            .variables
+            .insert("scope".into(), "all dispatch paths".into());
+
+        let view = nucleate(
+            &FakeStore::default(),
+            &state_dir,
+            &formulas_dir,
+            &Subject::operator(),
+            request,
+        )
+        .unwrap();
+        let briefing = fs::read_to_string(view.molecule_dir.join("briefing.md")).unwrap();
+        assert!(
+            briefing.contains(topic),
+            "task text absent from durable briefing"
+        );
+        assert!(
+            briefing.contains("all dispatch paths"),
+            "other variable absent"
+        );
     }
 
     #[test]
