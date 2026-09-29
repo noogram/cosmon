@@ -65,6 +65,8 @@ use std::path::PathBuf;
 // ADR renumbering across a harvest merge — the collision resolver that runs
 // when both the trunk and the branch added an ADR with the same number.
 pub mod adr;
+/// Strict, shared authority facts read before gates and under the effect lock.
+pub mod authorization_facts;
 // Resolution of a molecule's integration base branch — the single place that
 // answers "which trunk does this molecule's work belong to?" for both the
 // branch cut (`cs tackle`) and the harvest (`cs done`).

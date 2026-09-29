@@ -13,9 +13,9 @@
 //! So the check lives in one place — under the trunk lock, with every fact
 //! re-derived *there*, with a durable reservation before the first Git
 //! mutation. The transaction journals progress separately, so reservation
-//! never claims a merge landed. [`authorize_harvest`] takes the trunk guard as a
-//! parameter it does not use, so the type signature is the statement: this is
-//! not callable outside the lock.
+//! never claims a merge landed. `authorize_harvest_from_facts` takes the
+//! trunk guard as a parameter it does not use, so the type signature is the
+//! statement: this is not callable outside the lock.
 //!
 //! # What it claims
 //!
@@ -33,16 +33,21 @@ use std::path::Path;
 use chrono::Utc;
 use cosmon_core::config::HarvestAuthorityConfig;
 use cosmon_core::error::CosmonError;
+use cosmon_core::harness::Clock;
 use cosmon_core::harvest_authorization::{
-    authorize, reservations_crossed, AuthorizedHarvest, ConsumptionRecord, HarvestAction,
-    HarvestConsumptionLedger, HarvestFacts, HarvestRefusal, HarvestSealVerifier,
+    authorize, reservations_crossed, AuthorizedHarvest, ConsumptionRecord, DoneAuthorization,
+    HarvestAction, HarvestConsumptionLedger, HarvestFacts, HarvestRefusal, HarvestScope,
+    HarvestSealVerifier,
 };
 use cosmon_core::id::MoleculeId;
 use cosmon_filestore::harvest_authority::{
     read_epoch, read_policy_digest, FileConsumptionLedger, MinisignHarvestVerifier,
     NoHarvestTrustRoot,
 };
+use cosmon_state::StateStore;
 use cosmon_state::TrunkGuard;
+
+use crate::authorization_facts::{strict_mission_ancestry, AuthorizationFacts, MissionAncestry};
 
 /// What the effect boundary decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +76,9 @@ pub enum HarvestDecision {
     Refused(String),
 }
 
-/// Everything the effect boundary needs from the `cs done` transaction.
+/// Legacy positional facts for callers that have not migrated to the strict
+/// [`AuthorizationFacts`] loader. The production transaction uses
+/// `authorize_harvest_from_facts`.
 ///
 /// Grouped into one struct rather than passed as nine parameters because the
 /// call site assembles all of them at one point — under the trunk lock — and a
@@ -97,16 +104,21 @@ pub struct HarvestRequest<'a> {
     pub invocation_id: &'a str,
 }
 
-/// Verify and consume a harvest authorisation, under the trunk lock.
+/// Verify and reserve a harvest authorisation from caller-supplied facts.
+///
+/// This compatibility entry preserves existing signed-grant tests and old
+/// library callers. It cannot establish that `mission`, tags or base came
+/// from current state. The `cs done` effect uses
+/// `authorize_harvest_from_facts` with strict locked facts instead.
 ///
 /// `_trunk` is the proof the caller holds the lock. It is deliberately unused:
 /// its job is to make "call this before locking" a compile error rather than a
 /// review comment.
 ///
-/// The order is fixed and load-bearing. Facts are re-derived here, the seal is
-/// checked against them, and the reservation is appended before the first Git
-/// mutation. The transaction then syncs a prepared progress record; neither
-/// line alone asserts that integration succeeded.
+/// The order is fixed and load-bearing. The seal is checked against the given
+/// facts, and the reservation is appended before the first Git mutation. The
+/// transaction then syncs a prepared progress record; neither line alone
+/// asserts that integration succeeded.
 ///
 /// # Errors
 ///
@@ -156,11 +168,119 @@ pub fn authorize_harvest(
         None => &NoHarvestTrustRoot,
     };
 
-    let ledger = FileConsumptionLedger::at_state_root(state_root);
     let candidates = cosmon_filestore::harvest_authority::load_authorizations(state_root)?;
+    authorize_candidates(
+        state_root,
+        molecule,
+        base,
+        invocation_id,
+        &candidates,
+        verifier,
+        |_| Ok(facts.clone()),
+    )
+}
+
+/// Verify and reserve authority using the strict snapshot read under the
+/// trunk lock. Grant tooling uses the same [`AuthorizationFacts`] loader.
+/// Mission ancestry is read only for a mission-scoped candidate; an ordinary
+/// molecule seal does not depend on unrelated parents being readable.
+///
+/// # Errors
+///
+/// Returns a state fault if a needed mission ancestor is missing or ambiguous,
+/// or if grant or receipt storage is unreadable.
+pub(crate) fn authorize_harvest_from_facts(
+    _trunk: &dyn TrunkGuard,
+    facts: &AuthorizationFacts,
+    request: &LockedHarvestRequest<'_>,
+) -> Result<HarvestDecision, CosmonError> {
+    if !facts.config.harvest_authority.is_required() {
+        return Ok(HarvestDecision::NotInForce);
+    }
+    let no_root = NoHarvestTrustRoot;
+    let verifier: &dyn HarvestSealVerifier = facts
+        .verifier
+        .as_ref()
+        .map_or(&no_root, |v| v as &dyn HarvestSealVerifier);
+    let candidates = cosmon_filestore::harvest_authority::load_authorizations(request.state_root)?;
+    authorize_candidates(
+        request.state_root,
+        request.molecule,
+        &facts.base.branch,
+        request.invocation_id,
+        &candidates,
+        verifier,
+        |authorization| {
+            let mission = match &authorization.grant().scope {
+                HarvestScope::Molecule { .. } => None,
+                HarvestScope::Mission { .. } => {
+                    let before = match request.preliminary_mission {
+                        Some(Ok(before)) => before,
+                        Some(Err(_)) => {
+                            return Err(CosmonError::StateStore {
+                                reason: "harvest_facts_unavailable: preliminary mission ancestry"
+                                    .to_owned(),
+                            });
+                        }
+                        None => {
+                            return Err(CosmonError::StateStore {
+                                reason: "harvest_facts_changed: mission grant appeared after gates"
+                                    .to_owned(),
+                            });
+                        }
+                    };
+                    let current = strict_mission_ancestry(request.store, request.molecule)?;
+                    if before != &current {
+                        return Err(CosmonError::StateStore {
+                            reason: "harvest_facts_changed: mission ancestry changed after gates"
+                                .to_owned(),
+                        });
+                    }
+                    Some(current.root)
+                }
+            };
+            Ok(facts.for_effect(request.molecule, mission, request.clock.now()))
+        },
+    )
+}
+
+/// Dependencies already under the trunk guard for one effect decision.
+pub(crate) struct LockedHarvestRequest<'a> {
+    /// State port for strict mission ancestry.
+    pub store: &'a dyn StateStore,
+    /// Durable grant and receipt residence.
+    pub state_root: &'a Path,
+    /// Target molecule.
+    pub molecule: &'a MoleculeId,
+    /// Correlation ID shared by the transaction and receipt.
+    pub invocation_id: &'a str,
+    /// Pre-gate mission graph, when a mission grant was present.
+    pub preliminary_mission: Option<&'a Result<MissionAncestry, CosmonError>>,
+    /// Current time port for expiry decisions.
+    pub clock: &'a dyn Clock,
+}
+
+fn authorize_candidates(
+    state_root: &Path,
+    molecule: &MoleculeId,
+    base: &str,
+    invocation_id: &str,
+    candidates: &[DoneAuthorization],
+    verifier: &dyn HarvestSealVerifier,
+    mut fact_for: impl FnMut(&DoneAuthorization) -> Result<HarvestFacts, CosmonError>,
+) -> Result<HarvestDecision, CosmonError> {
+    let ledger = FileConsumptionLedger::at_state_root(state_root);
 
     let mut refusals: Vec<String> = Vec::new();
-    for authorization in &candidates {
+    let mut fact_fault: Option<CosmonError> = None;
+    for authorization in candidates {
+        let facts = match fact_for(authorization) {
+            Ok(facts) => facts,
+            Err(error) => {
+                fact_fault = Some(error);
+                continue;
+            }
+        };
         let mut prior: Option<ConsumptionRecord> = None;
         for permit in authorization.receipt_ids(&facts.molecule) {
             if let Some(record) = ledger
@@ -200,7 +320,7 @@ pub fn authorize_harvest(
                     grant: granted.grant.clone(),
                     effect: granted.effect.clone(),
                     key_id: granted.key_id,
-                    invocation_id: (*invocation_id).to_owned(),
+                    invocation_id: invocation_id.to_owned(),
                 };
                 ledger
                     .consume(&record)
@@ -209,6 +329,10 @@ pub fn authorize_harvest(
             }
             Err(refusal) => refusals.push(refusal_line(&refusal)),
         }
+    }
+
+    if let Some(error) = fact_fault {
+        return Err(error);
     }
 
     Ok(HarvestDecision::Refused(refusal_message(

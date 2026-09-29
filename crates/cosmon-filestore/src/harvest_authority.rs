@@ -99,6 +99,7 @@ pub const HARVEST_GRANT_ENV: &str = "COSMON_HARVEST_GRANT";
 pub struct MinisignHarvestVerifier {
     key: MinisignPublicKey,
     source: PathBuf,
+    content_digest: String,
 }
 
 impl MinisignHarvestVerifier {
@@ -115,7 +116,11 @@ impl MinisignHarvestVerifier {
         let key = MinisignPublicKey::parse(text).map_err(|e| CosmonError::StateStore {
             reason: format!("{} is not a minisign public key: {e}", source.display()),
         })?;
-        Ok(Self { key, source })
+        Ok(Self {
+            key,
+            source,
+            content_digest: cosmon_core::harvest_authorization::policy_digest(text.as_bytes()),
+        })
     }
 
     /// Read a pinned key from `path`.
@@ -152,8 +157,17 @@ impl MinisignHarvestVerifier {
         let galaxy_root = galaxy_root.as_ref();
         for rel in [HARVEST_PUBKEY_REL, crate::TAKEOVER_PUBKEY_REL] {
             let candidate = galaxy_root.join(rel);
-            if candidate.exists() {
-                return Self::from_path(candidate).map(Some);
+            match std::fs::read_to_string(&candidate) {
+                Ok(text) => return Self::from_public_key_text(&text, candidate).map(Some),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(CosmonError::StateStore {
+                        reason: format!(
+                            "failed to read harvest public key {}: {e}",
+                            candidate.display()
+                        ),
+                    });
+                }
             }
         }
         Ok(None)
@@ -163,6 +177,15 @@ impl MinisignHarvestVerifier {
     #[must_use]
     pub fn source(&self) -> &Path {
         &self.source
+    }
+
+    /// Digest of the exact trust-root bytes read for this verifier.
+    ///
+    /// The effect's preliminary and locked snapshots compare this alongside
+    /// the source path so a key replacement cannot inherit an earlier gate.
+    #[must_use]
+    pub fn content_digest(&self) -> &str {
+        &self.content_digest
     }
 }
 
@@ -234,12 +257,15 @@ impl HarvestSealVerifier for NoHarvestTrustRoot {
 /// not hold a decimal counter.
 pub fn read_epoch(galaxy_root: impl AsRef<Path>) -> Result<GrantEpoch, CosmonError> {
     let path = galaxy_root.as_ref().join(HARVEST_EPOCH_REL);
-    if !path.exists() {
-        return Ok(GrantEpoch::first());
-    }
-    let raw = std::fs::read_to_string(&path).map_err(|e| CosmonError::StateStore {
-        reason: format!("failed to read harvest epoch {}: {e}", path.display()),
-    })?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(GrantEpoch::first()),
+        Err(e) => {
+            return Err(CosmonError::StateStore {
+                reason: format!("failed to read harvest epoch {}: {e}", path.display()),
+            })
+        }
+    };
     raw.trim()
         .parse::<u64>()
         .map(GrantEpoch::from_u64)
@@ -271,17 +297,30 @@ pub const HARVEST_POLICY_REL: &str = ".cosmon/harvest-policy.toml";
 ///
 /// [`CosmonError::StateStore`] when the file exists but cannot be read.
 pub fn read_policy_digest(galaxy_root: impl AsRef<Path>) -> Result<String, CosmonError> {
+    let bytes = read_policy_bytes(galaxy_root)?;
+    Ok(cosmon_core::harvest_authorization::policy_digest(
+        bytes.as_deref().unwrap_or_default(),
+    ))
+}
+
+/// Read the policy as an optional byte sequence, preserving the distinction
+/// between no policy and an unreadable policy for authority diagnostics.
+///
+/// # Errors
+///
+/// Returns [`CosmonError::StateStore`] when an existing policy cannot be read.
+pub fn read_policy_bytes(galaxy_root: impl AsRef<Path>) -> Result<Option<Vec<u8>>, CosmonError> {
     let path = galaxy_root.as_ref().join(HARVEST_POLICY_REL);
     let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => {
             return Err(CosmonError::StateStore {
                 reason: format!("failed to read harvest policy {}: {e}", path.display()),
             })
         }
     };
-    Ok(cosmon_core::harvest_authorization::policy_digest(&bytes))
+    Ok(bytes)
 }
 
 // ---------------------------------------------------------------------------
