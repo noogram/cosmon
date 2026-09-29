@@ -1410,7 +1410,7 @@ EXIT CODES (decide): 0 approve, 2 refuse, 1 error.
 SEE ALSO: cs notarize (operator Ed25519 attestation), cs witness (quorum seal).";
 
 pub const WORK: &str = "EXAMPLES:
-  cs nucleate task-work --title 'review task-2026...-0001'    # reviewer molecule
+  cs nucleate task-work --var topic='review task-2026...-0001'  # reviewer molecule
   cs tackle <reviewer> --adapter codex --model gpt-5.6-sol    # on another provider
   cs work declare <owner> --seat impl=<implementer> --seat review=<reviewer>
   cs work send --to review --text 'finding: the retry loop never backs off'
