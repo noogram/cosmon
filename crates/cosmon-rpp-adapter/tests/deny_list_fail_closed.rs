@@ -91,6 +91,7 @@ fn malformed_policy_refresh_never_clears_an_existing_revocation() {
         ),
         "a failed refresh must refuse all admission"
     );
+    assert!(deny_list.is_sub_revoked(&sub_hash));
 
     fs::write(&policy, "").unwrap();
     assert!(
@@ -116,5 +117,47 @@ fn unreadable_operator_files_close_admission_on_refresh() {
             ),
             "{name} must close admission after a read error"
         );
+        let boot_list = DenyList::new(td.path().to_path_buf());
+        assert!(
+            matches!(
+                admission_result(td.path(), &boot_list),
+                Err(RppRejectReason::GlobalKill)
+            ),
+            "{name} must close admission on a fresh boot too"
+        );
     }
+}
+
+#[test]
+fn invalid_kill_switch_refresh_closes_admission_until_repaired() {
+    let td = tempfile::tempdir().unwrap();
+    let kill = security(td.path()).join("oidc-kill.toml");
+    fs::write(&kill, "[global]\nenabled = false\n").unwrap();
+    let deny_list = DenyList::new(td.path().to_path_buf()).with_ttl(Duration::ZERO);
+    assert!(admission_result(td.path(), &deny_list).is_ok());
+
+    // A misspelled security field must not be accepted as a disabled switch.
+    fs::write(&kill, "[global]\nenabld = true\n").unwrap();
+    assert!(matches!(
+        admission_result(td.path(), &deny_list),
+        Err(RppRejectReason::GlobalKill)
+    ));
+
+    fs::write(&kill, "[global]\nenabled = false\n").unwrap();
+    assert!(admission_result(td.path(), &deny_list).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_operator_file_is_unreadable_not_absent() {
+    use std::os::unix::fs::symlink;
+
+    let td = tempfile::tempdir().unwrap();
+    let policy = security(td.path()).join("oidc-policy.toml");
+    symlink("missing-policy", &policy).unwrap();
+    let deny_list = DenyList::new(td.path().to_path_buf());
+    assert!(matches!(
+        admission_result(td.path(), &deny_list),
+        Err(RppRejectReason::GlobalKill)
+    ));
 }

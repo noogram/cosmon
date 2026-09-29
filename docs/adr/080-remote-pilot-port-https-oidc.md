@@ -700,6 +700,13 @@ These commands are **operator-only** (§5). The RPP does **not** expose them.
 
 Operator command → effect at the RPP: **≤ 30 s** (cache TTL). No remote round-trip required: the deny-list lives on the same filesystem as the adapter binary. For multi-host deployments, the deny-list is replicated by the operator's existing filesystem replication (`rclone sync`, `rsync`, NFS). Replication latency is the operator's responsibility; the RPP guarantees its own re-read latency.
 
+An absent file is an empty policy. An existing file that cannot be read or
+parsed closes admission for every tenant at boot or on refresh, with an
+operator-facing error. The adapter keeps that deny-all decision until both
+files can be read again. This avoids relying on an earlier snapshot that may
+omit a newly requested revocation. A successful refresh restores admission
+according to the current files.
+
 ---
 
 ## 8. Identity, multi-tenant, and the four-key segregation

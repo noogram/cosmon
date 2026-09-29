@@ -387,6 +387,9 @@ async fn main() -> anyhow::Result<()> {
         state_dir.join("security/oidc-rate-limit"),
     ));
     let deny_list = Arc::new(DenyList::new(state_dir.clone()));
+    // Read before serving so a broken operator file is reported at boot,
+    // rather than only when the first tenant request reaches admission.
+    let _ = deny_list.snapshot();
 
     let backend_health = Arc::new(BackendHealthRegistry::new());
     let configured_backends = cfg.resolved_backends();

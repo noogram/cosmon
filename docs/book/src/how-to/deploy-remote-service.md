@@ -169,6 +169,16 @@ rules explicit.
 
 ## Step 3: Start the fente on loopback
 
+The adapter reads `state/security/oidc-kill.toml` and
+`state/security/oidc-policy.toml` at startup and refreshes them at most 30 s
+after a change. Both files are optional. If either file exists but cannot be
+read or parsed, the adapter logs an error naming the file and refuses all
+tenant admission with `global_kill` (HTTP 503). This also applies after a
+refresh, even if the previous contents were valid. Repair or remove the bad
+file; the next refresh restores admission from both files. A misspelled field
+in the kill switch or policy structure is an error, so check the adapter log
+after changing either file.
+
 Start `cosmon-rpp-adapter` with its state directory, tenant configuration, and
 the loopback address that the tunnel will reach. Keep this process supervised
 by the service manager available to the host.
