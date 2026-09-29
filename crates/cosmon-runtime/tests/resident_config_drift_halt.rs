@@ -7,10 +7,9 @@
 //! The ADR-095 Resident Runtime seals `.cosmon/config.toml` (+ the global
 //! tier) at launch and re-checks it before every dispatch. Issue #91
 //! narrowed the original blanket halt (any edit at all) to: **reload** the
-//! fresh config and keep going when nothing already dispatched can be
-//! affected, **halt fail-closed** only when the `[adapters]` dispatch
-//! surface changed *and* a molecule is currently `running` under the old
-//! one.
+//! fresh config and keep going when no running molecule's effective adapter
+//! settings changed, **halt fail-closed** when a running molecule's settings
+//! changed or its adapter is unknown.
 //!
 //! # The retroactive acceptance criterion (still binding)
 //!
@@ -24,11 +23,11 @@
 //!
 //! # Issue #91 — the narrowed cases
 //!
-//! `config_drift_with_no_running_molecules_reloads_and_dispatches` and
-//! `config_drift_in_unrelated_section_reloads_even_with_running_molecule`
-//! reproduce the complaint in the issue: a config edit with nothing already
-//! dispatched to protect must not halt an otherwise-idle DAG waiting on an
-//! external watchdog to relaunch it.
+//! `config_drift_with_no_running_molecules_reloads_and_dispatches`,
+//! `config_drift_in_unrelated_section_reloads_even_with_running_molecule`,
+//! and `config_drift_in_unused_adapter_reloads_with_running_molecule`
+//! reproduce the complaint in the issue: a config edit that changes no
+//! running worker's settings must not halt the DAG.
 //!
 //! # The self-poisoning regression
 //!
@@ -208,6 +207,57 @@ def main(argv):
         TICK.touch()
         return 0
     sys.stderr.write(f"stub: unknown verb {verb!r}\n")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+"#;
+
+/// Change only an adapter row that the running molecule does not use.
+/// The pending sibling must still be dispatched after the reload.
+const PY_STUB_UNUSED_ADAPTER_DRIFT_WHILE_RUNNING: &str = r#"#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+FLEET = Path("__FLEET_PATH__")
+CONFIG = Path("__CONFIG_PATH__")
+TICK = Path("__TICK_PATH__")
+
+
+def main(argv):
+    if len(argv) < 2:
+        return 2
+    verb = argv[1]
+    if verb == "ensemble":
+        CONFIG.write_text('[adapters]\ndefault = "local"\n[adapters.unused]\nmode = "exec"\n')
+        TICK.touch()
+        sys.stdout.write(FLEET.read_text())
+        return 0
+    if verb == "observe":
+        if len(argv) < 3:
+            return 2
+        data = json.loads(FLEET.read_text())
+        for m in data["molecules"]:
+            if m["id"] == argv[2]:
+                sys.stdout.write(json.dumps({"status": m["status"]}))
+                return 0
+        sys.stdout.write(json.dumps({"status": "absent"}))
+        return 0
+    if verb in ("tackle", "done"):
+        if len(argv) < 3:
+            return 2
+        data = json.loads(FLEET.read_text())
+        if verb == "tackle":
+            for m in data["molecules"]:
+                if m["id"] == argv[2]:
+                    m["status"] = "completed"
+        else:
+            data["molecules"] = [m for m in data["molecules"] if m["id"] != argv[2]]
+        FLEET.write_text(json.dumps(data))
+        TICK.touch()
+        return 0
     return 2
 
 
@@ -402,7 +452,7 @@ fn config_drift_while_molecule_running_still_halts_fail_closed() {
     std::fs::write(
         &fleet_path,
         br#"{"molecules":[
-            {"id":"task-20260531-bbbb","status":"running","blocked_by":[]},
+            {"id":"task-20260531-bbbb","status":"running","dispatched_adapter":"local","blocked_by":[]},
             {"id":"task-20260531-cccc","status":"pending","blocked_by":[]}
         ]}"#,
     )
@@ -564,6 +614,73 @@ fn config_drift_in_unrelated_section_reloads_even_with_running_molecule() {
     assert_eq!(
         reload_line["decision_basis"],
         "config-seal-reload-unaffected-surface",
+    );
+}
+
+/// An edit to an adapter no running worker uses must reload even though the
+/// `[adapters]` table changed. The assertion covers the resident decision and
+/// the pending sibling's actual tackle, rather than only a helper comparison.
+#[test]
+fn config_drift_in_unused_adapter_reloads_with_running_molecule() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let cosmon = root.join(".cosmon");
+    let state_dir = cosmon.join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+
+    let config_path = cosmon.join("config.toml");
+    std::fs::write(
+        &config_path,
+        b"[adapters]\ndefault = \"local\"\n[adapters.unused]\nmode = \"interactive\"\n",
+    )
+    .unwrap();
+    let fleet_path = state_dir.join("fleet.json");
+    std::fs::write(
+        &fleet_path,
+        br#"{"molecules":[
+            {"id":"task-20260531-dddd","status":"running","adapter":"local","dispatched_adapter":"local","blocked_by":[]},
+            {"id":"task-20260531-eeee","status":"pending","blocked_by":[]}
+        ]}"#,
+    )
+    .unwrap();
+    let tick_path = state_dir.join("wake.touch");
+    std::fs::write(&tick_path, b"").unwrap();
+    let stub_path = root.join("cs_stub.py");
+    let stub_body = common::with_fast_python_shebang(PY_STUB_UNUSED_ADAPTER_DRIFT_WHILE_RUNNING)
+        .replace("__FLEET_PATH__", fleet_path.to_string_lossy().as_ref())
+        .replace("__CONFIG_PATH__", config_path.to_string_lossy().as_ref())
+        .replace("__TICK_PATH__", tick_path.to_string_lossy().as_ref());
+    std::fs::write(&stub_path, stub_body).unwrap();
+    make_executable(&stub_path);
+
+    let mut config = RuntimeLoopConfig::new(&root);
+    config.cs_binary = stub_path;
+    config.poll_interval = Duration::from_millis(20);
+    config.max_runtime = Some(Duration::from_millis(400));
+    let scheduler: Box<dyn ResidentScheduler> = Box::new(ReadyFrontierScheduler::new());
+    let mut runtime = RuntimeLoop::new(config, scheduler);
+    let trace_path = runtime.trace_path().to_path_buf();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let summary = runtime.run(&shutdown).expect("loop returns a summary");
+
+    if summary.exit == ExitReason::ConfigDrift {
+        common::dump_trace(&trace_path, &summary);
+    }
+    assert_ne!(summary.exit, ExitReason::ConfigDrift, "{summary:?}");
+    assert_eq!(
+        summary.tackles, 1,
+        "pending sibling must dispatch: {summary:?}"
+    );
+    assert!(summary.config_reloads >= 1, "edit must reload: {summary:?}");
+    let trace = std::fs::read_to_string(&trace_path).expect("trace exists");
+    let reload_line = trace
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("trace line is JSON"))
+        .find(|line| line["action"] == "config-reloaded")
+        .expect("reload must be traced");
+    assert_eq!(
+        reload_line["decision_basis"],
+        "config-seal-reload-unaffected-adapters"
     );
 }
 

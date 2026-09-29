@@ -250,16 +250,12 @@ structural reason. The witness obligation above is refined, not repealed:
    `cs tackle`'s adapter/model resolution (ADR-097 / C6) reads — call it the
    **dispatch surface**.
 3. **Reload** (adopt `H'` as the new seal, keep running, record a
-   `config-reloaded` trace line) when *either* the dispatch surface is
-   unchanged (the edit was elsewhere), *or* no molecule is currently
-   `running`. Neither case has anything already dispatched that the edit
-   could contradict.
+   `config-reloaded` trace line) when no running molecule's effective adapter
+   settings changed. An edit to an adapter no running worker uses is safe.
 4. **Halt fail-closed** (unchanged from above: refuse the dispatch, emit
-   `EventV2::ConfigDriftDetected`, `exit(75)`) when the dispatch surface
-   changed *and* a molecule is `running` — that molecule was already
-   dispatched under the surface that just changed underneath it, which is
-   exactly the "silently billing the wrong oracle" shape this witness
-   obligation exists to prevent.
+   `EventV2::ConfigDriftDetected`, `exit(75)`) when a running molecule's
+   effective adapter settings changed, or its adapter is unknown so the
+   comparison cannot prove the edit unrelated.
 
 Still never a SIGHUP-style in-place *merge* of arbitrary config: a "safe"
 reload is decided by *whether* anything running depends on the changed
