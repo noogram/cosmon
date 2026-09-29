@@ -6,7 +6,7 @@
 
 ## `cs tackle`
 
-Tackle a molecule — spawn ONE worker on this node (always leaf; for DAG walks use `cs run`)
+Tackle a molecule — claim before model selection and spawn ONE worker (for DAG walks use `cs run`)
 
 **Usage:** `cs tackle [OPTIONS] <MOLECULE>`
 
@@ -27,6 +27,10 @@ exactly as before.
 never walks the DAG. To walk a DAG of N≥1 nodes (1 = leaf, N = full
 orchestration), use `cs run` instead. Human only. Workers never
 self-tackle. Pairs with `cs done`.
+
+Dispatch claims are per molecule and precede model selection. If another
+tackle wins, this command exits non-zero and names its worker, adapter and
+selected model. An unpinned adapter default is reported as unrecorded.
 
 The historical `--leaf` and `--force-runtime` flags are deprecated
 no-ops since the verb-unification: the routing decision is now the
@@ -91,7 +95,7 @@ SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).
    When set, `cs tackle` mints an [`EventV2::LocalFallback`](cosmon_core::event_v2::EventV2::LocalFallback) line in the *same atom* as the `RemoteEgressOptIn` egress grant, so a remote call carrying a fallback cause can never reach the wire without a matching loud audit record — silent fallback is impossible by construction. Soft "the output looked bad" judgement is NOT a valid cause: that is undecidable (Rice) and belongs to acceptance tests, not this routing flag.
 * `--by <ACTOR>` — Actor class recording **who** dispatched this molecule — the anti-preemption lease.
 
-   Accepts `human` (the default when the flag is absent — a direct operator invocation) or `runtime:<pid>` (the resident runtime `cs run` passes its own process id). The value is stamped onto the molecule's [`tackled_by`](cosmon_state::MoleculeData::tackled_by) field when the molecule flips to `Running`, so the walker can enforce "manual always wins": a human-claimed molecule is never raffled by the runtime, even if it briefly returns to `Pending` on a revision. This is `cs tackle`'s only role in the lease — recording the claim; honouring it is the walker's job.
+   Accepts `human` (the default when the flag is absent — a direct operator invocation) or `runtime:<pid>` (the resident runtime `cs run` passes its own process id). The value is stamped onto the molecule's [`tackled_by`](cosmon_state::MoleculeData::tackled_by) field when the molecule flips to `Running`, so the walker can preserve a prior human claim: a human-claimed molecule is never raffled by the runtime, even if it briefly returns to `Pending` on a revision. This is `cs tackle`'s only role in the lease — recording the claim; honouring it is the walker's job.
 
   Default value: `human`
 * `--harness <KEY=VALUE>` — Per-dispatch **harness setting** — `key=value`, repeatable (ADR-177 / issue #65).

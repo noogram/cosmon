@@ -753,6 +753,10 @@ never walks the DAG. To walk a DAG of N≥1 nodes (1 = leaf, N = full
 orchestration), use `cs run` instead. Human only. Workers never
 self-tackle. Pairs with `cs done`.
 
+Dispatch claims are per molecule and precede model selection. If another
+tackle wins, this command exits non-zero and names its worker, adapter and
+selected model. An unpinned adapter default is reported as unrecorded.
+
 The historical `--leaf` and `--force-runtime` flags are deprecated
 no-ops since the verb-unification: the routing decision is now the
 verb itself, not a flag on a polymorphic command.

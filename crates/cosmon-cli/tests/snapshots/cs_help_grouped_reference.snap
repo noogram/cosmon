@@ -58,7 +58,7 @@ Fleet management:
   wait                 Wait — block until a molecule reaches a terminal (or requested) status
 
 Execution:
-  tackle               Tackle a molecule — spawn ONE worker on this node (always leaf; for DAG walks use `cs run`)
+  tackle               Tackle a molecule — claim before model selection and spawn ONE worker (for DAG walks use `cs run`)
   done                 Done — terminal teardown for a molecule (merge + cleanup, human-callable)
   sync                 Sync — base-sync the current worktree from main, stamping a Base-Sync trailer
   harvest              Harvest — close a completed-but-unmerged molecule by invoking `cs done`

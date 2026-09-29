@@ -79,17 +79,20 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              without a git checkout dance, and what lets a 'cs done' fired by a \
              tmux hook (whose environment froze when the tmux server started) still \
              land on the right trunk.\n\n\
-             ANTI-PREEMPTION LEASE. A human 'cs tackle' and a \
-             running 'cs run' are two writers racing on the same Pending → Active \
-             flip, so every tackle records WHO dispatched it: 'cs tackle --by human' \
+             DISPATCH CLAIM. A manual 'cs tackle' and a resident 'cs run' \
+             serialize on the molecule before adapter and model selection. \
+             The losing tackle exits non-zero and names the winning worker, \
+             adapter and selected model; an unpinned adapter default is \
+             reported as unrecorded. Every tackle also records WHO dispatched it: \
+             'cs tackle --by human' \
              (the default) or 'cs tackle --by runtime:<pid>' (what 'cs run' passes). \
              The walker re-reads each candidate fresh from disk right before dispatch \
              and SKIPS anything no longer Pending, carrying a sticky 'human' claim, \
              or tagged 'hold:pilot'. Use 'cs claim <id>' before reaching for a pending \
              molecule: it writes the durable pilot hold before 'cs tackle', and \
-             'cs release <id>' removes it. The runtime always defers to that hold. \
-             'manual always wins', the runtime never raffles a molecule you reached \
-             for. Binary owner field, no clock to calibrate. Operators do not normally \
+             'cs release <id>' removes it. The runtime defers when its \
+             post-lock recheck sees that hold. Otherwise the first tackle \
+             to claim the molecule wins. Operators do not normally \
              type '--by'; 'human' is the default.\n\n\
              SPORE (ADR-140) germinates a whole polymer from a shareable \
              'spore.toml' template, the way 'cs nucleate' germinates one \

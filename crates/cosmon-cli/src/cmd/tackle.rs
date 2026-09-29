@@ -285,7 +285,7 @@ pub struct Args {
     /// `cs run` passes its own process id). The value is stamped onto the
     /// molecule's [`tackled_by`](cosmon_state::MoleculeData::tackled_by)
     /// field when the molecule flips to `Running`, so the walker can
-    /// enforce "manual always wins": a human-claimed molecule is never
+    /// preserve a prior human claim: a human-claimed molecule is never
     /// raffled by the runtime, even if it briefly returns to `Pending` on a
     /// revision. This is `cs tackle`'s only role in the lease — recording
     /// the claim; honouring it is the walker's job.
@@ -368,6 +368,55 @@ struct LocalWorkerJob {
 
 /// Maximum tmux session name length accepted by `--name`.
 const MAX_SESSION_NAME_LEN: usize = 50;
+
+/// Reconcile a snapshot taken before the dispatch claim with the winner.
+fn refresh_after_dispatch_claim(
+    store: &FileStore,
+    prior: &MoleculeData,
+    force: bool,
+    tackled_by: &cosmon_core::tackle::TackledBy,
+) -> anyhow::Result<MoleculeData> {
+    let current = store.load_molecule(&prior.id)?;
+    if !tackled_by.is_human()
+        && (current.is_human_claimed()
+            || current.tags.iter().any(|tag| tag.as_str() == "hold:pilot"))
+    {
+        return Err(anyhow::anyhow!(
+            "cs tackle: runtime dispatch of {} refused: pilot holds the molecule",
+            prior.id
+        ));
+    }
+    if let Some(process) = current.process.as_ref() {
+        if !force || current.process != prior.process {
+            let adapter = process.adapter_name.as_deref().unwrap_or("unknown");
+            let model = process
+                .model
+                .as_deref()
+                .unwrap_or("adapter default (unrecorded)");
+            return Err(anyhow::anyhow!(
+                "cs tackle: dispatch claim lost for {}: winning worker {}, adapter {}, model {}",
+                prior.id,
+                process.worker_id,
+                adapter,
+                model
+            ));
+        }
+    }
+    if !current.status.is_alive() {
+        return Err(anyhow::anyhow!(
+            "molecule {} is {} — cannot tackle a terminal molecule",
+            current.id,
+            current.status
+        ));
+    }
+    if current.status == MoleculeStatus::Running && current.process.is_none() && !force {
+        return Err(anyhow::anyhow!(
+            "cs tackle: molecule {} is already running without a worker process",
+            current.id
+        ));
+    }
+    Ok(current)
+}
 
 /// Sanitize and validate a user-supplied session name.
 ///
@@ -583,6 +632,19 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
              `cs tackle` no longer routes to runtime mode; pass --force-runtime \
              to `cs run` instead to override the backlog-sanity guard."
         );
+    }
+
+    // Claim the molecule before resolving its adapter or model. The resident
+    // runtime shells out to this same command, so the lock serializes both
+    // contenders through the recorded spawn verdict. A dry run has no spawn
+    // to claim. Re-read after waiting: the snapshot above may be stale.
+    let dispatch_claim = if args.dry_run {
+        None
+    } else {
+        Some(store.acquire_dispatch_lock(&mol_id)?)
+    };
+    if dispatch_claim.is_some() {
+        mol = refresh_after_dispatch_claim(&store, &mol, args.force, &tackled_by)?;
     }
 
     // 2. Load formula for context.
@@ -9770,6 +9832,107 @@ mod tests {
             !lease_path.exists(),
             "dropping the lease guard must remove the marker file"
         );
+    }
+
+    #[test]
+    fn dispatch_claim_waits_then_names_the_winning_worker_adapter_and_model() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (_tmp, state_dir) = make_store();
+        let store = FileStore::new(&state_dir);
+        let pending = sample_molecule("task-20260928-a119", MoleculeStatus::Pending);
+        store.save_molecule(&pending.id, &pending).unwrap();
+
+        let first_claim = store.acquire_dispatch_lock(&pending.id).unwrap();
+        let (attempted_tx, attempted_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let other_store = store.clone();
+        let stale_snapshot = pending.clone();
+        let loser = std::thread::spawn(move || {
+            attempted_tx.send(()).unwrap();
+            let _claim = other_store
+                .acquire_dispatch_lock(&stale_snapshot.id)
+                .unwrap();
+            let result = refresh_after_dispatch_claim(
+                &other_store,
+                &stale_snapshot,
+                false,
+                &cosmon_core::tackle::TackledBy::Human,
+            )
+            .map(|_| String::new())
+            .unwrap_or_else(|error| error.to_string());
+            result_tx.send(result).unwrap();
+        });
+        attempted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(result_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        let worker = WorkerId::new("winning-worker").unwrap();
+        let mut winner = pending;
+        winner.status = MoleculeStatus::Running;
+        winner.bind_process(
+            cosmon_core::process::MoleculeProcess::new(worker, "winning-worker".to_owned())
+                .with_adapter_name("local")
+                .with_model(Some("model-pinned")),
+        );
+        store.save_molecule(&winner.id, &winner).unwrap();
+        drop(first_claim);
+
+        let error = result_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        loser.join().unwrap();
+        assert!(error.contains("winning-worker"), "{error}");
+        assert!(error.contains("local"), "{error}");
+        assert!(error.contains("model-pinned"), "{error}");
+    }
+
+    #[test]
+    fn resident_rechecks_pilot_hold_after_dispatch_claim() {
+        let (_tmp, state_dir) = make_store();
+        let store = FileStore::new(&state_dir);
+        let pending = sample_molecule("task-20260928-b119", MoleculeStatus::Pending);
+        store.save_molecule(&pending.id, &pending).unwrap();
+        let mut claimed = pending.clone();
+        claimed
+            .tags
+            .insert(cosmon_core::tag::Tag::new("hold:pilot").unwrap());
+        store.save_molecule(&claimed.id, &claimed).unwrap();
+
+        let _claim = store.acquire_dispatch_lock(&pending.id).unwrap();
+        let error = refresh_after_dispatch_claim(
+            &store,
+            &pending,
+            false,
+            &cosmon_core::tackle::TackledBy::runtime(42),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("pilot holds"), "{error}");
+        assert_eq!(
+            store.load_molecule(&pending.id).unwrap().status,
+            MoleculeStatus::Pending
+        );
+    }
+
+    #[test]
+    fn second_tackle_refuses_running_molecule_without_process() {
+        let (_tmp, state_dir) = make_store();
+        let store = FileStore::new(&state_dir);
+        let pending = sample_molecule("task-20260928-c119", MoleculeStatus::Pending);
+        store.save_molecule(&pending.id, &pending).unwrap();
+        let mut running = pending.clone();
+        running.status = MoleculeStatus::Running;
+        store.save_molecule(&running.id, &running).unwrap();
+
+        let _claim = store.acquire_dispatch_lock(&pending.id).unwrap();
+        let error = refresh_after_dispatch_claim(
+            &store,
+            &pending,
+            false,
+            &cosmon_core::tackle::TackledBy::Human,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("already running"), "{error}");
     }
 
     /// COSMON #90 — the end-to-end shape of the fix: a *live* session torn
