@@ -6688,10 +6688,22 @@ fn codex_launch_dialogue(
     backend: &dyn TransportBackend,
     wid: &cosmon_core::id::WorkerId,
 ) -> anyhow::Result<Option<cosmon_core::dialogue::DialogueScan>> {
-    use cosmon_core::dialogue::{classify_codex_dialog, classify_pane};
+    use cosmon_core::dialogue::{
+        classify_codex_dialog, classify_pane, CodexDialogKind, DialogueClass,
+    };
 
     let pane = backend.capture_output(wid, 40)?;
-    Ok(classify_codex_dialog(&pane).map(|_| classify_pane(&pane)))
+    let kind = classify_codex_dialog(&pane);
+    let scan = classify_pane(&pane);
+    // A completed update can leave an informational restart notice in the
+    // scrollback after the normal prompt appears. Keep observing that notice
+    // elsewhere, but do not block briefing on it alone. A real blocking menu
+    // in the same capture still wins.
+    Ok(match kind {
+        Some(CodexDialogKind::RestartRequired) if scan.class == DialogueClass::None => None,
+        Some(_) => Some(scan),
+        None => None,
+    })
 }
 
 /// Deliver only when the launch pane has no recognised codex menu.
@@ -9886,6 +9898,10 @@ mod tests {
             (
                 "Update ran successfully! Please restart.\n› Ask codex to do anything",
                 None,
+            ),
+            (
+                "Update ran successfully! Please restart.\nSelect Reasoning Level for model\n› 1. Medium",
+                Some(DialogueClass::Unknown),
             ),
         ] {
             backend.set_canned_output(pane);
