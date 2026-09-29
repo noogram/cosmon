@@ -50,11 +50,11 @@
 //! left as a future extension — [`reload`] is the reusable core it would
 //! call, so adding it later is additive.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use crate::image_init::{ImageInit, ImageInitReport};
-use crate::jwks_fetch::TrustedIssuers;
+use crate::jwks_fetch::{JwksProvider, TrustedIssuers};
 use crate::jwt::{JwksStore, SharedJwksStore};
 use crate::nucleon_map::{HabilitationMap, Noyau, SharedHabilitationMap};
 
@@ -247,6 +247,11 @@ impl JwksReloadOutcome {
 #[must_use]
 pub fn reload_jwks(shared: &SharedJwksStore, state_dir: &Path) -> JwksReloadOutcome {
     let issuers_before = shared.load().key_counts_by_issuer().len();
+    let prior_http: HashMap<_, _> = shared
+        .remote_issuers()
+        .into_iter()
+        .map(|issuer| (issuer.iss.clone(), issuer))
+        .collect();
 
     let trusted = match TrustedIssuers::load_optional(state_dir) {
         Ok(trusted) => trusted,
@@ -282,7 +287,49 @@ pub fn reload_jwks(shared: &SharedJwksStore, state_dir: &Path) -> JwksReloadOutc
             }
         };
 
-    shared.store_file_stage(&fresh, &configured, trusted.is_some());
+    let issuers = trusted
+        .as_ref()
+        .map_or(&[][..], |trusted| trusted.issuers.as_slice());
+    shared.store_file_stage(&fresh, &configured, trusted.is_some(), issuers);
+
+    let current_http: HashMap<_, _> = issuers
+        .iter()
+        .map(|issuer| (issuer.iss.as_str(), issuer))
+        .collect();
+    let added = current_http
+        .keys()
+        .filter(|iss| !prior_http.contains_key(**iss))
+        .count();
+    let removed = prior_http
+        .keys()
+        .filter(|iss| !current_http.contains_key(iss.as_str()))
+        .count();
+    let audiences_changed = issuers
+        .iter()
+        .filter(|issuer| {
+            prior_http
+                .get(&issuer.iss)
+                .is_some_and(|old| old.audiences != issuer.audiences)
+        })
+        .count();
+    let key_locations_changed = issuers
+        .iter()
+        .filter(|issuer| {
+            prior_http
+                .get(&issuer.iss)
+                .is_some_and(|old| old.jwks_uri != issuer.jwks_uri)
+        })
+        .count();
+    if added + removed + audiences_changed + key_locations_changed > 0 {
+        tracing::warn!(
+            event = "reload.jwks.config",
+            issuers_added = added,
+            issuers_removed = removed,
+            audiences_changed,
+            key_locations_changed,
+            "trusted issuer configuration changed; HTTP keys will be refreshed",
+        );
+    }
 
     let counts = shared.load().key_counts_by_issuer();
     let issuers_after = counts.len();
@@ -313,6 +360,7 @@ pub fn reload_jwks(shared: &SharedJwksStore, state_dir: &Path) -> JwksReloadOutc
 pub async fn sighup_reload_listener(
     shared: SharedHabilitationMap,
     jwks: SharedJwksStore,
+    jwks_provider: Option<JwksProvider>,
     state_dir: std::path::PathBuf,
     image_init: ImageInit,
 ) {
@@ -341,7 +389,23 @@ pub async fn sighup_reload_listener(
             "SIGHUP received — reloading nucleon bindings and JWKS",
         );
         reload(&shared, &state_dir, &image_init).log();
-        reload_jwks(&jwks, &state_dir).log();
+        let jwks_outcome = reload_jwks(&jwks, &state_dir);
+        let refreshed = jwks_outcome.is_ok();
+        jwks_outcome.log();
+        if refreshed {
+            if let Some(provider) = &jwks_provider {
+                let report = provider.refresh_all().await;
+                if !report.all_ok() {
+                    tracing::warn!(
+                        event = "reload.jwks.fetch",
+                        issuers_ok = report.issuers_ok,
+                        issuers_total = report.issuers_total,
+                        "HTTP issuer reload completed with unavailable keys",
+                    );
+                }
+                report.log();
+            }
+        }
     }
 }
 

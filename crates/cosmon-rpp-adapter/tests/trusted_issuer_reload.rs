@@ -63,7 +63,7 @@ fn trusted_issuer_set_is_identical_at_boot_and_after_reload() {
     let staged = JwksStore::load_with_allowlist(td.path(), Some(&configured)).unwrap();
     let provider = JwksProvider::new(
         SharedJwksStore::new(staged),
-        trusted.issuers,
+        &trusted.issuers,
         JwksFetcher::new().unwrap(),
     );
     let shared = provider.shared();

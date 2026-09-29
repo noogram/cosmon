@@ -58,7 +58,7 @@
 //! `reload_jwks_read_error_keeps_live_store`). A network failure closes
 //! the door, it never opens it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -94,7 +94,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// One trusted issuer, host-side. The two-field shape is load-bearing:
 /// `iss` matches the token, `jwks_uri` targets the fetch (see module
 /// docs and smithy spec §2.1).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct TrustedIssuer {
     /// External issuer URL — matches the token `iss` claim and the
     /// authz pin byte-for-byte. Never a fetch target.
@@ -270,6 +270,7 @@ impl JwksFetcher {
 struct IssuerRuntime {
     fetch_lock: Arc<tokio::sync::Mutex<()>>,
     last_fetch: Option<Instant>,
+    last_config: Option<TrustedIssuer>,
 }
 
 /// Summary of one [`JwksProvider::refresh_all`] pass, for ops logging.
@@ -302,8 +303,8 @@ impl JwksRefreshReport {
     }
 }
 
-/// The live JWKS provider: owns the trusted-issuer allowlist, the HTTP
-/// fetcher, and a handle to the [`SharedJwksStore`] the validator reads.
+/// The live JWKS provider: reads the current trusted-issuer allowlist from
+/// the shared store, and owns the HTTP fetcher and refresh runtime.
 ///
 /// Construct it at boot, run [`Self::refresh_all`] once for the initial
 /// load, then `tokio::spawn` [`Self::run`] for the TTL + boot-backoff
@@ -317,7 +318,6 @@ impl JwksRefreshReport {
 pub struct JwksProvider {
     shared: SharedJwksStore,
     fetcher: JwksFetcher,
-    issuers: Vec<TrustedIssuer>,
     cooldown: Duration,
     runtime: Arc<Mutex<HashMap<String, IssuerRuntime>>>,
 }
@@ -326,16 +326,11 @@ impl JwksProvider {
     /// Build a provider over the given store, allowlist, and HTTP
     /// fetcher. Uses [`DEFAULT_CACHE_MISS_COOLDOWN`].
     #[must_use]
-    pub fn new(shared: SharedJwksStore, issuers: Vec<TrustedIssuer>, fetcher: JwksFetcher) -> Self {
-        let configured = issuers
-            .iter()
-            .map(|issuer| issuer.iss.clone())
-            .collect::<HashSet<_>>();
-        shared.configure_remote_issuers(&configured);
+    pub fn new(shared: SharedJwksStore, issuers: &[TrustedIssuer], fetcher: JwksFetcher) -> Self {
+        shared.configure_remote_issuers(issuers);
         Self {
             shared,
             fetcher,
-            issuers,
             cooldown: DEFAULT_CACHE_MISS_COOLDOWN,
             runtime: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -368,40 +363,33 @@ impl JwksProvider {
 
     /// Re-fetch **every** trusted issuer and publish the merged result.
     ///
-    /// Fail-closed and non-regressing: the new store starts as a clone of
-    /// the live one, each issuer that fetches + parses cleanly **replaces**
-    /// its keys, and an issuer that fails **keeps its previous keys**. A
+    /// Fail-closed and non-regressing: each issuer that fetches + parses
+    /// cleanly replaces its keys, and an issuer that fails keeps its
+    /// previous keys when its configuration is unchanged. A
     /// transient outage therefore never empties a working store; a boot
     /// with everything unreachable leaves an empty store (deny-all).
     pub async fn refresh_all(&self) -> JwksRefreshReport {
-        let mut store = (**self.shared.load()).clone();
         let mut issuers_ok = 0;
-        let configured: Vec<_> = self
-            .issuers
-            .iter()
-            .filter(|issuer| self.shared.is_remote_issuer_configured(&issuer.iss))
-            .collect();
+        let configured = self.shared.remote_issuers();
         for issuer in &configured {
             match self.fetcher.fetch_issuer(issuer).await {
-                Ok(json) => {
-                    match store.replace_remote_jwks(&issuer.iss, issuer.audiences.clone(), &json) {
-                        Ok(n) => {
-                            issuers_ok += 1;
-                            tracing::info!(
-                                event = "jwks.fetch.issuer",
-                                iss = %issuer.iss,
-                                keys = n,
-                                "fetched JWKS for issuer",
-                            );
-                        }
-                        Err(e) => tracing::warn!(
+                Ok(json) => match self.shared.store_remote_refresh(issuer, &json) {
+                    Ok(n) => {
+                        issuers_ok += 1;
+                        tracing::info!(
                             event = "jwks.fetch.issuer",
                             iss = %issuer.iss,
-                            error = %e,
-                            "malformed JWKS document — keeping prior keys for issuer",
-                        ),
+                            keys = n,
+                            "fetched JWKS for issuer",
+                        );
                     }
-                }
+                    Err(e) => tracing::warn!(
+                        event = "jwks.fetch.issuer",
+                        iss = %issuer.iss,
+                        error = %e,
+                        "malformed JWKS document — keeping prior keys for issuer",
+                    ),
+                },
                 Err(e) => tracing::warn!(
                     event = "jwks.fetch.issuer",
                     iss = %issuer.iss,
@@ -410,8 +398,13 @@ impl JwksProvider {
                 ),
             }
         }
-        let keys_total = store.key_counts_by_issuer().iter().map(|(_, n)| *n).sum();
-        self.shared.store_remote_refresh(&store);
+        let keys_total = self
+            .shared
+            .load()
+            .key_counts_by_issuer()
+            .iter()
+            .map(|(_, n)| *n)
+            .sum();
         JwksRefreshReport {
             issuers_total: configured.len(),
             issuers_ok,
@@ -429,41 +422,32 @@ impl JwksProvider {
     /// `true` only when this call performed a fetch that updated the
     /// store.
     pub async fn refresh_issuer(&self, iss: &str) -> bool {
-        if !self.shared.is_remote_issuer_configured(iss) {
-            return false;
-        }
-        let Some(issuer) = self.issuers.iter().find(|i| i.iss == iss).cloned() else {
-            return false;
-        };
         let lock = self.issuer_lock(iss);
         let _guard = lock.lock().await;
+        let Some(issuer) = self.shared.remote_issuer(iss) else {
+            return false;
+        };
         // Cooldown check (under the single-flight lock so a queued caller
         // observes the just-updated timestamp and skips a redundant fetch).
-        if let Some(last) = self.last_fetch(iss) {
+        if let Some(last) = self.last_fetch(&issuer) {
             if last.elapsed() < self.cooldown {
                 return false;
             }
         }
-        self.mark_fetched(iss);
+        self.mark_fetched(&issuer);
         match self.fetcher.fetch_issuer(&issuer).await {
-            Ok(json) => {
-                let mut store = (**self.shared.load()).clone();
-                match store.replace_remote_jwks(iss, issuer.audiences.clone(), &json) {
-                    Ok(_) => {
-                        self.shared.store_remote_refresh(&store);
-                        true
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            event = "jwks.cache_miss",
-                            iss = %iss,
-                            error = %e,
-                            "on-demand refetch returned a malformed document",
-                        );
-                        false
-                    }
+            Ok(json) => match self.shared.store_remote_refresh(&issuer, &json) {
+                Ok(_) => self.shared.remote_issuer(iss).as_ref() == Some(&issuer),
+                Err(e) => {
+                    tracing::warn!(
+                        event = "jwks.cache_miss",
+                        iss = %iss,
+                        error = %e,
+                        "on-demand refetch returned a malformed document",
+                    );
+                    false
                 }
-            }
+            },
             Err(e) => {
                 tracing::warn!(
                     event = "jwks.cache_miss",
@@ -528,21 +512,27 @@ impl JwksProvider {
     }
 
     /// Read the last-fetch timestamp for an issuer.
-    fn last_fetch(&self, iss: &str) -> Option<Instant> {
+    fn last_fetch(&self, issuer: &TrustedIssuer) -> Option<Instant> {
         let map = self
             .runtime
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.get(iss).and_then(|r| r.last_fetch)
+        map.get(&issuer.iss).and_then(|r| {
+            (r.last_config.as_ref() == Some(issuer))
+                .then_some(r.last_fetch)
+                .flatten()
+        })
     }
 
     /// Stamp the current instant as this issuer's last fetch attempt.
-    fn mark_fetched(&self, iss: &str) {
+    fn mark_fetched(&self, issuer: &TrustedIssuer) {
         let mut map = self
             .runtime
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.entry(iss.to_owned()).or_default().last_fetch = Some(Instant::now());
+        let runtime = map.entry(issuer.iss.clone()).or_default();
+        runtime.last_config = Some(issuer.clone());
+        runtime.last_fetch = Some(Instant::now());
     }
 }
 
@@ -618,7 +608,7 @@ mod tests {
 
     fn provider_for(issuers: Vec<TrustedIssuer>) -> JwksProvider {
         let shared = SharedJwksStore::new(JwksStore::default());
-        JwksProvider::new(shared, issuers, JwksFetcher::new().unwrap())
+        JwksProvider::new(shared, &issuers, JwksFetcher::new().unwrap())
             .with_cooldown(Duration::from_millis(0))
     }
 
@@ -801,7 +791,7 @@ mod tests {
         let mock = MockIdp::start(body.clone()).await;
         let provider = JwksProvider::new(
             SharedJwksStore::new(JwksStore::default()),
-            vec![TrustedIssuer {
+            &[TrustedIssuer {
                 iss: "https://idp.test".to_owned(),
                 jwks_uri: Some(format!("{}/keys", mock.base())),
                 audiences: vec!["cosmon-rpp-tenant-demo".to_owned()],

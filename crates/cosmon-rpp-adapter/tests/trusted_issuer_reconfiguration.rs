@@ -66,7 +66,7 @@ async fn http_issuer_edits_match_restart_after_reload_and_refresh() {
     let trusted = TrustedIssuers::load(td.path()).unwrap();
     let provider = JwksProvider::new(
         SharedJwksStore::new(JwksStore::default()),
-        trusted.issuers,
+        &trusted.issuers,
         JwksFetcher::new().unwrap(),
     );
     provider.refresh_all().await;
@@ -76,11 +76,15 @@ async fn http_issuer_edits_match_restart_after_reload_and_refresh() {
 
     write_issuers(
         td.path(),
-        &[(A, &uri_a, &["aud-x"]), (B, &uri_b, &["aud-z"])],
+        &[(A, &uri_a, &["aud-x", "aud-new"]), (B, &uri_b, &["aud-z"])],
     );
     assert!(cosmon_rpp_adapter::reload::reload_jwks(&shared, td.path()).is_ok());
     assert!(JwtVerifier::validate(&shared.load(), &old_audience, Posture::Active).is_err());
+    let new_audience = token(A, "aud-new", "key-a");
+    assert!(JwtVerifier::validate(&shared.load(), &new_audience, Posture::Active).is_ok());
     let added = token(B, "aud-z", "key-b");
+    assert!(provider.ensure_kid(B, "key-b").await);
+    assert!(JwtVerifier::validate(&shared.load(), &added, Posture::Active).is_ok());
     provider.refresh_all().await;
     assert!(JwtVerifier::validate(&shared.load(), &added, Posture::Active).is_ok());
     assert!(JwtVerifier::validate(&shared.load(), &old_audience, Posture::Active).is_err());
@@ -99,7 +103,7 @@ async fn changed_http_key_location_takes_effect_after_reload() {
     let trusted = TrustedIssuers::load(td.path()).unwrap();
     let provider = JwksProvider::new(
         SharedJwksStore::new(JwksStore::default()),
-        trusted.issuers,
+        &trusted.issuers,
         JwksFetcher::new().unwrap(),
     );
     provider.refresh_all().await;
@@ -110,6 +114,7 @@ async fn changed_http_key_location_takes_effect_after_reload() {
 
     write_issuers(td.path(), &[(A, &new_uri, &["aud-x"])]);
     assert!(cosmon_rpp_adapter::reload::reload_jwks(&shared, td.path()).is_ok());
+    assert!(JwtVerifier::validate(&shared.load(), &old_token, Posture::Active).is_err());
     provider.refresh_all().await;
     assert!(JwtVerifier::validate(&shared.load(), &new_token, Posture::Active).is_ok());
     assert!(JwtVerifier::validate(&shared.load(), &old_token, Posture::Active).is_err());
