@@ -2,8 +2,18 @@
 
 # CLI and UI parity audit
 
-This audit records the operator-facing surface touched by issue #117. It is
-scoped to the patrol dead-worker policy; it is not a full command inventory.
+## Trusted shell review (issue #74)
+
+| Capability | CLI | Native UI | Reveal CLI |
+|---|---|---|---|
+| Review a merged shell-surface diff, grant trust over the files on disk, then run the post-merge gate | `cs done <id> --review-shell` prompts for `trust <id>` and rolls back on decline | No equivalent review gesture audited | No equivalent review gesture audited |
+
+Ordinary `cs done` still refuses a merge that makes B5 trust stale and points
+to `--review-shell`. The operator gesture is available on the local CLI; the
+harvest wire options have no equivalent interactive flag.
+
+The following table records the operator-facing surface touched by issue #117.
+It is scoped to the patrol dead-worker policy; it is not a full command inventory.
 
 | Capability | CLI | Native UI | Reveal CLI |
 |---|---|---|---|

@@ -43,6 +43,9 @@ Options:
       --no-merge
           Skip merging the worker's branch into the base branch
 
+      --review-shell
+          Review a merge's changed shell surface and grant trust over the merged files before the post-merge gate. Requires an explicit operator reply; declining rolls the merge back and preserves the branch
+
       --no-worktree-remove
           Skip removing the git worktree
 
