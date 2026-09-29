@@ -183,6 +183,9 @@ pub struct DialogueScan {
     /// verbatim (truncated) into the alert so the operator sees *why* without
     /// re-capturing the pane.
     pub evidence: Option<String>,
+    /// The classification rule that matched. `None` means no dialogue was
+    /// recognised; callers can show this beside the pane excerpt on refusal.
+    pub rule: Option<&'static str>,
 }
 
 /// Money markers — case-insensitive substrings that, if present *anywhere* in
@@ -261,34 +264,66 @@ const PERMISSION_MARKERS: &[&str] = &[
     "yes, allow",
 ];
 
-/// Generic blocking markers — the pane is *waiting on input* but matches no
-/// safe permission shape. Yields [`DialogueClass::Unknown`] (alert, never
-/// act) when nothing more specific matched. Kept deliberately broad: a
-/// missed block costs a stalled worker slot, and the response is only ever a
-/// human page.
-const BLOCKING_MARKERS: &[&str] = &[
-    "press enter to",
-    "enter to confirm",
-    "enter to continue",
-    "[y/n]",
-    "(y/n)",
-    "continue? ",
-    "are you sure",
-    "confirm",
-    "❯ 1.",
-    "› 1.",
-    "1. yes",
-    "waiting for",
-    // codex update prompt (issue #85): "Update available! 0.154.0 →
-    // 0.157.0" — blocks an unattended worker at first launch after a
-    // release, and neither `cs ensemble` nor `cs peek` said why.
-    "update available",
-    // codex reasoning-level picker (issue #85): "Select Reasoning Level for
-    // <model>" — opens shortly after launch even when the dispatch already
-    // pinned a level via `--harness model_reasoning_effort=…`.
-    "select reasoning level",
-    "select a reasoning level",
-];
+/// Return an explicit confirmation or menu widget line. Ordinary status prose
+/// may contain words such as "confirm" or "waiting for"; those words alone do
+/// not mean the pane is waiting for input.
+fn blocking_widget_line(lines: &[&str]) -> Option<String> {
+    let has_confirmation_question = lines.iter().any(|line| {
+        let content = widget_content(line);
+        let lower = content
+            .trim_start_matches(['?', '⚠', '●'])
+            .trim()
+            .to_lowercase();
+        lower.starts_with("are you sure")
+            || lower.starts_with("continue?")
+            || (content.starts_with('?') && lower.contains('?'))
+            || (lower.ends_with('?') && !content.starts_with('⏺'))
+    });
+    lines.iter().rev().find_map(|line| {
+        let content = widget_content(line);
+        let lower = content
+            .trim_start_matches(['?', '⚠', '●'])
+            .trim()
+            .to_lowercase();
+        let explicit = [
+            "press enter to",
+            "enter to confirm",
+            "enter to continue",
+            "continue?",
+            "are you sure",
+            "1. yes",
+        ]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix));
+        let selection = ["❯ ", "› "].iter().any(|marker| {
+            lower.find(marker).is_some_and(|pos| {
+                let before = lower[..pos].trim();
+                let after = &lower[pos + marker.len()..];
+                let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+                digits > 0
+                    && (after[digits..].starts_with('.') || after[digits..].starts_with(')'))
+                    && (before.is_empty() || before.ends_with('?'))
+            })
+        });
+        let selected_option = has_confirmation_question
+            && (content.starts_with("❯ ") || content.starts_with("› "))
+            && !content.starts_with("› Ask ");
+        let yes_no = lower.ends_with("[y/n]") || lower.ends_with("(y/n)");
+        let prompt_cursor = lower.ends_with('›') && lower.contains('?');
+        (explicit || selection || selected_option || yes_no || prompt_cursor)
+            .then(|| truncate_evidence(line))
+    })
+}
+
+/// Remove pane box borders and a trailing cursor while retaining the original
+/// line for evidence. The visible prompt text then starts at a stable column.
+fn widget_content(line: &str) -> &str {
+    line.trim()
+        .trim_start_matches(['│', '┃', '║'])
+        .trim()
+        .trim_end_matches(['│', '┃', '║', '▌'])
+        .trim()
+}
 
 /// Return the first marker from `markers` found (case-insensitively) in the
 /// already-lowercased `haystack`, together with the trimmed line it occurred
@@ -349,8 +384,9 @@ fn truncate_evidence(line: &str) -> String {
 ///    [`DialogueClass::Permission`] (the auto-confirmable class).
 /// 3. **Risky-but-permission-shaped ⇒ Unknown.** A permission marker sitting
 ///    next to a destructive action is *not* safe to auto-accept.
-/// 4. **Generic block ⇒ Unknown.** Any `BLOCKING_MARKERS` hit with nothing
-///    safer resolves to [`DialogueClass::Unknown`] (alert, never act).
+/// 4. **Visible confirmation/menu widget ⇒ Unknown.** Prompt-shaped lines
+///    resolve to [`DialogueClass::Unknown`] (alert, never act). Words in
+///    ordinary status prose do not form a widget.
 /// 5. **Otherwise `None`.**
 ///
 /// Only the tail of a pane is meaningful (the live prompt sits at the bottom),
@@ -366,6 +402,7 @@ pub fn classify_pane(text: &str) -> DialogueScan {
         return DialogueScan {
             class: DialogueClass::MoneyStake,
             evidence: Some(ev),
+            rule: Some("money-stake marker"),
         };
     }
 
@@ -380,10 +417,19 @@ pub fn classify_pane(text: &str) -> DialogueScan {
         classify_codex_dialog(text),
         Some(CodexDialogKind::UpdateAvailable | CodexDialogKind::ReasoningPicker)
     ) {
-        let evidence = first_match(&lower, &lines, BLOCKING_MARKERS);
+        let evidence = first_match(
+            &lower,
+            &lines,
+            &[
+                "update available",
+                "select reasoning level",
+                "select a reasoning level",
+            ],
+        );
         return DialogueScan {
             class: DialogueClass::Unknown,
             evidence,
+            rule: Some("named interactive menu"),
         };
     }
 
@@ -396,19 +442,22 @@ pub fn classify_pane(text: &str) -> DialogueScan {
             return DialogueScan {
                 class: DialogueClass::Unknown,
                 evidence: Some(risk_ev),
+                rule: Some("risky action in permission prompt"),
             };
         }
         return DialogueScan {
             class: DialogueClass::Permission,
             evidence: Some(perm_ev),
+            rule: Some("permission prompt"),
         };
     }
 
-    // 4. A generic block we could not classify safely — alert, never act.
-    if let Some(ev) = first_match(&lower, &lines, BLOCKING_MARKERS).or(risky_hit) {
+    // 4. A visible widget we could not classify safely — alert, never act.
+    if let Some(ev) = blocking_widget_line(&lines) {
         return DialogueScan {
             class: DialogueClass::Unknown,
             evidence: Some(ev),
+            rule: Some("confirmation or menu widget"),
         };
     }
 
@@ -416,6 +465,7 @@ pub fn classify_pane(text: &str) -> DialogueScan {
     DialogueScan {
         class: DialogueClass::None,
         evidence: None,
+        rule: None,
     }
 }
 
@@ -493,6 +543,34 @@ mod tests {
         // "overwrite" is a risky marker -> Unknown, alert path.
         assert_eq!(scan.class, DialogueClass::Unknown);
         assert!(scan.class.requires_alert());
+    }
+
+    #[test]
+    fn bordered_selection_is_unknown() {
+        let pane = "╭──────────────────────────────╮\n\
+                    │ Overwrite existing config?   │\n\
+                    │ ❯ 1. Overwrite               │\n\
+                    │   2. Cancel                  │\n\
+                    ╰──────────────────────────────╯";
+        let scan = classify_pane(pane);
+        assert_eq!(scan.class, DialogueClass::Unknown);
+        assert_eq!(scan.rule, Some("confirmation or menu widget"));
+    }
+
+    #[test]
+    fn unnumbered_selection_below_confirmation_is_unknown() {
+        let pane = "? Are you sure you want to continue? (Use arrow keys)\n❯ Yes\n  No";
+        let scan = classify_pane(pane);
+        assert_eq!(scan.class, DialogueClass::Unknown);
+        assert_eq!(scan.evidence.as_deref(), Some("❯ Yes"));
+    }
+
+    #[test]
+    fn selection_on_second_option_is_unknown() {
+        let pane = "Overwrite existing config?\n  1. Overwrite\n❯ 2. Cancel";
+        let scan = classify_pane(pane);
+        assert_eq!(scan.class, DialogueClass::Unknown);
+        assert_eq!(scan.evidence.as_deref(), Some("❯ 2. Cancel"));
     }
 
     #[test]

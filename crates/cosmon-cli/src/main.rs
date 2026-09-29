@@ -400,8 +400,11 @@ enum Command {
     #[command(after_help = cmd::examples::DEMO)]
     Demo(cmd::demo::Args),
 
-    /// Whisper — inject a perturbation payload into a live worker's tmux pane (v0)
-    #[command(after_help = cmd::examples::WHISPER)]
+    /// Whisper — advise a live worker; refuse unsafe pane dialogues
+    #[command(
+        long_about = "Whisper — inject a perturbation payload into a live worker's tmux pane (v0)\n\nMolecule delivery refuses on money-stake markers and recognised unknown confirmation/menu widgets. Ordinary output and routine permission prompts remain deliverable. A dialogue refusal reports the rule and matched pane tail lines.",
+        after_help = cmd::examples::WHISPER
+    )]
     Whisper(cmd::whisper::Args),
 
     /// Presence — live-session registry (ping / ls / gc / poll / send / inbox)

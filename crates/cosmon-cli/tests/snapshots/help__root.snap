@@ -319,7 +319,7 @@ Commands:
   release-audit   `release-audit` — dry-run drift detector for the public distribution (analogue of `reconcile --check`)
   doctor          Doctor — diagnostic probes (whisper channel, …)
   demo            Demo — one-command end-to-end chatbot surface (first-contact experience)
-  whisper         Whisper — inject a perturbation payload into a live worker's tmux pane (v0)
+  whisper         Whisper — advise a live worker; refuse unsafe pane dialogues
   archive         Archive — operator view over durable terminal snapshots (list/show/verify/prune, ADR-030)
   opt-in-share    Opt-in-share — first-run consent prompt for encrypted developer bundles
   notarize        Notarize — issue or verify an operator-signed attestation for a molecule (ADR-056)
