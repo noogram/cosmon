@@ -115,8 +115,11 @@ CompleteGoverned(m) ==
     /\ fleet_desired'     = [fleet_desired     EXCEPT ![m] = "None"]
     /\ tmux_session'      = [tmux_session      EXCEPT ![m] = FALSE]
     /\ worker_pid_alive'  = [worker_pid_alive  EXCEPT ![m] = FALSE]
+    /\ in_grace'          = [in_grace          EXCEPT ![m] = FALSE]
     /\ UNCHANGED <<branch_merged, events_seqno, events_writer_lock,
                    sealLog, now>>
+    /\ UNCHANGED <<patrol_saw_dead, collapse_cause,
+                   claim, selected, dispatched_by>>
 
 NextGoverned ==
     \/ \E m \in Mol :
