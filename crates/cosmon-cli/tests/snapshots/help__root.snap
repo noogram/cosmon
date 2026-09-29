@@ -140,6 +140,9 @@ Every patrol also scans live panes for blocking dialogs and pages
   the operator for update, reasoning, or rate-limit menus. 'cs tackle'
   checks a codex launch menu before sending its briefing. Startup
   update policy comes from the operator's codex configuration.
+  An update can end a worker pane. 'cs purge <worker>' reclaims the
+  dead worker without collapsing its Running molecule. Resume with
+  'cs tackle <molecule> --force' in the same worktree.
 
 SCHEDULER DRY-RUN OUTPUT — four row types, one per patrol:
   FIRE     patrol is due; dispatch would spawn the command now
@@ -279,7 +282,7 @@ Commands:
   prime           Prime the system — load .cosmon/config.toml and self-check gates
   resume          Resume — convenience alias for `cs patrol --propel --molecule <id>`
   teardown        Teardown a fleet — gracefully stop all fleet workers
-  purge           Purge dead workers from fleet state (Stopped, Error, Stale)
+  purge           Purge dead workers from fleet state without changing molecule status
   migrate         Migrate the galaxy's memory — legacy flat→fleet, or residence-to-residence
   patrol          Patrol the fleet — health checks and anomaly detection
   health          Health — read-only molecule-health anomaly catalog, federation-wide (ADR-137 §7)

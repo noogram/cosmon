@@ -10034,6 +10034,64 @@ mod tests {
         assert!(error.contains("already running"), "{error}");
     }
 
+    #[test]
+    fn issue122_purged_worker_leaves_existing_worktree_admissible_to_force_tackle() {
+        let (tmp, state_dir) = make_store();
+        let store = FileStore::new(&state_dir);
+        let mut running = sample_molecule("task-20260929-1223", MoleculeStatus::Running);
+        running.current_step = 1;
+        let worker_id = cosmon_core::id::WorkerId::new("w-issue122").unwrap();
+        running.assigned_worker = Some(worker_id.clone());
+        store.save_molecule(&running.id, &running).unwrap();
+        let worktree = tmp.path().join(".worktrees").join(running.id.as_str());
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let mut fleet = cosmon_state::Fleet::new();
+        let mut worker = cosmon_state::WorkerData::new(
+            worker_id.clone(),
+            cosmon_core::id::AgentId::new("a").unwrap(),
+            cosmon_core::agent::AgentRole::Implementation,
+            cosmon_core::clearance::Clearance::Write,
+            cosmon_core::worker::WorkerStatus::Active,
+        );
+        worker.desired = cosmon_core::worker::DesiredState::Running;
+        worker.current_molecule = Some(running.id.clone());
+        fleet.workers.insert(worker_id.clone(), worker);
+        store.save_fleet(&fleet).unwrap();
+        let ctx = Context {
+            verbose: false,
+            json: false,
+            config: Some(state_dir),
+        };
+        super::super::purge::run(
+            &ctx,
+            &super::super::purge::Args {
+                worker: Some(worker_id.to_string()),
+                force: false,
+                status: None,
+                role: None,
+                allow_unharvested: true,
+                worktrees: false,
+                sessions: false,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+
+        let _claim = store.acquire_dispatch_lock(&running.id).unwrap();
+        let resumed = refresh_after_dispatch_claim(
+            &store,
+            &running,
+            true,
+            &cosmon_core::tackle::TackledBy::Human,
+        )
+        .unwrap();
+        assert_eq!(resumed.status, MoleculeStatus::Running);
+        assert_eq!(resumed.current_step, 1);
+        assert!(worktree.is_dir());
+        assert!(store.load_fleet().unwrap().workers.is_empty());
+    }
+
     /// COSMON #90 — the end-to-end shape of the fix: a *live* session torn
     /// down under `--force` must be protected by a fresh lease for the whole
     /// width of the teardown, and the lease must be gone once the caller

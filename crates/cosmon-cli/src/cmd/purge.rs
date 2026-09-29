@@ -28,13 +28,11 @@
 //!    removed, subsuming the former `cs kill` verb. Without `--force` the
 //!    worker is expected to already be in a terminal state (graceful path).
 //!
-//! Both modes fail **closed** on unharvested work (incident 2026-08-02): a
-//! worker whose pane is gone but whose molecule still carries commits ahead
-//! of base — or a dirty worktree — is not purged and its molecule is not
-//! collapsed. A missing tmux session is evidence about the pane, not about
-//! the work; the reboot that removed the tmux server that day took four
-//! healthy molecules with it. `--allow-unharvested` is the explicit gesture
-//! that accepts the loss.
+//! Both modes leave molecule status unchanged (`PurgeNeverCollapses`). A dead
+//! worker can be reclaimed while its Running molecule stays ready for
+//! `cs tackle <molecule> --force` in the same worktree. The unharvested-work
+//! guard still asks for an explicit gesture before removing the worker's
+//! fleet entry when its branch or worktree holds unharvested changes.
 //!
 //! ADR-052 §D3 collapses `cs kill` + `cs purge` into this one command:
 //! both are infrastructure teardown; the difference was always the force
@@ -45,9 +43,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use chrono::Utc;
-use cosmon_core::event_v2::{CollapseReason, EventV2};
 use cosmon_core::id::{MoleculeId, WorkerId};
-use cosmon_core::molecule::{CollapseCause, MoleculeStatus};
+use cosmon_core::molecule::MoleculeStatus;
 use cosmon_core::transport::TransportBackend;
 use cosmon_core::worker::{DesiredState, WorkerRole, WorkerStatus};
 use cosmon_state::StateStore;
@@ -127,7 +124,7 @@ impl UnharvestedWork {
 /// Ask whether a molecule still holds work that no merge has taken.
 ///
 /// A trait rather than a free function because the git probe is I/O at the
-/// edge: the sweep's policy (withhold or collapse) is what deserves a test,
+/// edge: the sweep's policy (withhold or reclaim) is what deserves a test,
 /// and a test that has to build a real repository with a diverged branch for
 /// every case tests git instead of the policy.
 pub(crate) trait HarvestProbe {
@@ -270,7 +267,7 @@ impl HarvestProbe for GitHarvestProbe {
 struct Withheld {
     /// The worker whose fleet entry was left in place.
     worker: WorkerId,
-    /// The still-`Running` molecule that would have been collapsed.
+    /// The still-`Running` molecule whose worker was withheld.
     molecule: MoleculeId,
     /// What is at stake.
     work: UnharvestedWork,
@@ -286,17 +283,12 @@ struct Withheld {
 /// `task-…-7582` had three uncommitted files in its worktree. Nothing in the
 /// output named any of it.
 ///
-/// So the sweep now separates two questions. *Is the pane dead?* decides the
-/// stale classification. *Is the work harvested?* decides whether the
-/// molecule may be collapsed. When the second answer is no, the worker is
-/// withheld entirely — neither the molecule flipped nor the fleet entry
-/// removed, so `cs ensemble` keeps showing it and the branch keeps its only
-/// witness. `--allow-unharvested` is the operator's explicit statement that
-/// the loss is acceptable.
+/// The sweep separates two questions. *Is the pane dead?* decides the stale
+/// classification. *Is the work harvested?* decides whether to ask before
+/// removing the worker entry. Either way, purge never changes molecule
+/// status. `--allow-unharvested` answers the worker-reclamation question.
 ///
-/// Only `Running` molecules are guarded: a terminal molecule is not going to
-/// be collapsed by [`collapse_zombie_molecule`], so there is nothing to fail
-/// closed about.
+/// Only `Running` molecules are guarded: terminal work has no worker to resume.
 fn withhold_unharvested(
     fleet: &cosmon_state::Fleet,
     store: &dyn StateStore,
@@ -326,110 +318,6 @@ fn withhold_unharvested(
         }
     }
     (keep, withheld)
-}
-
-/// Flip a zombie molecule's `state.json` from `Running` to `Collapsed` when
-/// the worker bound to it is being purged because the worker process is gone
-/// — dead tmux on the sweep `stale` path, or an explicit
-/// `cs purge <worker> --force`.
-///
-/// This closes the machine-crash zombie window. Before this fix, `cs purge`
-/// removed the worker's fleet entry but left `state.json` at
-/// `status = running`, so the board read undrained on a raw read and the
-/// operator had to `cs collapse` each zombie by hand. The exact pathology
-/// hit grace (verify-20260620-7e7b / verify-20260621-2b67) and cosmon (four
-/// cosmon-ward molecules left `running` after their workers 401-died; purge
-/// removed the workers but left the molecules running).
-///
-/// Defensive, in the spirit of the briefing seal (CLAUDE.md §briefing
-/// seals): only a `Running` molecule is touched — terminal, frozen, pending,
-/// and starved molecules are left exactly as they are, so an intentionally
-/// suspended molecule is never collapsed out from under the operator. The
-/// cause is recorded as [`CollapseCause::ProcessDeath`] and the reason-kind
-/// as `worker_crashed` so `cs errors` aggregates it correctly. Any I/O
-/// failure is swallowed so the purge hot path never blocks. Returns the
-/// molecule id when a flip happened, so the caller can report it.
-fn collapse_zombie_molecule(
-    store: &dyn StateStore,
-    events_path: &Path,
-    mol_id: &MoleculeId,
-    worker_id: &WorkerId,
-) -> Option<MoleculeId> {
-    let mut mol = store.load_molecule(mol_id).ok()?;
-    if mol.status != MoleculeStatus::Running {
-        return None;
-    }
-    let prev = mol.status;
-    let reason = format!(
-        "worker {worker_id} gone (purged); molecule was left running — \
-         auto-collapsed by cs purge"
-    );
-    let kind = CollapseReason::from("worker_crashed".to_owned());
-
-    mol.status = MoleculeStatus::Collapsed;
-    mol.collapse_cause = Some(CollapseCause::ProcessDeath);
-    mol.collapse_reason = Some(reason.clone());
-    mol.collapse_reason_kind = Some(kind.clone());
-    mol.collapsed_step = Some(mol.current_step);
-    // Terminal transition: clear any inline live-process record so a
-    // collapsed molecule never carries a phantom worker pointer (mirrors
-    // `cs collapse`).
-    if mol.process.is_some() {
-        mol.release_process();
-    }
-    mol.updated_at = Utc::now();
-    store.save_molecule(&mol.id.clone(), &mol).ok()?;
-
-    let status_seq = cosmon_state::event_log::emit_one(
-        events_path,
-        EventV2::MoleculeStatusChanged {
-            molecule_id: mol_id.clone(),
-            from: prev.to_string(),
-            to: "collapsed".to_owned(),
-        },
-        None,
-    )
-    .ok();
-    let _ = cosmon_state::event_log::emit_one(
-        events_path,
-        EventV2::MoleculeCollapsed {
-            molecule_id: mol_id.clone(),
-            reason,
-            kind: Some(kind),
-        },
-        status_seq,
-    );
-    Some(mol_id.clone())
-}
-
-/// Flip every zombie molecule pinned to a `stale` worker (dead tmux = the
-/// worker process is gone). Reads each stale worker's `current_molecule`
-/// from `fleet` BEFORE the caller reclassifies them (which nulls the
-/// binding), and returns the ids of the molecules actually collapsed.
-///
-/// Orphan workers are excluded by construction: the classifier only files a
-/// worker as `orphan` when its molecule is already terminal, so there is no
-/// zombie to flip there. The per-molecule `is_running` guard inside
-/// [`collapse_zombie_molecule`] makes a double call a no-op.
-fn collapse_stale_zombies(
-    fleet: &cosmon_state::Fleet,
-    store: &dyn StateStore,
-    events_path: &Path,
-    stale: &[WorkerId],
-) -> Vec<String> {
-    let mut collapsed = Vec::new();
-    for wid in stale {
-        if let Some(mid) = fleet
-            .workers
-            .get(wid)
-            .and_then(|w| w.current_molecule.clone())
-        {
-            if let Some(flipped) = collapse_zombie_molecule(store, events_path, &mid, wid) {
-                collapsed.push(flipped.as_str().to_owned());
-            }
-        }
-    }
-    collapsed
 }
 
 /// Arguments for the `purge` subcommand.
@@ -468,13 +356,13 @@ pub struct Args {
     #[arg(long, value_parser = parse_worker_role)]
     pub role: Option<WorkerRole>,
 
-    /// Collapse molecules whose work is still unharvested (commits ahead of
-    /// base, or an unclean worktree).
+    /// Permit reclaiming a worker whose molecule has unharvested changes.
     ///
     /// Without this flag `cs purge` fails closed: a worker whose pane is
     /// gone but whose branch still carries commits — or whose worktree still
     /// has uncommitted files — is left in the fleet, its molecule left
     /// `running`, and the commits and files at stake are named in an alert.
+    /// With this flag the worker is removed but the molecule stays Running.
     /// A dead tmux session is evidence about the pane, not about the work
     /// (incident 2026-08-02, where four molecules were silently collapsed
     /// after a reboot with up to three commits each still unmerged).
@@ -519,7 +407,7 @@ pub struct Args {
     /// Report what would change and change nothing.
     ///
     /// Applies to the whole command: no fleet entry is removed, no molecule
-    /// is collapsed, no event is emitted and no byte is reclaimed. The
+    /// is changed, no event is emitted and no byte is reclaimed. The
     /// `--worktrees` pass is dry by default and stays dry here.
     #[arg(long)]
     pub dry_run: bool,
@@ -639,15 +527,20 @@ fn classify_sweep<B: TransportBackend>(
     // non-terminal — the conservative default matching the stale-tmux
     // branch below, since a false-positive orphan reclassify would
     // silently destroy a live worker's fleet entry.
-    let mol_terminal: HashMap<MoleculeId, bool> = fleet
+    let now = Utc::now();
+    let grace = chrono::Duration::seconds(super::patrol::DEFAULT_DEAD_WORKER_GRACE_SECS);
+    let mol_state: HashMap<MoleculeId, (bool, bool)> = fleet
         .workers
         .values()
         .filter_map(|w| w.current_molecule.clone())
         .map(|mid| {
-            let terminal = store
-                .load_molecule(&mid)
-                .is_ok_and(|m| m.status.is_terminal());
-            (mid, terminal)
+            let state = store.load_molecule(&mid).map_or((false, false), |mol| {
+                (
+                    mol.status.is_terminal(),
+                    super::patrol::within_dead_worker_grace(&mol, now, grace),
+                )
+            });
+            (mid, state)
         })
         .collect();
 
@@ -666,12 +559,12 @@ fn classify_sweep<B: TransportBackend>(
                 continue;
             }
         }
-        let mol_is_terminal = worker
+        let (mol_is_terminal, in_grace) = worker
             .current_molecule
             .as_ref()
-            .and_then(|mid| mol_terminal.get(mid))
+            .and_then(|mid| mol_state.get(mid))
             .copied()
-            .unwrap_or(false);
+            .unwrap_or((false, false));
 
         match worker.desired {
             DesiredState::Stopped => buckets.terminal.push(worker.id.clone()),
@@ -681,7 +574,7 @@ fn classify_sweep<B: TransportBackend>(
                 // treated as "alive" — only a definitive `Ok(false)`
                 // counts as a stale-tmux verdict.
                 let alive = backend.is_alive(&worker.id).unwrap_or(true);
-                if !alive {
+                if !alive && !in_grace {
                     buckets.stale.push(worker.id.clone());
                 } else if mol_is_terminal {
                     // tmux alive but molecule Completed/Collapsed — the
@@ -733,6 +626,9 @@ fn run_sweep<B: TransportBackend>(
     probe: &dyn HarvestProbe,
     args: &Args,
 ) -> anyhow::Result<()> {
+    // Share tackle's fleet lock and probe liveness on the fresh roster. A
+    // spawn that wins the lock first cannot be reclaimed from an old scan.
+    let _fleet_guard = store.lock_fleet()?;
     let mut fleet = store.load_fleet()?;
 
     let filter_desired: Option<DesiredState> = args
@@ -801,10 +697,7 @@ fn run_sweep<B: TransportBackend>(
         return Ok(());
     }
 
-    // Before clearing `current_molecule` below, collapse any zombie
-    // molecule still pinned to a stale worker (machine crash / 401-death).
     let events_path = state_dir.join("events.jsonl");
-    let zombies_collapsed = collapse_stale_zombies(&fleet, store, &events_path, &stale);
 
     // Reclassify stale + orphan workers' status so the fleet.json
     // snapshot on disk carries an accurate reason before the entry is
@@ -870,7 +763,9 @@ fn run_sweep<B: TransportBackend>(
             "terminal": terminal.iter().map(|w| w.as_str().to_owned()).collect::<Vec<_>>(),
             "stale": stale.iter().map(|w| w.as_str().to_owned()).collect::<Vec<_>>(),
             "orphan": orphan.iter().map(|w| w.as_str().to_owned()).collect::<Vec<_>>(),
-            "zombies_collapsed": zombies_collapsed,
+            // Preserve the machine field for older readers. Purge never
+            // collapses a molecule, so the value is always empty.
+            "zombies_collapsed": Vec::<String>::new(),
             "withheld": withheld.iter().map(|w| serde_json::json!({
                 "worker": w.worker.as_str(),
                 "molecule": w.molecule.as_str(),
@@ -883,15 +778,6 @@ fn run_sweep<B: TransportBackend>(
         });
         println!("{out}");
     } else {
-        if !zombies_collapsed.is_empty() {
-            println!(
-                "Collapsed {} zombie molecule(s) (running → collapsed, cause=process_death):",
-                zombies_collapsed.len()
-            );
-            for mid in &zombies_collapsed {
-                println!("  - {mid}");
-            }
-        }
         if !stale.is_empty() {
             println!(
                 "Reclassified {} worker(s) to Stale (tmux session missing).",
@@ -924,7 +810,7 @@ fn run_sweep<B: TransportBackend>(
             }
             println!(
                 "  Harvest first (`cs done <molecule>`), or repeat with --allow-unharvested to \
-                 collapse them and accept the loss."
+                 reclaim their workers while keeping the molecules Running."
             );
         }
     }
@@ -937,16 +823,17 @@ fn run_sweep<B: TransportBackend>(
     // The withheld population is exactly the shape the 2026-08-02 incident
     // took, and it went unnoticed because purge exited 0 and said nothing an
     // operator would stop for. Re-running the sweep is idempotent, so the
-    // error repeats until the work is harvested or the loss is accepted.
+    // error repeats until the work is harvested or reclamation is allowed.
     let detail = withheld
         .iter()
         .map(|w| format!("{} ({}): {}", w.molecule, w.worker, w.work.describe()))
         .collect::<Vec<_>>()
         .join("\n  ");
     anyhow::bail!(
-        "refusing to collapse {} molecule(s) with unharvested work:\n  {detail}\n  \
+        "refusing to purge {} worker(s) with unharvested work:\n  {detail}\n  \
          a missing tmux session is not evidence that the work failed. Harvest with \
-         `cs done <molecule>`, or pass --allow-unharvested to collapse anyway.",
+         `cs done <molecule>`, or pass --allow-unharvested to reclaim the worker \
+         while keeping the molecule Running.",
         withheld.len()
     )
 }
@@ -955,12 +842,9 @@ fn run_sweep<B: TransportBackend>(
 /// [`withhold_unharvested`] for the sweep half and the incident it comes
 /// from).
 ///
-/// A targeted purge also flips a still-`Running` molecule to `Collapsed`, so
-/// it can discard unmerged commits just as silently as the sweep. `--force`
-/// is a statement about the tmux session, not about the work — only
-/// `--allow-unharvested` accepts the loss, otherwise the guard would be one
-/// `--force` away from useless. Called before any mutation, so a refusal
-/// leaves fleet and molecule state untouched.
+/// `--force` is a statement about the session, not about the work. The
+/// guard asks before removing the worker entry when changes remain, while
+/// molecule status stays untouched in every case.
 fn refuse_if_unharvested(
     fleet: &cosmon_state::Fleet,
     store: &dyn StateStore,
@@ -980,7 +864,8 @@ fn refuse_if_unharvested(
     anyhow::bail!(
         "refusing to purge {worker_id}: molecule {} is still running with unharvested work — \
          {}\n  a missing or killed pane is not evidence that the work failed. Harvest with \
-         `cs done {}`, or pass --allow-unharvested to purge anyway.",
+         `cs done {}`, or pass --allow-unharvested to reclaim the worker \
+         while keeping the molecule Running.",
         mol.id,
         work.describe(),
         mol.id,
@@ -1005,6 +890,7 @@ fn run_targeted(
     let (force, allow_unharvested, dry_run) = (args.force, args.allow_unharvested, args.dry_run);
     let worker_id = WorkerId::new(worker_name)?;
 
+    let _fleet_guard = store.lock_fleet()?;
     let mut fleet = store.load_fleet()?;
 
     // task-20260719-fedf — a bare "worker not found" is a dead end. During
@@ -1045,11 +931,8 @@ fn run_targeted(
     };
 
     let previous_status = worker.status.to_string();
-    // Capture the molecule binding before we null it — a targeted purge of
-    // a worker whose molecule is still `running` leaves a crash zombie just
-    // like the sweep stale path, so flip it below (the `is_running` guard
-    // inside the helper leaves terminal/frozen molecules alone).
-    let bound_molecule = worker.current_molecule.clone();
+    // Purge reclaims only the worker. A Running molecule retains its state
+    // and worktree for a forced tackle in place.
     worker.desired = DesiredState::Stopped;
     worker.status = WorkerStatus::Stopped;
     worker.updated_at = Utc::now();
@@ -1073,14 +956,6 @@ fn run_targeted(
     // Emit both legacy and V2 events so the audit trail is identical to
     // the old `cs kill` path (backward-compatible for consumers).
     let events_path = state_dir.join("events.jsonl");
-
-    // Flip a zombie molecule the purged worker left running. Mirrors the
-    // sweep stale path so `cs purge <worker> --force` no longer leaves the
-    // board reading undrained.
-    let zombie_collapsed = bound_molecule
-        .as_ref()
-        .and_then(|mid| collapse_zombie_molecule(store, &events_path, mid, &worker_id))
-        .map(|mid| mid.as_str().to_owned());
 
     let _ = cosmon_filestore::event::append(
         &events_path,
@@ -1112,17 +987,12 @@ fn run_targeted(
             "tmux_killed": tmux_killed,
             "purged": 1,
             "workers": [worker_id.as_str()],
-            "zombie_collapsed": zombie_collapsed,
+            "zombie_collapsed": serde_json::Value::Null,
         });
         println!("{out}");
     } else {
         let verb = if force { "Force-purged" } else { "Purged" };
         println!("{verb} worker {worker_id} ({previous_status} -> removed)");
-        if let Some(mid) = &zombie_collapsed {
-            println!(
-                "  • collapsed zombie molecule {mid} (running → collapsed, cause=process_death)"
-            );
-        }
     }
     Ok(())
 }
@@ -1827,13 +1697,8 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn test_purge_sweep_collapses_running_molecule_of_stale_worker() {
-        // The exact grace / cosmon zombie pathology: a worker's tmux dies
-        // (machine crash, 401-death), the molecule is left at status
-        // `running`, and the sweep removes the worker. Before the fix the
-        // molecule stayed `running` forever — the board read undrained and
-        // the operator had to `cs collapse` it by hand. The sweep must now
-        // flip it to `Collapsed` with cause `process_death`.
+    fn test_purge_sweep_preserves_running_molecule_of_stale_worker() {
+        // A dead worker is reclaimable without changing its molecule.
         let tmp = TempDir::new().unwrap();
         let store = FileStore::new(tmp.path());
 
@@ -1865,25 +1730,21 @@ mod tests {
         let fleet = store.load_fleet().unwrap();
         assert!(fleet.workers.is_empty(), "stale worker must be purged");
 
-        // Molecule flipped to Collapsed / ProcessDeath.
+        // The molecule retains its lifecycle and recovery path.
         let reloaded = store.load_molecule(&mol.id).unwrap();
         assert_eq!(
             reloaded.status,
-            MoleculeStatus::Collapsed,
-            "zombie running molecule must be collapsed by the sweep"
+            MoleculeStatus::Running,
+            "worker reclamation must leave the molecule Running"
         );
-        assert_eq!(
-            reloaded.collapse_cause,
-            Some(cosmon_core::molecule::CollapseCause::ProcessDeath),
-            "cause must be process_death"
-        );
-        assert_eq!(reloaded.collapsed_step, Some(reloaded.current_step));
+        assert!(reloaded.collapse_cause.is_none());
+        assert!(reloaded.collapsed_step.is_none());
 
-        // The flip is traced in the event log.
+        // The worker removal is traced without a molecule collapse.
         let events = std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap();
         assert!(
-            events.contains("\"verify-20260620-7e7b\"") && events.contains("collapsed"),
-            "events.jsonl must record the molecule collapse; got: {events}"
+            events.contains("worker_killed") && !events.contains("molecule_collapsed"),
+            "events.jsonl must record only worker reclamation; got: {events}"
         );
     }
 
@@ -1891,7 +1752,7 @@ mod tests {
     fn test_purge_sweep_leaves_completed_molecule_of_stale_worker_untouched() {
         // Guard: a stale worker bound to an already-terminal molecule must
         // NOT have its molecule rewritten — only `Running` molecules are
-        // zombies. A Completed molecule stays Completed.
+        // Running work. A Completed molecule stays Completed.
         let tmp = TempDir::new().unwrap();
         let store = FileStore::new(tmp.path());
 
@@ -1929,10 +1790,8 @@ mod tests {
     }
 
     #[test]
-    fn test_purge_targeted_force_collapses_running_molecule() {
-        // `cs purge <worker> --force` on a worker whose molecule is still
-        // running leaves the same crash zombie as the sweep stale path —
-        // flip it to Collapsed / ProcessDeath.
+    fn test_purge_targeted_force_preserves_running_molecule() {
+        // Even an explicit force removes the worker, not its molecule.
         let tmp = TempDir::new().unwrap();
         let store = FileStore::new(tmp.path());
 
@@ -1963,17 +1822,14 @@ mod tests {
             .contains_key(&WorkerId::new("force-target").unwrap()));
 
         let reloaded = store.load_molecule(&mol.id).unwrap();
-        assert_eq!(reloaded.status, MoleculeStatus::Collapsed);
-        assert_eq!(
-            reloaded.collapse_cause,
-            Some(cosmon_core::molecule::CollapseCause::ProcessDeath)
-        );
+        assert_eq!(reloaded.status, MoleculeStatus::Running);
+        assert!(reloaded.collapse_cause.is_none());
     }
 
     #[test]
     fn test_purge_targeted_leaves_completed_molecule_untouched() {
         // Symmetric guard for the targeted path: a Completed molecule is
-        // not a zombie and must survive a targeted purge unchanged.
+        // terminal and must survive a targeted purge unchanged.
         let tmp = TempDir::new().unwrap();
         let store = FileStore::new(tmp.path());
 
@@ -2023,8 +1879,87 @@ mod tests {
         mol.id
     }
 
+    /// Reclaiming a dead worker leaves its Running molecule and worktree ready
+    /// for a forced tackle in place (`PurgeNeverCollapses`).
     #[test]
-    fn test_sweep_refuses_to_collapse_molecule_with_commits_ahead() {
+    fn issue122_purge_dead_worker_preserves_running_molecule() {
+        let tmp = TempDir::new().unwrap();
+        let store = FileStore::new(tmp.path());
+        let mol_id = stale_worker_with_running_molecule(&store, "task-20260929-1220", "dead-122");
+        let mut original = store.load_molecule(&mol_id).unwrap();
+        original.current_step = 1;
+        store.save_molecule(&mol_id, &original).unwrap();
+        let worktree = tmp.path().join(".worktrees").join(mol_id.as_str());
+        std::fs::create_dir_all(&worktree).unwrap();
+        let args = Args {
+            worker: None,
+            force: false,
+            status: None,
+            role: None,
+            allow_unharvested: false,
+            worktrees: false,
+            sessions: false,
+            dry_run: false,
+        };
+
+        run_sweep(
+            &ctx_for(&tmp, false),
+            &store,
+            tmp.path(),
+            &MockBackend::new(),
+            &NoWork,
+            &args,
+        )
+        .unwrap();
+
+        assert!(store.load_fleet().unwrap().workers.is_empty());
+        let mol = store.load_molecule(&mol_id).unwrap();
+        assert_eq!(mol.status, MoleculeStatus::Running);
+        assert_eq!(mol.current_step, 1);
+        assert_eq!(mol.updated_at, original.updated_at);
+        assert!(mol.collapse_cause.is_none());
+        assert!(worktree.is_dir());
+    }
+
+    #[test]
+    fn issue122_sweep_respects_spawn_grace_before_reclaiming_worker() {
+        let tmp = TempDir::new().unwrap();
+        let store = FileStore::new(tmp.path());
+        let mol_id = stale_worker_with_running_molecule(&store, "task-20260929-1222", "w-1222");
+        let mut mol = store.load_molecule(&mol_id).unwrap();
+        mol.tackled_at = Some(Utc::now());
+        store.save_molecule(&mol_id, &mol).unwrap();
+        let args = Args {
+            worker: None,
+            force: false,
+            status: None,
+            role: None,
+            allow_unharvested: false,
+            worktrees: false,
+            sessions: false,
+            dry_run: false,
+        };
+        let backend = MockBackend::new();
+        let ctx = ctx_for(&tmp, false);
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
+        assert!(store
+            .load_fleet()
+            .unwrap()
+            .workers
+            .contains_key(&WorkerId::new("w-1222").unwrap()));
+
+        mol.tackled_at = Some(Utc::now() - chrono::Duration::minutes(3));
+        store.save_molecule(&mol_id, &mol).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
+        assert!(store.load_fleet().unwrap().workers.is_empty());
+        assert_eq!(
+            store.load_molecule(&mol_id).unwrap().status,
+            MoleculeStatus::Running
+        );
+    }
+
+    #[test]
+    fn test_sweep_withholds_worker_with_commits_ahead() {
         // THE regression test for 2026-08-02 09:19: the tmux server vanished
         // with the machine reboot, so every pane read dead, and `cs purge`
         // turned four running molecules into `collapsed` — while their
@@ -2125,9 +2060,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sweep_with_allow_unharvested_collapses_as_before() {
-        // The explicit gesture: the operator states the loss is acceptable,
-        // and the pre-fix behaviour is restored exactly.
+    fn test_sweep_with_allow_unharvested_reclaims_only_worker() {
+        // The explicit gesture releases the worker entry but not the work.
         let tmp = TempDir::new().unwrap();
         let store = FileStore::new(tmp.path());
         let mol_id = stale_worker_with_running_molecule(&store, "task-20260802-0c2d", "w-0c2d");
@@ -2155,8 +2089,8 @@ mod tests {
 
         assert_eq!(
             store.load_molecule(&mol_id).unwrap().status,
-            MoleculeStatus::Collapsed,
-            "--allow-unharvested must restore the collapsing sweep"
+            MoleculeStatus::Running,
+            "--allow-unharvested must leave the molecule Running"
         );
         assert!(store.load_fleet().unwrap().workers.is_empty());
     }
@@ -2272,16 +2206,15 @@ mod tests {
         assert!(store.load_fleet().unwrap().workers.is_empty());
         assert_eq!(
             store.load_molecule(&mol_id).unwrap().status,
-            MoleculeStatus::Collapsed,
-            "a harvested molecule is still zombie-flipped as before"
+            MoleculeStatus::Running,
+            "a harvested molecule still keeps its lifecycle state"
         );
     }
 
     #[test]
     fn test_terminal_molecule_is_not_withheld() {
-        // The guard exists to protect a collapse that would lose work. A
-        // molecule that is already terminal is not going to be collapsed, so
-        // its worker must still be swept even if a branch lingers.
+        // The guard asks before removing a live molecule's worker record.
+        // Terminal work has no worker to resume, even if a branch lingers.
         let tmp = TempDir::new().unwrap();
         let store = FileStore::new(tmp.path());
         let mol = sample_mol("task-20260802-done", MoleculeStatus::Completed);
@@ -2419,7 +2352,7 @@ mod tests {
 
     #[test]
     fn issue61_existing_guard_selection_and_ancestry_differential() -> anyhow::Result<()> {
-        // This is a witness for the EXISTING collapse guard, not a reclaim
+        // This is a witness for the unharvested-work guard, not a reclaim
         // planner. In particular, do not reinterpret its output as permission
         // to remove worktrees: registration and cargo locks are not inputs.
         let tmp = TempDir::new()?;

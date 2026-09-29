@@ -33,7 +33,7 @@ EXAMPLES:
 
 ## `cs purge`
 
-Purge dead workers from fleet state (Stopped, Error, Stale)
+Purge dead workers from fleet state without changing molecule status
 
 **Usage:** `cs purge [OPTIONS] [WORKER]`
 
@@ -60,9 +60,9 @@ SEE ALSO: cs freeze (graceful + state preservation), cs teardown
 * `--force` — In targeted mode, SIGKILL the tmux session before removing the fleet entry. Ignored in sweep mode. Supersedes the stand-alone `cs kill` verb (ADR-052 §D3)
 * `--status <STATUS>` — Only purge workers matching this desired state (default: sweep all workers — Stopped ones and Running/Paused ones whose tmux session is gone)
 * `--role <ROLE>` — Restrict the purge to workers matching this role discriminator — either `cognition` or `runtime` (see `WorkerRole`). Without this flag `cs purge` removes both runtime and cognition workers that meet the status predicate; with it, operators can clean up one half of a runtime+cognition pair without collapsing the other
-* `--allow-unharvested` — Collapse molecules whose work is still unharvested (commits ahead of base, or an unclean worktree).
+* `--allow-unharvested` — Permit reclaiming a worker whose molecule has unharvested changes.
 
-   Without this flag `cs purge` fails closed: a worker whose pane is gone but whose branch still carries commits — or whose worktree still has uncommitted files — is left in the fleet, its molecule left `running`, and the commits and files at stake are named in an alert. A dead tmux session is evidence about the pane, not about the work (incident 2026-08-02, where four molecules were silently collapsed after a reboot with up to three commits each still unmerged).
+   Without this flag `cs purge` fails closed: a worker whose pane is gone but whose branch still carries commits — or whose worktree still has uncommitted files — is left in the fleet, its molecule left `running`, and the commits and files at stake are named in an alert. With this flag the worker is removed but the molecule stays Running. A dead tmux session is evidence about the pane, not about the work (incident 2026-08-02, where four molecules were silently collapsed after a reboot with up to three commits each still unmerged).
 * `--worktrees` — Also run the `.worktrees/` reclamation pass (issue 61).
 
    Enumerates `readdir(.worktrees/) ∪ git worktree list --porcelain` — the filesystem and Git's own registry, not the worker roster, which is keyed by molecule and could not see a directory that has none. Reports every candidate: the reclaimable derived output on one side, and on the other every worktree withheld **with its reason**.
@@ -75,7 +75,7 @@ SEE ALSO: cs freeze (graceful + state preservation), cs teardown
    Reclamation is opt-in exactly as `--worktrees` is: on its own this flag kills nothing, and `--allow-unharvested` — the same gesture, not a second one — executes it. A session is reclaimed only when its molecule is terminal, no client is attached, and its scrollback has been captured to that molecule's directory first.
 * `--dry-run` — Report what would change and change nothing.
 
-   Applies to the whole command: no fleet entry is removed, no molecule is collapsed, no event is emitted and no byte is reclaimed. The `--worktrees` pass is dry by default and stays dry here.
+   Applies to the whole command: no fleet entry is removed, no molecule is changed, no event is emitted and no byte is reclaimed. The `--worktrees` pass is dry by default and stays dry here.
 
 
 

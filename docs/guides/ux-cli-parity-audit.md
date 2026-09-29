@@ -2,6 +2,17 @@
 
 # CLI and UI parity audit
 
+## Worker update recovery (issue #122)
+
+| Capability | CLI | Native UI | Other CLI |
+|---|---|---|---|
+| Record an observed update offer or restart request on the molecule | `cs patrol` and the pane-death hook add `worker-update-offered` or `worker-restart-requested` | No equivalent marker audited | No equivalent marker audited |
+| Reclaim a dead worker without changing its molecule | `cs purge <worker>` removes the worker entry and leaves a Running molecule available for `cs tackle <molecule> --force` in its worktree | No equivalent reclamation action audited | No equivalent action audited |
+
+The marker records pane text, not the cause of a later process exit. The
+existing unharvested-work guard can require `--allow-unharvested` before
+reclamation; neither purge path collapses the molecule.
+
 ## Whisper pane dialogue guard (issue #121)
 
 | Capability | CLI | Native UI | Other CLI |

@@ -141,6 +141,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             &mol_id,
             args.exit_code.as_deref(),
         );
+        record_update_from_dead_pane(ctx, store.as_ref(), &mol_id);
     }
 
     let outcome = harvest_one(store.as_ref(), &state_dir, &mol_id, args.dry_run)?;
@@ -163,6 +164,24 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Inspect retained scrollback after the process exit and keep any observed
+/// update or restart notice on the molecule. A missing session is an unknown
+/// observation, not evidence of a different exit cause.
+fn record_update_from_dead_pane(ctx: &Context, store: &dyn StateStore, mol_id: &MoleculeId) {
+    let Ok(mol) = store.load_molecule(mol_id) else {
+        return;
+    };
+    let Some(session) = mol.tmux_session() else {
+        return;
+    };
+    let backend = cosmon_transport::TmuxBackend::new(super::tmux_socket_name(ctx));
+    let Ok(pane) = backend.capture_session_output(session, 80) else {
+        return;
+    };
+    let kind = cosmon_core::dialogue::classify_codex_dialog(&pane);
+    super::patrol::record_update_observation(store, mol_id, kind);
 }
 
 /// Probe-side post-mortem for a tmux `pane-died` event. Three
@@ -557,5 +576,85 @@ mod tests {
         record_pane_died(&store, &state_dir, &mid, Some("1"));
         assert!(store.molecule_dir(&mid).join("worker.exit").exists());
         assert!(store.load_molecule(&mid).unwrap().process.is_none());
+    }
+
+    #[test]
+    fn issue122_dead_pane_restart_notice_is_recorded_on_molecule() {
+        use cosmon_core::id::ProjectId;
+        use cosmon_core::transport::TransportBackend;
+
+        let (tmp, store, mid, state_dir) = setup(MoleculeStatus::Running, false);
+        let project_id = ProjectId::generate(tmp.path());
+        std::fs::write(
+            state_dir.join("config.toml"),
+            format!("[project]\nproject_id = \"{project_id}\"\n"),
+        )
+        .unwrap();
+        let ctx = Context {
+            verbose: false,
+            json: false,
+            config: Some(state_dir),
+        };
+        let backend = cosmon_transport::TmuxBackend::new(super::super::tmux_socket_name(&ctx));
+        let session = "issue122-restart-pane";
+        backend
+            .spawn_worker(
+                session,
+                tmp.path().to_str().unwrap(),
+                "printf 'Update ran successfully! Please restart.\\n'; exec sleep 600",
+            )
+            .unwrap();
+        backend.install_pane_died_hook(session, "true").unwrap();
+        let mut mol = store.load_molecule(&mid).unwrap();
+        mol.session_name = Some(session.to_owned());
+        store.save_molecule(&mid, &mol).unwrap();
+        let mut notice_visible = false;
+        for _ in 0..40 {
+            if backend
+                .capture_session_output(session, 20)
+                .is_ok_and(|pane| pane.contains("Please restart"))
+            {
+                notice_visible = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(notice_visible);
+
+        let pane_id = std::process::Command::new("tmux")
+            .args([
+                "-L",
+                backend.socket(),
+                "list-panes",
+                "-t",
+                session,
+                "-F",
+                "#{pane_pid}",
+            ])
+            .output()
+            .unwrap();
+        let pane_pid = String::from_utf8(pane_id.stdout).unwrap();
+        assert!(std::process::Command::new("kill")
+            .args(["-9", pane_pid.trim()])
+            .status()
+            .unwrap()
+            .success());
+        let worker = cosmon_core::id::WorkerId::new(session).unwrap();
+        for _ in 0..40 {
+            if !backend.is_alive(&worker).unwrap_or(true) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!backend.is_alive(&worker).unwrap());
+
+        record_update_from_dead_pane(&ctx, &store, &mid);
+        let reloaded = store.load_molecule(&mid).unwrap();
+        assert_eq!(reloaded.status, MoleculeStatus::Running);
+        assert!(reloaded
+            .tags
+            .iter()
+            .any(|tag| tag.as_str() == "worker-restart-requested"));
+        backend.terminate_session(session).unwrap();
     }
 }

@@ -186,7 +186,7 @@ enum Command {
     #[command(after_help = cmd::examples::TEARDOWN)]
     Teardown(cmd::teardown::Args),
 
-    /// Purge dead workers from fleet state (Stopped, Error, Stale)
+    /// Purge dead workers from fleet state without changing molecule status
     #[command(after_help = cmd::examples::PURGE)]
     Purge(cmd::purge::Args),
 

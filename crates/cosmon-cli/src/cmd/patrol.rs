@@ -282,7 +282,8 @@ pub struct Args {
 
 /// Maximum times patrol will respawn a worker before circuit-breaking.
 const MAX_RESTARTS: u32 = 3;
-const DEFAULT_DEAD_WORKER_GRACE_SECS: i64 = 120;
+/// Shared grace for automatic dead-worker decisions in patrol and purge.
+pub(crate) const DEFAULT_DEAD_WORKER_GRACE_SECS: i64 = 120;
 
 fn configured_dead_worker_grace(seconds: u64) -> chrono::Duration {
     i64::try_from(seconds)
@@ -291,7 +292,8 @@ fn configured_dead_worker_grace(seconds: u64) -> chrono::Duration {
         .unwrap_or(chrono::Duration::MAX)
 }
 
-fn within_dead_worker_grace(
+/// A recent tackle is still inside the window where a pane may be starting.
+pub(crate) fn within_dead_worker_grace(
     molecule: &MoleculeData,
     now: chrono::DateTime<Utc>,
     grace: chrono::Duration,
@@ -3373,7 +3375,9 @@ pub(crate) fn dialogue_scan_sweep(
     opts: &DialogueScanOpts,
     now: chrono::DateTime<Utc>,
 ) -> DialogueScanReport {
-    use cosmon_core::dialogue::{classify_codex_dialog, classify_pane, DialogueClass};
+    use cosmon_core::dialogue::{
+        classify_codex_dialog, classify_pane, CodexDialogKind, DialogueClass,
+    };
 
     let running: Vec<&MoleculeData> = molecules
         .iter()
@@ -3398,13 +3402,18 @@ pub(crate) fn dialogue_scan_sweep(
         let Ok(pane) = be.capture_output(wid, opts.lines) else {
             continue;
         };
+        let codex_kind = classify_codex_dialog(&pane);
+        if matches!(
+            codex_kind,
+            Some(CodexDialogKind::UpdateAvailable | CodexDialogKind::RestartRequired)
+        ) {
+            record_update_observation(store, &mol.id, codex_kind);
+        }
         let scan = classify_pane(&pane);
         if scan.class == DialogueClass::None {
             update_dialogue_tags(store, &mol.id, now, None);
             continue;
         }
-        let codex_kind = classify_codex_dialog(&pane);
-
         // Blocked duration from the progress proxy (last_progress_at, else
         // updated_at). Saturating: a clock skew that makes it negative reads
         // as zero rather than a bogus huge age.
@@ -3473,6 +3482,30 @@ pub(crate) fn dialogue_scan_sweep(
         });
     }
     report
+}
+
+/// Keep a durable, visible trace of the update text actually captured from a
+/// worker pane. Neither tag claims the update caused a later process death.
+pub(crate) fn record_update_observation(
+    store: &dyn StateStore,
+    mol_id: &MoleculeId,
+    kind: Option<cosmon_core::dialogue::CodexDialogKind>,
+) {
+    use cosmon_core::dialogue::CodexDialogKind;
+
+    let name = match kind {
+        Some(CodexDialogKind::UpdateAvailable) => "worker-update-offered",
+        Some(CodexDialogKind::RestartRequired) => "worker-restart-requested",
+        _ => return,
+    };
+    let (Ok(tag), Ok(mut mol)) = (Tag::new(name), store.load_molecule(mol_id)) else {
+        return;
+    };
+    if mol.tags.insert(tag) {
+        // This is an observation, not progress. Leave the molecule's progress
+        // timestamp intact so dead-worker grace and stall policy stay honest.
+        let _ = store.save_molecule(mol_id, &mol);
+    }
 }
 
 /// Maintain the live blocked marker and return whether this is a new page.
@@ -5876,6 +5909,44 @@ mod tests {
             lines: 40,
             auto_confirm_safe,
             blocked_after: 900,
+        }
+    }
+
+    #[test]
+    fn issue122_update_and_restart_observations_stay_on_molecule() {
+        std::env::set_var("COSMON_NOTIFY_DRY_RUN", "1");
+        for (pane, expected_tag) in [
+            ("Update available! 1.0 → 1.1", "worker-update-offered"),
+            (
+                "Update ran successfully! Please restart.",
+                "worker-restart-requested",
+            ),
+        ] {
+            let (tmp, store) = make_store();
+            let mol = make_molecule("task-20260929-1221", MoleculeStatus::Running, Some("w1"));
+            store.save_molecule(&mol.id, &mol).unwrap();
+            let molecules = store.list_molecules(&MoleculeFilter::default()).unwrap();
+            let backend = mock_with_worker("w1", pane);
+
+            dialogue_scan_sweep(
+                &store,
+                tmp.path(),
+                &molecules,
+                Some(&backend as &dyn TransportBackend),
+                &opts(true),
+                Utc::now(),
+            );
+
+            let reloaded = store.load_molecule(&mol.id).unwrap();
+            assert_eq!(reloaded.status, MoleculeStatus::Running);
+            if expected_tag == "worker-restart-requested" {
+                assert_eq!(reloaded.updated_at, mol.updated_at);
+            }
+            assert!(reloaded.tags.iter().any(|tag| tag.as_str() == expected_tag));
+            assert!(!backend
+                .calls()
+                .iter()
+                .any(|call| matches!(call, cosmon_transport::mock::MockCall::SendInput { .. })));
         }
     }
 
