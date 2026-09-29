@@ -18,6 +18,11 @@ verify the invariants stated in cosmon's ADRs.
 | `CosmonRun_CrashesI3.cfg`           | Same as Crashes but checks I3 explicitly (fails — documents the frontier). |
 | `CosmonRun_CrashesI4.cfg`           | Same as Crashes but checks I4 explicitly (fails — documents the frontier). |
 | `CosmonRun_I9Counterexample.cfg`    | Minimal one-molecule witness for the I9 violation.                  |
+| `CosmonRun_Concurrency.cfg`         | 2026-09-29 concurrency situations with every fix (re-tackle #122, patrol grace #117, blocked-by #118, dispatch claim #119) — the four new invariants hold. |
+| `CosmonRun_PurgeCollapsesCounterexample.cfg` | `PreFix = {"PurgeCollapses"}` — `PurgeNeverCollapses` fails (the implementation's behaviour while #122 is open). |
+| `CosmonRun_PatrolGraceCounterexample.cfg` | `PreFix = {"PatrolSnapshot"}` — `NoCollapseOfLiveOrGraceWorker` fails (pre-#117 patrol). |
+| `CosmonRun_BlockerReleaseCounterexample.cfg` | `PreFix = {"ReleaseOnAnyTerminal"}` — `DependentRunsOnlyAfterBlockerCompleted` fails (pre-#118 admission). |
+| `CosmonRun_DispatchClaimCounterexample.cfg` | `PreFix = {"UnclaimedTackle"}` — `OneDispatchPerMolecule` fails (pre-#119 tackle). |
 | `CosmonRunXGalaxy_InBand.cfg`       | Closed cross-galaxy model — all five I11..I15 hold.                 |
 | `CosmonRunXGalaxy_Adversarial.cfg`  | `ForgePeerReceipt` enabled — exhibits I14 as the cross-galaxy Gödel counterexample. |
 | `CosmonDocHarness.tla`              | TLA+ meta-fleet for DOC-HARNESS mission (delib-20260519-a20b, B.4). Invariants I1 NoOrphanDoc, I2 DemoGateBeforeDoc, I3 RegistryTruth (with KebabRenameBait exclusion), I4 LyapunovDecreasing, TatouageShape. |
@@ -108,6 +113,11 @@ above is mechanised as a contract:
 | `CosmonRun_CrashesI3.cfg`           | **fail**   | `I3_FleetMirrorsSession`             |
 | `CosmonRun_CrashesI4.cfg`           | **fail**   | `I4_SessionImpliesLiveProcess`       |
 | `CosmonRun_I9Counterexample.cfg`    | **fail**   | `I9_BranchMergedOnlyIfCompleted`     |
+| `CosmonRun_Concurrency.cfg`         | pass       | —                                    |
+| `CosmonRun_PurgeCollapsesCounterexample.cfg` | **fail** | `PurgeNeverCollapses`         |
+| `CosmonRun_PatrolGraceCounterexample.cfg` | **fail** | `NoCollapseOfLiveOrGraceWorker`   |
+| `CosmonRun_BlockerReleaseCounterexample.cfg` | **fail** | `DependentRunsOnlyAfterBlockerCompleted` |
+| `CosmonRun_DispatchClaimCounterexample.cfg` | **fail** | `OneDispatchPerMolecule`        |
 | `CosmonRunXGalaxy_InBand.cfg`       | pass       | —                                    |
 | `CosmonRunXGalaxy_Adversarial.cfg`  | **fail**   | `I14_PeerCompletionHonest`           |
 

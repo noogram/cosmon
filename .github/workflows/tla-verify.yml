@@ -4,8 +4,8 @@ name: TLA+ Verify
 #
 # Fires whenever the TLA+ spec or any model config changes. Runs TLC in a
 # matrix, one job per .cfg, and compares the actual outcome against a
-# hard-coded expected verdict. Two of the six configs must pass; four must
-# fail, each with a specific violated-invariant. The "must-fail" cases —
+# hard-coded expected verdict. Three of the eleven configs must pass; eight
+# must fail, each with a specific violated-invariant. The "must-fail" cases —
 # especially CosmonRun_I9Counterexample — encode a continuous proof of the
 # Gödel sentence: if the counterexample ever stops being reachable, the
 # bypass action was silently removed and the closed-environment hypothesis
@@ -60,6 +60,23 @@ jobs:
           - config: CosmonRun_I9Counterexample
             expect: fail
             violation: I9_BranchMergedOnlyIfCompleted
+          # 2026-09-29 concurrency situations (#117 #118 #119 #122):
+          # one passing model with every fix, one must-fail model per
+          # fix that re-opens it through CONSTANT PreFix.
+          - config: CosmonRun_Concurrency
+            expect: pass
+          - config: CosmonRun_PurgeCollapsesCounterexample
+            expect: fail
+            violation: PurgeNeverCollapses
+          - config: CosmonRun_PatrolGraceCounterexample
+            expect: fail
+            violation: NoCollapseOfLiveOrGraceWorker
+          - config: CosmonRun_BlockerReleaseCounterexample
+            expect: fail
+            violation: DependentRunsOnlyAfterBlockerCompleted
+          - config: CosmonRun_DispatchClaimCounterexample
+            expect: fail
+            violation: OneDispatchPerMolecule
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
