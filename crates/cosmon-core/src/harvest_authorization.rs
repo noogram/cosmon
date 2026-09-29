@@ -256,6 +256,12 @@ pub enum GrantError {
         /// The scope that was offered.
         found: HarvestScope,
     },
+    /// Delegation may not silently cross a reservation requiring human review.
+    #[error("a delegated harvest cannot name reserved authority")]
+    DelegationHasReservations,
+    /// Decoded reservations must already have the constructor's canonical order.
+    #[error("reservations are not sorted and unique")]
+    ReservationsNotCanonical,
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +325,29 @@ pub struct HarvestGrant {
 }
 
 impl HarvestGrant {
+    /// Check the semantic invariants after decoding, without rewriting signed bytes.
+    ///
+    /// # Errors
+    /// A malformed field or noncanonical reservation list is refused.
+    pub fn validate(&self) -> Result<(), GrantError> {
+        one_line("galaxy", self.galaxy.clone())?;
+        one_line("base", self.base.clone())?;
+        if let HarvestScope::Mission { policy_digest, .. } = &self.scope {
+            one_line("policy_digest", policy_digest.clone())?;
+        }
+        let mut canonical = BTreeSet::new();
+        for reservation in &self.reservations {
+            let value = one_line("reservation", reservation.clone())?;
+            if value.contains(',') {
+                return Err(GrantError::ReservationHoldsSeparator { found: value });
+            }
+            canonical.insert(value);
+        }
+        if self.reservations != canonical.into_iter().collect::<Vec<_>>() {
+            return Err(GrantError::ReservationsNotCanonical);
+        }
+        Ok(())
+    }
     /// Compose a grant, refusing any field the line-oriented encoding could
     /// not hold unambiguously.
     ///
@@ -554,6 +583,25 @@ pub enum DoneAuthorization {
 }
 
 impl DoneAuthorization {
+    /// Check the decoded variant and every signed field before using authority.
+    ///
+    /// # Errors
+    /// Invalid fields, mission ratification, or reserved delegation refuse.
+    pub fn validate(&self) -> Result<(), GrantError> {
+        let grant = self.grant();
+        grant.validate()?;
+        match self {
+            Self::Ratified(_) if matches!(grant.scope, HarvestScope::Mission { .. }) => {
+                Err(GrantError::RatificationIsNotMissionScoped {
+                    found: grant.scope.clone(),
+                })
+            }
+            Self::Delegated(_) if !grant.reservations.is_empty() => {
+                Err(GrantError::DelegationHasReservations)
+            }
+            _ => Ok(()),
+        }
+    }
     /// The grant both variants cover.
     #[must_use]
     pub fn grant(&self) -> &HarvestGrant {
@@ -574,20 +622,33 @@ impl DoneAuthorization {
 
     /// The unit of consumption for this authority against `molecule`.
     ///
-    /// This is where the two variants genuinely differ. A ratification is
-    /// consumed *whole* — its permit is the grant itself — so a second,
-    /// different effect under the same seal has nothing left to spend. A
-    /// delegation yields one molecule-specific permit per member of its scope,
-    /// which is what lets an approved policy drain a DAG without the operator
-    /// signing every edge.
+    /// The signed scope determines the identity. An unsigned variant relabel
+    /// cannot create a fresh permit for the same signed molecule grant.
     #[must_use]
     pub fn permit_id(&self, molecule: &MoleculeId) -> PermitId {
-        match self {
-            Self::Ratified(r) => PermitId(r.grant.fingerprint().0),
-            Self::Delegated(d) => PermitId(hex_digest(
-                format!("{}\n{}\n", d.grant.fingerprint(), molecule.as_str()).as_bytes(),
+        let fingerprint = self.grant().fingerprint();
+        match &self.grant().scope {
+            HarvestScope::Molecule { .. } => PermitId(fingerprint.0),
+            HarvestScope::Mission { .. } => PermitId(hex_digest(
+                format!("{fingerprint}\n{}\n", molecule.as_str()).as_bytes(),
             )),
         }
+    }
+
+    /// Canonical receipt key followed by its v1 unsigned-variant alias.
+    ///
+    /// Historical receipts must remain visible when a grant is relabelled.
+    #[must_use]
+    pub fn receipt_ids(&self, molecule: &MoleculeId) -> Vec<PermitId> {
+        let canonical = self.permit_id(molecule);
+        let fingerprint = self.grant().fingerprint();
+        let legacy = match &self.grant().scope {
+            HarvestScope::Molecule { .. } => PermitId(hex_digest(
+                format!("{fingerprint}\n{}\n", molecule.as_str()).as_bytes(),
+            )),
+            HarvestScope::Mission { .. } => PermitId(fingerprint.0),
+        };
+        vec![canonical, legacy]
     }
 }
 
@@ -782,6 +843,9 @@ pub enum AuthorizedHarvest {
 /// pin a key, or stop — for the reason [`AttestationError`] is enumerated.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HarvestRefusal {
+    /// A decoded grant violated semantic invariants even if its signature checks.
+    #[error("invalid harvest grant: {0}")]
+    InvalidGrant(#[from] GrantError),
     /// The seal did not check out. Includes the case where no trust root is
     /// pinned, which refuses rather than permits: deleting the key stops
     /// harvests instead of unlocking them.
@@ -827,6 +891,12 @@ pub enum HarvestRefusal {
     #[error("the harvest crosses reservation {reservation:?}, which the grant does not name")]
     ReservationNotNamed {
         /// The reservation crossed but unnamed.
+        reservation: String,
+    },
+    /// A ratification named a reservation that is no longer present.
+    #[error("the grant names reservation {reservation:?}, which this harvest no longer crosses")]
+    ReservationRemoved {
+        /// The old reservation, absent from the current effect facts.
         reservation: String,
     },
     /// The galaxy epoch moved: the grant has been revoked, arithmetically.
@@ -985,6 +1055,7 @@ pub fn authorize(
 ) -> Result<AuthorizedHarvest, HarvestRefusal> {
     let grant = authorization.grant();
     verifier.verify(grant, authorization.attestation())?;
+    authorization.validate()?;
 
     if grant.galaxy != facts.galaxy {
         return Err(HarvestRefusal::WrongGalaxy {
@@ -1020,6 +1091,15 @@ pub fn authorize(
                 reservation: crossed.clone(),
             });
         }
+    }
+    if let Some(removed) = grant
+        .reservations
+        .iter()
+        .find(|named| !facts.reservations_crossed.contains(named))
+    {
+        return Err(HarvestRefusal::ReservationRemoved {
+            reservation: removed.clone(),
+        });
     }
     if grant.epoch != facts.epoch {
         return Err(HarvestRefusal::EpochSuperseded {

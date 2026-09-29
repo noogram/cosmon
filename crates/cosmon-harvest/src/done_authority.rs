@@ -162,10 +162,35 @@ pub fn authorize_harvest(
 
     let mut refusals: Vec<String> = Vec::new();
     for authorization in &candidates {
-        let permit = authorization.permit_id(&facts.molecule);
-        let prior = ledger
-            .recorded(&permit)
-            .map_err(|reason| CosmonError::StateStore { reason })?;
+        let mut prior: Option<ConsumptionRecord> = None;
+        for permit in authorization.receipt_ids(&facts.molecule) {
+            if let Some(record) = ledger
+                .recorded(&permit)
+                .map_err(|reason| CosmonError::StateStore { reason })?
+            {
+                if record.grant != authorization.grant().fingerprint() {
+                    return Err(CosmonError::StateStore {
+                        reason: format!("harvest receipt for {permit} names a different grant"),
+                    });
+                }
+                if let Some(previous) = &prior {
+                    if previous.grant != record.grant
+                        || previous.effect != record.effect
+                        || previous.key_id != record.key_id
+                        || previous.invocation_id != record.invocation_id
+                    {
+                        return Err(CosmonError::StateStore {
+                            reason: format!(
+                                "conflicting harvest receipt aliases for {}",
+                                authorization.grant().fingerprint()
+                            ),
+                        });
+                    }
+                } else {
+                    prior = Some(record);
+                }
+            }
+        }
         match authorize(authorization, &facts, prior.as_ref(), verifier) {
             Ok(AuthorizedHarvest::AlreadyLanded(record)) => {
                 return Ok(HarvestDecision::AlreadyLanded(record));
