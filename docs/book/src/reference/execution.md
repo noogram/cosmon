@@ -177,6 +177,7 @@ SEE ALSO: cs complete (state transition only), cs tackle (counterpart).
 
    Reports what `cs done` *would* do: worktree state (clean/dirty), whether a merge is needed, whether the tmux session is alive, whether a fleet worker is registered, and whether the branch exists.
 * `--no-merge` — Skip merging the worker's branch into the base branch
+* `--review-shell` — Review a merge's changed shell surface and grant trust over the merged files before the post-merge gate. Requires an explicit operator reply; declining rolls the merge back and preserves the branch
 * `--no-worktree-remove` — Skip removing the git worktree
 * `--no-branch-delete` — Skip deleting the worker's branch after merge
 * `--no-kill` — Skip killing the tmux session

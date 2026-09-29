@@ -55,6 +55,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -134,6 +135,12 @@ pub struct Args {
     /// Skip merging the worker's branch into the base branch.
     #[arg(long)]
     no_merge: bool,
+
+    /// Review a merge's changed shell surface and grant trust over the merged
+    /// files before the post-merge gate. Requires an explicit operator reply;
+    /// declining rolls the merge back and preserves the branch.
+    #[arg(long, conflicts_with_all = ["no_merge", "dry_run"])]
+    review_shell: bool,
 
     /// Skip removing the git worktree.
     #[arg(long)]
@@ -267,6 +274,9 @@ impl Args {
             // be two doors.
             dry_run: false,
             no_merge: opts.no_merge,
+            // The wire has no interactive operator gesture. A requester or
+            // worker cannot mint this option through HarvestOptions.
+            review_shell: false,
             no_worktree_remove: opts.no_worktree_remove,
             no_branch_delete: opts.no_branch_delete,
             no_kill: opts.no_kill,
@@ -2882,6 +2892,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // this dispatch and retries the molecule instead of advancing dependents
     // past a broken main.
     if merge_succeeded {
+        let mut review_granted = false;
         // Issue #109: a merge that changes the trusted shell surface is refused
         // unless the merged surface is itself trusted — on every gate rung.
         // Before this check the refusal was a side effect of the gate running a
@@ -2895,43 +2906,72 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             if let Some(refusal) =
                 unreviewed_surface_refusal(&pre.status, &crate::trust::status(&repo_root), &paths)
             {
-                let remedy = matches!(refusal, SurfaceRefusal::MergeInvalidatedTrust).then(|| {
-                    trust_surface_remedy(
-                        &repo_root,
-                        &base_branch,
+                if args.review_shell && refusal == SurfaceRefusal::MergeInvalidatedTrust {
+                    match review_merged_shell_surface(&repo_root, pmh, &mol_id, &paths) {
+                        Ok(()) => {
+                            review_granted = true;
+                            actions.push(
+                                "shell_surface: operator reviewed and trusted merged files"
+                                    .to_owned(),
+                            );
+                        }
+                        Err(e) => {
+                            return Err(refuse_post_merge_and_rollback(
+                                ctx,
+                                &events_path,
+                                &mol_id,
+                                &branch_name,
+                                &repo_root,
+                                Some(pmh),
+                                merge_dispatch_seq,
+                                &actions,
+                                &e.to_string(),
+                                None,
+                                true,
+                            ));
+                        }
+                    }
+                } else {
+                    let remedy =
+                        matches!(refusal, SurfaceRefusal::MergeInvalidatedTrust).then(|| {
+                            trust_surface_remedy(
+                                &repo_root,
+                                &base_branch,
+                                &mol_id,
+                                &branch_name,
+                                &paths,
+                                project_cfg
+                                    .gates
+                                    .integrity_command
+                                    .as_deref()
+                                    .or(project_cfg.gates.build_command.as_deref()),
+                            )
+                        });
+                    let cause = match crate::trust::ensure_trusted(&repo_root) {
+                        Err(e) => format!(
+                            "the merge changes the trusted shell surface ({}) and the merged \
+                         surface is not trusted — {e}",
+                            paths.join(", ")
+                        ),
+                        Ok(()) => format!(
+                            "the merge changes the trusted shell surface ({})",
+                            paths.join(", ")
+                        ),
+                    };
+                    return Err(refuse_post_merge_and_rollback(
+                        ctx,
+                        &events_path,
                         &mol_id,
                         &branch_name,
-                        &paths,
-                        project_cfg
-                            .gates
-                            .integrity_command
-                            .as_deref()
-                            .or(project_cfg.gates.build_command.as_deref()),
-                    )
-                });
-                let cause = match crate::trust::ensure_trusted(&repo_root) {
-                    Err(e) => format!(
-                        "the merge changes the trusted shell surface ({}) and the merged \
-                         surface is not trusted — {e}",
-                        paths.join(", ")
-                    ),
-                    Ok(()) => format!(
-                        "the merge changes the trusted shell surface ({})",
-                        paths.join(", ")
-                    ),
-                };
-                return Err(refuse_post_merge_and_rollback(
-                    ctx,
-                    &events_path,
-                    &mol_id,
-                    &branch_name,
-                    &repo_root,
-                    Some(pmh),
-                    merge_dispatch_seq,
-                    &actions,
-                    &cause,
-                    remedy.as_deref(),
-                ));
+                        &repo_root,
+                        Some(pmh),
+                        merge_dispatch_seq,
+                        &actions,
+                        &cause,
+                        remedy.as_deref(),
+                        false,
+                    ));
+                }
             }
         }
 
@@ -2955,6 +2995,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                         &actions,
                         &e.to_string(),
                         None,
+                        review_granted,
                     ));
                 }
             },
@@ -2970,6 +3011,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     &actions,
                     "post-merge gate refused DONE but no pre-merge revision was captured",
                     None,
+                    review_granted,
                 ));
             }
         };
@@ -3061,6 +3103,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                         &actions,
                         &cause,
                         remedy.as_deref(),
+                        review_granted,
                     ));
                 }
                 // Reached only for `expected: false` without the promoting flag —
@@ -5607,6 +5650,49 @@ fn shell_surface_changes(changed: &[PathBuf], pre: &[String], post: &[String]) -
     out
 }
 
+/// Show the exact merged shell changes before granting B5 trust over bytes on
+/// disk. A missing or different reply is a decline, including EOF in a
+/// detached caller. The caller owns the trunk lock and rolls back on refusal.
+fn review_merged_shell_surface(
+    repo_root: &Path,
+    pre_merge_head: &str,
+    mol_id: &MoleculeId,
+    paths: &[String],
+) -> anyhow::Result<()> {
+    let diff = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["diff", "--no-ext-diff", "--no-color", "--binary"])
+        .arg(format!("{pre_merge_head}..HEAD"))
+        .arg("--")
+        .args(paths)
+        .output()?;
+    if !diff.status.success() {
+        anyhow::bail!(
+            "could not display merged shell-surface diff: {}",
+            String::from_utf8_lossy(&diff.stderr).trim()
+        );
+    }
+    if diff.stdout.is_empty() {
+        anyhow::bail!("merged shell-surface diff is empty; refusing to request trust");
+    }
+    eprintln!(
+        "Shell-surface changes now on disk at {}:",
+        repo_root.display()
+    );
+    std::io::stderr().write_all(&diff.stdout)?;
+    eprint!("Type `trust {mol_id}` to trust these merged files and run the post-merge gate: ");
+    std::io::stderr().flush()?;
+    let mut reply = String::new();
+    std::io::stdin().read_line(&mut reply)?;
+    if reply.trim() != format!("trust {mol_id}") {
+        anyhow::bail!("operator declined shell-surface trust; no gate was run");
+    }
+    crate::trust::grant(repo_root, &crate::trust::store_dir())?;
+    crate::trust::ensure_trusted(repo_root)?;
+    Ok(())
+}
+
 /// Quote `s` for a POSIX shell only when it needs it, so the common path
 /// (`scripts/gate.sh`) prints as typed and a path with a space still pastes.
 fn sh_quote(s: &str) -> String {
@@ -5695,6 +5781,7 @@ fn trust_surface_remedy(
     out.push_str(
         "`cs done` then reports the branch already merged, skips the merge and only tears down.",
     );
+    out.push_str(&format!("\nOr run `cs done {mol_id} --review-shell` to review and trust the merged files inside the rollback-protected transaction."));
     out
 }
 
@@ -5723,13 +5810,34 @@ fn refuse_post_merge_and_rollback(
     actions: &[String],
     cause: &str,
     remedy: Option<&str>,
+    restore_pre_merge_trust: bool,
 ) -> anyhow::Error {
     let rollback = pre_merge_head.ok_or_else(|| {
         anyhow::anyhow!("post-merge gate refused DONE but no pre-merge revision was captured")
     });
     let reason = match rollback.and_then(|head| reset_hard(repo_root, head)) {
-        Ok(()) => format!("{cause}; git reset --hard restored main to its pre-merge revision"),
-        Err(reset_err) => format!("{cause}; CRITICAL: git reset --hard failed: {reset_err}"),
+        Ok(()) => {
+            let restored = if restore_pre_merge_trust {
+                match crate::trust::grant(repo_root, &crate::trust::store_dir()) {
+                    Ok(_) => "; original shell trust restored".to_owned(),
+                    Err(e) => format!("; CRITICAL: could not restore original shell trust: {e}"),
+                }
+            } else {
+                String::new()
+            };
+            format!("{cause}; git reset --hard restored main to its pre-merge revision{restored}")
+        }
+        Err(reset_err) => {
+            let revoked = if restore_pre_merge_trust {
+                match crate::trust::revoke(repo_root, &crate::trust::store_dir()) {
+                    Ok(_) => "; merged shell trust revoked".to_owned(),
+                    Err(e) => format!("; CRITICAL: could not revoke merged shell trust: {e}"),
+                }
+            } else {
+                String::new()
+            };
+            format!("{cause}; CRITICAL: git reset --hard failed: {reset_err}{revoked}")
+        }
     };
     let _ = cosmon_state::event_log::emit_one(
         events_path,

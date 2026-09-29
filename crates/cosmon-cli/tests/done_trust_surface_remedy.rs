@@ -16,8 +16,9 @@
 //!    reports it already merged and tears down.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 /// Marker line that opens the remedy block; its absence is the "no trust
 /// sequence" verdict in falsifiers 2 and 3.
@@ -162,6 +163,185 @@ fn done(repo: &Path, trust_store: &Path, mol_id: &str) -> Output {
         .expect("cs done")
 }
 
+/// Give the review gesture through stdin, as an operator at the prompt would.
+fn reviewed_done(repo: &Path, trust_store: &Path, mol_id: &str, answer: &str) -> Output {
+    let mut child = cs(repo, trust_store)
+        .args(["done", mol_id, "--review-shell", "--no-auto-propel"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("cs done --review-shell");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(answer.as_bytes())
+        .expect("answer");
+    child.wait_with_output().expect("reviewed done result")
+}
+
+/// Proposal (2): the operator reviews the merged bytes, grants trust there,
+/// then the declared post-merge gate runs and the branch lands in one command.
+#[test]
+fn reviewed_shell_merge_lands_and_grants_over_merged_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let (mol_id, branch) = surface_changing_fixture(repo, store.path(), true);
+    let response = format!("trust {mol_id}\n");
+
+    let result = reviewed_done(repo, store.path(), &mol_id, &response);
+    let text = combined(&result);
+    assert!(
+        result.status.success(),
+        "the reviewed merge must land.\n{text}"
+    );
+    assert!(
+        text.contains("scripts/lint.sh") && text.contains("diff --git"),
+        "the changed shell bytes must be shown.\n{text}"
+    );
+    assert!(
+        text.contains("post_merge_compile_gate"),
+        "the gate must run after trust.\n{text}"
+    );
+    assert!(git(repo, &["cat-file", "-e", "main:scripts/lint.sh"])
+        .status
+        .success());
+    assert!(!git(repo, &["rev-parse", "--verify", &branch])
+        .status
+        .success());
+    let trust = cs(repo, store.path())
+        .args(["trust", "--status"])
+        .output()
+        .expect("trust status");
+    assert!(
+        combined(&trust).contains("trusted"),
+        "the grant must cover merged bytes.\n{}",
+        combined(&trust)
+    );
+}
+
+/// Declining the gesture restores both the branch topology and original grant.
+#[test]
+fn declined_shell_review_rolls_back_without_changing_trust() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let (mol_id, branch) = surface_changing_fixture(repo, store.path(), true);
+    let before = rev(repo, "main");
+
+    let result = reviewed_done(repo, store.path(), &mol_id, "no\n");
+    assert!(
+        !result.status.success(),
+        "a decline must refuse.\n{}",
+        combined(&result)
+    );
+    assert_eq!(
+        rev(repo, "main"),
+        before,
+        "decline must roll back the merge"
+    );
+    assert!(git(repo, &["rev-parse", "--verify", &branch])
+        .status
+        .success());
+    let trust = cs(repo, store.path())
+        .args(["trust", "--status"])
+        .output()
+        .expect("trust status");
+    assert!(
+        combined(&trust).contains("trusted"),
+        "the old grant must survive.\n{}",
+        combined(&trust)
+    );
+}
+
+/// A gate failure after the grant restores the original main and its trust.
+#[test]
+fn reviewed_shell_gate_failure_restores_original_grant() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo(
+        repo,
+        GATED_CONFIG,
+        &[("scripts/gate.sh", "exit 7\n"), ("src/main.py", "pass\n")],
+    );
+    let mol_id = nucleate_terminal(repo, store.path());
+    let branch = stage_branch(repo, &mol_id, &[("scripts/lint.sh", "exit 0\n"),
+        (".cosmon/config.toml", "[project]\nproject_id = \"issue-74\"\n\n[gates]\nintegrity_command = 'sh scripts/gate.sh && sh scripts/lint.sh'\n")]);
+    grant_trust(repo, store.path());
+    let before = rev(repo, "main");
+
+    let result = reviewed_done(repo, store.path(), &mol_id, &format!("trust {mol_id}\n"));
+    let text = combined(&result);
+    assert!(
+        !result.status.success(),
+        "the failed gate must refuse.\n{text}"
+    );
+    assert!(
+        text.contains("[gates].integrity_command") && text.contains("exited 7"),
+        "the declared gate must be reached.\n{text}"
+    );
+    assert_eq!(rev(repo, "main"), before);
+    assert!(git(repo, &["rev-parse", "--verify", &branch])
+        .status
+        .success());
+    let trust = cs(repo, store.path())
+        .args(["trust", "--status"])
+        .output()
+        .expect("trust status");
+    assert!(
+        combined(&trust).contains("trusted"),
+        "the pre-merge grant must be restored.\n{}",
+        combined(&trust)
+    );
+}
+
+/// The existing worker-self-harvest guard also covers the new review option.
+#[test]
+fn worker_cannot_review_own_shell_surface() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let (mol_id, branch) = surface_changing_fixture(repo, store.path(), true);
+    let before = rev(repo, "main");
+    let result = cs(repo, store.path())
+        .env("COSMON_PARENT_MOL_ID", &mol_id)
+        .args(["done", &mol_id, "--review-shell", "--no-auto-propel"])
+        .output()
+        .expect("worker done");
+    assert!(!result.status.success());
+    assert!(combined(&result).contains("harvest belongs to the pilot"));
+    assert_eq!(rev(repo, "main"), before);
+    assert!(git(repo, &["rev-parse", "--verify", &branch])
+        .status
+        .success());
+}
+
+/// The review option only repairs trust made stale by this merge; it cannot
+/// grant trust to a repository the operator never trusted in the first place.
+#[test]
+fn review_option_does_not_grant_initial_repository_trust() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let (mol_id, branch) = surface_changing_fixture(repo, store.path(), false);
+    let before = rev(repo, "main");
+    let result = reviewed_done(repo, store.path(), &mol_id, &format!("trust {mol_id}\n"));
+    let text = combined(&result);
+    assert!(!result.status.success());
+    assert!(text.contains("repository not trusted"), "{text}");
+    assert!(
+        !text.contains("Type `trust"),
+        "there must be no grant prompt.\n{text}"
+    );
+    assert_eq!(rev(repo, "main"), before);
+    assert!(git(repo, &["rev-parse", "--verify", &branch])
+        .status
+        .success());
+}
+
 const GATED_CONFIG: &str =
     "[project]\nproject_id = \"issue-74\"\n\n[gates]\nintegrity_command = 'sh scripts/gate.sh'\n";
 
@@ -216,6 +396,10 @@ fn merge_that_invalidates_trust_prints_a_sequence_that_lands_the_branch() {
     assert!(
         text.contains(REMEDY_MARKER),
         "the refusal must name the class.\n{text}"
+    );
+    assert!(
+        text.contains(&format!("cs done {mol_id} --review-shell")),
+        "the ordinary refusal must point to the review option.\n{text}"
     );
     assert!(
         text.contains("    • scripts/lint.sh"),
