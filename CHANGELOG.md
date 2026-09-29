@@ -19,6 +19,17 @@ this stage.
 
 ## [Unreleased]
 
+### Security
+
+- **`cosmon-rpp-adapter` closes tenant admission when an OIDC operator file is
+  invalid.** At boot and on refresh, an unreadable or malformed
+  `oidc-kill.toml` or `oidc-policy.toml` now logs an error and returns
+  `global_kill` (HTTP 503) for tenant requests. Missing files remain optional;
+  repairing either file restores admission on the next refresh. Misspelled
+  kill-switch and policy-structure fields are treated as invalid rather than
+  silently ignored. Operators should check the adapter log after editing
+  either file.
+
 ### Added
 
 - **`cs run --resident --harness <KEY>=<VALUE>`** (GitHub issue #86, repeatable).

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 
 use crate::nucleon_map::Noyau;
 
@@ -32,9 +32,9 @@ pub struct DenyList {
 
 #[derive(Debug, Default)]
 struct CacheSlot {
-    /// Cached snapshot (defaults to "nothing denied").
+    /// Cached snapshot (defaults to "nothing denied" before the first read).
     snapshot: Snapshot,
-    /// Last successful refresh.
+    /// Last refresh attempt, including a failed one that closed admission.
     refreshed_at: Option<Instant>,
 }
 
@@ -70,8 +70,8 @@ impl DenyList {
         self
     }
 
-    /// Refresh the cache if the TTL elapsed; return the snapshot in
-    /// any case.
+    /// Refresh the cache if the TTL elapsed. A read or parse error closes
+    /// admission until a later successful refresh.
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         let now = Instant::now();
@@ -84,7 +84,16 @@ impl DenyList {
             None => true,
         };
         if refresh_due {
-            slot.snapshot = read_from_disk(&self.state_dir);
+            slot.snapshot = match read_from_disk(&self.state_dir) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    tracing::error!(%error, "OIDC deny-list unavailable; refusing all admission until the next successful refresh");
+                    Snapshot {
+                        global_kill: true,
+                        ..Snapshot::default()
+                    }
+                }
+            };
             slot.refreshed_at = Some(now);
         }
         slot.snapshot.clone()
@@ -106,50 +115,55 @@ impl DenyList {
         self.snapshot().global_kill
     }
 
-    /// True iff `sub_hash` is on the deny-list.
+    /// True when `sub_hash` is denied or the global door is closed.
     #[must_use]
     pub fn is_sub_revoked(&self, sub_hash: &str) -> bool {
-        self.snapshot()
-            .denied_sub_hashes
-            .iter()
-            .any(|s| s == sub_hash)
+        let snapshot = self.snapshot();
+        snapshot.global_kill || snapshot.denied_sub_hashes.iter().any(|s| s == sub_hash)
     }
 
-    /// True iff `jti` is on the deny-list.
+    /// True when `jti` is denied or the global door is closed.
     #[must_use]
     pub fn is_jti_revoked(&self, jti: &str) -> bool {
-        self.snapshot().denied_jtis.iter().any(|j| j == jti)
+        let snapshot = self.snapshot();
+        snapshot.global_kill || snapshot.denied_jtis.iter().any(|j| j == jti)
     }
 
-    /// True iff `noyau` is paused.
+    /// True when `noyau` is paused or the global door is closed.
     #[must_use]
     pub fn is_noyau_revoked(&self, noyau: &Noyau) -> bool {
-        self.snapshot()
-            .denied_noyaus
-            .iter()
-            .any(|n| n == noyau.as_str())
+        let snapshot = self.snapshot();
+        snapshot.global_kill || snapshot.denied_noyaus.iter().any(|n| n == noyau.as_str())
     }
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct KillFile {
     #[serde(default)]
     global: GlobalKill,
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GlobalKill {
     #[serde(default)]
     enabled: bool,
+    #[serde(rename = "reason")]
+    _reason: Option<String>,
+    #[serde(rename = "since")]
+    _since: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PolicyFile {
     #[serde(default)]
     deny: DenyEntries,
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DenyEntries {
     #[serde(default, rename = "sub")]
     subs: Vec<DeniedSub>,
@@ -174,30 +188,39 @@ struct DeniedNoyau {
     noyau: String,
 }
 
-fn read_from_disk(state_dir: &std::path::Path) -> Snapshot {
+fn read_from_disk(state_dir: &std::path::Path) -> Result<Snapshot, String> {
     let mut snap = Snapshot::default();
     let kill_path = state_dir.join("security/oidc-kill.toml");
-    if let Ok(text) = std::fs::read_to_string(&kill_path) {
-        if let Ok(file) = toml::from_str::<KillFile>(&text) {
-            snap.global_kill = file.global.enabled;
-        } else {
-            tracing::warn!(path = %kill_path.display(), "malformed oidc-kill.toml — ignoring");
-        }
+    if let Some(file) = read_optional_toml::<KillFile>(&kill_path)? {
+        snap.global_kill = file.global.enabled;
     }
     let policy_path = state_dir.join("security/oidc-policy.toml");
-    if let Ok(text) = std::fs::read_to_string(&policy_path) {
-        match toml::from_str::<PolicyFile>(&text) {
-            Ok(file) => {
-                snap.denied_sub_hashes = file.deny.subs.into_iter().map(|d| d.sub_hash).collect();
-                snap.denied_jtis = file.deny.jtis.into_iter().map(|d| d.jti).collect();
-                snap.denied_noyaus = file.deny.noyaus.into_iter().map(|d| d.noyau).collect();
-            }
-            Err(e) => {
-                tracing::warn!(path = %policy_path.display(), error = %e, "malformed oidc-policy.toml — ignoring");
+    if let Some(file) = read_optional_toml::<PolicyFile>(&policy_path)? {
+        snap.denied_sub_hashes = file.deny.subs.into_iter().map(|d| d.sub_hash).collect();
+        snap.denied_jtis = file.deny.jtis.into_iter().map(|d| d.jti).collect();
+        snap.denied_noyaus = file.deny.noyaus.into_iter().map(|d| d.noyau).collect();
+    }
+    Ok(snap)
+}
+
+fn read_optional_toml<T: DeserializeOwned>(path: &std::path::Path) -> Result<Option<T>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A dangling symlink has a directory entry, so it is an unreadable
+            // operator file rather than an intentionally absent optional one.
+            match std::fs::symlink_metadata(path) {
+                Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(None);
+                }
+                _ => return Err(format!("cannot read {}: {error}", path.display())),
             }
         }
-    }
-    snap
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    toml::from_str(&text)
+        .map(Some)
+        .map_err(|error| format!("cannot parse {}: {error}", path.display()))
 }
 
 #[cfg(test)]
