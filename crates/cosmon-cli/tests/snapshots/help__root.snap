@@ -39,6 +39,8 @@ A branch that changes the trusted shell surface needs an operator review after m
 
 DECLARED WORK (ADR-182): a pilot records a finite seat roster with 'cs work declare <owner> --seat a=<molecule> --seat b=<molecule>'. Members use 'cs work send --to <seat> --text <evidence>', 'cs work inbox', and 'cs work ack <key> --considered|--deferred|--rejected'. 'cs work list <owner>' reconstructs each message stage from the owner's canonical evidence. Messages and receipts never advance a molecule or grant lifecycle authority.
 
+COLLABORATE — 'cs sessions' vs 'cs work'. Two commands cover two different shapes of collaboration; pick by what you are actually running. 'cs sessions' is TWO LIVE SESSIONS ON ONE MISSION: one holds the controls and may change it, the other reads the same material and advises, and only a human signature ('cs sessions takeover grant') moves the controls between them. 'cs work' is SEPARATE MOLECULES — an implementer and a reviewer, say, on the same provider or on two different ones — each with its own lifecycle, branch and permissions, visible in 'cs peek' and harvested on its own, exchanging bounded findings with no authority over each other. Neither replaces 'cs whisper' (pilot-to-worker steering only).
+
 Pilots NEVER poll 'cs observe' by hand — always use 'cs wait'. Pilots NEVER skip 'cs done' — without it the branch never merges. Pilots NEVER run 'cs run' in the foreground — wrap it in a detached tmux session: tmux new -d -s runtime cs run <root> --poll-interval 5 (cs run calls cs done automatically on completion). The historical '--leaf' and '--force-runtime' flags on 'cs tackle' are deprecated no-ops since the verb-unification: pick the right verb instead.
 
 BASE BRANCH. The branch a molecule merges back into is a property of the MOLECULE, not of your shell: 'cs tackle --base <branch>' cuts the worker's branch from that trunk and persists the name, and 'cs done' reads it back. Resolution order: the molecule's own base → $COSMON_BASE_BRANCH → origin/HEAD → 'main'. Tackle without --base and nothing changes — the branch is cut from the ambient HEAD and the harvest uses the environment chain, as it always did. This is what lets you pilot several molecules on several trunks from one session without a git checkout dance, and what lets a 'cs done' fired by a tmux hook (whose environment froze when the tmux server started) still land on the right trunk.
@@ -264,7 +266,7 @@ Commands:
   transform       Transform a molecule's kind (idea → task, etc.)
   init            Bootstrap a project-local .cosmon/ directory (creates the target dir if missing)
   inbox           Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
-  work            Exchange bounded evidence within a declared work scope
+  work            Work — separate molecules (e.g. an implementer and a reviewer, same or another provider) exchange findings, recorded and bounded (ADR-182)
   spark           Spark — capture a one-line operator intent into the Inbox (ADR-061)
   drop            Drop — universal Inbox gesture (hotkey / zsh widget / menubar) → `cs spark`
   listen          Listen — voice → whisper.cpp → `cs nucleate spark` (MVP)

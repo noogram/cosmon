@@ -27,6 +27,30 @@ use serde::{Deserialize, Serialize};
 
 use super::Context;
 
+/// What `cs work --help` opens with, before the verbs and the examples.
+///
+/// Printed once, on `cs work --help`; kept as a constant (rather than the
+/// doc comment on the `Work` variant in `main.rs`, which is also the one
+/// line shown in `cs help`) so the longer explanation does not force that
+/// line to wrap.
+pub const LONG_ABOUT: &str = "\
+Separate molecules — an implementer and a reviewer, say, on the same
+provider or on two different ones — exchange findings under a declared,
+bounded work scope (ADR-182). Each molecule keeps its own lifecycle,
+branch and permissions; it stays visible in `cs peek` and is harvested on
+its own. Messages carry evidence and requests only: they never advance a
+molecule, satisfy a dependency or grant one molecule authority over
+another.
+
+The owning molecule declares a finite seat roster once (`declare`); each
+member then sends bounded evidence to another seat (`send`), pulls what is
+addressed to it (`inbox`), and reports how it treated a message
+(`ack`). `list` rebuilds every message's stage — admitted, delivered,
+consumed — from canonical evidence, for any member or for the owner.
+
+For two live sessions on ONE mission instead, where a human signature
+moves the controls between them, see `cs sessions`.";
+
 /// A refused work operation, reported with exit code 2 for scripts.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]

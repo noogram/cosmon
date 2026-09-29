@@ -66,6 +66,8 @@ A branch that changes the trusted shell surface needs an operator review after m
 .PP
 DECLARED WORK (ADR\-182): a pilot records a finite seat roster with \*(Aqcs work declare <owner> \-\-seat a=<molecule> \-\-seat b=<molecule>\*(Aq. Members use \*(Aqcs work send \-\-to <seat> \-\-text <evidence>\*(Aq, \*(Aqcs work inbox\*(Aq, and \*(Aqcs work ack <key> \-\-considered|\-\-deferred|\-\-rejected\*(Aq. \*(Aqcs work list <owner>\*(Aq reconstructs each message stage from the owner\*(Aqs canonical evidence. Messages and receipts never advance a molecule or grant lifecycle authority.
 .PP
+COLLABORATE — \*(Aqcs sessions\*(Aq vs \*(Aqcs work\*(Aq. Two commands cover two different shapes of collaboration; pick by what you are actually running. \*(Aqcs sessions\*(Aq is TWO LIVE SESSIONS ON ONE MISSION: one holds the controls and may change it, the other reads the same material and advises, and only a human signature (\*(Aqcs sessions takeover grant\*(Aq) moves the controls between them. \*(Aqcs work\*(Aq is SEPARATE MOLECULES — an implementer and a reviewer, say, on the same provider or on two different ones — each with its own lifecycle, branch and permissions, visible in \*(Aqcs peek\*(Aq and harvested on its own, exchanging bounded findings with no authority over each other. Neither replaces \*(Aqcs whisper\*(Aq (pilot\-to\-worker steering only).
+.PP
 Pilots NEVER poll \*(Aqcs observe\*(Aq by hand — always use \*(Aqcs wait\*(Aq. Pilots NEVER skip \*(Aqcs done\*(Aq — without it the branch never merges. Pilots NEVER run \*(Aqcs run\*(Aq in the foreground — wrap it in a detached tmux session: tmux new \-d \-s runtime cs run <root> \-\-poll\-interval 5 (cs run calls cs done automatically on completion). The historical \*(Aq\-\-leaf\*(Aq and \*(Aq\-\-force\-runtime\*(Aq flags on \*(Aqcs tackle\*(Aq are deprecated no\-ops since the verb\-unification: pick the right verb instead.
 .PP
 BASE BRANCH. The branch a molecule merges back into is a property of the MOLECULE, not of your shell: \*(Aqcs tackle \-\-base <branch>\*(Aq cuts the worker\*(Aqs branch from that trunk and persists the name, and \*(Aqcs done\*(Aq reads it back. Resolution order: the molecule\*(Aqs own base → $COSMON_BASE_BRANCH → origin/HEAD → \*(Aqmain\*(Aq. Tackle without \-\-base and nothing changes — the branch is cut from the ambient HEAD and the harvest uses the environment chain, as it always did. This is what lets you pilot several molecules on several trunks from one session without a git checkout dance, and what lets a \*(Aqcs done\*(Aq fired by a tmux hook (whose environment froze when the tmux server started) still land on the right trunk.
@@ -330,7 +332,7 @@ cs\-inbox(1)
 Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
 .TP
 cs\-work(1)
-Exchange bounded evidence within a declared work scope
+Work — separate molecules (e.g. an implementer and a reviewer, same or another provider) exchange findings, recorded and bounded (ADR\-182)
 .TP
 cs\-spark(1)
 Spark — capture a one\-line operator intent into the Inbox (ADR\-061)

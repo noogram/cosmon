@@ -108,7 +108,7 @@ Tools:
   journal              Write down what you notice while you work; anything worth doing becomes a task without you stopping to file it
   sessions             Sessions — two agent sessions on one mission: one drives, the other watches and advises; only a human signs the relay
   inbox                Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
-  work                 Exchange bounded evidence within a declared work scope
+  work                 Work — separate molecules (e.g. an implementer and a reviewer, same or another provider) exchange findings, recorded and bounded (ADR-182)
   panel                Panel — convene a hash-pinned supermajority panel to gate a constitutional amendment
   notify               Notify — push a one-line message to every configured operator channel
   opt-in-share         Opt-in-share — first-run consent prompt for encrypted developer bundles
