@@ -5001,6 +5001,83 @@ fn mint_briefing_receipt_overlay_in(
     outcome
 }
 
+/// Read the status-line setting from the same local files used for this
+/// worker's user and project configuration. An unreadable file or an explicit
+/// launch settings flag leaves the effective command unknown.
+fn resolved_status_line_settings(
+    config_dir: Option<&str>,
+    worktree: &Path,
+    harness_args: &[String],
+) -> Option<serde_json::Value> {
+    if harness_args
+        .iter()
+        .any(|arg| arg == "--settings" || arg.starts_with("--settings="))
+    {
+        return None;
+    }
+    let config = match config_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(std::env::var_os("HOME")?).join(".claude"),
+    };
+    let mut status_line = None;
+    for path in [
+        config.join("settings.json"),
+        worktree.join(".claude/settings.json"),
+        worktree.join(".claude/settings.local.json"),
+    ] {
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        let settings: serde_json::Value = serde_json::from_str(&text).ok()?;
+        let object = settings.as_object()?;
+        if let Some(value) = object.get("statusLine") {
+            status_line = Some(value.clone());
+        }
+    }
+    Some(match status_line {
+        Some(status) => serde_json::json!({"statusLine": status}),
+        None => serde_json::json!({}),
+    })
+}
+
+/// Extend the already-minted worker overlay with a private plan collector.
+/// The receipt hooks stay in the same settings document. A failed composition
+/// leaves the original overlay in place and lets the worker launch normally.
+fn install_plan_observation_overlay(
+    overlay: &Path,
+    mol_state_dir: &Path,
+    worker: &WorkerId,
+    effective: Option<&serde_json::Value>,
+) -> std::io::Result<bool> {
+    let binary = std::env::current_exe()?;
+    let plan_root = mol_state_dir.join("plan-observations");
+    let quote = cosmon_cli::tackle_env::shell_quote;
+    let collector = format!(
+        "{} plan-observation-hook {} {}",
+        quote(&binary.to_string_lossy()),
+        quote(&plan_root.to_string_lossy()),
+        quote(worker.as_str())
+    );
+    let Ok(status) =
+        cosmon_state::plan_observation::claude_statusline_overlay(effective, &collector)
+    else {
+        return Ok(false);
+    };
+    let mut receipt: serde_json::Value = serde_json::from_slice(&fs::read(overlay)?)?;
+    receipt["statusLine"] = status["statusLine"].clone();
+    let pending = overlay.with_extension("pending");
+    fs::write(&pending, serde_json::to_vec_pretty(&receipt)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600))?;
+    }
+    fs::rename(&pending, overlay)?;
+    Ok(true)
+}
+
 /// Claude branch of [`spawn_and_prompt`] — the historical path.
 // Composes two COSMON-DEV #20 fixes (root-spawn demotion + the out-of-worktree
 // writable-dir grant), which together push this one line over the pedantic cap.
@@ -5353,9 +5430,31 @@ fn spawn_claude_and_prompt(
     // `receipt_overlay=installed|unavailable` on `cosmon::dispatch` before it
     // returns, so the absence of a receipt later can be attributed to a hook
     // that was never installed rather than to a prompt that was never accepted.
+    cosmon_state::plan_observation::FilePlanObservationStore::new(
+        mol_state_dir.join("plan-observations"),
+    )
+    .retire(
+        wid,
+        cosmon_core::plan_observation::PlanSource::ClaudeStatusLine,
+    )?;
     let receipt_mint =
         mint_briefing_receipt_overlay(wid, cosmon_cli::work_hook::is_current_member(mol_state_dir));
     let receipt_overlay = receipt_mint.path();
+    if let Some(overlay) = receipt_overlay {
+        let settings =
+            resolved_status_line_settings(config_dir.as_deref(), worktree_path, harness_args);
+        match install_plan_observation_overlay(overlay, mol_state_dir, wid, settings.as_ref()) {
+            Ok(true) => {
+                tracing::info!(target: "cosmon::dispatch", phase = "plan.overlay", plan_overlay = "installed");
+            }
+            Ok(false) => {
+                tracing::info!(target: "cosmon::dispatch", phase = "plan.overlay", plan_overlay = "unavailable");
+            }
+            Err(_) => {
+                tracing::warn!(target: "cosmon::dispatch", phase = "plan.overlay", plan_overlay = "unavailable");
+            }
+        }
+    }
 
     let claude_cmd = cosmon_cli::tackle_env::build_claude_command(
         &mol_dir_str,
@@ -14987,6 +15086,52 @@ prompt = "Custom fleet prompt."
         let occupied = tmp.path().join("root-is-a-file");
         std::fs::write(&occupied, b"not a directory").unwrap();
         occupied
+    }
+
+    #[test]
+    fn dispatch_overlay_keeps_receipt_hooks_and_original_status_command() {
+        let temp = TempDir::new().unwrap();
+        let config = temp.path().join("config");
+        let worktree = temp.path().join("worktree");
+        let mol = temp.path().join("molecule");
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(worktree.join(".claude")).unwrap();
+        fs::create_dir_all(&mol).unwrap();
+        fs::write(
+            config.join("settings.json"),
+            r#"{"statusLine":{"type":"command","command":"printf user"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            worktree.join(".claude/settings.local.json"),
+            r#"{"statusLine":{"type":"command","command":"printf local","padding":2}}"#,
+        )
+        .unwrap();
+        let worker = WorkerId::new("quartz").unwrap();
+        let mint = mint_briefing_receipt_overlay_in(&temp.path().join("receipts"), &worker, false);
+        let overlay = mint.path().unwrap();
+        let effective = resolved_status_line_settings(config.to_str(), &worktree, &[]);
+        assert!(
+            install_plan_observation_overlay(overlay, &mol, &worker, effective.as_ref()).unwrap()
+        );
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(overlay).unwrap()).unwrap();
+        assert!(value["hooks"]["UserPromptSubmit"].is_array());
+        assert_eq!(value["statusLine"]["padding"], 2);
+        let command = value["statusLine"]["command"].as_str().unwrap();
+        assert!(command.contains("plan-observation-hook"));
+        assert!(command.contains("plan-observations"));
+        assert!(command.contains("printf local"));
+        assert!(!command.contains("printf user"));
+
+        let before = fs::read(overlay).unwrap();
+        assert!(!install_plan_observation_overlay(overlay, &mol, &worker, None).unwrap());
+        assert_eq!(fs::read(overlay).unwrap(), before);
+        assert!(resolved_status_line_settings(
+            config.to_str(),
+            &worktree,
+            &["--settings".to_owned(), "opaque".to_owned()],
+        )
+        .is_none());
     }
 
     /// The red test. With the overlay unavailable, the dispatch must continue

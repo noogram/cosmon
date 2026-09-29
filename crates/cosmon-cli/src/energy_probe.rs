@@ -31,12 +31,14 @@ use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::model_realization::{
     realized_models_from_claude_jsonl, realized_models_from_codex_session, ModelObservationSource,
 };
+use cosmon_core::plan_observation::{PlanObservationStore, PlanSource};
 use cosmon_core::price_manifest::{bundled_price_manifest, value_model_segments};
 use cosmon_core::usage::{
     ApiEquivalent, Availability, ModelUsageSegment, ObservationProvenance, ObservationScope,
     PlanApplicability, PlanUsage, TokenCount as UsageTokenCount, TokenUsage, UnavailableReason,
     UsageHistory, UsageObservationId, UsageRecord, UsageSubject, CURRENT_USAGE_SCHEMA_VERSION,
 };
+use cosmon_state::plan_observation::FilePlanObservationStore;
 use sha2::{Digest as _, Sha256};
 
 /// Per-worker aggregated energy values.
@@ -177,7 +179,20 @@ pub fn load_worker_energy_with_adapters(
                 .and_then(|cwd| codex_sessions.get(cwd.to_string_lossy().as_ref()))
                 .and_then(|session| read_codex_worker_energy(session, worker_id))
         } else {
-            probe_worker_energy_with_adapter(state_dir, backends, worker_id, adapter)
+            let plan_root = data
+                .current_molecule
+                .as_ref()
+                .and_then(|molecule| {
+                    cosmon_state::archive::resolve_molecule_dir(state_dir, molecule)
+                })
+                .map(|dir| dir.join("plan-observations"));
+            probe_worker_energy_with_adapter(
+                state_dir,
+                backends,
+                worker_id,
+                adapter,
+                plan_root.as_deref(),
+            )
         };
         let Some(energy) = energy else {
             continue;
@@ -338,6 +353,7 @@ pub fn probe_worker_energy_with_adapter(
     backends: &[cosmon_transport::TmuxBackend],
     worker_id: &WorkerId,
     adapter: Option<&str>,
+    plan_root: Option<&Path>,
 ) -> Option<WorkerEnergy> {
     if adapter == Some("codex") {
         return probe_codex_worker_energy(state_dir, backends, worker_id);
@@ -352,7 +368,15 @@ pub fn probe_worker_energy_with_adapter(
     if !jsonl_path.exists() {
         return None;
     }
-    let session_log = claudion::parse_session(&jsonl_path).ok()?;
+    read_claude_worker_energy(&jsonl_path, worker_id, plan_root)
+}
+
+fn read_claude_worker_energy(
+    jsonl_path: &Path,
+    worker_id: &WorkerId,
+    plan_root: Option<&Path>,
+) -> Option<WorkerEnergy> {
+    let session_log = claudion::parse_session(jsonl_path).ok()?;
     let (input_total, cached_input, cache_write, output) = claude_totals(&session_log)?;
     let (segments, segments_complete) = claude_model_segments(&session_log);
     let api_equivalent = value_current_segments(
@@ -361,10 +385,22 @@ pub fn probe_worker_energy_with_adapter(
         "claude_code_session_log",
         "anthropic",
     );
-    let plan = unavailable_plan();
+    let plan = plan_root.map_or_else(
+        unavailable_plan,
+        |root| match FilePlanObservationStore::new(root.to_path_buf())
+            .load(worker_id, PlanSource::ClaudeStatusLine)
+        {
+            Ok(Some(mut sample)) if sample.source == PlanSource::ClaudeStatusLine => {
+                sample.refresh(chrono::Utc::now(), chrono::Duration::minutes(10));
+                sample.plan
+            }
+            Ok(None) => unavailable_plan(),
+            Ok(Some(_)) | Err(_) => unavailable_plan_for(UnavailableReason::MalformedSource),
+        },
+    );
     let canonical_usage = build_usage_record(
         worker_id,
-        &jsonl_path,
+        jsonl_path,
         "anthropic",
         "claude_code_session_log",
         input_total,
@@ -375,7 +411,7 @@ pub fn probe_worker_energy_with_adapter(
         &segments,
         api_equivalent.clone(),
         plan,
-        file_capture_time(&jsonl_path),
+        file_capture_time(jsonl_path),
     );
     Some(WorkerEnergy {
         input: TokenCount::new(input_total),
@@ -470,10 +506,12 @@ fn read_codex_worker_energy(session_path: &Path, worker_id: &WorkerId) -> Option
 }
 
 fn unavailable_plan() -> PlanUsage {
+    unavailable_plan_for(UnavailableReason::NotObserved)
+}
+
+fn unavailable_plan_for(reason: UnavailableReason) -> PlanUsage {
     PlanUsage {
-        applicability: PlanApplicability::Unknown {
-            reason: UnavailableReason::NotObserved,
-        },
+        applicability: PlanApplicability::Unknown { reason },
         windows: Vec::new(),
         worker_attributed: Availability::Unavailable {
             reason: UnavailableReason::MissingAttributionEvidence,
@@ -2000,6 +2038,134 @@ mod tests {
         assert_eq!(o, 50);
         assert_eq!(reasoning, 20);
         assert_eq!(e.cost.reference_usd(), Some(0.25));
+    }
+
+    #[test]
+    fn claude_reader_joins_hook_plan_with_reference_usage() {
+        use cosmon_core::plan_observation::{claude_plan, PlanObservationStore, PlanSource};
+        use cosmon_state::plan_observation::FilePlanObservationStore;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let history = root.path().join("session.jsonl");
+        std::fs::write(
+            &history,
+            concat!(
+                r#"{"type":"assistant","message":{"model":"claude-opus-4-6","usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":100}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let worker = WorkerId::new("quartz").unwrap();
+        let captured = chrono::Utc::now();
+        let reset = (captured + chrono::Duration::hours(1)).timestamp();
+        let raw = format!(
+            r#"{{"rate_limits":{{"five_hour":{{"used_percentage":42,"resets_at":{reset}}}}}}}"#
+        );
+        let sample = claude_plan(&raw, PlanSource::ClaudeStatusLine, captured);
+        let plan_root = root.path().join("plan-observations");
+        FilePlanObservationStore::new(plan_root.clone())
+            .save(&worker, &sample)
+            .unwrap();
+
+        let usage = read_claude_worker_energy(&history, &worker, Some(&plan_root))
+            .unwrap()
+            .usage
+            .unwrap();
+        assert!(matches!(
+            usage.api_equivalent,
+            ApiEquivalent::Estimated { .. }
+        ));
+        assert_eq!(usage.plan.windows.len(), 1);
+        assert_eq!(usage.plan.windows[0].scope, ObservationScope::Account);
+        assert_eq!(usage.plan.windows[0].utilization.get(), 0.42);
+        assert!(matches!(
+            usage.plan.worker_attributed,
+            Availability::Unavailable {
+                reason: UnavailableReason::MissingAttributionEvidence
+            }
+        ));
+    }
+
+    #[test]
+    fn stored_plan_age_and_reset_are_applied_at_the_reader() {
+        use cosmon_core::plan_observation::{claude_plan, PlanObservationStore, PlanSource};
+        use cosmon_core::usage::Freshness;
+        use cosmon_state::plan_observation::FilePlanObservationStore;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let history = root.path().join("session.jsonl");
+        std::fs::write(
+            &history,
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-6","usage":{"input_tokens":1000,"output_tokens":100}}}"#,
+        )
+        .unwrap();
+        let worker = WorkerId::new("quartz").unwrap();
+        let old = chrono::Utc::now() - chrono::Duration::minutes(20);
+        let raw = format!(
+            r#"{{"rate_limits":{{"five_hour":{{"used_percentage":42,"resets_at":{}}},"seven_day":{{"used_percentage":15,"resets_at":{}}}}}}}"#,
+            (old + chrono::Duration::minutes(5)).timestamp(),
+            (old + chrono::Duration::days(1)).timestamp(),
+        );
+        let root_path = root.path().join("plan-observations");
+        FilePlanObservationStore::new(root_path.clone())
+            .save(
+                &worker,
+                &claude_plan(&raw, PlanSource::ClaudeStatusLine, old),
+            )
+            .unwrap();
+        let usage = read_claude_worker_energy(&history, &worker, Some(&root_path))
+            .unwrap()
+            .usage
+            .unwrap();
+        assert_eq!(usage.plan.windows.len(), 2);
+        assert_eq!(usage.plan.windows[0].freshness, Freshness::Reset);
+        assert_eq!(usage.plan.windows[1].freshness, Freshness::Stale);
+        assert!(usage
+            .plan
+            .windows
+            .iter()
+            .all(|window| window.scope == ObservationScope::Account));
+    }
+
+    #[test]
+    fn malformed_stored_plan_does_not_disappear_as_an_unobserved_plan() {
+        use cosmon_core::plan_observation::{claude_plan, PlanObservationStore, PlanSource};
+        use cosmon_state::plan_observation::FilePlanObservationStore;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let history = root.path().join("session.jsonl");
+        std::fs::write(
+            &history,
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-6","usage":{"input_tokens":1000,"output_tokens":100}}}"#,
+        )
+        .unwrap();
+        let worker = WorkerId::new("quartz").unwrap();
+        let plan_root = root.path().join("plan-observations");
+        FilePlanObservationStore::new(plan_root.clone())
+            .save(
+                &worker,
+                &claude_plan("{}", PlanSource::ClaudeStatusLine, chrono::Utc::now()),
+            )
+            .unwrap();
+        let path = std::fs::read_dir(&plan_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .unwrap();
+        std::fs::write(path, "{").unwrap();
+        let usage = read_claude_worker_energy(&history, &worker, Some(&plan_root))
+            .unwrap()
+            .usage
+            .unwrap();
+        assert!(matches!(
+            usage.plan.applicability,
+            PlanApplicability::Unknown {
+                reason: UnavailableReason::MalformedSource
+            }
+        ));
     }
 
     #[test]

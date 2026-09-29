@@ -74,12 +74,21 @@ The adapter does not read user settings, install itself, or overwrite global
 configuration. A launch caller may merge the returned `statusLine` member into
 its worker overlay while retaining receipt hooks and harness settings.
 
-Automatic launch enablement remains open: current dispatch does not establish
-an effective-settings resolution contract. Neither peek nor ensemble enables
-collection. Until a launch caller supplies that contract and an ordinary
-worker response produces a supported reading, Claude live integration remains
-unvalidated. C4 can render explicit unavailable state; C5 must keep this live
-criterion open. Synthetic fixtures and a working pipe are not live evidence.
+Dispatch now composes the collector into its existing per-worker settings
+overlay after reading the user and worktree settings files. It retains the
+selected status command and options, and leaves the overlay unchanged if the
+files cannot be read or a separate launch settings flag is present. The hook
+stores each sample in the molecule's `plan-observations/` directory. Dispatch
+retires a previous sample for the same worker name before launch, so a retry
+cannot display the prior attempt's quota as its own. Peek and ensemble read
+that store through the shared energy probe and refresh each window with the
+same ten-minute age rule used for rollout observations. Account scope and
+unavailable worker attribution remain intact. Reading never installs a hook.
+
+The settings resolution covers local files known at dispatch, not remotely
+managed policy. A synthetic hook sample establishes the wiring but is not a
+live quota witness. Ordinary activity must produce a stored reading before
+live collection can be claimed.
 
 ## CLI/UI parity and specification scope
 

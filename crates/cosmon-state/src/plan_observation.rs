@@ -36,6 +36,23 @@ impl FilePlanObservationStore {
         self.root
             .join(format!("{}-{}.json", worker.as_str(), source.schema()))
     }
+
+    /// Retire a previous reading before reusing a worker name for a new
+    /// dispatch. Removal holds the same source lock as a concurrent writer.
+    ///
+    /// # Errors
+    /// Returns a filesystem error if the cache cannot be reset safely.
+    pub fn retire(&self, worker: &WorkerId, source: PlanSource) -> io::Result<()> {
+        fs::create_dir_all(&self.root)?;
+        let path = self.path(worker, source);
+        let lock = private_file(&path.with_extension("lock"))?;
+        fs2::FileExt::lock_exclusive(&lock)?;
+        match fs::remove_file(path) {
+            Ok(()) => fs::File::open(&self.root)?.sync_all(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 impl PlanObservationStore for FilePlanObservationStore {
