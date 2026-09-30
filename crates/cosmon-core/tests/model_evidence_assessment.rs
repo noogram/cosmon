@@ -92,6 +92,17 @@ fn bootstrap_is_historical_but_not_response_confirmation() {
 }
 
 #[test]
+fn bootstrap_without_its_model_is_degraded_not_confirmed() {
+    let input = b"{\"type\":\"system\",\"subtype\":\"init\"}\n";
+    let assessment = assess_claude_model_evidence(input, true);
+    assert!(assessment.trajectory.is_empty());
+    assert_eq!(
+        assessment.coverage,
+        ModelEvidenceCoverage::Degraded(vec![ModelEvidenceReason::InvalidModel])
+    );
+}
+
+#[test]
 fn placeholder_is_not_usable_response_evidence() {
     let input = concat!(
         "{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n",
@@ -256,6 +267,32 @@ fn codex_unknown_event_subtype_degrades_but_effort_only_change_does_not() {
     assert_eq!(
         assess_codex_model_evidence(unknown, true).coverage,
         ModelEvidenceCoverage::Degraded(vec![ModelEvidenceReason::UnclassifiedRecord])
+    );
+}
+
+#[test]
+fn codex_placeholder_settings_do_not_leave_old_settings_as_latest() {
+    let input = concat!(
+        "{\"type\":\"turn_context\",\"payload\":{\"model\":\"model-a\"}}\n",
+        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_settings\":{\"model\":\"<synthetic>\"}}}\n",
+    );
+    let assessment = assess_codex_model_evidence(input.as_bytes(), true);
+    assert_eq!(names(&assessment), ["model-a"]);
+    assert_eq!(assessment.latest, LatestModelEvidence::Indeterminate);
+    assert_eq!(
+        assessment.coverage,
+        ModelEvidenceCoverage::Degraded(vec![ModelEvidenceReason::PlaceholderModel])
+    );
+    assert_eq!(
+        assessment.stats,
+        ModelEvidenceStats::Codex {
+            response_records: 0,
+            settings_records: 2,
+            usable_model_records: 1,
+            placeholder_records: 1,
+            malformed_records: 0,
+            unclassified_records: 0,
+        }
     );
 }
 

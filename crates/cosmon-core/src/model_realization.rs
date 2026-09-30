@@ -753,6 +753,10 @@ impl ModelEvidenceAccumulator {
                     self.placeholder_records += 1;
                     self.reason(ModelEvidenceReason::PlaceholderModel);
                     self.latest = LatestModelEvidence::ModelMissing;
+                } else if self.grammar == ModelEvidenceGrammar::Codex {
+                    self.placeholder_records += 1;
+                    self.reason(ModelEvidenceReason::PlaceholderModel);
+                    self.latest = LatestModelEvidence::Indeterminate;
                 }
             }
             Some(raw) => {
@@ -832,7 +836,7 @@ impl ModelEvidenceAccumulator {
                         self.reason(ModelEvidenceReason::InvalidModel);
                         self.latest = LatestModelEvidence::Indeterminate;
                     } else {
-                        self.report_model(raw, false, false);
+                        self.report_model(raw, false, true);
                     }
                 }
                 Some("turn_duration" | "compact_boundary" | "stop_hook_summary") => {}
