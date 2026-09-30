@@ -37,6 +37,26 @@ use crate::credential::{CredentialKey, CredentialStore};
 use crate::error::{Error, Result};
 use crate::oidc::{self, OidcError, RefreshConfig, RefreshRotation, TokenState};
 
+/// Additive, safe harvest diagnostic returned alongside the historic API label.
+/// Unknown tokens are retained for JSON round-tripping but get no local hint.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct HarvestAuthorizationWire {
+    /// The authorization boundary that denied the request.
+    pub gate: String,
+    /// Stable refusal token, independent of raw server details.
+    pub reason: String,
+    /// Stable action token interpreted only by the local client.
+    pub action: String,
+}
+
+impl HarvestAuthorizationWire {
+    /// Decode the additive object from an API error body, if present and valid.
+    #[must_use]
+    pub fn from_error_body(body: &serde_json::Value) -> Option<Self> {
+        serde_json::from_value(body.get("harvest_authorization")?.clone()).ok()
+    }
+}
+
 /// A molecule `kind` as it arrives on the wire.
 ///
 /// The bug this

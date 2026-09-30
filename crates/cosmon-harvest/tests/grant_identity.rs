@@ -176,7 +176,7 @@ fn a_removed_reservation_refuses_the_old_ratification() {
     .expect("store");
     assert!(matches!(
         run(&root, &molecule, &[]),
-        HarvestDecision::Refused(_)
+        HarvestDecision::Refused(_, _)
     ));
 }
 

@@ -78,7 +78,7 @@ use cosmon_runtime::{DispatchPin, LibraryExecutor};
 use crate::admission::{http_request_to_spark, AdmissionRig, Spark, Verb};
 use crate::audit::new_request_id;
 use crate::drain;
-use crate::error::{ApiError, RppRejectReason};
+use crate::error::{ApiError, HarvestApiError, RppRejectReason};
 use crate::events_bus::MoleculeEvent;
 use crate::jwt::{JwtVerifier, ValidatedJwt};
 use crate::worker_env::{env::ANTHROPIC_MODEL, EnvelopedBackend, SharedBackend, WorkerEnvelope};
@@ -2245,7 +2245,7 @@ pub async fn done_molecule(
     headers: HeaderMap,
     AxumPath(molecule_id_str): AxumPath<String>,
     body: axum::body::Bytes,
-) -> Result<Response, ApiError> {
+) -> Result<Response, HarvestApiError> {
     // 1. Authorization header → JWT validation. This proves *who asks*.
     let token = extract_bearer(&headers).map_err(|e| state.reject(e))?;
     let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
@@ -2260,34 +2260,70 @@ pub async fn done_molecule(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
-        });
+        }
+        .into());
     }
-    let cfg = cosmon_filestore::load_project_config(&tenant_root.join(".cosmon/config.toml"))
-        .map_err(|_| ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            label: "harvest_failed",
-            request_id: Some(spark.request_id.clone()),
-        })?;
+    let cfg_read = cosmon_filestore::load_project_config(&tenant_root.join(".cosmon/config.toml"));
+    // Preserve the scope decision before target lookup when policy is usable.
+    // A missing target still receives no policy or grant diagnostic.
+    if let Ok(cfg) = &cfg_read {
+        if let Ok(policy) =
+            cosmon_core::remote_harvest::resolve_remote_policy(&cfg.harvest_authority)
+        {
+            if policy.policy != EffectiveRemotePolicy::Disabled {
+                let wanted = if policy.provenance == PolicyProvenance::Legacy {
+                    &[SCOPE_MOLECULE_WRITE, SCOPE_MOLECULE_HARVEST][..]
+                } else {
+                    &[SCOPE_MOLECULE_HARVEST][..]
+                };
+                authorise_scope(&state, &jwt, "done", wanted, SCOPE_MOLECULE_HARVEST).map_err(
+                    |api| {
+                        HarvestApiError::with_cause(
+                            api,
+                            cosmon_core::harvest_authorization::HarvestAuthorizationCause::ScopeMissing,
+                        )
+                    },
+                )?;
+            }
+        }
+    }
+    let molecule_id = MoleculeId::new(&molecule_id_str).map_err(|_| ApiError {
+        status: StatusCode::NOT_FOUND,
+        label: "not_found",
+        request_id: Some(spark.request_id.clone()),
+    })?;
+    status_public(&state, &spark, &molecule_id)?;
+    let cfg = cfg_read.map_err(|_| {
+        HarvestApiError::with_cause(
+            ApiError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                label: "harvest_failed",
+                request_id: Some(spark.request_id.clone()),
+            },
+            cosmon_core::harvest_authorization::HarvestAuthorizationCause::FactsUnavailable,
+        )
+    })?;
     let policy = cosmon_core::remote_harvest::resolve_remote_policy(&cfg.harvest_authority)
-        .map_err(|_| ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            label: "harvest_failed",
-            request_id: Some(spark.request_id.clone()),
+        .map_err(|_| {
+            HarvestApiError::with_cause(
+                ApiError {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    label: "harvest_failed",
+                    request_id: Some(spark.request_id.clone()),
+                },
+                cosmon_core::harvest_authorization::HarvestAuthorizationCause::PolicyConflict,
+            )
         })?;
     if policy.policy == EffectiveRemotePolicy::Disabled {
-        return Err(ApiError {
-            status: StatusCode::FORBIDDEN,
-            label: "not_authorized",
-            request_id: Some(spark.request_id.clone()),
-        });
+        return Err(HarvestApiError::with_cause(
+            ApiError {
+                status: StatusCode::FORBIDDEN,
+                label: "not_authorized",
+                request_id: Some(spark.request_id.clone()),
+            },
+            cosmon_core::harvest_authorization::HarvestAuthorizationCause::Disabled,
+        ));
     }
-    let wanted = if policy.provenance == PolicyProvenance::Legacy {
-        &[SCOPE_MOLECULE_WRITE, SCOPE_MOLECULE_HARVEST][..]
-    } else {
-        &[SCOPE_MOLECULE_HARVEST][..]
-    };
-    authorise_scope(&state, &jwt, "done", wanted, SCOPE_MOLECULE_HARVEST)?;
-
     // 4. The body. Empty is legal only in the sense that it fails the same
     //    way `{}` does — with `missing_reason`, named, rather than with a
     //    parse error the requester cannot act on.
@@ -2307,25 +2343,28 @@ pub async fn done_molecule(
         request_id: Some(spark.request_id.clone()),
     })?;
     if let Err(refusal) = options.validate() {
-        return Err(door_refusal_to_api_error(refusal, &spark.request_id));
+        return Err(door_refusal_to_api_error(refusal, &spark.request_id).into());
     }
     if policy.provenance == PolicyProvenance::Explicit
         && cosmon_core::remote_harvest::explicit_override_requested(&options)
     {
-        return Err(ApiError {
+        return Err(HarvestApiError::with_cause(ApiError {
             status: StatusCode::FORBIDDEN,
             label: "not_authorized",
             request_id: Some(spark.request_id.clone()),
-        });
+        }, cosmon_core::harvest_authorization::HarvestAuthorizationCause::OverrideRequiresRatification));
     }
     if policy.provenance == PolicyProvenance::Explicit
         && !state.harvest_effect.supports_explicit_remote()
     {
-        return Err(ApiError {
-            status: StatusCode::NOT_IMPLEMENTED,
-            label: "harvest_effect_unavailable",
-            request_id: Some(spark.request_id.clone()),
-        });
+        return Err(HarvestApiError::with_cause(
+            ApiError {
+                status: StatusCode::NOT_IMPLEMENTED,
+                label: "harvest_effect_unavailable",
+                request_id: Some(spark.request_id.clone()),
+            },
+            cosmon_core::harvest_authorization::HarvestAuthorizationCause::EffectUnsupported,
+        ));
     }
     // Auto-propel is the one option that spends agent budget: it sends a
     // natural-language instruction into a live worker session and retries
@@ -2342,13 +2381,6 @@ pub async fn done_molecule(
         )?;
     }
 
-    // 5. Malformed id and absent tenant root both collapse to 404 — the same
-    //    no-existence-oracle boundary the rest of the surface holds.
-    let molecule_id = MoleculeId::new(&molecule_id_str).map_err(|_| ApiError {
-        status: StatusCode::NOT_FOUND,
-        label: "not_found",
-        request_id: Some(spark.request_id.clone()),
-    })?;
     let authority_source =
         if policy.provenance == PolicyProvenance::Legacy && jwt.has_scope(SCOPE_MOLECULE_WRITE) {
             RemoteAuthoritySource::LegacyTokenWrite
@@ -2379,10 +2411,15 @@ pub async fn done_molecule(
         state: Arc::clone(&state),
     };
     cosmon_core::remote_harvest::RemoteAdmissionValidator::validate(&validator, &admission)
-        .map_err(|_| ApiError {
-            status: StatusCode::FORBIDDEN,
-            label: "forbidden",
-            request_id: Some(spark.request_id.clone()),
+        .map_err(|_| {
+            HarvestApiError::with_cause(
+                ApiError {
+                    status: StatusCode::FORBIDDEN,
+                    label: "forbidden",
+                    request_id: Some(spark.request_id.clone()),
+                },
+                cosmon_core::harvest_authorization::HarvestAuthorizationCause::ScopeMissing,
+            )
         })?;
 
     // 6. The decision half, in-process: the same library body the door has
@@ -2398,10 +2435,15 @@ pub async fn done_molecule(
     )
     .await?;
     cosmon_core::remote_harvest::RemoteAdmissionValidator::validate(&validator, &admission)
-        .map_err(|_| ApiError {
-            status: StatusCode::FORBIDDEN,
-            label: "forbidden",
-            request_id: Some(spark.request_id.clone()),
+        .map_err(|_| {
+            HarvestApiError::with_cause(
+                ApiError {
+                    status: StatusCode::FORBIDDEN,
+                    label: "forbidden",
+                    request_id: Some(spark.request_id.clone()),
+                },
+                cosmon_core::harvest_authorization::HarvestAuthorizationCause::ScopeMissing,
+            )
         })?;
     match decision {
         harvest_door::DoorDecision::AlreadyLanded { merged } => {
@@ -2516,7 +2558,7 @@ async fn run_harvest_effect(
         cosmon_core::remote_harvest::RemoteHarvestAdmission,
         Arc<crate::harvest_effect::AdapterRemoteValidator>,
     )>,
-) -> Result<(cosmon_core::harvest_door::DoorOutcome, Option<String>), ApiError> {
+) -> Result<(cosmon_core::harvest_door::DoorOutcome, Option<String>), HarvestApiError> {
     let effect = Arc::clone(&state.harvest_effect);
     let root = tenant_root.to_path_buf();
     let id = molecule_id.clone();
@@ -2524,17 +2566,6 @@ async fn run_harvest_effect(
     let opts = options.clone();
     let state_dir = tenant_root.join(".cosmon").join("state");
     let config_path = tenant_root.join(".cosmon").join("config.toml");
-    let unavailable = ApiError {
-        status: StatusCode::NOT_IMPLEMENTED,
-        label: "harvest_effect_unavailable",
-        request_id: Some(request_id.to_owned()),
-    };
-    let failed = ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        label: "harvest_failed",
-        request_id: Some(request_id.to_owned()),
-    };
-
     let joined = tokio::task::spawn_blocking(move || {
         match crate::harvest_effect::snapshot_api_tokens(&root, &tenant, &id) {
             Ok(crate::harvest_effect::TokenSnapshotOutcome::CwdOutsideTenant) => {
@@ -2590,12 +2621,40 @@ async fn run_harvest_effect(
     .await;
 
     let Ok(result) = joined else {
-        return Err(failed);
+        return Err(ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "harvest_failed",
+            request_id: Some(request_id.to_owned()),
+        }
+        .into());
+    };
+    project_harvest_result(result, request_id, molecule_id)
+}
+
+fn project_harvest_result(
+    result: Result<
+        (cosmon_core::harvest_door::DoorOutcome, Option<String>),
+        harvest_door::LandError,
+    >,
+    request_id: &str,
+    molecule_id: &MoleculeId,
+) -> Result<(cosmon_core::harvest_door::DoorOutcome, Option<String>), HarvestApiError> {
+    let failed = ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        label: "harvest_failed",
+        request_id: Some(request_id.to_owned()),
     };
     match result {
         Ok(outcome) => Ok(outcome),
         Err(harvest_door::LandError::Refused(refused)) => {
-            Err(door_refusal_to_api_error(refused.refusal, request_id))
+            let api = door_refusal_to_api_error(refused.refusal, request_id);
+            Err(match refused.authorization_cause {
+                Some(cause) => HarvestApiError::with_cause(api, cause),
+                None => api.into(),
+            })
+        }
+        Err(harvest_door::LandError::AuthorizationRefused(cause)) => {
+            Err(HarvestApiError::with_cause(failed, cause))
         }
         Err(harvest_door::LandError::Fault(cosmon_core::error::CosmonError::MoleculeNotFound(
             _,
@@ -2603,7 +2662,8 @@ async fn run_harvest_effect(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(request_id.to_owned()),
-        }),
+        }
+        .into()),
         Err(harvest_door::LandError::EffectUnavailable) => {
             tracing::warn!(
                 request_id = %request_id,
@@ -2611,9 +2671,14 @@ async fn run_harvest_effect(
                 "the door admitted the harvest, but this deployment declared no \
                  harvest effect (ADR-176 §11) — refusing harvest_effect_unavailable"
             );
-            Err(unavailable)
+            Err(ApiError {
+                status: StatusCode::NOT_IMPLEMENTED,
+                label: "harvest_effect_unavailable",
+                request_id: Some(request_id.to_owned()),
+            }
+            .into())
         }
-        Err(_) => Err(failed),
+        Err(_) => Err(failed.into()),
     }
 }
 
@@ -2671,7 +2736,7 @@ async fn decide_harvest_in_process(
     options: &HarvestOptions,
     request_id: &str,
     policy: Option<cosmon_core::remote_harvest::ResolvedRemotePolicy>,
-) -> Result<harvest_door::DoorDecision, ApiError> {
+) -> Result<harvest_door::DoorDecision, HarvestApiError> {
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
     let tenant_config_path = tenant_root.join(".cosmon").join("config.toml");
     let decision_molecule = molecule_id.clone();
@@ -2689,11 +2754,13 @@ async fn decide_harvest_in_process(
             let current =
                 cosmon_core::remote_harvest::resolve_remote_policy(&cfg.harvest_authority)
                     .map_err(|_| {
-                        harvest_door::LandError::EffectFailed("harvest_policy_conflict".to_owned())
+                        harvest_door::LandError::AuthorizationRefused(
+                    cosmon_core::harvest_authorization::HarvestAuthorizationCause::PolicyConflict,
+                )
                     })?;
             if current != policy {
-                return Err(harvest_door::LandError::EffectFailed(
-                    "harvest_facts_changed".to_owned(),
+                return Err(harvest_door::LandError::AuthorizationRefused(
+                    cosmon_core::harvest_authorization::HarvestAuthorizationCause::FactsChanged,
                 ));
             }
             harvest_door::decide_remote(&store, &cfg, &decision_molecule, &decision_options, policy)
@@ -2710,20 +2777,42 @@ async fn decide_harvest_in_process(
 
     decision.map_err(|err| match err {
         harvest_door::LandError::Refused(refused) => {
-            door_refusal_to_api_error(refused.refusal, request_id)
+            let api = door_refusal_to_api_error(refused.refusal, request_id);
+            match refused.authorization_cause {
+                Some(cause) => HarvestApiError::with_cause(api, cause),
+                None => api.into(),
+            }
         }
+        harvest_door::LandError::AuthorizationRefused(cause) => HarvestApiError::with_cause(
+            ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                label: "harvest_failed",
+                request_id: Some(request_id.to_owned()),
+            },
+            cause,
+        ),
         harvest_door::LandError::Fault(cosmon_core::error::CosmonError::MoleculeNotFound(_)) => {
             ApiError {
                 status: StatusCode::NOT_FOUND,
                 label: "not_found",
                 request_id: Some(request_id.to_owned()),
             }
+            .into()
         }
+        harvest_door::LandError::Fault(_) => HarvestApiError::with_cause(
+            ApiError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                label: "harvest_failed",
+                request_id: Some(request_id.to_owned()),
+            },
+            cosmon_core::harvest_authorization::HarvestAuthorizationCause::FactsUnavailable,
+        ),
         _ => ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             label: "harvest_failed",
             request_id: Some(request_id.to_owned()),
-        },
+        }
+        .into(),
     })
 }
 

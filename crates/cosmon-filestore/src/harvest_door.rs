@@ -68,6 +68,8 @@ pub struct DoorRefused {
     pub refusal: DoorRefusal,
     /// Specifics an operator can act on, when the door has any.
     pub detail: Option<String>,
+    /// Safe authorization cause, when the refusal came from that boundary.
+    pub authorization_cause: Option<cosmon_core::harvest_authorization::HarvestAuthorizationCause>,
 }
 
 impl DoorRefused {
@@ -75,6 +77,7 @@ impl DoorRefused {
         Self {
             refusal,
             detail: Some(detail.into()),
+            authorization_cause: None,
         }
     }
 }
@@ -99,6 +102,8 @@ pub enum LandError {
     /// One of the seven named refusals. The CLI maps it to exit codes
     /// 70–76; the §8p route maps it to its wire label and status.
     Refused(DoorRefused),
+    /// Safe authorization refusal detected before the effect ran.
+    AuthorizationRefused(cosmon_core::harvest_authorization::HarvestAuthorizationCause),
     /// A malformed id, an unreadable store, an unacquirable lock — faults
     /// of the invocation, not outcomes of the door.
     Fault(CosmonError),
@@ -117,6 +122,7 @@ impl std::fmt::Display for LandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Refused(refused) => write!(f, "harvest refused ({refused})"),
+            Self::AuthorizationRefused(cause) => write!(f, "harvest refused ({})", cause.reason()),
             Self::Fault(e) => write!(f, "harvest fault: {e}"),
             Self::EffectFailed(msg) => write!(f, "harvest effect failed: {msg}"),
             Self::EffectUnavailable => f.write_str("no harvest effect is wired in this deployment"),
@@ -418,6 +424,7 @@ pub fn land_remote(
         LandError::Refused(DoorRefused {
             refusal,
             detail: None,
+            authorization_cause: None,
         })
     })?;
     match decide_remote(store, cfg, molecule, options, policy)? {
@@ -495,17 +502,14 @@ fn interpret_effect(
         // still read, for the *detail* an exit code cannot carry (the
         // conflicted files), and only when it names the same refusal; a
         // record left by an earlier attempt cannot rename this one.
-        Err(EffectFailure::Refused(refusal)) => {
-            let detail = store
-                .load_molecule(molecule)
-                .ok()
-                .and_then(|m| m.non_integration)
-                .map(|record| refusal_from_record(&record))
-                .filter(|from_record| from_record.refusal == refusal)
-                .and_then(|from_record| from_record.detail);
-            Err(LandError::Refused(DoorRefused { refusal, detail }))
+        Err(EffectFailure::Refused(refusal)) => Err(refused_effect(store, molecule, refusal, None)),
+        Err(EffectFailure::AuthorizationRefused(refusal, cause)) => {
+            Err(refused_effect(store, molecule, refusal, Some(cause)))
         }
         Err(EffectFailure::Unavailable) => Err(LandError::EffectUnavailable),
+        Err(EffectFailure::AuthorizationFault(cause)) => {
+            Err(LandError::AuthorizationRefused(cause))
+        }
         Err(EffectFailure::Failed(message)) => {
             let recorded = store
                 .load_molecule(molecule)
@@ -517,6 +521,26 @@ fn interpret_effect(
             }
         }
     }
+}
+
+fn refused_effect(
+    store: &dyn StateStore,
+    molecule: &MoleculeId,
+    refusal: DoorRefusal,
+    authorization_cause: Option<cosmon_core::harvest_authorization::HarvestAuthorizationCause>,
+) -> LandError {
+    let detail = store
+        .load_molecule(molecule)
+        .ok()
+        .and_then(|m| m.non_integration)
+        .map(|record| refusal_from_record(&record))
+        .filter(|from_record| from_record.refusal == refusal)
+        .and_then(|from_record| from_record.detail);
+    LandError::Refused(DoorRefused {
+        refusal,
+        detail,
+        authorization_cause,
+    })
 }
 
 /// The non-integration records that are a **success** for this request,

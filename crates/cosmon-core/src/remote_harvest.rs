@@ -111,7 +111,10 @@ pub trait RemoteAdmissionValidator: Send + Sync {
     /// # Errors
     ///
     /// Returns a diagnostic for a denied or unavailable admission source.
-    fn validate(&self, admission: &RemoteHarvestAdmission) -> Result<(), String>;
+    fn validate(
+        &self,
+        admission: &RemoteHarvestAdmission,
+    ) -> Result<(), crate::harvest_authorization::HarvestAuthorizationCause>;
 }
 
 /// Refuse legacy override flags on an explicit profile until a signed
