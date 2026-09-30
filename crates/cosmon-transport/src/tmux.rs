@@ -538,6 +538,39 @@ impl TmuxBackend {
         &self.socket
     }
 
+    /// Capture the tail of a named session, including a retained dead pane.
+    ///
+    /// Liveness-based worker lookup intentionally omits dead panes. The
+    /// post-mortem observer needs the exact persisted session name so it can
+    /// read an update or restart notice before a later forced tackle clears
+    /// the carcass. A vanished session returns an error without changing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport error when the pane cannot be listed or captured.
+    pub fn capture_session_output(
+        &self,
+        session_name: &str,
+        lines: usize,
+    ) -> Result<String, TransportError> {
+        // Resolve an exact session name to a pane id first. A vanished pane
+        // then fails instead of matching another session by prefix.
+        let listing = self.tmux_cmd(&["list-panes", "-a", "-F", "#{session_name}|#{pane_id}"])?;
+        let pane = listing
+            .lines()
+            .filter_map(|line| line.split_once('|'))
+            .find_map(|(name, pane)| (name == session_name).then_some(pane))
+            .ok_or_else(|| TransportError::Io(format!("session {session_name} not found")))?;
+        let raw = self.tmux_cmd(&["capture-pane", "-t", pane, "-p", "-S", "-"])?;
+        let all: Vec<&str> = raw.lines().collect();
+        let end = all
+            .iter()
+            .rposition(|line| !line.is_empty())
+            .map_or(0, |i| i + 1);
+        let start = end.saturating_sub(lines);
+        Ok(all[start..end].join("\n"))
+    }
+
     /// Build session name from config prefix and worker name.
     fn session_name(config: &RuntimeConfig, worker_id: &WorkerId) -> String {
         format!("{}{}", config.session_prefix, worker_id.name())
@@ -1234,25 +1267,7 @@ impl TransportBackend for TmuxBackend {
             .find(|s| s.worker_id == *id)
             .ok_or_else(|| TransportError::NotFound(id.clone()))?;
 
-        // Capture the scrollback history. `-S -` = start of history,
-        // then we trim to the requested number of lines.
-        let raw = self.tmux_cmd(&[
-            "capture-pane",
-            "-t",
-            &session.session_name,
-            "-p", // print to stdout
-            "-S", // start line
-            "-",  // beginning of history
-        ])?;
-
-        // Trim trailing empty lines, then take the last `lines` lines.
-        let all: Vec<&str> = raw.lines().collect();
-        let trimmed: Vec<&str> = {
-            let end = all.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1);
-            all[..end].to_vec()
-        };
-        let start = trimmed.len().saturating_sub(lines);
-        Ok(trimmed[start..].join("\n"))
+        self.capture_session_output(&session.session_name, lines)
     }
 
     fn graceful_exit(
@@ -2238,6 +2253,10 @@ mod tests {
                 .expect("has-session failed"),
             "the carcass still holds its session name — this is the fact the \
              respawn path used to be blind to"
+        );
+        assert!(
+            backend.capture_session_output("carcass-agent", 40).is_ok(),
+            "a retained dead pane must remain readable for the post-mortem"
         );
         // 3. Which is exactly why the respawn died on `duplicate session`.
         let collision = backend.spawn_worker("carcass-agent", ".", "sleep 300");

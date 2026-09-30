@@ -24,6 +24,22 @@ resident runtime is indistinguishable from a fresh one; it rebuilds its whole
 picture from the same JSON the CLI reads. There is no crash-recovery *procedure*
 because statelessness makes recovery the default.
 
+## When an update ends a worker pane
+
+Startup update policy comes from the operator's worker configuration. A patrol
+scan or retained dead-pane check that sees an update offer or a restart request records
+`worker-update-offered` or `worker-restart-requested` on the molecule. These
+tags report pane text observed by the patrol; they do not prove why a later
+process ended.
+
+After the pane dies, `cs purge <worker>` reclaims its fleet entry while the
+molecule stays Running. If the worktree contains unharvested changes, purge
+asks for `--allow-unharvested` before removing the worker entry; that flag
+still leaves the molecule Running. Resume with `cs tackle <molecule> --force`
+in the same worktree. The molecule keeps its existing steps and lifecycle
+history. Patrol's spawn grace and locked liveness recheck still govern any
+later automatic orphan decision.
+
 ## Desired vs Observed vs Effective: telling wish from reality
 
 A crash creates a gap between what you *wanted* and what is *actually true*. You

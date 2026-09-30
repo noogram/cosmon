@@ -337,7 +337,10 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              Every patrol also scans live panes for blocking dialogs and pages\n  \
              the operator for update, reasoning, or rate-limit menus. 'cs tackle'\n  \
              checks a codex launch menu before sending its briefing. Startup\n  \
-             update policy comes from the operator's codex configuration.\n\n\
+             update policy comes from the operator's codex configuration.\n  \
+             An update can end a worker pane. 'cs purge <worker>' reclaims the\n  \
+             dead worker without collapsing its Running molecule. Resume with\n  \
+             'cs tackle <molecule> --force' in the same worktree.\n\n\
              SCHEDULER DRY-RUN OUTPUT — four row types, one per patrol:\n  \
              FIRE     patrol is due; dispatch would spawn the command now\n  \
              SKIP     gate rejected (disabled, kill-switch, not-due-yet,\n           \

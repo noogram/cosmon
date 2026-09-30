@@ -171,6 +171,9 @@ Every patrol also scans live panes for blocking dialogs and pages
   the operator for update, reasoning, or rate\-limit menus. \*(Aqcs tackle\*(Aq
   checks a codex launch menu before sending its briefing. Startup
   update policy comes from the operator\*(Aqs codex configuration.
+  An update can end a worker pane. \*(Aqcs purge <worker>\*(Aq reclaims the
+  dead worker without collapsing its Running molecule. Resume with
+  \*(Aqcs tackle <molecule> \-\-force\*(Aq in the same worktree.
 .PP
 SCHEDULER DRY\-RUN OUTPUT — four row types, one per patrol:
   FIRE     patrol is due; dispatch would spawn the command now
@@ -379,7 +382,7 @@ cs\-teardown(1)
 Teardown a fleet — gracefully stop all fleet workers
 .TP
 cs\-purge(1)
-Purge dead workers from fleet state (Stopped, Error, Stale)
+Purge dead workers from fleet state without changing molecule status
 .TP
 cs\-migrate(1)
 Migrate the galaxy\*(Aqs memory — legacy flat→fleet, or residence\-to\-residence

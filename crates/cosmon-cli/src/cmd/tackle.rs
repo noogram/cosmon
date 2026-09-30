@@ -6688,10 +6688,22 @@ fn codex_launch_dialogue(
     backend: &dyn TransportBackend,
     wid: &cosmon_core::id::WorkerId,
 ) -> anyhow::Result<Option<cosmon_core::dialogue::DialogueScan>> {
-    use cosmon_core::dialogue::{classify_codex_dialog, classify_pane};
+    use cosmon_core::dialogue::{
+        classify_codex_dialog, classify_pane, CodexDialogKind, DialogueClass,
+    };
 
     let pane = backend.capture_output(wid, 40)?;
-    Ok(classify_codex_dialog(&pane).map(|_| classify_pane(&pane)))
+    let kind = classify_codex_dialog(&pane);
+    let scan = classify_pane(&pane);
+    // A completed update can leave an informational restart notice in the
+    // scrollback after the normal prompt appears. Keep observing that notice
+    // elsewhere, but do not block briefing on it alone. A real blocking menu
+    // in the same capture still wins.
+    Ok(match kind {
+        Some(CodexDialogKind::RestartRequired) if scan.class == DialogueClass::None => None,
+        Some(_) => Some(scan),
+        None => None,
+    })
 }
 
 /// Deliver only when the launch pane has no recognised codex menu.
@@ -9887,6 +9899,10 @@ mod tests {
                 "Update ran successfully! Please restart.\n› Ask codex to do anything",
                 None,
             ),
+            (
+                "Update ran successfully! Please restart.\nSelect Reasoning Level for model\n› 1. Medium",
+                Some(DialogueClass::Unknown),
+            ),
         ] {
             backend.set_canned_output(pane);
             let sends = Cell::new(0);
@@ -10032,6 +10048,64 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("already running"), "{error}");
+    }
+
+    #[test]
+    fn issue122_purged_worker_leaves_existing_worktree_admissible_to_force_tackle() {
+        let (tmp, state_dir) = make_store();
+        let store = FileStore::new(&state_dir);
+        let mut running = sample_molecule("task-20260929-1223", MoleculeStatus::Running);
+        running.current_step = 1;
+        let worker_id = cosmon_core::id::WorkerId::new("w-issue122").unwrap();
+        running.assigned_worker = Some(worker_id.clone());
+        store.save_molecule(&running.id, &running).unwrap();
+        let worktree = tmp.path().join(".worktrees").join(running.id.as_str());
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let mut fleet = cosmon_state::Fleet::new();
+        let mut worker = cosmon_state::WorkerData::new(
+            worker_id.clone(),
+            cosmon_core::id::AgentId::new("a").unwrap(),
+            cosmon_core::agent::AgentRole::Implementation,
+            cosmon_core::clearance::Clearance::Write,
+            cosmon_core::worker::WorkerStatus::Active,
+        );
+        worker.desired = cosmon_core::worker::DesiredState::Running;
+        worker.current_molecule = Some(running.id.clone());
+        fleet.workers.insert(worker_id.clone(), worker);
+        store.save_fleet(&fleet).unwrap();
+        let ctx = Context {
+            verbose: false,
+            json: false,
+            config: Some(state_dir),
+        };
+        super::super::purge::run(
+            &ctx,
+            &super::super::purge::Args {
+                worker: Some(worker_id.to_string()),
+                force: false,
+                status: None,
+                role: None,
+                allow_unharvested: true,
+                worktrees: false,
+                sessions: false,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+
+        let _claim = store.acquire_dispatch_lock(&running.id).unwrap();
+        let resumed = refresh_after_dispatch_claim(
+            &store,
+            &running,
+            true,
+            &cosmon_core::tackle::TackledBy::Human,
+        )
+        .unwrap();
+        assert_eq!(resumed.status, MoleculeStatus::Running);
+        assert_eq!(resumed.current_step, 1);
+        assert!(worktree.is_dir());
+        assert!(store.load_fleet().unwrap().workers.is_empty());
     }
 
     /// COSMON #90 — the end-to-end shape of the fix: a *live* session torn

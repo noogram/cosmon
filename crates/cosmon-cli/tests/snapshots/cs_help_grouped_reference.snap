@@ -48,7 +48,7 @@ Molecule lifecycle:
 
 Fleet management:
   ensemble             Display ensemble status — observe the fleet at a glance
-  purge                Purge dead workers from fleet state (Stopped, Error, Stale)
+  purge                Purge dead workers from fleet state without changing molecule status
   kill                 Kill a worker — immediate termination (no state flush)
   quench               Quench a worker — graceful shutdown with state preservation
   teardown             Teardown a fleet — gracefully stop all fleet workers

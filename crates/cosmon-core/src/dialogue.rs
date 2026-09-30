@@ -125,7 +125,7 @@ impl DialogueClass {
     }
 }
 
-/// A specific codex dialog recognised inside a [`DialogueScan`], carried
+/// A specific worker update or interactive dialog recognised in pane text, carried
 /// alongside `class` so a report can say *why* the worker is blocked, not
 /// only how severe the block is (issue #85: `cs ensemble` / `cs peek` said
 /// a worker was blocked on a dialog but never which one).
@@ -134,6 +134,8 @@ impl DialogueClass {
 pub enum CodexDialogKind {
     /// "Update available! 0.154.0 → 0.157.0" at first launch after a release.
     UpdateAvailable,
+    /// An update finished and the pane asks for a restart.
+    RestartRequired,
     /// "Select Reasoning Level for `<model>`" shortly after launch.
     ReasoningPicker,
     /// "Approaching rate limits. Switch to `<cheaper model>` for lower credit
@@ -147,19 +149,25 @@ impl CodexDialogKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::UpdateAvailable => "update_available",
+            Self::RestartRequired => "restart_required",
             Self::ReasoningPicker => "reasoning_picker",
             Self::RateLimitSwitch => "rate_limit_switch",
         }
     }
 }
 
-/// Recognise one of the three codex interactive dialogs named in issue #85,
+/// Recognise a known interactive dialog or completed-update restart notice
 /// if the captured pane text matches. Pure and independent of
 /// [`classify_pane`]'s `class` decision — a report layer can attach this
 /// alongside the class for a human-readable "why".
 #[must_use]
 pub fn classify_codex_dialog(text: &str) -> Option<CodexDialogKind> {
     let lower = text.to_lowercase();
+    if lower.contains("restart to update")
+        || (lower.contains("update ran successfully") && lower.contains("please restart"))
+    {
+        return Some(CodexDialogKind::RestartRequired);
+    }
     if lower.contains("update available") {
         return Some(CodexDialogKind::UpdateAvailable);
     }
@@ -720,5 +728,19 @@ mod tests {
     fn classify_codex_dialog_is_none_for_ordinary_output() {
         let pane = "Running cargo test --workspace\ntest result: ok. 412 passed";
         assert_eq!(classify_codex_dialog(pane), None);
+    }
+
+    #[test]
+    fn issue122_restart_notice_is_distinct_from_a_blocking_menu() {
+        let pane = "Update ran successfully! Please restart.";
+        assert_eq!(classify_pane(pane).class, DialogueClass::None);
+        assert_eq!(
+            classify_codex_dialog(pane),
+            Some(CodexDialogKind::RestartRequired)
+        );
+        assert_eq!(
+            classify_codex_dialog("Restart to update"),
+            Some(CodexDialogKind::RestartRequired)
+        );
     }
 }
