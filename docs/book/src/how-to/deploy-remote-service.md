@@ -170,6 +170,14 @@ reload even if the file remains on disk. An existing empty allowlist denies
 every issuer; remove the allowlist file only when intentionally returning to
 the legacy file-stage fallback.
 
+Binding files are operator-controlled configuration. The adapter does not
+keep an independent hash of them. An edit to an existing binding takes effect
+after `SIGHUP` or restart. Keep the state directory writable only by the
+operator and review binding edits before reloading. If two binding files
+declare the same `(issuer, subject, audience)` triple, startup refuses the
+map; on `SIGHUP`, the adapter logs `duplicate binding refused` and keeps the
+previous live map. Remove the duplicate and reload again.
+
 In HTTP-fetch mode, send `SIGHUP` after every edit to
 `trusted-issuers.toml`. The adapter applies issuer additions and removals,
 audience changes, and `jwks_uri` changes, then immediately fetches the current

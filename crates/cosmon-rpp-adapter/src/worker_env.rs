@@ -198,7 +198,7 @@ pub const PASSTHROUGH_VARS: &[&str] = &[
 /// the *adapter process's* `COSMON_STATE_DIR` precedence over the walk-up,
 /// and on a multi-tenant server one inherited value would silently redirect
 /// EVERY tenant's store to a single directory. The tenant path is the
-/// server's decision, computed from the sealed binding's root — never from
+/// server's decision, computed from the loaded binding's root — never from
 /// this process's environment (the same "an inherited adapter value must
 /// never win" rule [`WorkerEnvelope::build_env`] enforces on the workers).
 ///

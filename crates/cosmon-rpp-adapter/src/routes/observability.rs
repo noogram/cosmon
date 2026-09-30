@@ -256,7 +256,7 @@ fn render_prometheus(state: &AppState) -> String {
     // Nucleon map projections.
     let _ = writeln!(
         out,
-        "# HELP cosmon_adapter_nucleon_bindings Active `(iss, sub)` bindings in the sealed nucleon map."
+        "# HELP cosmon_adapter_nucleon_bindings Active `(iss, sub, aud)` bindings in the loaded nucleon map."
     );
     let _ = writeln!(out, "# TYPE cosmon_adapter_nucleon_bindings gauge");
     let _ = writeln!(out, "cosmon_adapter_nucleon_bindings {bindings}");

@@ -78,8 +78,8 @@ pub struct ProvisionedHabilitation {
     pub noyau: String,
     /// Absolute path to the written `oidc-identity.toml`.
     pub binding_path: String,
-    /// BLAKE3 hash of the rendered file body (verification, never the
-    /// admin token).
+    /// BLAKE3 checksum of the rendered file body for the response. It is
+    /// not persisted or enforced at admission/reload; never the admin token.
     pub seal: String,
     /// Always `true` here — the map was reloaded in-process (no SIGHUP).
     pub reloaded: bool,

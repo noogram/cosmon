@@ -71,7 +71,7 @@ pub struct PorteeMember {
 
 /// On-disk grouping manifest — the *presentation* record that turns N
 /// habilitations back into one relation. It is **not** a root-of-trust:
-/// the bindings under `nucleons/` are the sealed truth; this manifest
+/// the bindings under `nucleons/` are the operator-declared truth; this manifest
 /// only records which of them belong together so the operator sees one
 /// "Casey : {speck, qcd}" instead of two opaque pins. Persisted at
 /// `<state_dir>/portees/<portee_id>/portee.toml`.
@@ -107,7 +107,7 @@ pub struct PorteeSpec {
     /// Materialise each galaxy's `<galaxies_root>/<galaxy>/` tree if
     /// absent (mirrors `Provisioner::provision`'s `create_noyau`).
     pub create_noyau: bool,
-    /// ISO-8601 timestamp stamped into the sealed bindings + manifest.
+    /// ISO-8601 timestamp stamped into the bindings + manifest.
     pub created_at: Option<String>,
 }
 

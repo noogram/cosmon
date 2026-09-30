@@ -56,8 +56,8 @@ pub struct ProvisionOutcome {
     pub noyau: String,
     /// Absolute path to the written `oidc-identity.toml`.
     pub binding_path: PathBuf,
-    /// BLAKE3 hash of the rendered file body (verification, NOT the
-    /// admin token).
+    /// BLAKE3 checksum of the rendered file body for the provisioning
+    /// response. It is not persisted or enforced at admission/reload.
     pub seal: String,
 }
 

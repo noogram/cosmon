@@ -282,15 +282,6 @@ pub fn http_request_to_spark(
         });
     };
 
-    // Seal verification — the briefing-seal model (ADR-058), per-galaxy
-    // (the audience-pinned binding the request resolved to).
-    if !rig
-        .nucleon_map
-        .seal_intact_for_audience(&jwt.iss, &jwt.sub, &jwt.aud)
-    {
-        return Err(RppRejectReason::SealBroken);
-    }
-
     let snapshot = rig.deny_list.snapshot();
     if snapshot.global_kill {
         return Err(RppRejectReason::GlobalKill);

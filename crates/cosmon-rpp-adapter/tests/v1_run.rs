@@ -193,7 +193,7 @@ async fn run_returns_202_and_terminates_drained() {
 #[tokio::test]
 async fn pinned_budget_exit_surfaces_stable_token() {
     // Exercised through `run_drain` directly: the route always resolves
-    // bounds from the sealed binding, so pinning budget = 0 needs the
+    // bounds from the loaded binding, so pinning budget = 0 needs the
     // function seam rather than a binding fixture. The pending root
     // makes the loop want to dispatch, and B3 refuses the very first
     // action with its named token.

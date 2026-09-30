@@ -1976,7 +1976,7 @@ pub async fn run_molecule(
         });
     }
 
-    // 5. Bounds — resolved from the same sealed binding admission used,
+    // 5. Bounds — resolved from the same loaded binding admission used,
     //    audience included (the read face of `GET /v1/quota` and this
     //    enforcement face project from one `Resolved`, so they cannot
     //    disagree). Pinning the audience is what makes that true: a

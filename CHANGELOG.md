@@ -21,6 +21,14 @@ this stage.
 
 ### Security
 
+- **RPP binding loads refuse duplicate identity triples.** A repeated
+  `(issuer, subject, audience)` across binding files now stops adapter
+  startup. On `SIGHUP`, the adapter logs the refusal and keeps the prior live
+  map. Operators must remove the duplicate and reload again. Binding files
+  are operator-controlled configuration; the adapter does not persist or
+  verify an independent content seal for them. Existing binding edits take
+  effect on reload or restart.
+
 - **RPP discovery and secondary controls now use issuer-scoped identity.**
   `GET /v1/noyaux` filters by issuer, subject and audience. Rate-limit and
   quota buckets, revocations, and authz audit keys distinguish equal subject

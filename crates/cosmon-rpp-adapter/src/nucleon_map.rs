@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Sealed `sub → nucleon_id → noyau` mapping — clause (a) of the §8j
+//! Operator-declared `sub → nucleon_id → noyau` mapping — clause (a) of the §8j
 //! HTTPS+JWT instantiation (ADR-080 §3.1).
 //!
-//! Each `oidc-identity.toml` file under
-//! `<state_dir>/nucleons/<nucleon_id>/` is BLAKE3-sealed at load. The
-//! recorded seal is compared on every `resolve()` call so retroactive
-//! edits are detected via [`crate::RppRejectReason::SealBroken`].
+//! Each `oidc-identity*.toml` file under
+//! `<state_dir>/nucleons/<nucleon_id>/` is loaded at boot or explicit reload.
+//! Duplicate identity triples refuse the load. File integrity depends on
+//! operator control of the state directory; there is no independent seal.
 //!
 //! The mapping is read-only here; provisioning is an explicit
 //! operator gesture (`cs nucleon bind ...`, out of crate).
@@ -36,7 +36,7 @@
 //! by `admission_test::undeclared_admin_sub_is_refused_fail_closed`.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use arc_swap::{ArcSwap, Guard};
@@ -161,7 +161,7 @@ pub struct ScopesGrant {
 ///
 /// Every field is optional; an absent field (or an absent section)
 /// falls back to the server defaults below. The binding is
-/// operator-written and BLAKE3-sealed — the client can *read* the
+/// operator-written — the client can *read* the
 /// effective bounds (`GET /v1/quota`) but can never write them; the
 /// §8p surface carries no route that touches this file. Extension of
 /// the §8j(c) leaky-bucket placement: same boot-time read, same
@@ -263,14 +263,11 @@ pub struct OidcClaims {
 #[derive(Clone, Debug, Default)]
 pub struct HabilitationMap {
     by_key: BTreeMap<(String, String, String), Resolved>,
-    seals: BTreeMap<(String, String, String), String>,
-    live_seals: BTreeMap<(String, String, String), String>,
 }
 
 /// Secret-free projection of one loaded binding, for operator
 /// introspection (`GET /v1/admin/habilitations`).
-/// Carries the binding envelope the operator wrote — NEVER the BLAKE3
-/// seal, NEVER any admin credential.
+/// Carries the binding envelope the operator wrote — never an admin credential.
 #[derive(Clone, Debug, Serialize)]
 pub struct BindingSummary {
     /// JWT `iss` claim the binding admits.
@@ -319,7 +316,7 @@ pub struct Resolved {
 }
 
 impl HabilitationMap {
-    /// Resolve a principal `(iss, sub)` to *a* sealed binding, ignoring
+    /// Resolve a principal `(iss, sub)` to *a* loaded binding, ignoring
     /// audience. Returns the lexicographically-first binding (by audience)
     /// when the principal holds several per-galaxy grants; `None` for an
     /// unknown principal.
@@ -357,7 +354,7 @@ impl HabilitationMap {
             .map(|(_, r)| r)
     }
 
-    /// Resolve a full `(iss, sub, aud)` triple to its sealed binding —
+    /// Resolve a full `(iss, sub, aud)` triple to its loaded binding —
     /// the per-galaxy capability lookup. The audience pins exactly one
     /// galaxy (ADR-0023 D4), so this is the authoritative admission-path
     /// resolver: a token can only ever open the galaxy whose audience it
@@ -460,7 +457,7 @@ impl HabilitationMap {
     /// Owned, secret-free projection of every loaded binding, in stable
     /// `(iss, sub)` order. Powers `GET /v1/admin/habilitations`
     /// (operator introspection). It NEVER carries
-    /// the BLAKE3 seal nor any admin credential — only the binding
+    /// any admin credential — only the binding
     /// envelope the operator wrote.
     #[must_use]
     pub fn summaries(&self) -> Vec<BindingSummary> {
@@ -477,57 +474,15 @@ impl HabilitationMap {
             .collect()
     }
 
-    /// Verify the BLAKE3 seal on `(iss, sub)`. Callers MUST consult
-    /// this before trusting a [`Self::resolve`] return value in any
-    /// state-mutating path.
-    #[must_use]
-    pub fn seal_intact(&self, iss: &str, sub: &str) -> bool {
-        // Principal-level seal: every per-galaxy binding for this
-        // `(iss, sub)` must be intact. With a single binding (the local
-        // tenant case) this is identical to the old behaviour; for a
-        // federated principal it is conservative — a single tampered
-        // galaxy grant fails the whole principal.
-        let mut any = false;
-        for ((i, s, aud), recorded) in &self.seals {
-            if i != iss || s != sub {
-                continue;
-            }
-            any = true;
-            match self.live_seals.get(&(i.clone(), s.clone(), aud.clone())) {
-                Some(live) if live == recorded => {}
-                _ => return false,
-            }
-        }
-        // No recorded seal at all ⇒ builder path (tests opt out).
-        if any {
-            return true;
-        }
-        !self.live_seals.keys().any(|(i, s, _)| i == iss && s == sub)
-    }
-
-    /// Verify the BLAKE3 seal on an exact `(iss, sub, aud)` binding — the
-    /// per-galaxy seal check used by the admission hot path once the
-    /// audience has pinned the galaxy. Returns `true` on the builder path
-    /// (no recorded seal) so tests opt out exactly as with
-    /// [`Self::seal_intact`].
-    #[must_use]
-    pub fn seal_intact_for_audience(&self, iss: &str, sub: &str, aud: &str) -> bool {
-        let key = (iss.to_owned(), sub.to_owned(), aud.to_owned());
-        match (self.seals.get(&key), self.live_seals.get(&key)) {
-            (Some(recorded), Some(live)) => recorded == live,
-            (None, None) => true, // builder path — tests opt out
-            _ => false,
-        }
-    }
-
     /// Load every `<state_dir>/nucleons/<nucleon_id>/oidc-identity.toml`
-    /// file. Malformed files are logged and skipped.
+    /// file. Malformed files are logged and skipped; duplicate identity
+    /// triples refuse the entire load so directory order never grants access.
     ///
     /// # Errors
     ///
-    /// Returns an error if the parent directory cannot be enumerated;
-    /// individual file failures are tolerated (skipped + logged) so a
-    /// single bad provisioning record does not blackhole the map.
+    /// Returns an error if a directory cannot be enumerated or an identity
+    /// triple is duplicated. Individual unreadable or malformed files are
+    /// tolerated (skipped + logged).
     pub fn load(state_dir: &Path) -> std::io::Result<Self> {
         let mut out = Self::default();
         let root = state_dir.join("nucleons");
@@ -563,14 +518,18 @@ impl HabilitationMap {
                         continue;
                     }
                 };
-                let seal = blake3::hash(text.as_bytes()).to_hex().to_string();
                 let key = (
                     parsed.oidc.issuer.clone(),
                     parsed.oidc.sub.clone(),
                     parsed.oidc.audience.clone(),
                 );
-                out.seals.insert(key.clone(), seal.clone());
-                out.live_seals.insert(key.clone(), seal);
+                if out.by_key.contains_key(&key) {
+                    tracing::error!(path = %path.display(), "duplicate binding refused");
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("duplicate binding at {}", path.display()),
+                    ));
+                }
                 let allowed_scopes = parsed
                     .scopes
                     .as_ref()
@@ -592,38 +551,6 @@ impl HabilitationMap {
         Ok(out)
     }
 
-    /// Recompute every live seal from the on-disk content. Called
-    /// once per refresh window (V1+ — cached at boot for V0).
-    pub fn refresh_live_seals(&mut self, state_dir: &Path) {
-        for ((iss, sub, aud), resolved) in &self.by_key.clone() {
-            let path = candidate_paths(state_dir, &resolved.nucleon_id);
-            let mut found_live = None;
-            for p in path {
-                if let Ok(text) = std::fs::read_to_string(&p) {
-                    if let Ok(parsed) = toml::from_str::<OidcIdentity>(&text) {
-                        if &parsed.oidc.issuer == iss
-                            && &parsed.oidc.sub == sub
-                            && &parsed.oidc.audience == aud
-                        {
-                            let seal = blake3::hash(text.as_bytes()).to_hex().to_string();
-                            found_live = Some(seal);
-                            break;
-                        }
-                    }
-                }
-            }
-            let key = (iss.clone(), sub.clone(), aud.clone());
-            match found_live {
-                Some(seal) => {
-                    self.live_seals.insert(key, seal);
-                }
-                None => {
-                    self.live_seals.remove(&key);
-                }
-            }
-        }
-    }
-
     /// Test/util builder.
     #[must_use]
     pub fn builder() -> HabilitationMapBuilder {
@@ -633,7 +560,7 @@ impl HabilitationMap {
 
 /// Live, atomically-swappable handle to the [`HabilitationMap`].
 ///
-/// The adapter loads the sealed bindings once at boot and reads the map
+/// The adapter loads the bindings at boot and reads the map
 /// on every request, but it reloads the map only on an explicit operator
 /// gesture (`SIGHUP`, see [`crate::reload`]). `arc-swap` is the right
 /// tool for this read-mostly/reload-rarely shape: reads are lock-free
@@ -680,22 +607,6 @@ fn is_toml(name: &str) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
 }
 
-fn candidate_paths(state_dir: &Path, nucleon_id: &HabilitationId) -> Vec<PathBuf> {
-    let mut out = vec![];
-    let dir = state_dir.join("nucleons").join(nucleon_id.as_str());
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("oidc-identity") && is_toml(name) {
-                    out.push(path);
-                }
-            }
-        }
-    }
-    out
-}
-
 /// Test-only builder for [`HabilitationMap`].
 #[derive(Clone, Debug, Default)]
 pub struct HabilitationMapBuilder {
@@ -703,7 +614,7 @@ pub struct HabilitationMapBuilder {
 }
 
 impl HabilitationMapBuilder {
-    /// Insert a binding without on-disk seal machinery. The resulting
+    /// Insert a binding without on-disk loading. The resulting
     /// binding carries no granted scopes; use
     /// [`Self::insert_with_scopes`] to populate `[scopes].allowed`
     /// directly.
@@ -1182,7 +1093,7 @@ budget = {budget}
     }
 
     #[test]
-    fn builder_path_treats_seal_as_intact() {
+    fn builder_path_resolves_binding() {
         let map = HabilitationMap::builder()
             .insert(
                 "https://idp",
@@ -1192,7 +1103,6 @@ budget = {budget}
                 "cosmon-rpp-tenant-demo",
             )
             .build();
-        assert!(map.seal_intact("https://idp", "sub-123"));
         let r = map.resolve("https://idp", "sub-123").unwrap();
         assert_eq!(r.nucleon_id.as_str(), "nuc-a");
         assert_eq!(r.noyau.as_str(), "tenant-demo");
@@ -1207,7 +1117,7 @@ budget = {budget}
     }
 
     #[test]
-    fn load_seals_present_files() {
+    fn load_resolves_present_files() {
         let td = tempfile::TempDir::new().unwrap();
         let dir = td.path().join("nucleons/nuc-a");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1226,7 +1136,6 @@ sealed_at = "2026-04-27T14:00:00Z"
         let map = HabilitationMap::load(td.path()).unwrap();
         let r = map.resolve("https://idp", "sub-123").unwrap();
         assert_eq!(r.nucleon_id.as_str(), "nuc-a");
-        assert!(map.seal_intact("https://idp", "sub-123"));
     }
 
     #[test]
@@ -1432,34 +1341,6 @@ allowed = ["cosmon:molecule:read", "cosmon:molecule:write"]
             .is_empty());
     }
 
-    #[test]
-    fn seal_breaks_after_disk_edit() {
-        let td = tempfile::TempDir::new().unwrap();
-        let dir = td.path().join("nucleons/nuc-a");
-        std::fs::create_dir_all(&dir).unwrap();
-        let body = r#"
-nucleon_id = "nuc-a"
-phase = "Biological"
-noyau = "tenant-demo"
-
-[oidc]
-issuer = "https://idp"
-sub = "sub-123"
-audience = "cosmon-rpp-tenant-demo"
-"#;
-        let path = dir.join("oidc-identity.toml");
-        std::fs::write(&path, body).unwrap();
-        let mut map = HabilitationMap::load(td.path()).unwrap();
-        // Edit on disk — seal MUST diverge.
-        std::fs::write(
-            &path,
-            body.replace("noyau = \"tenant-demo\"", "noyau = \"noog\""),
-        )
-        .unwrap();
-        map.refresh_live_seals(td.path());
-        assert!(!map.seal_intact("https://idp", "sub-123"));
-    }
-
     // ── Operator-side renderer (Pierre hardening P2) ────────────────────
 
     fn sample_spec() -> HabilitationBindingSpec {
@@ -1504,7 +1385,6 @@ audience = "cosmon-rpp-tenant-demo"
                 "cosmon:molecule:write".to_owned()
             ]
         );
-        assert!(map.seal_intact("http://oidc-mock:8444", "research-operator"));
     }
 
     #[test]

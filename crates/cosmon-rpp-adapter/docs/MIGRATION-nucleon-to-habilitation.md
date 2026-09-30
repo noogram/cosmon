@@ -17,7 +17,7 @@ different risk:
 |---|---|---|
 | **Rust type names** (PascalCase) | `NucleonMap`, `NucleonId`, `SharedNucleonMap` | **none** — newtypes serialize transparently or are never serialized; renaming the type does not touch any wire/disk byte |
 | **Serialized field names** (snake_case) | `pub nucleon_id: …` in `OidcIdentity`, `audit`, `admission`, matrix `types` | **high** — these are JSON-API + on-disk TOML field names. Renaming changes the wire/disk format → breaks deployed instances and existing on-disk state |
-| **On-disk paths** | `.cosmon/state/nucleons/<id>/oidc-identity.toml` | **high + load-bearing** — this is the §8j **posture-(b) root of trust** (operator-written, BLAKE3-sealed). Renaming the directory breaks admission until every instance's state volume is migrated |
+| **On-disk paths** | `.cosmon/state/nucleons/<id>/oidc-identity.toml` | **high + load-bearing** — this is the §8j **posture-(b) root of trust** (operator-written). Renaming the directory breaks admission until every instance's state volume is migrated |
 
 The safe strategy separates the harmless type-name flip (do now) from the
 wire/disk-format change (do later, behind read-compat), and never touches the
@@ -45,7 +45,7 @@ out-of-workspace / not-yet-migrated consumer.
 - No on-disk path changed (`.cosmon/state/nucleons/` kept verbatim).
 - The module file is still `nucleon_map.rs` and the module path
   `cosmon_rpp_adapter::nucleon_map` still resolves (file rename deferred to B).
-- Posture-(b) binding unchanged: 1→1 sealed `(iss,sub)→noyau`, BLAKE3 seal,
+- Posture-(b) binding unchanged in this migration: 1→1 operator-declared `(iss,sub)→noyau`,
   SIGHUP reload, operator-only host-side write. `v1_binding_scopes`,
   `admission_test`, `v1_noyaux`, `v1_auth_me`, `tenant_isolation_test` all green.
 
@@ -128,6 +128,6 @@ Per the smithy↔Tenant-Demo contract (image autonomous; runtime def NOT):
   Tenant-Demo. Transmit the path change + the loader's read-fallback contract so the
   volume layout and any `provision-noyau.sh` / seed tooling migrate in lockstep.
 - The **image** (binary) change is smithy/cosmon-autonomous.
-- Operator-written sealed `oidc-identity.toml` files are the §8j root of trust:
+- Operator-written `oidc-identity.toml` files are the §8j root of trust:
   their migration is an **operator gesture**, scripted with the read-fallback as
   the safety net, never an in-flight auto-rewrite.

@@ -21,7 +21,7 @@
 [ADR-035](035-cross-galaxy-edges.md) (cross-galaxy edges — multi-tenant routing precedent),
 [ADR-047](047-event-log-protocol-v0.md) (`events.jsonl` — the audit log),
 [ADR-056](056-notary-protocol-v0.md) (notary key segregation),
-[ADR-058](058-step-progress-invariant.md) (briefing-seal pattern — re-used for OIDC identity files),
+[ADR-058](058-step-progress-invariant.md) (briefing-seal pattern for molecule progress; OIDC identity files do not use it),
 [ADR-061](061-pilot-session-and-causal-closure.md) (pilot-session, `nucleon_id`, causal closure),
 [ADR-063](063-vocabulary-orbitale-nucleon-noyau-phase.md) (Orbitale ⊂ Nucléon ⊂ Noyau — multi-tenant axis),
 ADR-064 (postman's-uniform / wheat-paste — §8k preempted),
@@ -116,11 +116,11 @@ Every request admitted to the cosmon DAG via the RPP MUST pass through an admiss
 
 ### 3.1 Clause (a) — Identity mapping
 
-> The JWT's `sub` claim resolves to a sealed `nucleon_id` via a file at
+> The JWT's `(iss, sub, aud)` claims resolve to an operator-declared `nucleon_id` via a file at
 > ```
 > .cosmon/state/nucleons/<nucleon_id>/oidc-identity.toml
 > ```
-> The mapping file is **briefing-sealed** (ADR-058 model): a BLAKE3 hash of its content is stored in `state.json` so retroactive edits are detectable. Unmapped `sub` claims are rejected with `RejectReason::UnknownSub`. The RPP **never** defaults, **never** auto-admits, **never** derives a `nucleon_id` from the raw `sub` string. *Implements §8j(a) on HTTPS+JWT.*
+> The mapping file is operator-controlled configuration. There is no independently recorded binding hash in `state.json`; edits take effect on an explicit reload or restart. Duplicate `(iss, sub, aud)` rows across files refuse boot or reload. Unmapped `sub` claims are rejected with `RejectReason::UnknownSub`. The RPP **never** defaults, **never** auto-admits, **never** derives a `nucleon_id` from the raw `sub` string. *Implements §8j(a) on HTTPS+JWT.*
 
 The mapping file structure is:
 
@@ -434,7 +434,6 @@ pub enum RppRejectReason {
     AudienceMismatch,
     IssuerNotPinned,
     UnknownSub,
-    SealBroken(NucleonId),
     CrossTenantPivot { sub: ClaimSub, expected_noyau: Noyau, found_noyau: Noyau },
 
     // Rate (clause c)
@@ -628,7 +627,7 @@ the same change that adds them (`api-cli-coverage.md`, OpenAPI,
 `POST /v1/molecules/{id}/run` does **not** hand the JWT-bearer the
 operator orchestrator: it is a *request door* — the client asks for a
 drain of its own DAG, and the resident loop inside the tenant
-container decides what to tackle, when, under the binding-sealed
+container decides what to tackle, when, under the operator-declared
 B1/B2/B3 bounds (readable via `GET /v1/quota`, never writable through
 any §8p route). The §5.2 objection (blast radius of an unbounded,
 long-running orchestrator) is dissolved by construction, not waived:
@@ -921,7 +920,7 @@ The CLAUDE.md coherence checklist is reproduced and answered for the RPP, plus o
 | R4 | OpenAPI drifts from Rust types. | OpenAPI is hand-written. Coherence test deserialises representative payloads against Rust types, asserts schema match. Drift = test failure. |
 | R5 | Two of the four signing keys are accidentally the same. | Operator audit (V0); CI configuration audit at `tests/key_segregation.rs` (V1+). |
 | R6 | A worker LLM exfiltrates an API token from operator's home directory. | The RPP token (if persisted at all on the operator's box) lives at `~/.config/cosmon/api-credentials.toml`, mode 0600. Worker harness refuses to start if the file is readable from its sandbox (V1+). |
-| R7 | Cross-tenant pivot via crafted JWT. | Clause (a) `CrossTenantPivot` reject; per-`noyau` rate-limiter; per-`sub → nucleon_id → noyau` is briefing-sealed. |
+| R7 | Cross-tenant pivot via crafted JWT. | Clause (a) `CrossTenantPivot` reject; per-`noyau` rate-limiter; exact `(iss, sub, aud)` binding lookup. Duplicate triples refuse boot or reload. Binding file integrity depends on operator control of the state directory. |
 | R8 | Forbidden vocabulary creeps into code or commits. | Lint script `scripts/forbid-rpp-daemon-vocab.sh` (sibling of `forbid-matrix-features.sh`) greps for `daemon`, `cosmon-server`, `microservice`, `endpoint` (in isolation) under `crates/cosmon-rpp-adapter/`. Fails CI on hit. |
 
 ---

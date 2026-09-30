@@ -41,7 +41,7 @@ request."* Each clause is addressed by construction:
 | §5.1 objection | What changed |
 |---|---|
 | Long-running | The route detaches: 202 on spawn, never a held connection. The loop's wall clock is itself bounded (`--timeout`, named exit 124). |
-| Side-effectful / blast radius | The drain only tackles molecules in the **caller's own noyau**, under the binding-sealed B1/B2/B3 bounds (B3 obligatory — a tenant drain is never unbounded, godel Q3). The bounds are readable (`GET /v1/quota`) and never writable through any §8p route. |
+| Side-effectful / blast radius | The drain only tackles molecules in the **caller's own noyau**, under the operator-declared B1/B2/B3 binding bounds (B3 obligatory — a tenant drain is never unbounded, godel Q3). The bounds are readable (`GET /v1/quota`) and never writable through any §8p route. |
 | Blocks the caller | The caller is a request door, not a cockpit: the client DEMANDS, the server DECIDES what to tackle, when, under the lock (torvalds Q3). |
 
 The §5.2 `delegate_for` claim model is intentionally **not** used: there is no
@@ -53,7 +53,7 @@ sequence of spawns.
 ## 3. Bounds and refusals (the godel clause)
 
 - The bounds live in a system stronger than the client: `[drain_bounds]` in
-  the BLAKE3-sealed binding, resolved against server defaults (128/8/256).
+  the operator-controlled binding, resolved against server defaults (128/8/256).
 - Refusals are stable and documented: `429 budget_exhausted` (B3),
   `409 max_depth_exceeded` (B1), `429 molecule_quota_exceeded` (B2) — mirrors
   of `cs run` exit codes 90/92/91 (`task-20260610-e5f6`). On the asynchronous
