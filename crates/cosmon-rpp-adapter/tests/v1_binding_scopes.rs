@@ -425,3 +425,126 @@ async fn cross_tenant_attempt_with_binding_grant_still_rejected() {
     );
     assert_ne!(resp.status(), StatusCode::CREATED);
 }
+
+#[tokio::test]
+async fn token_harvest_scope_cannot_replace_exact_binding_grant() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add("a");
+    std::fs::create_dir_all(tenant.root.join(".cosmon")).unwrap();
+    std::fs::write(
+        tenant.root.join(".cosmon/config.toml"),
+        "[project]\nproject_id = \"binding-test\"\n[harvest_authority]\nremote = \"scoped\"\n",
+    )
+    .unwrap();
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let state = make_state(
+        &oidc,
+        &tenants,
+        vec![(
+            "admin-a",
+            "nuc-admin-a",
+            "a",
+            "cosmon-rpp-a",
+            &["cosmon:molecule:write"],
+        )],
+        security_dir.path(),
+    );
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "admin-a",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &["cosmon:molecule:harvest"],
+        lifetime_secs: Some(60),
+        jti: Some("jti-token-harvest-without-binding"),
+    });
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/molecules/task-20260930-abcd/done")
+                .header("Authorization", format!("Bearer {jwt}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"reason":"close"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let events = read_authz_ndjson(&security_dir.path().join(AUTHZ_NDJSON_RELATIVE_PATH)).unwrap();
+    let event = events.iter().find(|event| event.verb == "done").unwrap();
+    assert_eq!(event.decision, AuthzDecision::Absent);
+}
+
+#[tokio::test]
+async fn a_binding_removed_after_admission_refuses_at_the_effect_port() {
+    use cosmon_core::config::{HarvestAuthorityConfig, RemoteHarvestPolicy};
+    use cosmon_core::harvest_door::HarvestOptions;
+    use cosmon_core::id::MoleculeId;
+    use cosmon_core::remote_harvest::{
+        resolve_remote_policy, RemoteAdmissionValidator, RemoteHarvestAdmission,
+    };
+    use cosmon_rpp_adapter::harvest_effect::AdapterRemoteValidator;
+
+    let mut tenants = TenantWorkspaces::new();
+    tenants.add("a");
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let state = Arc::new(make_state(
+        &oidc,
+        &tenants,
+        vec![(
+            "admin-a",
+            "nuc-admin-a",
+            "a",
+            "cosmon-rpp-a",
+            &["cosmon:molecule:harvest"],
+        )],
+        security_dir.path(),
+    ));
+    let policy = resolve_remote_policy(&HarvestAuthorityConfig {
+        remote: Some(RemoteHarvestPolicy::Scoped),
+        ..HarvestAuthorityConfig::default()
+    })
+    .unwrap();
+    let admission = RemoteHarvestAdmission {
+        issuer: oidc.issuer().to_owned(),
+        subject: "admin-a".to_owned(),
+        audience: "cosmon-rpp-a".to_owned(),
+        tenant: "a".to_owned(),
+        molecule: MoleculeId::new("task-20260930-c004").unwrap(),
+        options: HarvestOptions::new("close"),
+        expires_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60,
+        token_id: "binding-removed".to_owned(),
+        authority_source: cosmon_core::remote_harvest::RemoteAuthoritySource::BindingHarvest,
+        policy,
+    };
+    let validator = AdapterRemoteValidator {
+        state: Arc::clone(&state),
+    };
+    assert!(validator.validate(&admission).is_ok());
+    state.nucleon_map.store(
+        HabilitationMap::builder()
+            .insert_with_scopes(
+                oidc.issuer(),
+                "admin-a",
+                HabilitationId::new("nuc-admin-a"),
+                Noyau::new("a"),
+                "cosmon-rpp-a",
+                vec!["cosmon:molecule:write".to_owned()],
+            )
+            .build(),
+    );
+    assert!(validator.validate(&admission).is_err());
+}

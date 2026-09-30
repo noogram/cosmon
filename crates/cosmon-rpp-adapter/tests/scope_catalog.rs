@@ -8,8 +8,9 @@
 //! and `cs auth scopes --list` planning depend on stable ordering).
 
 use cosmon_rpp_adapter::auth::scopes::{
-    ALL, ARTIFACT_READ, ARTIFACT_WRITE, EVENTS_SUBSCRIBE, LOGS_SUBSCRIBE, MOLECULE_READ,
-    MOLECULE_WRITE, PILOTE_CONVERSE, WORKER_READ, WORKER_SPAWN, WORKER_TERMINATE, WORLD_OBSERVE,
+    ALL, ARTIFACT_READ, ARTIFACT_WRITE, EVENTS_SUBSCRIBE, LOGS_SUBSCRIBE, MOLECULE_HARVEST,
+    MOLECULE_READ, MOLECULE_WRITE, PILOTE_CONVERSE, WORKER_READ, WORKER_SPAWN, WORKER_TERMINATE,
+    WORLD_OBSERVE,
 };
 
 #[test]
@@ -19,6 +20,7 @@ fn scope_catalog_is_pinned() {
         &[
             MOLECULE_READ,
             MOLECULE_WRITE,
+            MOLECULE_HARVEST,
             WORKER_SPAWN,
             WORKER_READ,
             WORKER_TERMINATE,
@@ -52,6 +54,7 @@ fn molecule_and_worker_scopes_have_distinct_namespaces() {
     // intermediate worker reasoning, a different surface again.
     assert!(MOLECULE_READ.starts_with("cosmon:molecule:"));
     assert!(MOLECULE_WRITE.starts_with("cosmon:molecule:"));
+    assert!(MOLECULE_HARVEST.starts_with("cosmon:molecule:"));
     assert!(WORKER_SPAWN.starts_with("cosmon:worker:"));
     assert!(WORKER_READ.starts_with("cosmon:worker:"));
     assert!(WORKER_TERMINATE.starts_with("cosmon:worker:"));
@@ -68,6 +71,7 @@ fn scope_literals_match_published_strings() {
     // every admin-nucleon binding — must never happen silently.
     assert_eq!(MOLECULE_READ, "cosmon:molecule:read");
     assert_eq!(MOLECULE_WRITE, "cosmon:molecule:write");
+    assert_eq!(MOLECULE_HARVEST, "cosmon:molecule:harvest");
     assert_eq!(WORKER_SPAWN, "cosmon:worker:spawn");
     assert_eq!(WORKER_READ, "cosmon:worker:read");
     assert_eq!(WORKER_TERMINATE, "cosmon:worker:terminate");

@@ -675,6 +675,11 @@ pub struct HarvestAuthorityConfig {
     #[serde(default)]
     pub required: bool,
 
+    /// Explicit remote harvest policy. Absence retains the legacy decision;
+    /// local `cs done` continues to use `required` alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteHarvestPolicy>,
+
     /// How many molecules may sit *closed but not integrated* in this kernel
     /// before the remote harvest door refuses further requests (ADR-176 D7).
     ///
@@ -690,6 +695,18 @@ pub struct HarvestAuthorityConfig {
     /// the whole point of the field is that the queue is bounded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_unintegrated: Option<u32>,
+}
+
+/// Administrator-selected policy for the remote harvest door.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteHarvestPolicy {
+    /// Refuse remote closure and integration.
+    Disabled,
+    /// Accept an administrator-bound harvest scope without a seal.
+    Scoped,
+    /// Require both the administrator-bound scope and a valid seal.
+    Sealed,
 }
 
 impl HarvestAuthorityConfig {

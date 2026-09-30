@@ -193,8 +193,9 @@ pub(crate) fn authorize_harvest_from_facts(
     _trunk: &dyn TrunkGuard,
     facts: &AuthorizationFacts,
     request: &LockedHarvestRequest<'_>,
+    require_seal: bool,
 ) -> Result<HarvestDecision, CosmonError> {
-    if !facts.config.harvest_authority.is_required() {
+    if !require_seal {
         return Ok(HarvestDecision::NotInForce);
     }
     let no_root = NoHarvestTrustRoot;

@@ -1,10 +1,10 @@
 # Remote harvest authority — contract
 
-**Status:** Proposed contract, ratified by work unit W0 of issue #120
-(2026-09-29). It fixes the decisions that later units implement. **Nothing
-in this document is implemented yet**, and no default changes with it: a
-deployment upgraded to the revision that adds this file behaves exactly as
-before. Each section says what exists today and what is proposed.
+**Status:** Ratified by work unit W0 of issue #120 (2026-09-29).
+W4 implements the remote policy resolver, dedicated scope, binding-only
+source rule, and trusted route-to-effect transport. The operator commands,
+administrative routes, and typed refusal object remain work for later units.
+Absent `remote` configuration retains the legacy behavior.
 
 **Amends:** [ADR-172](../adr/172-done-authority-is-an-operator-sealed-capability.md)
 (amendment of 2026-09-29), [ADR-080](../adr/080-remote-pilot-port-https-oidc.md)
@@ -281,23 +281,15 @@ deprecated alias for `done --if-completed` and has callers.
 | `harvest grant --export <file> \| --sign <file> \| --import <file>` | offline issuance; the three modes are mutually exclusive |
 | `harvest status [--molecule <id>]` | effective policy and provenance (JSON fields `policy` and `provenance`, values as in §2), required scopes, executor support, key fingerprint, epoch, grant validity; writes nothing |
 
-## 13. Open question — the harvest scope's grant source
+## 13. Decision OQ-1 — the harvest scope's grant source
 
-**OQ-1 (not decided by W0).** Where the harvest scope may come from — the
-administrator's per-identity binding, the bearer token, or both — is decided
-in a follow-up, routed by the pilot. The options recorded:
-
-1. **Binding-only.** The harvest scope is honoured only when the
-   administrator's binding for the exact issuer/subject/audience grants it.
-2. **Token ∩ binding.** The scope must be present in both.
-3. **Unchanged.** The harvest scope follows the source rule every other
-   `cosmon:*` scope follows today.
-
-The plan's §1.2 text was written assuming option 3 and states no
-recommendation that weighs this question; this contract therefore records no
-default. Until OQ-1 is decided, implementation units keep the harvest-scope
-source check in one function, so that any of the three can be adopted
-without touching the route or the effect.
+The operator selected **binding-only** on 2026-09-29. The dedicated harvest
+scope is honoured only when the administrator's binding for the exact
+issuer/subject/audience grants it. A bearer token carrying that scope does
+not grant harvest authority when the binding omits it. Other scopes retain
+their existing token-or-binding source rule; changing that general rule is a
+separate follow-up. This check applies again at the effect boundary so a
+binding removed after route admission cannot authorize an effect.
 
 ## 14. Acceptance cases
 

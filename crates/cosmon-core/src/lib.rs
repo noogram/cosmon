@@ -187,6 +187,8 @@ pub mod harvest_authorization;
 pub mod harvest_door;
 #[doc(hidden)]
 pub mod hook;
+/// Pure remote harvest policy and admission decisions.
+pub mod remote_harvest;
 // Provenance vocabulary for keystroke injection into a worker session
 // (COSMON #26 residual). Documented by the module's own `//!` header and NOT by
 // a `///` here: an outer doc comment on the declaration merges with the inner
