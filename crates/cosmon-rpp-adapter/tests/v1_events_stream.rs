@@ -146,6 +146,74 @@ async fn open_events_stream_closes_when_credential_expires() {
 }
 
 #[tokio::test]
+async fn open_events_stream_closes_after_live_admission_changes() {
+    let mut tenants = TenantWorkspaces::new();
+    let _ = tenants.add("a");
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+
+    for change in ["kill", "subject", "token", "noyau", "binding", "issuer"] {
+        let security_dir = tempfile::tempdir().unwrap();
+        let state = make_state(
+            &oidc,
+            &tenants,
+            vec![("sub-a", "nuc-a", "a", "cosmon-rpp-a")],
+            security_dir.path(),
+        );
+        let events = state.events.clone();
+        let jwt = issue_sse_jwt(&oidc, "sub-a", "cosmon-rpp-a", "jti-live-policy");
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events")
+                    .header("Authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{change}");
+        assert_eq!(events.receiver_count(), 1, "{change}");
+
+        match change {
+            "kill" => {
+                let path = security_dir.path().join("security/oidc-kill.toml");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "[global]\nenabled = true\n").unwrap();
+            }
+            "subject" | "token" | "noyau" => {
+                let entry = match change {
+                    "subject" => format!(
+                        "[[deny.sub]]\nissuer = {:?}\nsub_hash = {:?}\n",
+                        oidc.issuer(),
+                        cosmon_rpp_adapter::rate_limit::hash_sub("sub-a")
+                    ),
+                    "token" => format!(
+                        "[[deny.jti]]\nissuer = {:?}\njti = \"jti-live-policy\"\n",
+                        oidc.issuer()
+                    ),
+                    _ => "[[deny.noyau]]\nnoyau = \"a\"\n".to_owned(),
+                };
+                let path = security_dir.path().join("security/oidc-policy.toml");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, entry).unwrap();
+            }
+            "binding" => state.nucleon_map.store(HabilitationMap::builder().build()),
+            "issuer" => state.jwks.store(JwksStore::default()),
+            _ => unreachable!(),
+        }
+
+        tokio::time::timeout(Duration::from_secs(3), to_bytes(response.into_body(), 1024))
+            .await
+            .unwrap_or_else(|_| panic!("stream stayed open after {change} change"))
+            .expect("SSE body failed");
+    }
+}
+
+#[tokio::test]
 async fn sse_returns_event_stream_content_type_for_authorised_call() {
     let mut tenants = TenantWorkspaces::new();
     let _ = tenants.add("a");

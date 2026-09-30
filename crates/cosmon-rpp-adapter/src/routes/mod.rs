@@ -32,6 +32,7 @@ pub mod quota;
 pub mod result;
 pub mod session;
 pub mod status;
+mod stream_guard;
 pub mod vitals;
 pub mod workers;
 

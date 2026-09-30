@@ -25,7 +25,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Body;
+use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use cosmon_oidc_testkit::{IssueJwt, OidcMock, OidcMockConfig, TenantWorkspaces};
 use cosmon_rpp_adapter::deny_list::DenyList;
@@ -103,6 +103,99 @@ fn issue_logs_jwt(oidc: &OidcMock, sub: &str, audience: &str, jti: &str) -> Stri
         lifetime_secs: Some(60),
         jti: Some(jti),
     })
+}
+
+#[tokio::test]
+async fn open_logs_stream_closes_when_credential_expires() {
+    // The route's source is a real pane. Where tmux is unavailable,
+    // the existing route tests still exercise admission and wire shape.
+    if std::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    struct Session(String);
+    impl Drop for Session {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux")
+                .args(["-L", "cosmon", "kill-session", "-t", &self.0])
+                .output();
+        }
+    }
+
+    let molecule = format!(
+        "task-stream-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let session = Session(format!("cosmon-{molecule}"));
+    let started = std::process::Command::new("tmux")
+        .args([
+            "-L",
+            "cosmon",
+            "new-session",
+            "-d",
+            "-s",
+            &session.0,
+            "sleep",
+            "30",
+        ])
+        .output()
+        .unwrap();
+    assert!(started.status.success(), "pane session did not start");
+
+    let mut tenants = TenantWorkspaces::new();
+    let _ = tenants.add("a");
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let state = make_state(
+        &oidc,
+        &tenants,
+        vec![("sub-a", "nuc-a", "a", "cosmon-rpp-a")],
+        security_dir.path(),
+    );
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "sub-a",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &["cosmon:logs:subscribe"],
+        lifetime_secs: Some(3),
+        jti: Some("jti-logs-expiry"),
+    });
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/molecules/{molecule}/logs"))
+                .header("Authorization", format!("Bearer {jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::timeout(
+        Duration::from_secs(7),
+        to_bytes(response.into_body(), 65536),
+    )
+    .await
+    .expect("logs stream stayed open beyond credential expiry")
+    .expect("SSE body failed");
+    let still_live = std::process::Command::new("tmux")
+        .args(["-L", "cosmon", "has-session", "-t", &session.0])
+        .output()
+        .unwrap();
+    assert!(
+        still_live.status.success(),
+        "logs source ended before the admission guard"
+    );
 }
 
 #[tokio::test]

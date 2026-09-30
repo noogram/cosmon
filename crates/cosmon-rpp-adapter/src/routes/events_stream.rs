@@ -22,6 +22,9 @@
 //!    a monotonically increasing `id:`.
 //! 7. Emit a keep-alive comment every 30 s so any HTTP/1.1 proxy in
 //!    the middle keeps the socket open.
+//! 8. Recheck live admission every second and before an event is sent;
+//!    close when the credential or an operator projection no longer
+//!    admits this exact binding.
 //!
 //! # Why broadcast, not history
 //!
@@ -51,6 +54,7 @@ use crate::auth::scopes::{EVENTS_SUBSCRIBE, GRANT_SOURCE_BINDING, GRANT_SOURCE_J
 use crate::error::{ApiError, RppRejectReason};
 use crate::events_bus::MoleculeEvent;
 use crate::jwt::{JwtVerifier, ValidatedJwt};
+use crate::routes::stream_guard::guard_stream;
 use crate::AppState;
 
 /// Keep-alive interval. Matches the briefing — "ping toutes les 30s".
@@ -136,6 +140,14 @@ pub async fn events_stream(
         }
     });
 
+    let stream = guard_stream(
+        stream,
+        state,
+        token.to_owned(),
+        spark,
+        EVENTS_SUBSCRIBE,
+        "events",
+    );
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(KEEP_ALIVE_SECS))
