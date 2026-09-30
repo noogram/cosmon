@@ -1,5 +1,32 @@
 # Claude observer audit — issue #73
 
+## Implementation follow-up (2026-09-30)
+
+The finding below describes the 2026-09-14 parser, before issue #73(b)'s
+assessment work. Current capture assesses complete assistant records before
+trajectory deduplication. A later record without a usable model persists a
+`ModelEvidenceAssessed` receipt even when `ModelObserved` does not change; the
+historical model remains visible with a coverage warning. A later usable
+record can restore the **latest response** disposition while the earlier gap
+remains in whole-history coverage. The receipt includes its capture time and
+assessed byte boundary; neither is a model-execution timestamp.
+
+The settings-record grammar has a different limit. One reported setting may
+cover many ordinary responses, so sparse settings remain explicitly limited
+evidence, without a time-to-live or a missing-model ratio threshold. An
+unclassified complete record or read loss degrades coverage, but a model
+switch hidden inside a shape classified as ordinary may still be invisible.
+This closes the silent qualification gap for named input failures. It does not
+prove arbitrary grammar drift or the model's internal execution. Historical
+journals without receipts remain `not_assessed`.
+
+The executable synthetic cases are in
+[`model_evidence_assessment.rs`](../../../crates/cosmon-core/tests/model_evidence_assessment.rs)
+and the [watcher re-exec test](../../../crates/cosmon-cli/tests/realized_watch_reexec.rs).
+The latter exercises durable receipts, recovery, concurrent capture, replay,
+and attempt reset through the real journal. The original measurement and
+historical limitation follow unchanged below.
+
 Measured on 2026-09-14 by molecule `task-20260914-c10b`, against base
 `a90cfaf6`. The durable molecule `result.md` holds the detailed evidence,
 verification results, and freshness proposal. No private log contents, session

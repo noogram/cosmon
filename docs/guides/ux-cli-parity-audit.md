@@ -2,7 +2,7 @@
 
 # CLI and UI parity audit
 
-## Model evidence coverage (issue #73, W5)
+## Model evidence coverage (issue #73, W5–W6)
 
 | Capability | CLI | Native UI | Remote service |
 |---|---|---|---|
@@ -12,6 +12,14 @@
 The warning describes the persisted assessment boundary. It does not measure
 observer liveness or prove that the reported model executed. Web and native
 renderers need a separate visual witness before parity can be claimed.
+
+The CLI witness uses `cs observe` text and JSON over a persisted receipt; the
+compact cell is checked from the same journal fold. A detached watcher test
+also verifies that two capture processes retain the warning when a later
+response reports the same model, across restart and replay. The terminal
+buffer witness for narrow peek cells lives with the W5 surface tests. These
+checks do not establish native or web visual parity. General grammar drift
+inside a record treated as ordinary can still escape detection.
 
 `cs harvest-authority` is an operator terminal surface for remote harvest trust administration, status, challenge construction and signed-grant import (issue #120 W6). No native UI counterpart is shipped; the RPP exposes the corresponding tenant reads and imports and a disjoint host-sealed administration route. A native UI must use the same public-root and grant validation rules before parity can be claimed.
 
