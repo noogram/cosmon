@@ -6,7 +6,7 @@
 
 ## `cs peek`
 
-Peek — canonical fleet observation with a latest-turn context gauge (TUI default).
+Peek — canonical fleet observation command (TUI default; `--no-tui` for plaintext stream)
 
 The context gauge uses the latest reported turn's input over the model window. Unknown occupancy has no percentage; token columns stay cumulative.
 
