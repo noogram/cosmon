@@ -11,7 +11,7 @@
 //! This layer is the receiving half: no new route (§8p untouched), a
 //! middleware that mirrors [`crate::routes::quota::rate_limit_headers_layer`]
 //! — it reads the header off authenticated requests, re-validates the
-//! JWT against the sealed JWKS, resolves the noyau, and writes one
+//! JWT against the sealed JWKS, applies the current deny policy, resolves the noyau, and writes one
 //! report file per pair under `<inbox_root>/phone-home/<request_id>.json`,
 //! next to the audit envelopes where `cs patrol --abandon` reads it.
 //!
@@ -27,9 +27,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::jwt::JwtVerifier;
-use crate::rate_limit::hash_principal;
-#[cfg(test)]
-use crate::rate_limit::hash_sub;
+use crate::rate_limit::{hash_principal, hash_sub};
 use crate::AppState;
 
 /// Wire header carrying `rid:code[,rid:code…]` pairs from the CLI.
@@ -138,6 +136,14 @@ pub async fn phone_home_ingest_layer(
 
     if let (Some(value), Some(t)) = (header_value, token) {
         if let Ok(jwt) = JwtVerifier::validate(&state.jwks.load(), &t, state.posture) {
+            let deny = state.deny_list.snapshot();
+            let sub_hash = hash_sub(&jwt.sub);
+            if deny.global_kill
+                || deny.revokes_jti(&jwt.iss, &sub_hash, &jwt.jti)
+                || deny.revokes_sub(&jwt.iss, &sub_hash)
+            {
+                return next.run(req).await;
+            }
             let map = state.nucleon_map.load();
             // Audience-pinned: the report is materialised UNDER a noyau
             // directory, so the noyau is an enforced value, not an
@@ -147,6 +153,13 @@ pub async fn phone_home_ingest_layer(
             // A's tree whenever the principal happens to hold both
             // grants. Unbound (or wrong-audience) ⇒ nothing is written.
             if let Some(resolved) = map.resolve_for_audience(&jwt.iss, &jwt.sub, &jwt.aud) {
+                if deny
+                    .denied_noyaus
+                    .iter()
+                    .any(|n| n == resolved.noyau.as_str())
+                {
+                    return next.run(req).await;
+                }
                 let pairs = parse_header(&value);
                 if !pairs.is_empty() {
                     let reported_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();

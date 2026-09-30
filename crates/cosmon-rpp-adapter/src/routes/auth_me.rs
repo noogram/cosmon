@@ -10,7 +10,8 @@
 //! 2. Validate JWT (clause a) → `ValidatedJwt`.
 //! 3. **No scope check.** A valid JWT is the whole gate — this is the
 //!    counterpart of `cs whoami`, not a state-mutating verb.
-//! 4. Resolve `(iss, sub) → noyau` via the loaded nucleon map. Absent
+//! 4. Apply the current deny policy, then resolve `(iss, sub, aud) → noyau`
+//!    via the loaded nucleon map. Absent
 //!    bindings surface as `"noyau": null` in the response; the route
 //!    does not 401, because the JWT is well-formed and the tenant is
 //!    asking "who do you see in this token?", not "let me do work".
@@ -18,14 +19,9 @@
 //!
 //! # `noyau` here is a *hint*, not a grant
 //!
-//! Step 4 uses the audience-blind
-//! [`crate::nucleon_map::HabilitationMap::resolve`]. A
-//! non-null `noyau` therefore means "this principal holds *some*
-//! binding", never "this token opens that noyau". The admission
-//! boundary re-resolves the full `(iss, sub, aud)` triple and
-//! checks the full binding key on every state-touching verb, so a token whose
-//! audience pins another galaxy is still refused with
-//! `cross_tenant_pivot` after `/me` cheerfully printed a noyau name.
+//! Step 4 uses the same audience-pinned binding and deny policy as
+//! admission. A non-null `noyau` identifies the binding for this token;
+//! it does not imply that the token has a scope for any state-changing verb.
 //!
 //! Read `/me` as a debugging aid, not as evidence of access: probing it
 //! with a second identity and concluding from a matching `noyau` that
@@ -54,8 +50,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::auth_claude::credentials::{classify_credentials_file, CredentialsVerdict};
-use crate::error::ApiError;
+use crate::error::{ApiError, RppRejectReason};
 use crate::jwt::JwtVerifier;
+use crate::rate_limit::hash_sub;
 use crate::AppState;
 
 /// Body schema for `GET /v1/auth/me`.
@@ -77,7 +74,7 @@ pub struct AuthMeResponse {
     /// authorization detail the wire-side `/me` deliberately does not
     /// leak).
     pub scopes: Vec<String>,
-    /// Tenant axis (noyau) bound to `(iss, sub)`. `None` when no
+    /// Tenant axis (noyau) bound to `(iss, sub, aud)`. `None` when no
     /// nucleon binding exists for the principal — the JWT is valid but
     /// not yet provisioned for any tenant.
     pub noyau: Option<String>,
@@ -158,14 +155,36 @@ pub async fn get_auth_me(
 
     // 3. No scope check (whoami semantics).
 
-    // 4. Resolve binding → noyau. Absent binding ⇒ `noyau: null` (the
+    // 4. Apply the same deny policy as admission, without a rate or
+    //    scope check. Absent binding ⇒ `noyau: null` (the
     //    JWT decoded fine, the tenant is simply not yet bound to a
     //    cosmon noyau).
-    let noyau = state
+    let deny = state.deny_list.snapshot();
+    if deny.global_kill {
+        return Err(state.reject(RppRejectReason::GlobalKill));
+    }
+    let sub_hash = hash_sub(&jwt.sub);
+    if deny.revokes_jti(&jwt.iss, &sub_hash, &jwt.jti) {
+        return Err(state.reject(RppRejectReason::JtiKilled));
+    }
+    if deny.revokes_sub(&jwt.iss, &sub_hash) {
+        return Err(state.reject(RppRejectReason::SubKilled));
+    }
+    let resolved = state
         .nucleon_map
         .load()
-        .resolve(&jwt.iss, &jwt.sub)
-        .map(|resolved| resolved.noyau.as_str().to_owned());
+        .resolve_for_audience(&jwt.iss, &jwt.sub, &jwt.aud)
+        .cloned();
+    if let Some(binding) = &resolved {
+        if deny
+            .denied_noyaus
+            .iter()
+            .any(|n| n == binding.noyau.as_str())
+        {
+            return Err(state.reject(RppRejectReason::NoyauKilled(binding.noyau.clone())));
+        }
+    }
+    let noyau = resolved.map(|binding| binding.noyau.as_str().to_owned());
 
     // 5. Format `exp` as ISO-8601 UTC. The token's exp is already
     //    validated as in-future, so the conversion never collapses to

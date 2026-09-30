@@ -74,7 +74,7 @@ where
         // Polling the interval registers a wake even when the source is
         // idle. Recheck on every poll so a queued item cannot outrun a
         // revocation tick.
-        let _ = Pin::new(&mut this.interval).poll_tick(cx);
+        while Pin::new(&mut this.interval).poll_tick(cx).is_ready() {}
         if let Err(reason) = admission_still_valid(this) {
             tracing::warn!(
                 event = "rpp.sse.admission_ended",

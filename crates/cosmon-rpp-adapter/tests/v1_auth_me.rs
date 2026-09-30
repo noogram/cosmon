@@ -295,22 +295,56 @@ async fn passive_report_respects_deny_policy() {
         lifetime_secs: Some(60),
         jti: Some("jti-passive-policy"),
     });
-    let path = dir.path().join("security/oidc-policy.toml");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &path,
+    let security = dir.path().join("security");
+    let path = security.join("oidc-policy.toml");
+    std::fs::create_dir_all(&security).unwrap();
+    let entries = [
+        format!(
+            "[[deny.sub]]\nissuer = {:?}\nsub_hash = {:?}\n",
+            oidc.issuer(),
+            cosmon_rpp_adapter::rate_limit::hash_sub("principal")
+        ),
         format!(
             "[[deny.jti]]\nissuer = {:?}\njti = \"jti-passive-policy\"\n",
             oidc.issuer()
         ),
+        "[[deny.noyau]]\nnoyau = \"a\"\n".to_owned(),
+    ];
+    for (index, entry) in entries.into_iter().enumerate() {
+        std::fs::write(&path, entry).unwrap();
+        let request_id = format!("req-passive-{index}");
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .header("Authorization", format!("Bearer {jwt}"))
+                    .header(
+                        "x-cosmon-phone-home",
+                        format!("{request_id}:503_unavailable"),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!dir
+            .path()
+            .join(format!("whispers/inbox/phone-home/{request_id}.json"))
+            .exists());
+    }
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(
+        security.join("oidc-kill.toml"),
+        "[global]\nenabled = true\n",
     )
     .unwrap();
-    let response = router(state)
+    let response = router(state.clone())
         .oneshot(
             Request::builder()
                 .uri("/healthz")
                 .header("Authorization", format!("Bearer {jwt}"))
-                .header("x-cosmon-phone-home", "req-passive:503_unavailable")
+                .header("x-cosmon-phone-home", "req-passive-kill:503_unavailable")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -319,7 +353,25 @@ async fn passive_report_respects_deny_policy() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!dir
         .path()
-        .join("whispers/inbox/phone-home/req-passive.json")
+        .join("whispers/inbox/phone-home/req-passive-kill.json")
+        .exists());
+
+    std::fs::remove_file(security.join("oidc-kill.toml")).unwrap();
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .header("Authorization", format!("Bearer {jwt}"))
+                .header("x-cosmon-phone-home", "req-passive-allowed:503_unavailable")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(dir
+        .path()
+        .join("whispers/inbox/phone-home/req-passive-allowed.json")
         .exists());
 }
 
