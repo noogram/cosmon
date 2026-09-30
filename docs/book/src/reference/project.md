@@ -652,16 +652,18 @@ Apply a residence to every tracked path classified under a single genre (ADR-057
 
 ## `cs deps`
 
-Deps — show blocking dependencies for a molecule (upstream/downstream)
+Deps — show blocking, lineage, and citation links for a molecule
 
 **Usage:** `cs deps [OPTIONS] <MOLECULE>`
 
 EXAMPLES:
-  cs deps <mol>                       # upstream + downstream blockers
-  cs deps <mol> --upstream            # only predecessors
-  cs deps <mol> --json                # for scripting
+  cs deps <mol>                       # blocking, lineage, citation links
+  cs deps <mission> --transitive      # planned children and pipeline closure
+  cs --json deps <mol>                # for scripting
 
-Reads the typed-link DAG (`Blocks` / `BlockedBy`).
+Walks `Blocks` / `BlockedBy`, `DecayProduct` / `DecayedFrom`, and citation links.
+Only `BlockedBy` is a completion prerequisite; a planner can freeze after
+verification while its lineage-linked first child becomes dispatchable.
 
 ###### **Arguments:**
 

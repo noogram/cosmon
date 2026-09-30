@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `cs deps` — show molecule blocking dependencies.
+//! `cs deps` — show molecule blocking, lineage, and citation links.
 //!
-//! Read-only dependency walker for blocking links (`Blocks` and `BlockedBy`)
-//! and for citation links (`Refines` and `RefinedBy`, used mainly by
+//! Read-only relationship walker for blocking links (`Blocks` and `BlockedBy`),
+//! lineage links (`DecayProduct` and `DecayedFrom`), and citation links
+//! (`Refines` and `RefinedBy`, used mainly by
 //! [`Constellation`](cosmon_core::kind::MoleculeKind::Constellation)
-//! molecules — the fil-rouge artifacts). Shows upstream (what blocks or
-//! refines this molecule) and downstream (what this molecule blocks or
-//! refines) relationships. Supports transitive traversal via BFS for
-//! walking the full closure.
+//! molecules — the fil-rouge artifacts). Shows upstream and downstream
+//! relationships and supports transitive traversal via BFS.
 //!
 //! `Refines` edges are traversed along the same directions as `Blocks`:
 //! a molecule's `Refines` targets appear under **downstream** (the things
@@ -148,10 +147,6 @@ enum Direction {
     Downstream,
 }
 
-/// Return the direct neighbors of a molecule in the requested direction,
-/// merging progression edges (`Blocks`/`BlockedBy`) and citation edges
-/// (`Refines`/`RefinedBy`). Duplicates (a molecule that is both blocked
-/// and cited) are de-duplicated while preserving first-seen order.
 /// Pull every direct cross-galaxy reference of the requested direction
 /// off the molecule. Order matches `typed_links` insertion (which is
 /// the order the operator declared them on the CLI), giving a stable,
@@ -168,14 +163,25 @@ fn direct_cross_galaxy_neighbors(mol: &MoleculeData, dir: Direction) -> Vec<Cros
         .collect()
 }
 
+/// Return direct neighbors across progression, lineage, and citation edges.
+/// Duplicates are de-duplicated in first-seen order.
 fn direct_neighbors(mol: &MoleculeData, dir: Direction) -> Vec<MoleculeId> {
     let mut seen: HashSet<MoleculeId> = HashSet::new();
     let mut out: Vec<MoleculeId> = Vec::new();
-    let pairs: [Vec<&MoleculeId>; 2] = match dir {
-        Direction::Upstream => [mol.blocked_by(), mol.refined_by()],
-        Direction::Downstream => [mol.blocks(), mol.refines()],
+    let lineage: Vec<&MoleculeId> = mol
+        .typed_links
+        .iter()
+        .filter_map(|link| match (dir, link) {
+            (Direction::Upstream, MoleculeLink::DecayedFrom { id })
+            | (Direction::Downstream, MoleculeLink::DecayProduct { id }) => Some(id),
+            _ => None,
+        })
+        .collect();
+    let groups: [Vec<&MoleculeId>; 3] = match dir {
+        Direction::Upstream => [mol.blocked_by(), lineage, mol.refined_by()],
+        Direction::Downstream => [mol.blocks(), lineage, mol.refines()],
     };
-    for group in pairs {
+    for group in groups {
         for id in group {
             if seen.insert(id.clone()) {
                 out.push(id.clone());
@@ -269,9 +275,9 @@ fn emit_human(
     let label = if transitive { "transitive" } else { "direct" };
     println!("Deps for {} ({}) — {label}", target.id, target.status);
     println!();
-    println!("  ⏳ Blocked by ({}):", upstream.len());
+    println!("  ⬆ Upstream links ({}):", upstream.len());
     if upstream.is_empty() && cross_upstream.is_empty() {
-        println!("    (none — this molecule has no upstream blockers)");
+        println!("    (none — this molecule has no upstream links)");
     } else {
         for id in upstream {
             let status = status_hint(store, id);
@@ -282,9 +288,9 @@ fn emit_human(
         }
     }
     println!();
-    println!("  ⛔ Blocks ({}):", downstream.len());
+    println!("  ⬇ Downstream links ({}):", downstream.len());
     if downstream.is_empty() && cross_downstream.is_empty() {
-        println!("    (none — this molecule has no downstream blocked molecules)");
+        println!("    (none — this molecule has no downstream links)");
     } else {
         for id in downstream {
             let status = status_hint(store, id);
@@ -443,6 +449,52 @@ mod tests {
         let downstream: Vec<MoleculeId> = b.blocks().into_iter().cloned().collect();
         assert_eq!(upstream, vec![a_id]);
         assert_eq!(downstream, vec![c_id]);
+    }
+
+    #[test]
+    fn frozen_planner_lineage_is_visible_through_pipeline_closure() {
+        let (_tmp, store) = make_store();
+        let mission_id = MoleculeId::new("mission-20261001-aaaa").unwrap();
+        let first_id = MoleculeId::new("task-20261001-bbbb").unwrap();
+        let second_id = MoleculeId::new("task-20261001-cccc").unwrap();
+        let mut mission = sample(mission_id.as_str());
+        mission.status = MoleculeStatus::Frozen;
+        mission.typed_links.push(MoleculeLink::DecayProduct {
+            id: first_id.clone(),
+        });
+        mission.typed_links.push(MoleculeLink::DecayProduct {
+            id: second_id.clone(),
+        });
+        let mut first = sample(first_id.as_str());
+        first.typed_links.push(MoleculeLink::DecayedFrom {
+            id: mission_id.clone(),
+        });
+        first.typed_links.push(MoleculeLink::Blocks {
+            target: second_id.clone(),
+        });
+        let mut second = sample(second_id.as_str());
+        second.typed_links.push(MoleculeLink::DecayedFrom {
+            id: mission_id.clone(),
+        });
+        second.typed_links.push(MoleculeLink::BlockedBy {
+            source: first_id.clone(),
+        });
+        for molecule in [&mission, &first, &second] {
+            store.save_molecule(&molecule.id, molecule).unwrap();
+        }
+
+        assert_eq!(
+            collect_transitive(&store, &mission_id).unwrap().1,
+            vec![first_id.clone(), second_id]
+        );
+        assert_eq!(
+            direct_neighbors(&first, Direction::Upstream),
+            vec![mission_id]
+        );
+        assert!(
+            first.blocked_by().is_empty(),
+            "lineage must not become a BlockedBy edge"
+        );
     }
 
     #[test]

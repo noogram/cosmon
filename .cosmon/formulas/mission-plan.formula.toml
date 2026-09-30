@@ -103,8 +103,12 @@ Concretely: \
   - After all per-unit pipelines, create the cross-cutting final roles \
     (e.g. horizontal-editor blocked-by all reviewers, editor-in-chief \
     blocked-by horizontal-editor, index blocked-by editor-in-chief). \
-  - Every child molecule MUST have --blocked-by {this_mission_mol_id} \
-    so cs deps --transitive shows the full DAG from this mission. \
+  - Every planned child molecule MUST have \
+    --decayed-from {this_mission_mol_id}, including children that also have \
+    --blocked-by edges to pipeline predecessors. This lineage link keeps \
+    the child visible under cs deps --transitive without making the frozen \
+    mission a completion prerequisite. NEVER use a --blocked-by edge to the \
+    mission; only pipeline predecessors block. \
 \
 ROLE-SPECIFIC BRIEFING (critical — without this the worker has no context): \
 After nucleating each child molecule, write a custom briefing.md to the \
@@ -220,7 +224,7 @@ worker to verify a cross-reference, write it as \
 matched the memo's own Prop. 4.1 three times.
 """
 needs = ["analyze"]
-acceptance = "All molecules nucleated with --blocked-by edges and tagged with temp:warm. Each child has a briefing.md in its molecule_dir containing the role prompt from the fleet template, the specific assignment, output expectations, and pipeline context. Verified by: (1) cs deps {this_mol_id} --transitive returns the expected number of children, (2) each child's MOLECULE_DIR/briefing.md exists and contains the role prompt (not generic task-work boilerplate), (3) MOLECULE_DIR/dag-manifest.md lists every molecule ID with its role, work unit, and briefing status."
+acceptance = "All planned children nucleated with --decayed-from {this_mission_mol_id}, pipeline --blocked-by edges only between children, and tagged with temp:warm. Each child has a briefing.md in its molecule_dir containing the role prompt from the fleet template, the specific assignment, output expectations, and pipeline context. Verified by: (1) cs deps {this_mol_id} --transitive returns the expected number of children, (2) each child's MOLECULE_DIR/briefing.md exists and contains the role prompt (not generic task-work boilerplate), (3) MOLECULE_DIR/dag-manifest.md lists every molecule ID with its role, work unit, and briefing status."
 
 [[steps]]
 id = "verify"
@@ -228,7 +232,8 @@ title = "Verify the DAG and hand off to execution"
 description = """
 Run cs deps {this_mol_id} --transitive and verify: \
   (1) The number of children matches the cross-product + final roles. \
-  (2) Every child has a --blocked-by edge back to this mission. \
+  (2) Every child has a --decayed-from edge back to this mission and \
+      no --blocked-by edge to this mission. \
   (3) The pipeline order is correct (researchers before writers, etc.). \
   (4) Final roles are blocked-by the correct predecessors. \
   (5) Every child has a briefing.md in its molecule_dir that contains \

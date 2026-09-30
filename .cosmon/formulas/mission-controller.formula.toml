@@ -77,13 +77,13 @@ Using the analysis from step 1, nucleate the complete DAG: \
 \
 Phase 1 — RESEARCHER-READERS (1 per key paper): \
   cs nucleate task-work --kind task \
-    --blocked-by {this_mission_id} \
+    --decayed-from {this_mission_id} \
     --var "topic=RESEARCHER-READER: read and summarize <paper> → research/<slug>.md" \
   Write briefing.md with researcher-reader role prompt from fleet template. \
 \
 Phase 2 — WRITERS (1 per topic): \
   cs nucleate task-work --kind task \
-    --blocked-by {this_mission_id} \
+    --decayed-from {this_mission_id} \
     --blocked-by {relevant_researcher_ids...} \
     --var "topic=WRITER: produce wiki/<topic-slug>.md about <topic>" \
   Wire --blocked-by to the researcher-readers whose papers are relevant \
@@ -92,36 +92,41 @@ Phase 2 — WRITERS (1 per topic): \
 \
 Phase 3 — REVIEWERS (1 per topic): \
   cs nucleate task-work --kind task \
+    --decayed-from {this_mission_id} \
     --blocked-by {writer_id_for_this_topic} \
     --var "topic=REVIEWER: review wiki/<topic-slug>.md, suggest references" \
   Write briefing.md with reviewer role prompt + SUGGESTED REFERENCES instruction. \
 \
 Phase 4 — CITATION-ARBITER (1): \
   cs nucleate task-work --kind task \
+    --decayed-from {this_mission_id} \
     --blocked-by {all_reviewer_ids...} \
     --var "topic=CITATION-ARBITER: collect reviewer reference suggestions, \
       decide which papers to add, nucleate new researchers+writers if needed, \
       then cs thaw {this_mission_id} with feedback summary" \
   Write briefing.md with arbiter instructions including: \
     - How to search Zotero (zotero_search, zotero_get_pdf_path) \
-    - How to nucleate new molecules (cs nucleate --blocked-by <self>) \
+    - How to nucleate new molecules with --decayed-from {this_mission_id} \
+      and --blocked-by only for completed pipeline predecessors \
     - How to thaw the planner (cs thaw {this_mission_id}) \
     - How to complete (cs complete) if no new sources needed \
 \
 Phase 5 — HORIZONTAL EDITOR (1): \
   cs nucleate task-work --kind task \
+    --decayed-from {this_mission_id} \
     --blocked-by {citation_arbiter_id} \
     --var "topic=HORIZONTAL-EDITOR: cross-article consistency" \
   Write briefing.md with editor role prompt. \
 \
 Phase 6 — CHIEF EDITOR (1): \
   cs nucleate task-work --kind task \
+    --decayed-from {this_mission_id} \
     --blocked-by {horizontal_editor_id} \
     --var "topic=CHIEF-EDITOR: final quality gate and sign-off" \
   Write briefing.md with chief role prompt. \
 \
 Write MOLECULE_DIR/dag-manifest.md listing every nucleated molecule \
-with its ID, role, topic, and blocked-by edges. \
+with its ID, role, topic, mission lineage, and blocked-by edges. \
 \
 **MANDATORY TEMPERATURE TAG.** Immediately after nucleating each child \
 (in any phase above), run `cs tag <child_id> --add temp:warm`. Pending \
@@ -145,7 +150,7 @@ but all three hits were self-references to the memo's own Prop. 4.1 \
 `memo.md §Prop. 4.1 (L127)` (internal) — never bare locator-only.
 """
 needs = ["analyze"]
-acceptance = "All molecules nucleated and tagged with temp:warm. Each has briefing.md. dag-manifest.md lists the full DAG. cs deps --transitive confirms edge count."
+acceptance = "All planned children nucleated with --decayed-from {this_mission_id}, --blocked-by only for child pipeline order, and tagged with temp:warm. Each has briefing.md. dag-manifest.md lists the full DAG. cs deps --transitive confirms child count."
 
 [[steps]]
 id = "verify"
@@ -153,9 +158,11 @@ title = "Verify DAG completeness"
 description = """
 Verify the DAG: \
   (1) cs deps {this_mol_id} --transitive shows expected child count \
-  (2) Every child has briefing.md with role-specific content \
-  (3) Pipeline order is correct (researchers → writers → reviewers → arbiter → editors) \
-  (4) No absolute paths in briefings \
+  (2) Every child is --decayed-from this mission, with no --blocked-by \
+      edge to this mission \
+  (3) Every child has briefing.md with role-specific content \
+  (4) Pipeline order is correct (researchers → writers → reviewers → arbiter → editors) \
+  (5) No absolute paths in briefings \
 \
 Write MOLECULE_DIR/dag-verified.md with the verification results. \
 \

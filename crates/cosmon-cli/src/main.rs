@@ -326,7 +326,7 @@ enum Command {
     #[command(after_help = cmd::examples::TOPOLOGY)]
     Topology(cmd::topology::Args),
 
-    /// Deps — show blocking dependencies for a molecule (upstream/downstream)
+    /// Deps — show blocking, lineage, and citation links for a molecule
     #[command(after_help = cmd::examples::DEPS)]
     Deps(cmd::deps::Args),
 
