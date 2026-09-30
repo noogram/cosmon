@@ -185,13 +185,17 @@ the cosmon repository:
 cd tools/cosmon-skill && ./install.sh
 ```
 
-That copies `SKILL.md` into `~/.claude/skills/cosmon/` (idempotent — safe to
-re-run after an update). To scope it to a single project instead, copy or
-symlink `SKILL.md` into that project's `.claude/skills/cosmon/` directory.
-Either way, the skill costs nothing when unused — Claude Code only loads it
-when you ask it to pilot cosmon — and it carries the same content as the
-CLAUDE.md/AGENTS.md pointer, so a repository with `cs init` already run and a
-repository without it read the same instructions.
+That copies `SKILL.md` into
+`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/cosmon/` (idempotent — safe to
+re-run after an update). When `CLAUDE_CONFIG_DIR` is set, the installer uses
+that directory so the skill is available to the matching account. Pass
+`./install.sh --link` to install a symlink that follows the repository as it
+changes. To scope it to a single project instead, copy or symlink `SKILL.md`
+into that project's `.claude/skills/cosmon/` directory. Either way, the skill
+costs nothing when unused — Claude Code only loads it when you ask it to pilot
+cosmon — and it carries the same content as the CLAUDE.md/AGENTS.md pointer,
+so a repository with `cs init` already run and a repository without it read the
+same instructions.
 
 ## Related
 
