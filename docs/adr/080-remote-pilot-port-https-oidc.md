@@ -224,6 +224,11 @@ This is the structural guarantee that prevents L0 / L1 boundary erosion: every c
 
 > A per-`claim.sub` leaky bucket persisted to disk (`.cosmon/state/security/oidc-rate-limit/<sub_hash>.toml`) rejects bursts before any `cs` invocation. State persists across adapter restarts (re-loaded at boot). Token-bucket capacity and refill rate are operator-tuned per `noyau`. *Implements §8j(c) on HTTPS+JWT.*
 
+The implemented multi-issuer refinement keys the persisted bucket by a
+domain-separated digest of `(iss, sub)`. Equal subject strings from different
+issuers have independent budgets. Existing subject-only bucket files are not
+consulted after this change; the deployment guide records the upgrade effect.
+
 Default V0 budget: 10 requests / minute / `sub`, burst 30. Tightened in V1+ once usage data is collected. A per-`noyau` global budget overlays the per-`sub` budget (defence in depth against pivot via multiple `sub`).
 
 ### 3.4 Clause (d) — One-way topology
@@ -745,6 +750,11 @@ since = "2026-04-27T17:00:00Z"
 ```
 
 The TOML format is canonical; future encodings (JSON, signed CBOR) are successor-ADR territory.
+An optional `issuer` in `[[deny.sub]]` scopes a subject digest to that issuer.
+An optional `issuer` and `sub_hash` in `[[deny.jti]]` scope a token ID to a
+principal; `sub_hash` requires `issuer`. The examples above omit `issuer` and
+therefore remain broad across all trusted issuers for compatibility. The
+subject digest is still BLAKE3 of `sub` alone inside the issuer-scoped entry.
 
 ### 7.3 Operator commands
 

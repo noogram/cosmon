@@ -1117,14 +1117,14 @@ paths:
         Multi-noyau discovery (task-20260523-eb61, gap-report ae3d
         workflow f).
       description: |
-        Returns the list of noyaux the JWT's `sub` is bound to, with
+        Returns the list of noyaux the JWT's `(iss, sub, aud)` is bound to, with
         the per-noyau binding count and the absolute `galaxies_root`
         on the adapter host. A multi-noyau operator can call
         `/v1/noyaux` once and then pick a noyau to scope subsequent
         calls against — without first guessing a slug.
 
-        Admission-side route, **no scope check** — a valid JWT is the
-        whole gate. Same discovery class as `/v1/auth/me`: an unbound
+        Admission-side route, **no scope check** — a valid JWT and an open
+        deny policy are required. Same discovery class as `/v1/auth/me`: an unbound
         principal still gets a 200 with `noyaux: []` so the tenant
         can debug the binding independently of the read/write
         surface.
@@ -1148,9 +1148,16 @@ paths:
         "401":
           description: |
             Missing / malformed `Authorization` header, JWT signature
-            invalid, expired, unknown issuer, or audience mismatch.
+            invalid, expired, unknown issuer, audience mismatch, or an
+            identity or token revocation.
             One stable label per reject reason; the wire body never
             leaks `sub` / nucleon / tenant identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: Global OIDC kill switch or unavailable deny policy.
           content:
             application/json:
               schema:
@@ -3592,7 +3599,7 @@ components:
       required: [noyaux]
       description: |
         Discovery envelope for `GET /v1/noyaux` (task-20260523-eb61).
-        Echoes the per-`sub` projection of the sealed nucleon map —
+        Echoes the per-`(iss, sub, aud)` projection of the sealed nucleon map —
         one row per noyau the JWT principal is bound to, with the
         per-noyau binding count and the absolute path of the noyau's
         galaxy tree on the adapter host. Empty array when no nucleon
@@ -3601,8 +3608,8 @@ components:
         noyaux:
           type: array
           description: |
-            One entry per noyau visible to the JWT's `sub`. Order is
-            first-occurrence in the underlying `(iss, sub)` map (a
+            One entry per noyau visible to the JWT's issuer, subject and
+            audience. Order is first-occurrence in the underlying binding map (a
             `BTreeMap`), so deterministic across boots.
           items:
             $ref: "#/components/schemas/NoyauEntry"
@@ -3622,11 +3629,9 @@ components:
           format: int64
           minimum: 1
           description: |
-            Number of `(iss, sub) → noyau` rows backing this noyau
-            for the JWT's `sub`. ≥ 1 by construction (zero-count
-            rows are not emitted). > 1 when an operator is bound
-            under several pinned issuers (multi-IdP), all resolving
-            to the same noyau.
+            Number of `(iss, sub, aud) → noyau` rows backing this noyau
+            for the JWT's exact identity and audience. ≥ 1 by construction
+            (zero-count rows are not emitted).
         galaxies_root:
           type: string
           description: |

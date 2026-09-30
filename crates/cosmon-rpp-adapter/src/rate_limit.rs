@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Per-`sub` leaky bucket — clause (c) of the §8j HTTPS+JWT
+//! Per-`(iss, sub)` leaky bucket — clause (c) of the §8j HTTPS+JWT
 //! instantiation (ADR-080 §3.3).
 //!
 //! Mirrors the disk-persisted bucket model from `cosmon-matrix-tick`
-//! (the §8j Matrix instantiation), keyed on the JWT `claim.sub`
+//! (the §8j Matrix instantiation), keyed on the JWT issuer and subject
 //! BLAKE3 hash so the on-disk filename never leaks the raw subject.
 //!
 //! The bucket persists across adapter restarts: a kill-9'd RPP
@@ -47,7 +47,7 @@ struct BucketState {
     last_updated_ms: i64,
 }
 
-/// Persistent leaky-bucket rate limiter, keyed by JWT `claim.sub`.
+/// Persistent leaky-bucket rate limiter, keyed by a digest of `(iss, sub)`.
 #[derive(Debug)]
 pub struct IngressRateLimiter {
     dir: PathBuf,
@@ -214,6 +214,18 @@ fn filename_safe(s: &str) -> String {
 #[must_use]
 pub fn hash_sub(sub: &str) -> String {
     blake3::hash(sub.as_bytes()).to_hex().to_string()
+}
+
+/// Hash an issuer-local subject into an unambiguous, domain-separated disk key.
+/// The legacy subject-only digest is retained for unscoped deny-list entries.
+#[must_use]
+pub fn hash_principal(iss: &str, sub: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"cosmon-rpp-principal-v1");
+    hasher.update(&(iss.len() as u64).to_be_bytes());
+    hasher.update(iss.as_bytes());
+    hasher.update(sub.as_bytes());
+    hasher.finalize().to_hex().to_string()
 }
 
 /// Outcome of a single check-and-consume call.

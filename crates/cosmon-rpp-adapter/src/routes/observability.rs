@@ -166,7 +166,7 @@ fn render_prometheus(state: &AppState) -> String {
     // operator's bucket size.
     let _ = writeln!(
         out,
-        "# HELP cosmon_adapter_rate_limit_capacity Per-sub leaky-bucket burst capacity (tokens)."
+        "# HELP cosmon_adapter_rate_limit_capacity Per-issuer-subject leaky-bucket burst capacity (tokens)."
     );
     let _ = writeln!(out, "# TYPE cosmon_adapter_rate_limit_capacity gauge");
     let _ = writeln!(
@@ -176,7 +176,7 @@ fn render_prometheus(state: &AppState) -> String {
     );
     let _ = writeln!(
         out,
-        "# HELP cosmon_adapter_rate_limit_leak_per_minute Per-sub leaky-bucket drain rate (tokens/min)."
+        "# HELP cosmon_adapter_rate_limit_leak_per_minute Per-issuer-subject leaky-bucket drain rate (tokens/min)."
     );
     let _ = writeln!(
         out,

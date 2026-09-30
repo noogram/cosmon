@@ -2,6 +2,15 @@
 
 # CLI and UI parity audit
 
+## RPP identity discovery and quota (issue #45)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Discover accessible noyaux | No matching command; local binding files remain readable | No equivalent audited | `GET /v1/noyaux` filters by token issuer, subject and audience |
+| Inspect ingress quota | No matching command audited | No equivalent audited | `GET /v1/quota` reads the same issuer-subject bucket admission consumes |
+
+The RPP route change has no CLI command behavior to mirror.
+
 ## Durable task briefing (issue #124)
 
 | Capability | CLI | Native UI | Remote service |

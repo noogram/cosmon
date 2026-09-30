@@ -14,7 +14,7 @@
 //! - **(b)** materialise on disk under
 //!   `<inbox_root>/api/<request_id>.json` (audit envelope, never the
 //!   raw token).
-//! - **(c)** per-`sub` leaky bucket pre-admission rate limit.
+//! - **(c)** per-`(iss, sub)` leaky bucket pre-admission rate limit.
 //! - **(d)** one-way topology — V0 forbids POST routes outright; the
 //!   `bidirectional` flag is reserved for V2+.
 //! - **(e)** worker envelope — checked here as a list of *forbidden
@@ -29,7 +29,7 @@ use crate::deny_list::DenyList;
 use crate::error::RppRejectReason;
 use crate::jwt::ValidatedJwt;
 use crate::nucleon_map::{HabilitationMap, Noyau};
-use crate::rate_limit::{hash_sub, IngressRateLimiter, RateOutcome};
+use crate::rate_limit::{hash_principal, hash_sub, IngressRateLimiter, RateOutcome};
 
 /// Operator-only verbs the RPP MUST refuse to expose (ADR-080 §5.1).
 ///
@@ -295,11 +295,11 @@ pub fn http_request_to_spark(
     if snapshot.global_kill {
         return Err(RppRejectReason::GlobalKill);
     }
-    if snapshot.denied_jtis.iter().any(|j| j == &jwt.jti) {
+    let sub_hash = hash_sub(&jwt.sub);
+    if snapshot.revokes_jti(&jwt.iss, &sub_hash, &jwt.jti) {
         return Err(RppRejectReason::JtiKilled);
     }
-    let sub_hash = hash_sub(&jwt.sub);
-    if snapshot.denied_sub_hashes.contains(&sub_hash) {
+    if snapshot.revokes_sub(&jwt.iss, &sub_hash) {
         return Err(RppRejectReason::SubKilled);
     }
     if snapshot
@@ -310,10 +310,10 @@ pub fn http_request_to_spark(
         return Err(RppRejectReason::NoyauKilled(resolved.noyau.clone()));
     }
 
-    // Clause (c) — per-`sub` rate limit.
+    // Clause (c) — per-issuer-subject rate limit.
     let outcome = rig
         .rate_limiter
-        .check_and_consume(&sub_hash, rig.now_ms)
+        .check_and_consume(&hash_principal(&jwt.iss, &jwt.sub), rig.now_ms)
         .map_err(|e| RppRejectReason::InboxMaterializationFailed(e.to_string()))?;
     match outcome {
         RateOutcome::Admitted => {}

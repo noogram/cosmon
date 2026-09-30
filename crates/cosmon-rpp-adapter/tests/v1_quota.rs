@@ -26,6 +26,78 @@ use cosmon_rpp_adapter::{router, AppState, BackendHealthRegistry, JwksStore, Pos
 use serde_json::Value;
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn quota_reads_the_presented_issuers_bucket() {
+    let tenants = TenantWorkspaces::new();
+    let a = OidcMock::start_with(OidcMockConfig {
+        issuer: "https://issuer-a.example".to_owned(),
+        audiences: vec!["aud".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let b = OidcMock::start_with(OidcMockConfig {
+        issuer: "https://issuer-b.example".to_owned(),
+        audiences: vec!["aud".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let td = tempfile::tempdir().unwrap();
+    let mut state = make_state(&a, &tenants, vec![], td.path(), 3.0);
+    b.write_jwks_file(td.path()).unwrap();
+    state.jwks = cosmon_rpp_adapter::SharedJwksStore::new(JwksStore::load(td.path()).unwrap());
+    state.nucleon_map = cosmon_rpp_adapter::SharedHabilitationMap::new(
+        HabilitationMap::builder()
+            .insert(
+                a.issuer(),
+                "shared",
+                HabilitationId::new("nuc-a"),
+                Noyau::new("tenant-a"),
+                "aud",
+            )
+            .insert(
+                b.issuer(),
+                "shared",
+                HabilitationId::new("nuc-b"),
+                Noyau::new("tenant-b"),
+                "aud",
+            )
+            .build(),
+    );
+    let app = router(state);
+    let issue = IssueJwt {
+        subject: "shared",
+        audience: Some("aud"),
+        scopes: &["cosmon:molecule:read"],
+        lifetime_secs: Some(60),
+        jti: Some("quota-token"),
+    };
+    for (token, remaining) in [
+        (a.issue(&issue), "2"),
+        (a.issue(&issue), "1"),
+        (b.issue(&issue), "2"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/quota")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("x-ratelimit-remaining").unwrap(),
+            remaining
+        );
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["remaining"], remaining.parse::<i64>().unwrap());
+    }
+}
+
 fn make_state(
     oidc: &OidcMock,
     tenants: &TenantWorkspaces,

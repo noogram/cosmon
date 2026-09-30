@@ -27,6 +27,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::jwt::JwtVerifier;
+use crate::rate_limit::hash_principal;
+#[cfg(test)]
 use crate::rate_limit::hash_sub;
 use crate::AppState;
 
@@ -151,7 +153,7 @@ pub async fn phone_home_ingest_layer(
                     let _ = materialize_reports(
                         &state.inbox_root,
                         resolved.noyau.as_str(),
-                        &hash_sub(&jwt.sub),
+                        &hash_principal(&jwt.iss, &jwt.sub),
                         &pairs,
                         &reported_at,
                     );

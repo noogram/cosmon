@@ -21,6 +21,15 @@ this stage.
 
 ### Security
 
+- **RPP discovery and secondary controls now use issuer-scoped identity.**
+  `GET /v1/noyaux` filters by issuer, subject and audience. Rate-limit and
+  quota buckets, revocations, and authz audit keys distinguish equal subject
+  strings from different issuers. Existing subject-only and token-only deny
+  entries remain broad across issuers; add `issuer` to narrow an entry.
+  Subject-only rate-limit bucket files are no longer consulted, so each
+  principal starts with a fresh bucket after upgrade. The adapter logs the
+  bucket transition at startup and warns about unscoped deny entries.
+
 - **`cosmon-rpp-adapter` closes tenant admission when an OIDC operator file is
   invalid.** At boot and on refresh, an unreadable or malformed
   `oidc-kill.toml` or `oidc-policy.toml` now logs an error and returns

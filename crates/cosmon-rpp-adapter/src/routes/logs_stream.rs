@@ -388,7 +388,10 @@ fn authorise_logs_subscribe(state: &Arc<AppState>, jwt: &ValidatedJwt) -> Result
     emit_authz_decision_with_source(
         &state.state_dir,
         "logs_subscribe",
-        &format!("jwt:{}", jwt.sub),
+        &format!(
+            "jwt:{}",
+            crate::rate_limit::hash_principal(&jwt.iss, &jwt.sub)
+        ),
         Some(LOGS_SUBSCRIBE),
         decision,
         grant_source,
