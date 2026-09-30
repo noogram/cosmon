@@ -37,11 +37,11 @@ added without a curated row in `scripts/license-rationales.tsv`.
 <!-- BEGIN LICENSE TABLE -->
 ## Per-crate partition (machine-generated — do not edit by hand)
 
-_Last generated: 2026-09-10, 48 crates._
+_Last generated: 2026-09-30, 49 crates._
 
 _Run `bash scripts/license-table.sh --write` to refresh._
 
-### Core (AGPL-3.0-only) — 40 crates
+### Core (AGPL-3.0-only) — 41 crates
 
 | Crate | Tier | Licence | Rationale |
 |-------|------|---------|-----------|
@@ -72,6 +72,7 @@ _Run `bash scripts/license-table.sh --write` to refresh._
 | `cosmon-pilot` | core | AGPL-3.0-only | pilot UX — layer ⑥ cockpit (delib-ca76) |
 | `cosmon-process-witness` | core | AGPL-3.0-only | process-identity witness for adapters — same kernel tier as the adapters it guards |
 | `cosmon-provider` | core | AGPL-3.0-only | provider trait — layer ④ engine; closes the --features llama SPDX lie (delib-ca76) |
+| `cosmon-realized` | core | AGPL-3.0-only | runtime session-log capture and durable model evidence shared by lifecycle surfaces; filesystem and process effects |
 | `cosmon-registry` | core | AGPL-3.0-only | registry — code-links AGPL core (delib-ca76) |
 | `cosmon-remote` | core | AGPL-3.0-only | remote CLI — code-links AGPL core+surface-canon, not pure-network (delib-ca76) |
 | `cosmon-rpp-adapter` | core | AGPL-3.0-only | RPP adapter binary |

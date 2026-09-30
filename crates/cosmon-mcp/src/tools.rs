@@ -891,7 +891,11 @@ impl CosmonService {
         let mol_id = cosmon_core::id::MoleculeId::new(&params.molecule)
             .map_err(|e| McpError::invalid_params(format!("invalid molecule id: {e}"), None))?;
 
-        let store = self.store_for(params.cwd.as_deref());
+        let state_dir = self.state_dir_for(params.cwd.as_deref());
+        let store = FileStore::new(&state_dir);
+        let _fleet_guard = store
+            .lock_fleet()
+            .map_err(|e| McpError::internal_error(format!("fleet lock failed: {e}"), None))?;
         let mol_data = store
             .load_molecule(&mol_id)
             .map_err(|e| McpError::invalid_params(format!("molecule not found: {e}"), None))?;
@@ -931,6 +935,9 @@ impl CosmonService {
             _ => {}
         }
 
+        if updated.status == MoleculeStatus::Completed {
+            cosmon_realized::energy_probe::capture_realized_at_completion(&state_dir, &mol_id);
+        }
         store
             .save_molecule(&updated.id.clone(), &updated)
             .map_err(|e| McpError::internal_error(format!("failed to persist: {e}"), None))?;
@@ -1451,10 +1458,21 @@ impl CosmonService {
             .reason
             .unwrap_or_else(|| "completed via MCP".to_owned());
         let ids: Vec<&str> = params.molecule.split(',').map(str::trim).collect();
-        let store = self.store_for(params.cwd.as_deref());
+        let state_dir = self.state_dir_for(params.cwd.as_deref());
+        let store = FileStore::new(&state_dir);
         let mut results: Vec<serde_json::Value> = Vec::new();
 
         for raw_id in &ids {
+            let _fleet_guard = match store.lock_fleet() {
+                Ok(guard) => guard,
+                Err(e) => {
+                    results.push(serde_json::json!({
+                        "molecule": raw_id,
+                        "error": format!("fleet lock failed: {e}"),
+                    }));
+                    continue;
+                }
+            };
             let mol_id = match MoleculeId::new(*raw_id) {
                 Ok(id) => id,
                 Err(e) => {
@@ -1489,6 +1507,7 @@ impl CosmonService {
             mol_data.status = MoleculeStatus::Completed;
             mol_data.updated_at = Utc::now();
 
+            cosmon_realized::energy_probe::capture_realized_at_completion(&state_dir, &mol_id);
             if let Err(e) = store.save_molecule(&mol_id, &mol_data) {
                 results.push(serde_json::json!({
                     "molecule": raw_id,
@@ -3218,8 +3237,10 @@ always in the invariants document — read it before patching symptoms.";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cosmon_core::event_v2::EventV2;
     use cosmon_core::id::{FleetId, FormulaId};
     use cosmon_filestore::FileStore;
+    use cosmon_state::event_log::{emit_one, read_all, resolve_events_log_path};
     use tempfile::TempDir;
 
     fn make_store() -> (TempDir, FileStore) {
@@ -3227,6 +3248,119 @@ mod tests {
         let store = FileStore::new(tmp.path());
         store.save_fleet(&cosmon_state::Fleet::default()).unwrap();
         (tmp, store)
+    }
+
+    #[test]
+    fn mcp_completion_paths_flush_realized_model_before_reporting_completed() {
+        let (tmp, store) = make_store();
+        let prior_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+        struct RestoreConfig(Option<std::ffi::OsString>);
+        impl Drop for RestoreConfig {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+                    None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+                }
+            }
+        }
+        let _restore = RestoreConfig(prior_config);
+        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+        let cwd = std::env::current_dir().expect("cwd");
+        let session_dir =
+            tmp.path()
+                .join("projects")
+                .join(cosmon_core::session_thread::sanitise_agent_path(
+                    &cwd.to_string_lossy(),
+                ));
+        std::fs::create_dir_all(&session_dir).expect("session directory");
+        std::fs::write(
+            session_dir.join("session.jsonl"),
+            concat!(
+                "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"model-a\"}\n",
+                "{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n",
+            ),
+        )
+        .expect("session evidence");
+        let formula_path = tmp.path().join("task-work.formula.toml");
+        std::fs::write(
+            &formula_path,
+            include_str!("../../../.cosmon/formulas/task-work.formula.toml"),
+        )
+        .expect("formula");
+        let service = CosmonService {
+            store_dir: Arc::new(tmp.path().to_path_buf()),
+            formulas_dir: Arc::new(tmp.path().to_path_buf()),
+            tool_router: CosmonService::tool_router(),
+        };
+        let events = resolve_events_log_path(tmp.path());
+        for (id, use_evolve) in [("task-20260930-c001", false), ("task-20260930-c002", true)] {
+            let mut mol = sample_mol(id);
+            mol.status = MoleculeStatus::Running;
+            if use_evolve {
+                mol.current_step = 1;
+                mol.completed_steps
+                    .push(cosmon_core::id::StepId::new("implement").expect("step"));
+            }
+            store.save_molecule(&mol.id, &mol).expect("molecule");
+            emit_one(
+                &events,
+                EventV2::AdapterSelected {
+                    mol_id: mol.id.clone(),
+                    adapter_name: "claude".to_owned(),
+                    selected_at: chrono::Utc::now(),
+                    selection_source: cosmon_core::event_v2::AdapterSelectionSource::Cli {
+                        flag: "claude".to_owned(),
+                    },
+                    role_hint: None,
+                    loop_ownership: Default::default(),
+                },
+                None,
+            )
+            .expect("adapter event");
+            emit_one(
+                &events,
+                EventV2::WorkerSpawned {
+                    worker_id: WorkerId::new(format!("worker-{id}")).expect("worker"),
+                    molecule: Some(mol.id.clone()),
+                    session_name: "fixture".to_owned(),
+                    role: "implementation".to_owned(),
+                    adapter_name: "claude".to_owned(),
+                    loop_ownership: Default::default(),
+                },
+                None,
+            )
+            .expect("worker event");
+            if use_evolve {
+                service
+                    .cosmon_evolve(Parameters(EvolveParams {
+                        molecule: id.to_owned(),
+                        evidence: "verified".to_owned(),
+                        formula_path: formula_path.to_string_lossy().into_owned(),
+                        cwd: None,
+                    }))
+                    .expect("evolve");
+            } else {
+                service
+                    .cosmon_complete(Parameters(CompleteParams {
+                        molecule: id.to_owned(),
+                        reason: Some("verified".to_owned()),
+                        cwd: None,
+                    }))
+                    .expect("complete");
+            }
+            assert_eq!(
+                store
+                    .load_molecule(&mol.id)
+                    .expect("completed molecule")
+                    .status,
+                MoleculeStatus::Completed,
+            );
+            let journal = read_all(&events).expect("events");
+            assert!(
+                journal.iter().any(|entry| matches!(&entry.event, EventV2::ModelObserved { mol_id, .. } if mol_id == &mol.id)),
+                "{id} became Completed without a realized-model event: {journal:?}"
+            );
+        }
     }
 
     fn sample_mol(id: &str) -> MoleculeData {
