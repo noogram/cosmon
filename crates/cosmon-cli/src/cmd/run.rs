@@ -203,8 +203,8 @@ pub struct Args {
     /// (~40 GB off disk) on every dispatch. With `--affinity` the runtime
     /// clusters same-model molecules contiguously and drains the resident
     /// model first, so a same-model batch pays the load cost once. The
-    /// per-molecule model is PRE-RESOLVED from each molecule's formula-step
-    /// `model =` pin (the ADR-142 Incarnation model), since a pending
+    /// per-molecule model is PRE-RESOLVED from its `cosmon_model` variable,
+    /// then its formula-step `model =` pin, since a pending
     /// frontier molecule has no `ModelSelected` event yet.
     ///
     /// Off by default: cloud dispatch (many models, no resident constraint)
@@ -443,9 +443,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         if args.affinity {
             let step_models = load_step_models(&formulas_dir, &formula_ids);
             let resolver = ModelResolver::new(move |mol: &cosmon_state::MoleculeData| {
-                step_models
-                    .get(&(mol.formula_id.clone(), mol.current_step))
-                    .cloned()
+                mol.model_recommendation().map(str::to_owned).or_else(|| {
+                    step_models
+                        .get(&(mol.formula_id.clone(), mol.current_step))
+                        .cloned()
+                })
             });
             dag_policy = dag_policy
                 .with_affinity(resolver)

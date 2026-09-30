@@ -73,7 +73,8 @@ pub fn is_strong_model(strong_set: &[String], model: &str) -> bool {
 /// Is this resolution source a **positive per-molecule act** — the only kind
 /// of source allowed to reach a *strong* model?
 ///
-/// [`ModelSelectionSource::Flag`] (`cs tackle --model <id>`) and
+/// [`ModelSelectionSource::Flag`] (`cs tackle --model <id>`),
+/// [`ModelSelectionSource::MoleculePin`] (a child recommendation), and
 /// [`ModelSelectionSource::FormulaPin`] (a formula step's `model = "<id>"`)
 /// are positive acts: the operator/driver chose *this* model for *this*
 /// molecule. Every other arm — env var, per-galaxy config, global config, the
@@ -84,7 +85,9 @@ pub fn is_strong_model(strong_set: &[String], model: &str) -> bool {
 pub fn source_is_positive_act(source: &ModelSelectionSource) -> bool {
     matches!(
         source,
-        ModelSelectionSource::Flag { .. } | ModelSelectionSource::FormulaPin { .. }
+        ModelSelectionSource::Flag { .. }
+            | ModelSelectionSource::MoleculePin
+            | ModelSelectionSource::FormulaPin { .. }
     )
 }
 
@@ -391,10 +394,11 @@ mod tests {
     }
 
     #[test]
-    fn only_flag_and_formula_pin_are_positive_acts() {
+    fn explicit_molecule_and_formula_pins_are_positive_acts() {
         assert!(source_is_positive_act(&ModelSelectionSource::Flag {
             flag: "x".to_owned()
         }));
+        assert!(source_is_positive_act(&ModelSelectionSource::MoleculePin));
         assert!(source_is_positive_act(&ModelSelectionSource::FormulaPin {
             formula: "f".to_owned(),
             step_id: "s".to_owned(),

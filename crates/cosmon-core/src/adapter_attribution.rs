@@ -404,6 +404,8 @@ impl AdapterSource {
 pub enum ModelSource {
     /// `cs tackle --model <id>`.
     Flag,
+    /// A model pin recorded on the molecule at nucleation.
+    Molecule,
     /// A formula step's `model = "<id>"` pin.
     Formula,
     /// A model environment variable (`$COSMON_DEFAULT_MODEL` / `$ANTHROPIC_MODEL`).
@@ -422,6 +424,7 @@ impl ModelSource {
     pub fn tag(self) -> &'static str {
         match self {
             Self::Flag => "flag",
+            Self::Molecule => "molecule",
             Self::Formula => "formula",
             Self::Env => "env",
             Self::Config => "config",
@@ -435,6 +438,7 @@ impl ModelSource {
     pub fn from_event(src: &ModelSelectionSource) -> Self {
         match src {
             ModelSelectionSource::Flag { .. } => Self::Flag,
+            ModelSelectionSource::MoleculePin => Self::Molecule,
             ModelSelectionSource::FormulaPin { .. } => Self::Formula,
             ModelSelectionSource::EnvVar { .. } => Self::Env,
             ModelSelectionSource::Config { .. } => Self::Config,

@@ -518,6 +518,8 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              'cs tackle' — strong is NEVER inherited, silence resolves cheap. \
              Resolution order:\n  \
              'cs tackle --model <ID>'          → CLI flag wins.\n  \
+             molecule 'cosmon_model=<ID>'      → child recommendation stamped \
+             with 'cs nucleate --var'.\n  \
              formula step 'model = \"<ID>\"'     → per-workflow pin (does NOT \
              propagate across nucleation).\n  \
              $COSMON_DEFAULT_MODEL (else legacy $ANTHROPIC_MODEL)  → operator \

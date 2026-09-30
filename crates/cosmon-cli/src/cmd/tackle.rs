@@ -201,7 +201,8 @@ pub struct Args {
     /// Per-molecule model pin — the model sibling of `--adapter`
     /// (see ADR-097).
     ///
-    /// Resolution order (highest priority first): this flag → formula-step
+    /// Resolution order (highest priority first): this flag → molecule
+    /// `cosmon_model` variable set at nucleation → formula-step
     /// `model = "<id>"` pin → `$COSMON_DEFAULT_MODEL` (else the legacy
     /// `$ANTHROPIC_MODEL`) env var → per-galaxy
     /// `.cosmon/config.toml::[adapters.<name>].default_model` → global
@@ -210,8 +211,8 @@ pub struct Args {
     /// applies — byte-identical to today's no-pin behaviour).
     ///
     /// **Strong is never inherited.** Every dispatch resolves the model
-    /// fresh; a strong (frontier) model is reachable only from this flag or
-    /// a formula-step pin — a positive per-molecule act — never from a
+    /// fresh; a strong (frontier) model is reachable only from this flag,
+    /// a child pin, or a formula-step pin — a positive per-molecule act — never from a
     /// config/env *default* that could silently make an entire fleet
     /// expensive (the `/model`-hack leak this axis exists to close).
     ///
@@ -849,6 +850,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &cosmon_core::tackle_plan::SelectionRequest {
             adapter_flag: args.adapter.as_deref(),
             model_flag: args.model.as_deref(),
+            molecule_model: mol.model_recommendation(),
             formula: formula.as_ref(),
             current_step: mol.current_step,
             env_default_adapter: env_default.as_deref(),

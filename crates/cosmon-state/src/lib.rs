@@ -897,6 +897,18 @@ pub struct EscalationEntry {
 }
 
 impl MoleculeData {
+    /// Return the child's explicit model recommendation, if one was recorded.
+    ///
+    /// An absent or blank value leaves the existing formula and default
+    /// resolution chain intact.
+    #[must_use]
+    pub fn model_recommendation(&self) -> Option<&str> {
+        self.variables
+            .get(cosmon_core::tackle_plan::MOLECULE_MODEL_VAR)
+            .map(String::as_str)
+            .filter(|model| !model.trim().is_empty())
+    }
+
     /// Returns the molecule IDs this molecule blocks — i.e. the targets
     /// of its `Blocks` typed links. Empty if this molecule blocks nothing.
     ///

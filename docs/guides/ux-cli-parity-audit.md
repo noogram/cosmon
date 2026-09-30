@@ -2,6 +2,14 @@
 
 # CLI and UI parity audit
 
+## Planned child model routing (issue #139)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Preserve a planner's child model recommendation | `cs nucleate --var cosmon_model=<id>` persists the child's model choice. `cs tackle` and `cs run` resolve it above the formula-step pin; an explicit `cs tackle --model` wins. `cs run --affinity` groups by the same child choice. | No child model editor audited | Nucleation variables carry `cosmon_model`; in-process dispatch uses the same resolver |
+
+The planner formula is a trusted shell surface. Its child adapter recommendation uses the existing `cs nucleate --adapter` pin; its model recommendation uses `cosmon_model` only when present.
+
 ## Frozen planner hand-off (issue #138)
 
 | Capability | CLI | Native UI | Remote service |

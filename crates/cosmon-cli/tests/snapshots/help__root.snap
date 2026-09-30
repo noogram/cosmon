@@ -241,6 +241,7 @@ Loud fallback: a local model hard-failure (crash/oom/timeout/connection-refused)
 
 MODEL SELECTION (per-molecule, ADR-097). A model pin is the sibling of the adapter axis, resolved fresh at every 'cs tackle' — strong is NEVER inherited, silence resolves cheap. Resolution order:
   'cs tackle --model <ID>'          → CLI flag wins.
+  molecule 'cosmon_model=<ID>'      → child recommendation stamped with 'cs nucleate --var'.
   formula step 'model = "<ID>"'     → per-workflow pin (does NOT propagate across nucleation).
   $COSMON_DEFAULT_MODEL (else legacy $ANTHROPIC_MODEL)  → operator session hammer.
   '.cosmon/config.toml::[adapters.<name>.default_model]'  → per-galaxy default, SCOPED to the adapter.

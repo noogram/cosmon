@@ -162,7 +162,12 @@ pub struct Args {
     #[arg(long)]
     pub(crate) assign: Option<String>,
 
-    /// Set a variable (repeatable: --var key=value)
+    /// Set a variable (repeatable: --var key=value).
+    ///
+    /// `--var cosmon_model=<id>` records a child model recommendation for
+    /// later `cs tackle` and `cs run` dispatch. It outranks the formula-step
+    /// model; an explicit `cs tackle --model` still wins. Omit it to keep
+    /// ordinary model resolution unchanged.
     #[arg(long = "var", value_name = "KEY=VALUE")]
     pub(crate) vars: Vec<String>,
 

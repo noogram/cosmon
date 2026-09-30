@@ -1174,8 +1174,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // Resolve the formula (best-effort, like the runtime's native-tail
         // drain): an id that does not resolve degrades the per-step pins,
         // it does not block dispatch.
-        let formulas_dir = &self.paths.formulas_dir;
-        let formula = load_formula(formulas_dir, &mol);
+        let formula = load_formula(&self.paths.formulas_dir, &mol);
 
         // Refuse the execution kinds this executor does not cover, with a
         // typed error the caller can route on (module docs, "what this
@@ -1222,6 +1221,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         let mut selection = resolve_selection(&SelectionRequest {
             adapter_flag: pin.adapter.as_deref(),
             model_flag: pin.model.as_deref(),
+            molecule_model: mol.model_recommendation(),
             formula: formula.as_ref(),
             current_step: mol.current_step,
             env_default_adapter: env_default_adapter.as_deref(),

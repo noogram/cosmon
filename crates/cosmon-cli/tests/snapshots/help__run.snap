@@ -88,7 +88,7 @@ Options:
       --affinity
           **ADR-145** — model-affinity ordering of the ready frontier.
           
-          On a single-resident-model local oracle (`ollama-g5`: 48 GB ≈ one 120 B model in VRAM), an alternating frontier reloads the model (~40 GB off disk) on every dispatch. With `--affinity` the runtime clusters same-model molecules contiguously and drains the resident model first, so a same-model batch pays the load cost once. The per-molecule model is PRE-RESOLVED from each molecule's formula-step `model =` pin (the ADR-142 Incarnation model), since a pending frontier molecule has no `ModelSelected` event yet.
+          On a single-resident-model local oracle (`ollama-g5`: 48 GB ≈ one 120 B model in VRAM), an alternating frontier reloads the model (~40 GB off disk) on every dispatch. With `--affinity` the runtime clusters same-model molecules contiguously and drains the resident model first, so a same-model batch pays the load cost once. The per-molecule model is PRE-RESOLVED from its `cosmon_model` variable, then its formula-step `model =` pin, since a pending frontier molecule has no `ModelSelected` event yet.
           
           Off by default: cloud dispatch (many models, no resident constraint) keeps pure critical-path order. The reorder is a permutation — the DAG semantics and the set of dispatched molecules are unchanged; only the order within a ready batch differs. Legacy DAG-policy mode only (not `--resident`).
 
