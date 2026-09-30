@@ -319,7 +319,7 @@ Commands:
   stuck              Stuck — freeze a molecule and record the blocker
   await-operator     Await-operator — the only sanctioned way to block on an operator decision at an irreversibility boundary (ADR-123). Routes on the molecule's `op-block:*` capability: block-and-emit, or surface-and-continue
   topology           Topology — structural maps of the workspace (wraps the `topon` CLI)
-  deps               Deps — show blocking dependencies for a molecule (upstream/downstream)
+  deps               Deps — show blocking, lineage, and citation links for a molecule
   mission            Mission — read-only DAG view joining ledger edges to completion merge commits
   sync               Sync — base-sync the current worktree from main, stamping a Base-Sync trailer
   diverge            Diverge — structural agreement check between two sessions on a molecule (turing §5)

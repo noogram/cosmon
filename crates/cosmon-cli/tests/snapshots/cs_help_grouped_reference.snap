@@ -75,7 +75,7 @@ Project:
   scheduler            Scheduler — read-only view onto `cosmon-scheduler`'s state (patrols, last fires, log)
   daemons              Daemons — operator view over `cosmon-daemon-supervisor` (list/status/reload/logs)
   migrate              Migrate the galaxy's memory — legacy flat→fleet, or residence-to-residence
-  deps                 Deps — show blocking dependencies for a molecule (upstream/downstream)
+  deps                 Deps — show blocking, lineage, and citation links for a molecule
   mission              Mission — read-only DAG view joining ledger edges to completion merge commits
   diverge              Diverge — structural agreement check between two sessions on a molecule (turing §5)
   galaxies             Galaxies — inspect the four-family taxonomy

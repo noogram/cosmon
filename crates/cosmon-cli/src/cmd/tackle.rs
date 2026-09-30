@@ -14123,6 +14123,53 @@ mod tests {
     }
 
     #[test]
+    fn tackle_dry_run_admits_child_of_delivered_frozen_planner() {
+        let (_tmp, state_dir) = make_store();
+        let store = FileStore::new(&state_dir);
+        let planner = sample_molecule("mission-20261001-aaaa", MoleculeStatus::Frozen);
+        let mut child = sample_molecule("task-20261001-bbbb", MoleculeStatus::Pending);
+        child
+            .typed_links
+            .push(cosmon_core::interaction::MoleculeLink::DecayedFrom {
+                id: planner.id.clone(),
+            });
+        store.save_molecule(&planner.id, &planner).unwrap();
+        store.save_molecule(&child.id, &child).unwrap();
+        let ctx = Context {
+            verbose: false,
+            json: false,
+            config: Some(state_dir),
+        };
+        let args = Args {
+            molecule: child.id.to_string(),
+            fleet: None,
+            workdir: None,
+            base: None,
+            no_worktree: true,
+            dry_run: true,
+            permission_mode: None,
+            force: false,
+            name: None,
+            leaf: false,
+            force_runtime: false,
+            bypass_seal: false,
+            bypass_reason: None,
+            adapter: None,
+            model: None,
+            role_hint: None,
+            reclaim_derived: false,
+            fallback_from_local: None,
+            by: "human".to_owned(),
+            harness: Vec::new(),
+        };
+        run(&ctx, &args).expect("lineage-linked child is admissible after planner freezes");
+        assert_eq!(
+            store.load_molecule(&child.id).unwrap().status,
+            MoleculeStatus::Pending
+        );
+    }
+
+    #[test]
     fn test_dry_run_outputs_prompt() {
         let (_tmp, state_dir) = make_store();
         let store = FileStore::new(&state_dir);

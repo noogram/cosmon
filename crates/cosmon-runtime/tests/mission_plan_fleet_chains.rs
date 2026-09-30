@@ -135,6 +135,91 @@ fn seed(
 // The test
 // ---------------------------------------------------------------------------
 
+/// A delivered planner freeze hands off a lineage-linked first child while
+/// sibling pipeline order still waits for successful integration.
+#[test]
+fn frozen_mission_plan_exposes_its_first_child() {
+    let formula = include_str!("../../../.cosmon/formulas/mission-plan.formula.toml");
+    assert!(formula.contains("--decayed-from {this_mission_mol_id}"));
+    assert!(!formula.contains("--blocked-by {this_mission_mol_id}"));
+    assert!(formula.contains("freeze_on_last_step = true"));
+    let controller = include_str!("../../../.cosmon/formulas/mission-controller.formula.toml");
+    assert!(controller.contains("--decayed-from {this_mission_id}"));
+    assert!(!controller.contains("--blocked-by {this_mission_id}"));
+    assert!(controller.contains("freeze_on_last_step = true"));
+
+    let tmp = TempDir::new().expect("tempdir");
+    let store = FileStore::new(tmp.path());
+    let mission = mol_id("mission-20261001-aaaa");
+    let first = mol_id("task-20261001-bbbb");
+    let second = mol_id("task-20261001-cccc");
+    seed(
+        &store,
+        &mission,
+        MoleculeStatus::Frozen,
+        true,
+        vec![
+            MoleculeLink::DecayProduct { id: first.clone() },
+            MoleculeLink::DecayProduct { id: second.clone() },
+        ],
+    );
+    seed(
+        &store,
+        &first,
+        MoleculeStatus::Pending,
+        false,
+        vec![MoleculeLink::DecayedFrom {
+            id: mission.clone(),
+        }],
+    );
+    seed(
+        &store,
+        &second,
+        MoleculeStatus::Pending,
+        false,
+        vec![
+            MoleculeLink::DecayedFrom {
+                id: mission.clone(),
+            },
+            MoleculeLink::BlockedBy {
+                source: first.clone(),
+            },
+        ],
+    );
+
+    let frontier = cosmon_state::frontier::compute(&store).expect("frontier");
+    assert_eq!(frontier.ready, vec![first.clone()]);
+
+    let (plan, edges) =
+        compile_plan(&store, std::slice::from_ref(&mission)).expect("compile planner DAG");
+    assert!(edges.contains(&(mission.clone(), first.clone())));
+    let mut runtime = Runtime::new(
+        Box::new(FileStore::new(tmp.path())),
+        Box::new(DagPolicy::new(plan, edges)),
+        Box::new(CompletingExecutor::new(tmp.path().to_path_buf())),
+        RuntimeConfig {
+            poll_interval: Duration::from_millis(1),
+            max_runtime: Some(Duration::from_secs(10)),
+            sweep_orphan_descendants_every: None,
+            liveness_recheck_every: None,
+        },
+    );
+    let report = runtime.run().expect("runtime run");
+    assert_eq!(report.reason, ShutdownReason::PolicyDrained);
+    assert_eq!(
+        store.load_molecule(&first).expect("first").status,
+        MoleculeStatus::Completed
+    );
+    assert_eq!(
+        store.load_molecule(&second).expect("second").status,
+        MoleculeStatus::Completed
+    );
+    assert_eq!(
+        store.load_molecule(&mission).expect("mission").status,
+        MoleculeStatus::Frozen
+    );
+}
+
 /// Reproduce a mission-plan fleet topology:
 ///
 /// ```text

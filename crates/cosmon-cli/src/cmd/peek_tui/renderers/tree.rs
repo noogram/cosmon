@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! DAG navigation pane — upstream blockers and downstream dependents of
+//! DAG navigation pane — upstream blockers, mission lineage, and downstream dependents of
 //! the selected molecule. Reads directly from the fleet's state store so
 //! the view reflects on-disk truth, not the cached `RowView`.
 
 use std::fmt::Write as _;
 
+use cosmon_core::interaction::MoleculeLink;
 use cosmon_filestore::FileStore;
 use cosmon_state::{MoleculeFilter, StateStore};
 use ratatui::text::Text;
@@ -88,6 +89,30 @@ impl DetailRenderer for TreeRenderer {
             for (id, status, topic) in &downs {
                 let _ = writeln!(out, "• {id} [{status}] {topic}");
             }
+        }
+
+        out.push_str("\n## lineage — source / products\n");
+        match store.load_molecule(&mid) {
+            Ok(mol) => {
+                let mut found = false;
+                for link in &mol.typed_links {
+                    match link {
+                        MoleculeLink::DecayedFrom { id } => {
+                            let _ = writeln!(out, "• decayed from {id}");
+                            found = true;
+                        }
+                        MoleculeLink::DecayProduct { id } => {
+                            let _ = writeln!(out, "• product {id}");
+                            found = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if !found {
+                    out.push_str("(none)\n");
+                }
+            }
+            Err(_) => out.push_str("(unavailable)\n"),
         }
         Text::raw(out)
     }

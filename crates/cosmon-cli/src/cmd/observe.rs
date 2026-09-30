@@ -265,6 +265,14 @@ fn run_detail(
         }
     }
 
+    if !mol.typed_links.is_empty() {
+        println!();
+        println!("  {}", "Typed links:".bold());
+        for link in &mol.typed_links {
+            println!("    {link:?}");
+        }
+    }
+
     // Tags
     if !mol.tags.is_empty() {
         println!();

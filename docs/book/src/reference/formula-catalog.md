@@ -32,7 +32,7 @@ These nine arrive with every `cs init`.
 | `deep-think` | Structured multi-perspective deliberation. Frames a question, runs a panel of expert personas in parallel, synthesizes convergences and divergences, then nucleates the follow-up work the panel identified. | 1 |
 | `deep-think-inline` | The same panel, run inline by a single worker, producing a synthesis and a recommendation but never nucleating children. The leaf variant a Tier-1 controller can commission without violating the tier guard. | 0 |
 | `idea-to-plan` | Take a raw idea through capture and feasibility assessment, then turn it into a small, finite set of actionable child molecules. | 1 |
-| `mission-plan` | Compile a goal plus a fleet template into a DAG of task molecules assigned to fleet roles. Completes once the decomposition is done. | 1 |
+| `mission-plan` | Compile a goal plus a fleet template into a DAG of task molecules assigned to fleet roles. Freezes after verifying the plan; lineage-linked children can start. | 1 |
 | `mission-controller` | A mission planner that *persists*. It freezes after decomposing rather than completing, and downstream agents thaw it to feed results back and spawn new work across the mission's lifetime. | 1 |
 | `temp-review` | Sweep the backlog: scan every pending molecule, triage it by age and temperature tag, and report the backlog's shape. See [Curate the backlog with temperature tags](../how-to/temperature-tags.md). | 0 |
 | `verify-surface` | Render a visual surface and observe it from an independent molecule. Built in because the `surface_visual` gate refuses `cs complete` until a sibling `verify-surface` has landed green — a project without this formula could not satisfy the refusal. | 0 |

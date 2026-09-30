@@ -934,11 +934,13 @@ pub const TOPOLOGY: &str = "EXAMPLES:
 Thin wrapper over the `topon` CLI. Structural view, not runtime state.";
 
 pub const DEPS: &str = "EXAMPLES:
-  cs deps <mol>                       # upstream + downstream blockers
-  cs deps <mol> --upstream            # only predecessors
-  cs deps <mol> --json                # for scripting
+  cs deps <mol>                       # blocking, lineage, citation links
+  cs deps <mission> --transitive      # planned children and pipeline closure
+  cs --json deps <mol>                # for scripting
 
-Reads the typed-link DAG (`Blocks` / `BlockedBy`).";
+Walks `Blocks` / `BlockedBy`, `DecayProduct` / `DecayedFrom`, and citation links.
+Only `BlockedBy` is a completion prerequisite; a planner can freeze after
+verification while its lineage-linked first child becomes dispatchable.";
 
 pub const PEEK: &str = "EXAMPLES:
   cs peek                         # TUI over the current .cosmon/

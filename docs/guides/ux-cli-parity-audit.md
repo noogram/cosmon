@@ -2,6 +2,14 @@
 
 # CLI and UI parity audit
 
+## Frozen planner hand-off (issue #138)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Show mission lineage without a completion prerequisite | `cs nucleate --decayed-from <mission>` records lineage; `cs deps --transitive` walks it; `cs observe` shows typed links and `cs peek` tree shows source and products. `--blocked-by` remains the pipeline order edge. | No equivalent lineage pane audited | `cs --json observe` exposes the typed link; no separate remote display audited |
+
+The shipped planner formulas are a trusted shell surface and require operator review at harvest. A frozen planner exposes its first lineage child; later children still wait for their completed and integrated pipeline predecessors.
+
 ## Default model selection (issue #141)
 
 | Capability | CLI | Native UI | Remote service |
