@@ -138,7 +138,7 @@ BRIEF_B
         "$owner" "$a" "$b" \
         "$(shasum -a 256 "$project/alpha.txt" | cut -d' ' -f1)" \
         "$(shasum -a 256 "$project/beta.txt" | cut -d' ' -f1)" >> "$report"
-    if ! (cd "$project" && "$cs_bin" tackle "$a" --adapter claude --model claude-sonnet-5) >> "$log" 2>&1; then
+    if ! (cd "$project" && "$cs_bin" tackle "$a" --adapter claude --model claude-sonnet-5-5) >> "$log" 2>&1; then
         record_failure "$label tackle a" "$log" 'Claude dispatch failed'
         return 1
     fi
@@ -204,6 +204,6 @@ PY
 }
 
 run_pair mixed codex gpt-5.6-sol || true
-run_pair same_claude claude claude-sonnet-5 || true
+run_pair same_claude claude claude-sonnet-5-5 || true
 printf '\nFailures: %s. Raw run directories are retained beside this report.\n' "$failures" >> "$report"
 ((failures == 0))

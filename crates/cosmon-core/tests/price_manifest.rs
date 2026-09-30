@@ -81,7 +81,45 @@ fn current_manifest_matches_independent_gpt_5_6_sol_standard_arithmetic() {
             missing: vec!["gpt-5.6-sol:context_length_unknown".to_owned()]
         }
     );
-    assert_eq!(revision, "standard-2026-09-28-codex");
+    assert_eq!(revision, "standard-2026-09-30-sonnet-5-5");
+}
+
+#[test]
+fn current_sonnet_5_5_rates_are_independently_valued_and_preserve_history() {
+    let manifest = bundled_price_manifest().expect("bundled manifest must validate");
+    let current = manifest.current_card().expect("current revision exists");
+    let rate = current
+        .rate_for("claude-sonnet-5-5")
+        .expect("current model has an exact rate");
+    assert_eq!(
+        rate.source_url,
+        "https://platform.claude.com/docs/en/models/sonnet-5-5/overview"
+    );
+    assert_eq!(current.verified_at().to_string(), "2026-09-30");
+    assert!(current.rate_for("claude-sonnet-5").is_some());
+    assert!(manifest
+        .card("standard-2026-09-28-codex")
+        .expect("earlier card remains available")
+        .rate_for("claude-sonnet-5-5")
+        .is_none());
+
+    let mut usage = segment(
+        "claude-sonnet-5-5",
+        3_000_000,
+        1_000_000,
+        1_000_000,
+        100_000,
+        0,
+    );
+    usage.cache_write_5m_tokens = Some(400_000);
+    usage.cache_write_1h_tokens = Some(600_000);
+    let (amount, coverage, revision) =
+        estimated(value_model_segments(current, &[usage], true, provenance()));
+    // Published rates: fresh $2, read $0.20, 5m write $2.50,
+    // 1h write $4, output $10 per million tokens.
+    assert!((amount - 6.6).abs() < 1e-12);
+    assert_eq!(coverage, PricingCoverage::Complete);
+    assert_eq!(revision, "standard-2026-09-30-sonnet-5-5");
 }
 
 #[test]
