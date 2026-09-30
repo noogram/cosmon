@@ -666,6 +666,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 struct PeekMoleculeJson {
     /// Stable molecule id (e.g. `task-20260716-6a4e`).
     id: String,
+    /// Latest observed briefing postcondition, when a dispatch recorded one.
+    briefing_delivery: Option<cosmon_core::injection::BriefingDeliveryOutcome>,
+    /// Recovery gesture when the latest briefing was not confirmed.
+    briefing_recovery: Option<String>,
     /// Which galaxy the molecule belongs to, as a **display label**.
     /// Load-bearing under `--all`, where rows span galaxies and the
     /// molecule id alone does not say which.
@@ -812,7 +816,7 @@ fn run_json(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let state_dir = ctx.state_dir();
     let socket = super::tmux_socket_name(ctx);
-    let (mut snap, _state_dirs) = super::peek_tui::build_snapshot(
+    let (mut snap, state_dirs) = super::peek_tui::build_snapshot(
         &state_dir,
         &socket,
         Some(&project_id),
@@ -824,10 +828,23 @@ fn run_json(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         super::peek_tui::filter_snapshot_by_phase(&mut snap, phase_filter);
     }
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&snapshot_to_json(&snap, phase_filter))?
-    );
+    let mut output = snapshot_to_json(&snap, phase_filter);
+    for row in &mut output.molecules {
+        let Some(root) = state_dirs.get(&row.id) else {
+            continue;
+        };
+        let Ok(id) = cosmon_core::id::MoleculeId::new(&row.id) else {
+            continue;
+        };
+        let store = FileStore::new(root);
+        row.briefing_delivery = cosmon_state::events::input_injection::latest_briefing_delivery(
+            &store.molecule_dir(&id),
+        );
+        row.briefing_recovery = row.briefing_delivery.and_then(|outcome| {
+            cosmon_state::events::input_injection::briefing_recovery(&id, outcome)
+        });
+    }
+    println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
 
@@ -855,6 +872,8 @@ fn snapshot_to_json(
             let mol = by_id.get(&row.mol_id)?;
             Some(PeekMoleculeJson {
                 id: row.mol_id.clone(),
+                briefing_delivery: None,
+                briefing_recovery: None,
                 project: row.project.clone(),
                 status: mol.status,
                 archived: mol.archived,
