@@ -263,3 +263,43 @@ fn cs_done_clean_merge_tears_down() {
         "a clean merge must delete the feat branch (teardown proceeds)"
     );
 }
+
+#[test]
+fn cs_done_reports_git_error_and_dirty_checkout_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo(repo);
+    let mol_id = nucleate_terminal(repo);
+    let branch = format!("feat/{mol_id}");
+
+    fs::write(repo.join("shared.txt"), "base\n").unwrap();
+    git_ok(repo, &["add", ".gitignore", "shared.txt"]);
+    git_ok(repo, &["commit", "-qm", "base"]);
+    git_ok(repo, &["checkout", "-q", "-b", &branch]);
+    fs::write(repo.join("shared.txt"), "worker\n").unwrap();
+    git_ok(repo, &["commit", "-qam", "worker edit"]);
+    git_ok(repo, &["checkout", "-q", "main"]);
+    fs::write(repo.join("shared.txt"), "local\n").unwrap();
+
+    let done = cs_isolated(repo)
+        .args(["--json", "done", &mol_id, "--no-auto-propel"])
+        .output()
+        .expect("cs done");
+    assert!(!done.status.success(), "dirty merge must fail");
+    let stdout = String::from_utf8_lossy(&done.stdout);
+    let response: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(response["outcome"], "merge_failed");
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("local changes"),
+        "underlying git error missing: {response}"
+    );
+    assert!(
+        response["dirty_paths"].as_array().is_some_and(|paths| paths
+            .iter()
+            .any(|path| path.as_str().unwrap_or("").contains("shared.txt"))),
+        "dirty checkout path missing: {response}"
+    );
+}
