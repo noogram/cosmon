@@ -196,8 +196,8 @@ pub struct DialogueScan {
     pub rule: Option<&'static str>,
 }
 
-/// Money markers — case-insensitive substrings that, if present *anywhere* in
-/// the captured pane, force [`DialogueClass::MoneyStake`]. This table is the
+/// Money markers — case-insensitive substrings that, if present in the active
+/// pane tail, force [`DialogueClass::MoneyStake`]. This table is the
 /// single most important safety surface in the module: a false negative here
 /// means an autonomous Enter on a spend decision. When in doubt, add the
 /// marker — the cost of a false positive is one operator page, the cost of a
@@ -283,9 +283,8 @@ fn blocking_widget_line(lines: &[&str]) -> Option<String> {
             .trim()
             .to_lowercase();
         lower.starts_with("are you sure")
-            || lower.starts_with("continue?")
+            || lower == "continue?"
             || (content.starts_with('?') && lower.contains('?'))
-            || (lower.ends_with('?') && !content.starts_with('⏺'))
     });
     lines.iter().rev().find_map(|line| {
         let content = widget_content(line);
@@ -297,9 +296,7 @@ fn blocking_widget_line(lines: &[&str]) -> Option<String> {
             "press enter to",
             "enter to confirm",
             "enter to continue",
-            "continue?",
             "are you sure",
-            "1. yes",
         ]
         .iter()
         .any(|prefix| lower.starts_with(prefix));
@@ -315,12 +312,56 @@ fn blocking_widget_line(lines: &[&str]) -> Option<String> {
         });
         let selected_option = has_confirmation_question
             && (content.starts_with("❯ ") || content.starts_with("› "))
-            && !content.starts_with("› Ask ");
-        let yes_no = lower.ends_with("[y/n]") || lower.ends_with("(y/n)");
+            && !lower.contains('?');
+        let yes_no = ["[y/n]", "(y/n)"]
+            .iter()
+            .any(|marker| lower.contains(marker));
         let prompt_cursor = lower.ends_with('›') && lower.contains('?');
-        (explicit || selection || selected_option || yes_no || prompt_cursor)
+        (explicit
+            || lower == "continue?"
+            || selection
+            || selected_option
+            || yes_no
+            || prompt_cursor)
             .then(|| truncate_evidence(line))
     })
+}
+
+/// The last idle input field ends the preceding transcript. A numbered choice
+/// is a menu selection, not an input field, and must remain visible to the
+/// classifier. This is a pane-tail boundary, not a claim about worker progress.
+fn idle_input(line: &str) -> bool {
+    let content = widget_content(line);
+    if content == "❯" || content == "›" {
+        return true;
+    }
+    let Some(input) = content
+        .strip_prefix("› ")
+        .or_else(|| content.strip_prefix("❯ "))
+    else {
+        return false;
+    };
+    let input = input.trim();
+    !input.is_empty()
+        && !input.starts_with(|c: char| c.is_ascii_digit())
+        && !matches!(input.to_ascii_lowercase().as_str(), "yes" | "no")
+}
+
+/// A response directly below a live question is a choice, even when it uses
+/// the same cursor glyph as the idle input field.
+fn follows_prompt(lines: &[&str], at: usize) -> bool {
+    let Some(previous) = lines[..at]
+        .iter()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+    else {
+        return false;
+    };
+    let content = widget_content(previous);
+    !content.starts_with(['⏺', '•', '✻'])
+        && (content.contains('?')
+            || content.to_ascii_lowercase().contains("[y/n]")
+            || content.to_ascii_lowercase().contains("(y/n)"))
 }
 
 /// Remove pane box borders and a trailing cursor while retaining the original
@@ -382,9 +423,11 @@ fn truncate_evidence(line: &str) -> String {
 
 /// Classify the captured text of a worker pane into a [`DialogueScan`].
 ///
-/// The decision order encodes the safety invariants (most-severe wins):
+/// The latest idle input field starts the active tail; preceding scrollback
+/// cannot turn an idle pane into a blocking dialogue. Within that tail, the
+/// decision order encodes the safety invariants (most-severe wins):
 ///
-/// 1. **Money dominates.** If any `MONEY_MARKERS` entry is present anywhere,
+/// 1. **Money dominates.** If any `MONEY_MARKERS` entry is present in the active tail,
 ///    the verdict is [`DialogueClass::MoneyStake`] — full stop. A permission
 ///    prompt that also mentions a spend limit is a money decision.
 /// 2. **Permission, but only if clean.** A `PERMISSION_MARKERS` hit with no
@@ -397,16 +440,23 @@ fn truncate_evidence(line: &str) -> String {
 ///    ordinary status prose do not form a widget.
 /// 5. **Otherwise `None`.**
 ///
-/// Only the tail of a pane is meaningful (the live prompt sits at the bottom),
-/// but callers typically pass the last N captured lines already; this function
-/// classifies whatever it is given.
+/// Callers typically pass the last N captured lines already. A later prompt
+/// after the idle input field remains part of the active tail and is checked.
 #[must_use]
 pub fn classify_pane(text: &str) -> DialogueScan {
-    let lines: Vec<&str> = text.lines().collect();
-    let lower = text.to_lowercase();
+    let capture: Vec<&str> = text.lines().collect();
+    let lines = capture
+        .iter()
+        .enumerate()
+        .rposition(|(at, line)| idle_input(line) && !follows_prompt(&capture, at))
+        .map_or(capture.as_slice(), |at| &capture[at..]);
+    // An idle input is the live state even when earlier scrollback contains
+    // old prompts. A later prompt in the suffix still gets classified below.
+    let live = lines.join("\n");
+    let lower = live.to_lowercase();
 
-    // 1. Money dominates unconditionally.
-    if let Some(ev) = first_match(&lower, &lines, MONEY_MARKERS) {
+    // 1. Money dominates the active tail.
+    if let Some(ev) = first_match(&lower, lines, MONEY_MARKERS) {
         return DialogueScan {
             class: DialogueClass::MoneyStake,
             evidence: Some(ev),
@@ -422,12 +472,12 @@ pub fn classify_pane(text: &str) -> DialogueScan {
     // menu. Rate-limit switches have already returned through the money
     // branch above; the other two named menus fail closed as `Unknown`.
     if matches!(
-        classify_codex_dialog(text),
+        classify_codex_dialog(&live),
         Some(CodexDialogKind::UpdateAvailable | CodexDialogKind::ReasoningPicker)
     ) {
         let evidence = first_match(
             &lower,
-            &lines,
+            lines,
             &[
                 "update available",
                 "select reasoning level",
@@ -441,8 +491,8 @@ pub fn classify_pane(text: &str) -> DialogueScan {
         };
     }
 
-    let permission_hit = first_match(&lower, &lines, PERMISSION_MARKERS);
-    let risky_hit = first_match(&lower, &lines, RISKY_MARKERS);
+    let permission_hit = first_match(&lower, lines, PERMISSION_MARKERS);
+    let risky_hit = first_match(&lower, lines, RISKY_MARKERS);
 
     // 2 & 3. A clean permission prompt is auto-confirmable; a risky one is not.
     if let Some(perm_ev) = permission_hit {
@@ -461,12 +511,28 @@ pub fn classify_pane(text: &str) -> DialogueScan {
     }
 
     // 4. A visible widget we could not classify safely — alert, never act.
-    if let Some(ev) = blocking_widget_line(&lines) {
+    if let Some(ev) = blocking_widget_line(lines) {
         return DialogueScan {
             class: DialogueClass::Unknown,
             evidence: Some(ev),
             rule: Some("confirmation or menu widget"),
         };
+    }
+
+    // An irreversible action followed by an explicit question or input cue
+    // is a blocking prompt even without a recognised permission marker.
+    if let Some(ev) = risky_hit {
+        let asks_for_input = lines.iter().rev().take(3).any(|line| {
+            let content = widget_content(line).to_lowercase();
+            content.contains('?') || content.contains("press any key")
+        });
+        if asks_for_input {
+            return DialogueScan {
+                class: DialogueClass::Unknown,
+                evidence: Some(ev),
+                rule: Some("risky action in confirmation prompt"),
+            };
+        }
     }
 
     // 5. Nothing blocking.
