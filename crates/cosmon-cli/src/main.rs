@@ -283,6 +283,10 @@ enum Command {
     Paths(cmd::paths::Args),
 
     /// Done — terminal teardown for a molecule (merge + cleanup, human-callable)
+    ///
+    /// A failed merge reports the merge error and any dirty checkout paths.
+    /// Tracked harvest state, including archive and event files, is committed
+    /// before the next sibling merge; ignored molecule directories are skipped.
     #[command(after_help = cmd::examples::DONE)]
     Done(cmd::done::Args),
 

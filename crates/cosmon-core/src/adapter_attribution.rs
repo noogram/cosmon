@@ -26,7 +26,10 @@
 //! field exists so that *if* a future event ever records the effort, the
 //! whole pipeline surfaces it with no further change; until then, silence.
 
-use crate::event_v2::{AdapterSelectionSource, EventV2, ModelSelectionSource};
+use crate::event_v2::{
+    AdapterSelectionSource, EventV2, ModelEvidenceGeneration, ModelSelectionSource,
+};
+use crate::model_realization::{ModelEvidenceAssessment, ModelEvidenceGrammar};
 use crate::model_spec::ReasoningEffort;
 
 /// The **realized** model axis — what an adapter *actually* ran, folded from
@@ -200,6 +203,37 @@ pub struct AdapterAttribution {
     /// intention (delib-20260718-c70e; sibling of the reasoning-effort honesty
     /// rule). Defaults to [`Realized::Unknown`].
     pub realized: Realized,
+    /// Quality of current-attempt model evidence, independent of identity.
+    /// Legacy observations remain unassessed rather than gaining retroactive
+    /// confirmation from an unrelated receipt.
+    pub evidence: ModelEvidenceState,
+}
+
+/// One scoped quality receipt retained by attribution replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelEvidenceReceipt {
+    /// Version of the assessment policy used for this receipt.
+    pub policy_version: u16,
+    /// Provider grammar applied to the assessed input.
+    pub observation_basis: ModelEvidenceGrammar,
+    /// Local continuity epoch of the assessed input.
+    pub generation: ModelEvidenceGeneration,
+    /// Coverage and counters as of the recorded boundary.
+    pub assessment: ModelEvidenceAssessment,
+    /// Observer capture time, distinct from source response time.
+    pub captured_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Whether the last model fact is covered by an assessment in journal order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ModelEvidenceState {
+    /// No quality receipt exists for this attempt, including legacy journals.
+    #[default]
+    NotAssessed,
+    /// A receipt covers all model facts emitted before it.
+    Assessed(ModelEvidenceReceipt),
+    /// A later model fact awaits assessment; prior degradation is retained.
+    Pending(ModelEvidenceReceipt),
 }
 
 /// The realized-axis accumulators of one fold, grouped so an attempt boundary
@@ -220,6 +254,8 @@ struct RealizedWalk {
     unobservable: bool,
     /// Whether the molecule completed during this attempt.
     ran_to_completion: bool,
+    /// Quality receipt scoped to this attempt and ordered against model facts.
+    evidence: ModelEvidenceState,
 }
 
 impl RealizedWalk {
@@ -227,6 +263,52 @@ impl RealizedWalk {
     /// one is discarded, because none of it describes this one.
     fn start_attempt(&mut self) {
         *self = Self::default();
+    }
+
+    /// An existing receipt cannot certify a later model fact.
+    fn note_later_model_fact(&mut self) {
+        if let ModelEvidenceState::Assessed(prior) = &self.evidence {
+            self.evidence = ModelEvidenceState::Pending(prior.clone());
+        }
+    }
+
+    /// Apply a receipt only when it names the current, positively spawned
+    /// worker. A selected adapter alone is not an attempt anchor.
+    fn accept_assessment(
+        &mut self,
+        event: &EventV2,
+        current_adapter: Option<&str>,
+        current_worker: Option<&crate::id::WorkerId>,
+    ) {
+        if let EventV2::ModelEvidenceAssessed {
+            worker_id,
+            adapter_name,
+            policy_version,
+            observation_basis,
+            generation,
+            assessment,
+            captured_at,
+            ..
+        } = event
+        {
+            if current_worker != Some(worker_id)
+                || !belongs_to_current_attempt(
+                    adapter_name,
+                    Some(worker_id),
+                    current_adapter,
+                    current_worker,
+                )
+            {
+                return;
+            }
+            self.evidence = ModelEvidenceState::Assessed(ModelEvidenceReceipt {
+                policy_version: *policy_version,
+                observation_basis: *observation_basis,
+                generation: *generation,
+                assessment: assessment.clone(),
+                captured_at: *captured_at,
+            });
+        }
     }
 }
 
@@ -239,7 +321,7 @@ impl RealizedWalk {
 /// line folds only on a pure-legacy log that never recorded a `WorkerSpawned`,
 /// where there is nothing to scope against.
 ///
-/// Shared by [`EventV2::ModelObserved`] and
+/// Shared by [`EventV2::ModelObserved`], [`EventV2::ModelEvidenceAssessed`] and
 /// [`EventV2::ModelObservationUnavailable`] so the two can never drift: an
 /// observation and the finding that contradicts it must agree on which attempt
 /// they describe.
@@ -440,6 +522,7 @@ impl AdapterAttribution {
                 | EventV2::WorkerSpawned { .. }
                 | EventV2::ModelSelected { .. }
                 | EventV2::ModelObserved { .. }
+                | EventV2::ModelEvidenceAssessed { .. }
                 | EventV2::ModelObservationUnavailable { .. }
                 | EventV2::MoleculeCompleted { .. }
                 | EventV2::WorkerExited { .. }
@@ -542,6 +625,7 @@ impl AdapterAttribution {
                     out.adapter_source = Some(AdapterSource::from_event(selection_source));
                     // New attempt: discard any realized state from the prior run.
                     current_adapter = Some(adapter_name.clone());
+                    current_worker = None;
                     walk.start_attempt();
                     dispatched = true;
                 }
@@ -591,6 +675,9 @@ impl AdapterAttribution {
                     if walk.observed.last() != Some(model) {
                         walk.observed.push(model.clone());
                     }
+                    // A receipt before this fact cannot certify it, even if
+                    // the model id has not changed.
+                    walk.note_later_model_fact();
                     // Last in-scope record wins. A line that carries none does
                     // NOT erase an earlier one: silence is not a retraction.
                     if let Some(p) = observed_provenance {
@@ -615,12 +702,11 @@ impl AdapterAttribution {
                     }
                     walk.unobservable = true;
                 }
-                EventV2::MoleculeCompleted { .. } => {
-                    walk.ran_to_completion = true;
+                EventV2::ModelEvidenceAssessed { .. } => {
+                    walk.accept_assessment(ev, current_adapter.as_deref(), current_worker.as_ref());
                 }
-                EventV2::WorkerExited { .. } => {
-                    worker_exited = true;
-                }
+                EventV2::MoleculeCompleted { .. } => walk.ran_to_completion = true,
+                EventV2::WorkerExited { .. } => worker_exited = true,
                 _ => {}
             }
         }
@@ -632,6 +718,7 @@ impl AdapterAttribution {
         // liveness. They are kept because reading the walk without them
         // invites exactly that inference.
         let _ = (worker_exited, dispatched);
+        out.evidence = walk.evidence;
         out.realized = resolve_realized(
             RealizedAccumulators {
                 observed: walk.observed,
@@ -795,7 +882,25 @@ impl AdapterAttribution {
         // (silent)` rather than being confused with a confirmed match. Never
         // back-filled from the pin.
         let realized = self.realized.detail_fragment();
-        let disposition = self.realized.disposition();
+        let disposition = match &self.evidence {
+            ModelEvidenceState::Assessed(receipt) | ModelEvidenceState::Pending(receipt)
+                if matches!(
+                    receipt.assessment.coverage,
+                    crate::model_realization::ModelEvidenceCoverage::Degraded(_)
+                ) =>
+            {
+                let basis = if matches!(self.realized, Realized::Observed(_)) {
+                    "last observed"
+                } else {
+                    self.realized.disposition()
+                };
+                format!("{basis}; coverage degraded")
+            }
+            ModelEvidenceState::Pending(_) => {
+                format!("{}; assessment pending", self.realized.disposition())
+            }
+            _ => self.realized.disposition().to_owned(),
+        };
         format!(
             "adapter: {adapter} ({adapter_src})  model: {model} ({model_src})  \
              realized: {realized} ({disposition})  effort: {effort}"
@@ -895,6 +1000,196 @@ mod tests {
 
     fn model_observed(model: &str) -> EventV2 {
         model_observed_for("claude", model, None)
+    }
+
+    #[test]
+    fn degraded_receipt_qualifies_an_unchanged_observed_model() {
+        let receipt = serde_json::json!({
+            "type": "model_evidence_assessed",
+            "mol_id": mid(),
+            "worker_id": "worker-one",
+            "adapter_name": "claude",
+            "policy_version": 1,
+            "observation_basis": "claude",
+            "generation": 1,
+            "assessment": {
+                "trajectory": ["model-a"],
+                "coverage": {"degraded": ["missing_assistant_model"]},
+                "latest": "model_missing",
+                "stats": {"grammar":"claude", "assistant_records":2,
+                    "usable_model_records":1, "placeholder_records":0,
+                    "malformed_records":0, "unclassified_records":0},
+                "complete_bytes": 120,
+                "last_usable_model_at": 60,
+                "trailing_bytes": 0
+            },
+            "captured_at": "2026-09-30T10:00:00Z"
+        });
+        let parsed: EventV2 = serde_json::from_value(receipt).unwrap();
+        let events = [
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-one"),
+            model_observed_for("claude", "model-a", Some("worker-one")),
+            parsed,
+        ];
+        let attribution = AdapterAttribution::fold(&events);
+        assert_eq!(
+            attribution.realized,
+            Realized::Observed(vec!["model-a".into()])
+        );
+        assert!(format!("{attribution:?}").contains("MissingAssistantModel"));
+        assert!(attribution
+            .detail_line()
+            .contains("last observed; coverage degraded"));
+    }
+
+    fn evidence_assessed(worker: &str, records: &str) -> EventV2 {
+        EventV2::ModelEvidenceAssessed {
+            mol_id: mid(),
+            worker_id: crate::id::WorkerId::new(worker).unwrap(),
+            adapter_name: "claude".into(),
+            policy_version: 1,
+            observation_basis: ModelEvidenceGrammar::Claude,
+            generation: ModelEvidenceGeneration(1),
+            assessment: crate::model_realization::assess_claude_model_evidence(
+                records.as_bytes(),
+                true,
+            ),
+            captured_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn old_model_event_decodes_without_assessment_or_worker_scope() {
+        let old = model_observed("model-a");
+        let mut value = serde_json::to_value(old).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("worker_id");
+        object.remove("provenance");
+        let decoded: EventV2 = serde_json::from_value(value).unwrap();
+        let events = [
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            decoded,
+        ];
+        let attribution = AdapterAttribution::fold(&events);
+        assert_eq!(
+            attribution.realized,
+            Realized::Observed(vec!["model-a".into()])
+        );
+        assert_eq!(attribution.evidence, ModelEvidenceState::NotAssessed);
+    }
+
+    #[test]
+    fn latest_response_recovers_without_erasing_an_earlier_gap() {
+        let records = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{}}\n",
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n"
+        );
+        let events = [
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-one"),
+            model_observed_for("claude", "model-a", Some("worker-one")),
+            evidence_assessed("worker-one", records),
+        ];
+        let attr = AdapterAttribution::fold(&events);
+        assert_eq!(attr.realized, Realized::Observed(vec!["model-a".into()]));
+        let ModelEvidenceState::Assessed(receipt) = attr.evidence else {
+            panic!("receipt should cover the observation");
+        };
+        assert_eq!(
+            receipt.assessment.latest,
+            crate::model_realization::LatestModelEvidence::ModelReported(
+                crate::model_realization::ModelId::new("model-a").unwrap()
+            )
+        );
+        assert!(matches!(
+            receipt.assessment.coverage,
+            crate::model_realization::ModelEvidenceCoverage::Degraded(_)
+        ));
+    }
+
+    #[test]
+    fn later_model_fact_requires_a_new_covering_receipt() {
+        let complete = "{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n";
+        let events = [
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-one"),
+            model_observed_for("claude", "model-a", Some("worker-one")),
+            evidence_assessed("worker-one", complete),
+            model_observed_for("claude", "model-b", Some("worker-one")),
+        ];
+        assert!(matches!(
+            AdapterAttribution::fold(&events).evidence,
+            ModelEvidenceState::Pending(_)
+        ));
+        let recovered = evidence_assessed("worker-one", &complete.replace("model-a", "model-b"));
+        let events_with_receipt: Vec<_> = events.iter().cloned().chain([recovered]).collect();
+        assert!(matches!(
+            AdapterAttribution::fold(&events_with_receipt).evidence,
+            ModelEvidenceState::Assessed(_)
+        ));
+    }
+
+    #[test]
+    fn receipt_scope_resets_and_rejects_old_or_unanchored_workers() {
+        let complete = "{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n";
+        let events = [
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-one"),
+            model_observed_for("claude", "model-a", Some("worker-one")),
+            evidence_assessed("worker-one", complete),
+            worker_spawned("claude", "worker-two"),
+            evidence_assessed("worker-one", complete),
+        ];
+        let attr = AdapterAttribution::fold(&events);
+        assert_eq!(attr.evidence, ModelEvidenceState::NotAssessed);
+        assert_eq!(attr.realized, Realized::Unknown);
+        let no_spawn = [events[0].clone(), evidence_assessed("worker-one", complete)];
+        assert_eq!(
+            AdapterAttribution::fold(&no_spawn).evidence,
+            ModelEvidenceState::NotAssessed
+        );
+        let reselected_before_spawn = [
+            events[0].clone(),
+            worker_spawned("claude", "worker-one"),
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            evidence_assessed("worker-one", complete),
+        ];
+        assert_eq!(
+            AdapterAttribution::fold(&reselected_before_spawn).evidence,
+            ModelEvidenceState::NotAssessed
+        );
     }
 
     fn model_observed_for(adapter: &str, model: &str, worker: Option<&str>) -> EventV2 {

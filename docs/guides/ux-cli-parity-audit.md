@@ -4,6 +4,16 @@
 
 `cs harvest-authority` is an operator terminal surface for remote harvest trust administration, status, challenge construction and signed-grant import (issue #120 W6). No native UI counterpart is shipped; the RPP exposes the corresponding tenant reads and imports and a disjoint host-sealed administration route. A native UI must use the same public-root and grant validation rules before parity can be claimed.
 
+## Harvest diagnostics and tracked state (issue #123)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Explain a failed merge | `cs done` prints the merge error and dirty checkout paths; JSON includes `error` and `dirty_paths` | No equivalent diagnostic view audited | The harvest response retains the transaction error; no dirty-path projection audited |
+| Finish a harvest in a project with tracked archive state | `cs done` commits eligible archive, event, and frontier changes after teardown and skips ignored molecule directories without an artifact warning | No equivalent action audited | The shared harvest transaction applies the same state commit |
+
+The dirty-path list is a checkout observation at the failure report. It may
+include state written while recording that failure.
+
 ## RPP identity discovery and quota (issue #45)
 
 | Capability | CLI | Native UI | Remote service |

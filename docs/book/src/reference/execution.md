@@ -122,6 +122,8 @@ SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).
 
 Done — terminal teardown for a molecule (merge + cleanup, human-callable)
 
+A failed merge reports the merge error and any dirty checkout paths. Tracked harvest state, including archive and event files, is committed before the next sibling merge; ignored molecule directories are skipped.
+
 **Usage:** `cs done [OPTIONS] <MOLECULE>`
 
 EXAMPLES:

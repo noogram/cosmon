@@ -24,6 +24,7 @@
 //!    monotonically increasing `id:` and `event: log.line`.
 //! 8. Emit a keep-alive comment every 30 s so any HTTP/1.1 proxy in
 //!    the middle keeps the socket open.
+//! 9. Recheck live admission every second and before a line is sent.
 //!
 //! # Stop conditions
 //!
@@ -33,6 +34,8 @@
 //! down). This is structural: `tmux capture-pane` against a missing
 //! session returns a non-zero exit, the polling task surfaces it as
 //! an end-of-stream, and axum closes the SSE response.
+//! A credential expiry, issuer or binding reload, or deny-policy change
+//! also closes the stream. The polling task stops when its receiver closes.
 //!
 //! # Why per-connection, not a global bus
 //!
@@ -63,6 +66,7 @@ use crate::audit::new_request_id;
 use crate::auth::scopes::{GRANT_SOURCE_BINDING, GRANT_SOURCE_JWT, LOGS_SUBSCRIBE};
 use crate::error::{ApiError, RppRejectReason};
 use crate::jwt::{JwtVerifier, ValidatedJwt};
+use crate::routes::stream_guard::guard_stream;
 use crate::AppState;
 
 /// Keep-alive interval. Matches the briefing — "ping toutes les 30s".
@@ -166,6 +170,14 @@ pub async fn logs_stream(
         Some(Ok(render_event(id, &line)))
     });
 
+    let stream = guard_stream(
+        stream,
+        state,
+        token.to_owned(),
+        spark,
+        LOGS_SUBSCRIBE,
+        "logs",
+    );
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(KEEP_ALIVE_SECS))
@@ -289,7 +301,10 @@ async fn run_pane_poller(
             return;
         }
 
-        tokio::time::sleep(Duration::from_millis(poll_ms)).await;
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_millis(poll_ms)) => {}
+            () = tx.closed() => return,
+        }
     }
 }
 

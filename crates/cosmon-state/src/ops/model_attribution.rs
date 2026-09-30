@@ -403,6 +403,94 @@ mod tests {
         MoleculeId::new(id).unwrap()
     }
 
+    #[test]
+    fn persisted_evidence_replays_identically_through_the_retention_filter() {
+        use cosmon_core::adapter_attribution::ModelEvidenceState;
+        use cosmon_core::event_v2::{
+            AdapterSelectionSource, LoopOwnershipTag, ModelEvidenceGeneration,
+        };
+        use cosmon_core::id::WorkerId;
+        use cosmon_core::model_realization::{
+            assess_claude_model_evidence, ModelEvidenceCoverage, ModelEvidenceGrammar,
+            ModelObservationSource,
+        };
+
+        let dir = tempdir().unwrap();
+        let m = mol("task-20260930-ea11");
+        let worker = WorkerId::new("worker-ea11").unwrap();
+        let path = crate::event_log::resolve_events_log_path(dir.path());
+        let records = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n",
+            "{\"type\":\"assistant\",\"message\":{}}\n"
+        );
+        let events = [
+            EventV2::AdapterSelected {
+                mol_id: m.clone(),
+                adapter_name: "claude".into(),
+                selected_at: Utc::now(),
+                selection_source: AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+                role_hint: None,
+                loop_ownership: LoopOwnershipTag::default(),
+            },
+            EventV2::WorkerSpawned {
+                worker_id: worker.clone(),
+                molecule: Some(m.clone()),
+                session_name: "example".into(),
+                role: "worker".into(),
+                adapter_name: "claude".into(),
+                loop_ownership: LoopOwnershipTag::default(),
+            },
+            EventV2::ModelObserved {
+                mol_id: m.clone(),
+                worker_id: Some(worker.clone()),
+                adapter_name: "claude".into(),
+                model: "model-a".into(),
+                observed_source: ModelObservationSource::ClaudeStreamJson,
+                provenance: None,
+                observed_at: Utc::now(),
+            },
+            EventV2::MoleculeStepCompleted {
+                molecule_id: m.clone(),
+                step: 0,
+                total: 2,
+                duration_ms: None,
+                step_hash: None,
+            },
+            EventV2::ModelEvidenceAssessed {
+                mol_id: m.clone(),
+                worker_id: worker.clone(),
+                adapter_name: "claude".into(),
+                policy_version: 1,
+                observation_basis: ModelEvidenceGrammar::Claude,
+                generation: ModelEvidenceGeneration(1),
+                assessment: assess_claude_model_evidence(records.as_bytes(), true),
+                captured_at: Utc::now(),
+            },
+        ];
+        for event in &events {
+            crate::event_log::emit_one(&path, event.clone(), None).unwrap();
+        }
+        let replayed = realized_attribution(dir.path(), &m).unwrap();
+        let retained: Vec<_> = crate::event_log::read_all(&path)
+            .unwrap()
+            .into_iter()
+            .map(|envelope| envelope.event)
+            .filter(AdapterAttribution::folds)
+            .collect();
+        assert_eq!(retained.len(), events.len() - 1);
+        assert_eq!(replayed, AdapterAttribution::fold(&retained));
+        let ModelEvidenceState::Assessed(receipt) = replayed.evidence else {
+            panic!("persisted receipt must qualify the observation");
+        };
+        assert!(matches!(
+            receipt.assessment.coverage,
+            ModelEvidenceCoverage::Degraded(_)
+        ));
+        assert_eq!(receipt.assessment.complete_bytes, records.len() as u64);
+    }
+
     /// A flag-sourced emission projects back to a `ModelAttribution` carrying
     /// the model id and the `flag` slug — the round-trip C2-writer → C3-reader.
     #[test]

@@ -39,9 +39,16 @@ use strum::EnumCount;
 use crate::expiry::ExpiryPolicy;
 use crate::id::{MoleculeId, WorkerId};
 use crate::injection::InjectionOrigin;
+use crate::model_realization::{ModelEvidenceAssessment, ModelEvidenceGrammar};
 use crate::quality_band::QualityBand;
 use crate::spawn_seam::LoopOwnership;
 use crate::usage::UsageRecord;
+
+/// Local continuity epoch of the input read by one model-evidence observer.
+/// It is an ordinal, never a harness conversation identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ModelEvidenceGeneration(pub u64);
 
 /// Wire-side projection of [`LoopOwnership`] (ADR-103).
 ///
@@ -1717,6 +1724,28 @@ pub enum EventV2 {
         observed_at: DateTime<Utc>,
     },
 
+    /// Evidence quality assessed at a particular complete-byte boundary.
+    /// This qualifies observation coverage without changing model identity or
+    /// algorithmic provenance. New receipts always carry a typed worker scope.
+    ModelEvidenceAssessed {
+        /// Molecule whose observer assessed the input.
+        mol_id: MoleculeId,
+        /// Mandatory attempt scope for new evidence receipts.
+        worker_id: WorkerId,
+        /// Adapter whose grammar was assessed.
+        adapter_name: String,
+        /// Version of the assessment policy used by the observer.
+        policy_version: u16,
+        /// Provider grammar used to interpret the assessed records.
+        observation_basis: ModelEvidenceGrammar,
+        /// Local input continuity epoch, independent of harness identity.
+        generation: ModelEvidenceGeneration,
+        /// Counts, coverage, and latest evidence as of this receipt.
+        assessment: ModelEvidenceAssessment,
+        /// Time the observer captured this assessment, not source response time.
+        captured_at: DateTime<Utc>,
+    },
+
     /// **ADR-177 / issue #65** — one resolved **harness setting** was
     /// dispatched to an adapter's native override channel.
     ///
@@ -2801,6 +2830,7 @@ impl EventV2 {
             | Self::AdapterSelected { mol_id, .. }
             | Self::ModelSelected { mol_id, .. }
             | Self::ModelObserved { mol_id, .. }
+            | Self::ModelEvidenceAssessed { mol_id, .. }
             | Self::HarnessSettingSelected { mol_id, .. }
             | Self::EffortObserved { mol_id, .. }
             | Self::ModelObservationUnavailable { mol_id, .. }
@@ -4363,6 +4393,21 @@ mod tests {
                     .unwrap()
                     .with_timezone(&Utc),
             },
+            EventV2::ModelEvidenceAssessed {
+                mol_id: mid("cs-20260411-aaaa"),
+                worker_id: WorkerId::new("worker-aaaa").unwrap(),
+                adapter_name: "claude".to_owned(),
+                policy_version: 1,
+                observation_basis: ModelEvidenceGrammar::Claude,
+                generation: ModelEvidenceGeneration(1),
+                assessment: crate::model_realization::assess_claude_model_evidence(
+                    b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n",
+                    true,
+                ),
+                captured_at: DateTime::parse_from_rfc3339("2026-04-11T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            },
             EventV2::HarnessSettingSelected {
                 mol_id: mid("cs-20260411-aaaa"),
                 worker_id: Some(WorkerId::new("worker-aaaa").unwrap()),
@@ -4682,6 +4727,7 @@ mod tests {
             | EventV2::AdapterSelected { .. }
             | EventV2::ModelSelected { .. }
             | EventV2::ModelObserved { .. }
+            | EventV2::ModelEvidenceAssessed { .. }
             | EventV2::HarnessSettingSelected { .. }
             | EventV2::EffortObserved { .. }
             | EventV2::ModelObservationUnavailable { .. }

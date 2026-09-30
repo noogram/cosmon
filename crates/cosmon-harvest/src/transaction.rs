@@ -3096,9 +3096,9 @@ fn run_with_remote_before_lock(
                 );
                 report_merge_failure(
                     ctx,
+                    &repo_root,
                     &mol_id,
                     "merge_conflict",
-                    "MERGE CONFLICT — not merged, branch preserved",
                     &files,
                     &recovery,
                     &actions,
@@ -3147,9 +3147,9 @@ fn run_with_remote_before_lock(
                 );
                 report_merge_failure(
                     ctx,
+                    &repo_root,
                     &mol_id,
                     "merge_failed",
-                    "MERGE FAILED — not merged, branch preserved",
                     &[],
                     &e.to_string(),
                     &actions,
@@ -3996,6 +3996,15 @@ fn run_with_remote_before_lock(
         }
     }
 
+    // Archival and frontier writes happen after the merge, so the pre-merge
+    // flush cannot see them. Commit any trackable state they left behind before
+    // another sibling harvest attempts to merge into this checkout.
+    match commit_state_dir_changes(&repo_root, "chore(state): record harvest state") {
+        Ok(true) => actions.push("committed_post_harvest_state".to_owned()),
+        Ok(false) => {}
+        Err(e) => warnings.push(format!("post-harvest state commit failed: {e}")),
+    }
+
     // 8. Final post-condition (task-20260606-21d4, DoD b). `cs done` must
     //    NEVER exit 0 while the worker's branch still carries committed work
     //    that did not land on base. The merge block above already returns a
@@ -4288,13 +4297,21 @@ fn report_plan(ctx: &Context, plan: &TeardownPlan) {
 /// `outcome` (`"merge_conflict"` | `"merge_failed"`).
 fn report_merge_failure(
     ctx: &Context,
+    repo_root: &Path,
     mol_id: &MoleculeId,
     outcome: &str,
-    headline: &str,
     conflicted_files: &[String],
     recovery: &str,
     actions: &[String],
 ) {
+    let headline = match outcome {
+        "merge_conflict" => "MERGE CONFLICT — not merged, branch preserved",
+        "merge_failed" => "MERGE FAILED — not merged, branch preserved",
+        _ => "POST-MERGE COMPILE GATE REFUSED — merge rolled back, branch preserved",
+    };
+    let dirty = worktree_is_dirty(repo_root);
+    let dirty_paths = dirty.as_ref().map_or(&[][..], Vec::as_slice);
+    let dirty_probe_error = dirty.as_ref().err().map(ToString::to_string);
     if ctx.json {
         let out = serde_json::json!({
             "command": "done",
@@ -4304,6 +4321,9 @@ fn report_merge_failure(
             "teardown": false,
             "outcome": outcome,
             "conflicted_files": conflicted_files,
+            "dirty_paths": dirty_paths,
+            "dirty_probe_error": dirty_probe_error,
+            "error": recovery,
             "recovery": recovery,
             "actions": actions,
         });
@@ -4319,8 +4339,20 @@ fn report_merge_failure(
                 println!("    • {f}");
             }
         }
+        if !dirty_paths.is_empty() {
+            println!("  dirty checkout paths:");
+            for path in dirty_paths {
+                println!("    • {path}");
+            }
+        }
+        if let Some(error) = dirty_probe_error {
+            println!("  dirty checkout probe failed: {error}");
+        }
         println!("  base branch unchanged — no merge commit was created.");
         println!("  branch, worktree, and tmux session are preserved.");
+        if outcome == "merge_failed" {
+            println!("  merge error:");
+        }
         for line in recovery.lines() {
             println!("  {line}");
         }
@@ -4999,7 +5031,17 @@ fn try_merge_branch(
             {
                 MergeOutcome::NotFastForward
             } else {
-                MergeOutcome::Error(stderr.trim().to_owned())
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let detail = [stderr.trim(), stdout.trim()]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                MergeOutcome::Error(if detail.is_empty() {
+                    format!("git merge exited with {} without a diagnostic", o.status)
+                } else {
+                    detail
+                })
             }
         }
         Err(e) => MergeOutcome::Error(e.to_string()),
@@ -5095,6 +5137,14 @@ fn source_paths_in_commit(repo_root: &Path, pathspecs: &[&Path]) -> Vec<String> 
 /// working tree was already clean under `.cosmon/state/`, `Err` if git
 /// invocation fails.
 fn flush_state_dir_changes(repo_root: &Path) -> anyhow::Result<bool> {
+    commit_state_dir_changes(repo_root, "chore(state): flush before merge")
+}
+
+/// Commit trackable state files under a scoped bookkeeping subject.
+///
+/// Both the pre-merge and post-harvest paths use the same staging rules, so
+/// ignored siblings cannot change which files reach the index.
+fn commit_state_dir_changes(repo_root: &Path, message: &str) -> anyhow::Result<bool> {
     let repo_arg = repo_root.to_string_lossy().to_string();
 
     // Short-circuit when `.cosmon/state/` has no pending changes.
@@ -5194,7 +5244,7 @@ fn flush_state_dir_changes(repo_root: &Path) -> anyhow::Result<bool> {
     let offending = source_paths_in_commit(repo_root, &[Path::new(".cosmon/state/")]);
     if !offending.is_empty() {
         return Err(anyhow::anyhow!(
-            "refusing 'chore(state): flush before merge' — it would commit \
+            "refusing '{message}' — it would commit \
              source files under a state-tracking message (image/source drift \
              guard): {}",
             offending.join(", ")
@@ -5210,7 +5260,7 @@ fn flush_state_dir_changes(repo_root: &Path) -> anyhow::Result<bool> {
             &repo_arg,
             "commit",
             "-m",
-            "chore(state): flush before merge",
+            message,
             "--",
             ".cosmon/state/",
         ])
@@ -6303,9 +6353,9 @@ fn refuse_post_merge_and_rollback(
     };
     report_merge_failure(
         ctx,
+        repo_root,
         mol_id,
         "post_merge_compile_gate_refused",
-        "POST-MERGE COMPILE GATE REFUSED — merge rolled back, branch preserved",
         &[],
         &recovery,
         actions,
@@ -7732,42 +7782,57 @@ fn commit_molecule_artifacts(
     short_topic: &str,
     coauthor_trailers: &[String],
 ) -> anyhow::Result<bool> {
-    // Stage the molecule directory (prompt.md, briefing.md, log.md, …).
-    if mol_dir.is_dir() {
-        let _ = Command::new("git")
-            .args(["add", "--"])
-            .arg(mol_dir)
-            .current_dir(repo_root)
-            .output();
+    // Ask git which files are tracked or eligible for addition. A molecule
+    // directory can exist while the project's `state/*` rule ignores it;
+    // passing that directory to `git commit --` aborts after `git add` has
+    // already staged the tracked events log. File pathspecs also avoid a
+    // directory-level `git add` failing on ignored siblings.
+    let listed = Command::new("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+        ])
+        .arg(mol_dir)
+        .arg(events_path)
+        .current_dir(repo_root)
+        .output()?;
+    if !listed.status.success() {
+        return Err(anyhow::anyhow!(
+            "git ls-files (molecule artifacts) failed: {}",
+            String::from_utf8_lossy(&listed.stderr).trim()
+        ));
     }
-
-    // Stage the global events log.
-    if events_path.is_file() {
-        let _ = Command::new("git")
-            .args(["add", "--"])
-            .arg(events_path)
-            .current_dir(repo_root)
-            .output();
-    }
-
-    // The pathspecs this commit is allowed to touch. The commit below is
-    // scoped to exactly these, so even if other source is pre-staged in the
-    // index it can never be swept into a `chore(state):` commit — the bug
-    // that reverted crates/** + Cargo.* under this very subject (postmortem
-    // 2026-06-15, commit 2e86cf908). Only include paths that actually exist:
-    // passing a never-tracked pathspec to `git commit` makes it abort with
-    // "pathspec did not match any files".
-    let mut pathspecs: Vec<&Path> = Vec::new();
-    if mol_dir.is_dir() {
-        pathspecs.push(mol_dir);
-    }
-    if events_path.is_file() {
-        pathspecs.push(events_path);
-    }
+    let pathspecs: Vec<PathBuf> = listed
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|bytes| !bytes.is_empty())
+        .map(|bytes| repo_root.join(String::from_utf8_lossy(bytes).as_ref()))
+        .collect();
     if pathspecs.is_empty() {
-        // Nothing on disk to track.
+        // The molecule directory and events log are absent or ignored.
         return Ok(false);
     }
+    for path in &pathspecs {
+        let add = Command::new("git")
+            .args(["add", "--"])
+            .arg(path)
+            .current_dir(repo_root)
+            .output()?;
+        if !add.status.success() {
+            return Err(anyhow::anyhow!(
+                "git add {} failed: {}",
+                path.display(),
+                String::from_utf8_lossy(&add.stderr).trim()
+            ));
+        }
+    }
+
+    // Scope the commit to these files, never the whole staged index.
+    let pathspec_refs: Vec<&Path> = pathspecs.iter().map(PathBuf::as_path).collect();
 
     // Check if anything was actually staged UNDER THOSE PATHSPECS (not the
     // whole index — a global check would proceed on unrelated pre-staged
@@ -7778,7 +7843,7 @@ fn commit_molecule_artifacts(
         "--quiet".into(),
         "--".into(),
     ];
-    for p in &pathspecs {
+    for p in &pathspec_refs {
         diff_args.push(p.to_string_lossy().into_owned());
     }
     // `.output()` (not `.status()`) so git's stderr is CAPTURED, never inherited
@@ -7799,7 +7864,7 @@ fn commit_molecule_artifacts(
 
     // Structural guard: fail fast if the scoped commit would still carry
     // source (e.g. a molecule dir misresolved to overlap the workspace).
-    let offending = source_paths_in_commit(repo_root, &pathspecs);
+    let offending = source_paths_in_commit(repo_root, &pathspec_refs);
     if !offending.is_empty() {
         return Err(anyhow::anyhow!(
             "refusing 'chore(state): track artifacts for {mol_id}' — it would \
@@ -7827,7 +7892,7 @@ fn commit_molecule_artifacts(
         commit_args.push(coauthor_trailers.join("\n"));
     }
     commit_args.push("--".into());
-    for p in &pathspecs {
+    for p in &pathspec_refs {
         commit_args.push(p.to_string_lossy().into_owned());
     }
     let commit = Command::new("git")
