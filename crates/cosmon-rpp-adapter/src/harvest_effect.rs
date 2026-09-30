@@ -534,14 +534,14 @@ impl RemoteAdmissionValidator for AdapterRemoteValidator {
             .map_err(|_| Cause::FactsUnavailable)?
             .as_secs();
         if now >= admission.expires_at {
-            return Err(Cause::ScopeMissing);
+            return Err(Cause::CredentialExpired);
         }
         let map = self.state.nucleon_map.load();
         let resolved = map
             .resolve_for_audience(&admission.issuer, &admission.subject, &admission.audience)
-            .ok_or(Cause::ScopeMissing)?;
+            .ok_or(Cause::BindingChanged)?;
         if resolved.noyau.as_str() != admission.tenant {
-            return Err(Cause::ScopeMissing);
+            return Err(Cause::BindingChanged);
         }
         let scopes = map.allowed_scopes_for_audience(
             &admission.issuer,
@@ -563,7 +563,7 @@ impl RemoteAdmissionValidator for AdapterRemoteValidator {
             }
         };
         if !granted {
-            return Err(Cause::ScopeMissing);
+            return Err(Cause::BindingChanged);
         }
         self.state.deny_list.invalidate();
         let snapshot = self.state.deny_list.snapshot();
@@ -573,7 +573,7 @@ impl RemoteAdmissionValidator for AdapterRemoteValidator {
             || snapshot.revokes_sub(&admission.issuer, &sub_hash)
             || snapshot.denied_noyaus.contains(&admission.tenant)
         {
-            return Err(Cause::ScopeMissing);
+            return Err(Cause::CredentialRevoked);
         }
         Ok(())
     }

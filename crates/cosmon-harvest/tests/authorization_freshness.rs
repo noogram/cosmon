@@ -145,6 +145,15 @@ fn each_precheck_change_refuses_the_effect_snapshot() {
         ("status", |w| {
             w.save(|m| m.status = MoleculeStatus::Collapsed)
         }),
+        ("protected paths", |w| {
+            w.save(|m| m.protected_paths.push("reference".to_owned()))
+        }),
+        ("scope perimeter", |w| {
+            w.save(|m| {
+                m.variables
+                    .insert("scope_allow".to_owned(), "src/**".to_owned());
+            })
+        }),
         ("reservation tag", |w| {
             w.save(|m| {
                 m.tags.insert(Tag::new("security:high").expect("tag"));
@@ -185,6 +194,24 @@ fn each_precheck_change_refuses_the_effect_snapshot() {
             error.to_string().contains("harvest_facts_changed"),
             "{name}: {error}"
         );
+    }
+}
+
+#[test]
+fn preliminary_molecule_must_match_both_change_perimeters() {
+    for edit in [
+        (|m: &mut MoleculeData| m.protected_paths.push("reference".to_owned()))
+            as fn(&mut MoleculeData),
+        |m: &mut MoleculeData| {
+            m.variables
+                .insert("scope_allow".to_owned(), "src/**".to_owned());
+        },
+    ] {
+        let world = World::new();
+        let preliminary = world.store.load_molecule(&world.molecule).expect("load");
+        world.save(edit);
+        let facts = world.snapshot().expect("current facts");
+        assert!(facts.require_same_molecule(&preliminary).is_err());
     }
 }
 

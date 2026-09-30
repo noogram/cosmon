@@ -360,7 +360,7 @@ pub fn reload_jwks(shared: &SharedJwksStore, state_dir: &Path) -> JwksReloadOutc
 pub async fn sighup_reload_listener(
     shared: SharedHabilitationMap,
     jwks: SharedJwksStore,
-    jwks_provider: Option<JwksProvider>,
+    jwks_provider: JwksProvider,
     state_dir: std::path::PathBuf,
     image_init: ImageInit,
 ) {
@@ -389,24 +389,36 @@ pub async fn sighup_reload_listener(
             "SIGHUP received — reloading nucleon bindings and JWKS",
         );
         reload(&shared, &state_dir, &image_init).log();
-        let jwks_outcome = reload_jwks(&jwks, &state_dir);
-        let refreshed = jwks_outcome.is_ok();
+        let jwks_outcome = reload_jwks_and_fetch(&jwks, &jwks_provider, &state_dir).await;
         jwks_outcome.log();
-        if refreshed {
-            if let Some(provider) = &jwks_provider {
-                let report = provider.refresh_all().await;
-                if !report.all_ok() {
-                    tracing::warn!(
-                        event = "reload.jwks.fetch",
-                        issuers_ok = report.issuers_ok,
-                        issuers_total = report.issuers_total,
-                        "HTTP issuer reload completed with unavailable keys",
-                    );
-                }
-                report.log();
-            }
-        }
     }
+}
+
+/// Reload local keys and immediately fetch every configured HTTP issuer.
+/// The fetcher exists even when boot started in file-stage mode, so adding
+/// the first allowlist on SIGHUP does not wait for a process restart.
+pub async fn reload_jwks_and_fetch(
+    jwks: &SharedJwksStore,
+    provider: &JwksProvider,
+    state_dir: &Path,
+) -> JwksReloadOutcome {
+    let mut outcome = reload_jwks(jwks, state_dir);
+    if outcome.is_ok() {
+        let report = provider.refresh_all().await;
+        if !report.all_ok() {
+            tracing::warn!(
+                event = "reload.jwks.fetch",
+                issuers_ok = report.issuers_ok,
+                issuers_total = report.issuers_total,
+                "HTTP issuer reload completed with unavailable keys",
+            );
+        }
+        report.log();
+        let counts = jwks.load().key_counts_by_issuer();
+        outcome.issuers_after = counts.len();
+        outcome.keys_after = counts.iter().map(|(_, count)| *count).sum();
+    }
+    outcome
 }
 
 #[cfg(test)]

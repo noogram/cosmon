@@ -2419,14 +2419,14 @@ pub async fn done_molecule(
         state: Arc::clone(&state),
     };
     cosmon_core::remote_harvest::RemoteAdmissionValidator::validate(&validator, &admission)
-        .map_err(|_| {
+        .map_err(|cause| {
             HarvestApiError::with_cause(
                 ApiError {
                     status: StatusCode::FORBIDDEN,
                     label: "forbidden",
                     request_id: Some(spark.request_id.clone()),
                 },
-                cosmon_core::harvest_authorization::HarvestAuthorizationCause::ScopeMissing,
+                cause,
             )
         })?;
 
@@ -2443,14 +2443,14 @@ pub async fn done_molecule(
     )
     .await?;
     cosmon_core::remote_harvest::RemoteAdmissionValidator::validate(&validator, &admission)
-        .map_err(|_| {
+        .map_err(|cause| {
             HarvestApiError::with_cause(
                 ApiError {
                     status: StatusCode::FORBIDDEN,
                     label: "forbidden",
                     request_id: Some(spark.request_id.clone()),
                 },
-                cosmon_core::harvest_authorization::HarvestAuthorizationCause::ScopeMissing,
+                cause,
             )
         })?;
     match decision {

@@ -59,6 +59,9 @@ use cosmon_core::id::MoleculeId;
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_state::{MoleculeFilter, NonIntegration, NonIntegrationReason, StateStore};
 
+use crate::harvest_authority::FileHarvestJournal;
+use crate::FileStore;
+
 /// A refusal from the door, carrying the named [`DoorRefusal`] and the
 /// operator-facing specifics — the conflicted files, the reservation tag,
 /// the backlog census. Never a raw stderr dump.
@@ -239,6 +242,7 @@ pub fn decide(
         molecule,
         options,
         cfg.harvest_authority.is_required(),
+        None,
     )
 }
 
@@ -248,7 +252,7 @@ pub fn decide(
 ///
 /// Returns a named door refusal or a state fault.
 pub fn decide_remote(
-    store: &dyn StateStore,
+    store: &FileStore,
     cfg: &ProjectConfig,
     molecule: &MoleculeId,
     options: &HarvestOptions,
@@ -261,6 +265,7 @@ pub fn decide_remote(
         molecule,
         options,
         policy.policy != EffectiveRemotePolicy::Disabled,
+        Some(&FileHarvestJournal::at_state_root(store.state_root())),
     )
 }
 
@@ -270,6 +275,7 @@ fn decide_with_authority(
     molecule: &MoleculeId,
     options: &HarvestOptions,
     armed: bool,
+    journal: Option<&FileHarvestJournal>,
 ) -> Result<DoorDecision, LandError> {
     // 1. The second key. A galaxy that has not armed harvest authority has
     //    granted nobody anything, and a door that proceeded anyway would be
@@ -282,6 +288,14 @@ fn decide_with_authority(
     }
 
     let mol = store.load_molecule(molecule)?;
+
+    if let Some(journal) = journal {
+        journal.has_attempt_for(molecule).map_err(|_| {
+            LandError::AuthorizationRefused(
+                cosmon_core::harvest_authorization::HarvestAuthorizationCause::RecoveryRequired,
+            )
+        })?;
+    }
 
     // 2. Idempotence, before admissibility: a harvest that already landed
     //    must report the same success on every retry, including a retry sent
@@ -413,7 +427,7 @@ pub fn land(
 /// Returns a named refusal or an effect fault. The effect must still recheck
 /// the remote admission under its own lock before mutation.
 pub fn land_remote(
-    store: &dyn StateStore,
+    store: &FileStore,
     cfg: &ProjectConfig,
     molecule: &MoleculeId,
     options: &HarvestOptions,
@@ -1067,6 +1081,30 @@ mod tests {
 
         let out = land(&w.store, &armed(), &id, &opts(), &mut InertEffect).expect("idempotent");
         assert_eq!(out, DoorOutcome::AlreadyLanded { merged: true });
+    }
+
+    #[test]
+    fn remote_already_landed_refuses_an_unreadable_journal() {
+        use cosmon_core::remote_harvest::resolve_remote_policy;
+
+        let w = world();
+        let id = mol("task-20260930-journal");
+        plant(&w, &id, MoleculeStatus::Completed, |m| {
+            m.merged_at = Some(chrono::Utc::now());
+        });
+        let journal = w
+            .state_root
+            .join(crate::harvest_authority::HARVEST_JOURNAL_REL);
+        std::fs::create_dir_all(journal.parent().expect("journal parent")).expect("directory");
+        std::fs::write(&journal, "not a journal record\n").expect("corrupt journal");
+
+        let policy = resolve_remote_policy(&armed().harvest_authority).expect("legacy policy");
+        assert!(matches!(
+            decide_remote(&w.store, &armed(), &id, &opts(), policy),
+            Err(LandError::AuthorizationRefused(
+                cosmon_core::harvest_authorization::HarvestAuthorizationCause::RecoveryRequired
+            ))
+        ));
     }
 
     #[test]

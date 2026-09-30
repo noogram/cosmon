@@ -969,6 +969,12 @@ pub enum HarvestRefusal {
 pub enum HarvestAuthorizationCause {
     /// The admitted credential lacks the dedicated harvest scope.
     ScopeMissing,
+    /// The admitted credential expired before the effect.
+    CredentialExpired,
+    /// A live revocation or tenant kill switch withdrew the credential.
+    CredentialRevoked,
+    /// The admitted identity binding changed before the effect.
+    BindingChanged,
     /// The administrator disabled remote harvest.
     Disabled,
     /// The configured policy has incompatible settings.
@@ -1005,6 +1011,8 @@ impl HarvestAuthorizationCause {
     pub const fn gate(self) -> &'static str {
         match self {
             Self::ScopeMissing => "scope",
+            Self::CredentialExpired | Self::CredentialRevoked => "credential",
+            Self::BindingChanged => "binding",
             Self::Disabled | Self::PolicyConflict => "policy",
             Self::KeyMissing => "key",
             Self::GrantMissing
@@ -1025,6 +1033,9 @@ impl HarvestAuthorizationCause {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::ScopeMissing => "harvest_scope_missing",
+            Self::CredentialExpired => "harvest_credential_expired",
+            Self::CredentialRevoked => "harvest_credential_revoked",
+            Self::BindingChanged => "harvest_binding_changed",
             Self::Disabled => "harvest_disabled",
             Self::PolicyConflict => "harvest_policy_conflict",
             Self::KeyMissing => "harvest_key_missing",
@@ -1047,6 +1058,9 @@ impl HarvestAuthorizationCause {
     pub const fn action(self) -> &'static str {
         match self {
             Self::ScopeMissing => "issue_scope",
+            Self::CredentialExpired => "refresh_credential",
+            Self::CredentialRevoked => "contact_administrator",
+            Self::BindingChanged => "inspect_binding",
             Self::Disabled => "configure_harvest",
             Self::PolicyConflict | Self::FactsUnavailable => "repair_configuration",
             Self::KeyMissing => "init_harvest",

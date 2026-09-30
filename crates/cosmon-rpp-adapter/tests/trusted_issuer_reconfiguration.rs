@@ -57,6 +57,41 @@ fn token(issuer: &str, audience: &str, kid: &str) -> String {
 }
 
 #[tokio::test]
+async fn first_http_issuer_added_after_file_stage_boot_is_fetched_on_reload() {
+    let td = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(td.path().join("security/jwks")).unwrap();
+    let staged = serde_json::json!({
+        "iss": A,
+        "audiences": ["aud-file"],
+        "keys": [{"kid": "file-key", "alg": "RS256", "kty": "RSA", "n": TEST_RSA_N_B64URL, "e": TEST_RSA_E_B64URL}]
+    });
+    std::fs::write(
+        td.path().join("security/jwks/file.json"),
+        staged.to_string(),
+    )
+    .unwrap();
+    let shared = SharedJwksStore::new(JwksStore::load(td.path()).unwrap());
+    let provider = JwksProvider::for_reload(shared.clone(), JwksFetcher::new().unwrap());
+    assert!(shared.load().contains_kid(A, "file-key"));
+
+    let (uri, server) = serve_keys("http-key").await;
+    write_issuers(td.path(), &[(B, &uri, &["aud-http"])]);
+    let result =
+        cosmon_rpp_adapter::reload::reload_jwks_and_fetch(&shared, &provider, td.path()).await;
+    assert!(result.is_ok());
+    assert_eq!(result.keys_after, 1);
+    assert!(shared.load().contains_kid(B, "http-key"));
+    assert!(!shared.load().contains_kid(A, "file-key"));
+    assert!(JwtVerifier::validate(
+        &shared.load(),
+        &token(B, "aud-http", "http-key"),
+        Posture::Active
+    )
+    .is_ok());
+    server.abort();
+}
+
+#[tokio::test]
 async fn http_issuer_edits_match_restart_after_reload_and_refresh() {
     let td = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(td.path().join("security")).unwrap();

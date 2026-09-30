@@ -546,7 +546,13 @@ async fn a_binding_removed_after_admission_refuses_at_the_effect_port() {
             )
             .build(),
     );
-    assert!(validator.validate(&admission).is_err());
+    assert_eq!(
+        validator
+            .validate(&admission)
+            .expect_err("rebound binding")
+            .reason(),
+        "harvest_binding_changed"
+    );
 }
 
 #[tokio::test]
@@ -605,6 +611,18 @@ async fn effect_recheck_applies_issuer_scoped_policy() {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     assert!(validator.validate(&admission).is_ok());
 
+    let expired = RemoteHarvestAdmission {
+        expires_at: 0,
+        ..admission.clone()
+    };
+    assert_eq!(
+        validator
+            .validate(&expired)
+            .expect_err("expired credential")
+            .reason(),
+        "harvest_credential_expired"
+    );
+
     for entry in [
         format!(
             "[[deny.sub]]\nissuer = {:?}\nsub_hash = {:?}\n",
@@ -622,7 +640,13 @@ async fn effect_recheck_applies_issuer_scoped_policy() {
         ),
     ] {
         std::fs::write(&path, entry).unwrap();
-        assert!(validator.validate(&admission).is_err());
+        assert_eq!(
+            validator
+                .validate(&admission)
+                .expect_err("revoked credential")
+                .reason(),
+            "harvest_credential_revoked"
+        );
     }
     std::fs::write(
         &path,
