@@ -7457,6 +7457,7 @@ mod tests {
             model_source: Some(ModelSource::Flag),
             reasoning_effort: None,
             realized: Realized::default(),
+            evidence: Default::default(),
         }
     }
 

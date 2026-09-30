@@ -148,6 +148,7 @@ impl Action {
             // concrete model an adapter actually ran. It observes the run
             // without driving a spec transition.
             | EventV2::ModelObserved { .. }
+            | EventV2::ModelEvidenceAssessed { .. }
             // The harness-settings pair (ADR-177 / issue #65): the ex-ante
             // receipt of what cosmon dispatched through an adapter's own
             // override channel, and the ex-post echo the harness's log
