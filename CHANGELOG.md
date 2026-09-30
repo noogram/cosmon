@@ -21,6 +21,14 @@ this stage.
 
 ### Security
 
+- **RPP live event and log streams now close when admission ends.** Open SSE
+  subscriptions recheck credential expiry, the live issuer and binding maps,
+  scope, and deny policy every second and before emitting an item. A loaded
+  issuer or binding change closes the stream within one second; edits to
+  operator deny files close it within 31 seconds, including the deny cache
+  refresh. The adapter logs the closure. Clients must reconnect with a current
+  credential after authorization is restored.
+
 - **RPP binding loads refuse duplicate identity triples.** A repeated
   `(issuer, subject, audience)` across binding files now stops adapter
   startup. On `SIGHUP`, the adapter logs the refusal and keeps the prior live

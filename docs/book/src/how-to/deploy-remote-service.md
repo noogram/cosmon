@@ -201,6 +201,17 @@ cause rejection. Issuers that mint tokens ahead of the adapter clock or issue
 longer lived tokens may now receive `not_yet_valid` or `expired` refusals.
 Synchronize the issuer and adapter clocks and use the posture's token lifetime.
 
+Open `/v1/events` and `/v1/molecules/{id}/logs` streams now close when their
+bearer expires. They also recheck the live issuer and binding projections,
+scope, and deny policy every second and before sending each item. A removed
+issuer or binding takes effect on the next recheck after a successful reload;
+`global_kill` and subject, token, or tenant denies take effect within 31 seconds
+of an operator file edit (the deny cache refreshes every 30 seconds). The
+adapter logs `rpp.sse.admission_ended` with the route and a broad reason when
+it closes an open stream. Clients should reconnect with a current credential
+after authorization is restored. A disconnected stream is not resumed by a
+later policy change.
+
 ## Step 3: Start the fente on loopback
 
 The adapter reads `state/security/oidc-kill.toml` and
