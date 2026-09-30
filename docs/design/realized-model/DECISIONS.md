@@ -70,3 +70,24 @@ names **only** the realized field and cannot reach the intention field — the
 no-clobber property is structural. Mirror the existing
 `reasoning_effort_is_never_inferred` discipline: `realized` is never back-filled
 from the pin or config.
+
+## Issue #73(b) — evidence quality beside realization
+
+`ModelObserved` still carries only a concrete reported identity and keeps the
+first/change cadence of D4. A sibling `ModelEvidenceAssessed` event records
+the quality of the assessed input independently of model changes. An
+unchanged historical model can therefore acquire a degraded qualifier without
+inventing a new model observation. The receipt names the observer's capture
+time and complete-byte boundary, not the time or truth of execution.
+
+The fold keeps evidence beside `Realized`. It resets both at the attempt
+boundary, rejects another worker's receipt, and leaves old journals
+`not_assessed`. A later usable response can restore latest-response evidence
+while an earlier coverage gap stays degraded. Settings-only evidence remains
+sparse and cannot confirm every response. No clock expiry, model-name
+allowlist, usage adjustment, or scheduling transition follows from a receipt.
+
+The CLI and TUI qualify the last observed identity from the shared fold; the
+structured observe projection carries the same receipt. Native and web
+presentation still require their own rendered parity witness. Arbitrary
+grammar drift hidden inside an ordinary shape remains outside this contract.

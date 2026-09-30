@@ -266,6 +266,27 @@ impl Dispatch {
         .unwrap();
     }
 
+    /// Append a later response that reports the same model as the first.
+    fn append_model(&self, model: &str) {
+        let encoded: String = self
+            .worktree
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let path = self
+            .home
+            .join(".claude/projects")
+            .join(encoded)
+            .join("sess.jsonl");
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+            "{{\"type\":\"assistant\",\"message\":{{\"model\":\"{model}\"}}}}"
+        )
+        .unwrap();
+    }
+
     /// Fold the molecule's journal into its adapter attribution — the shape
     /// the operator surfaces (`cs observe`, `compact_cell`) actually read.
     fn attribution(&self) -> cosmon_core::adapter_attribution::AdapterAttribution {
@@ -478,6 +499,112 @@ fn reexeced_watcher_restart_does_not_heal_a_missing_model() {
         )),
         "rebuilding the source cannot make the historical gap healthy"
     );
+}
+
+/// Two independent capture processes share one journal. A stable model can
+/// regain latest-response evidence after a gap, but neither concurrency nor
+/// restart may erase the historical gap or emit another model transition.
+#[test]
+fn concurrent_watchers_preserve_degraded_receipt_through_recovery_and_replay() {
+    use cosmon_core::adapter_attribution::{ModelEvidenceState, Realized};
+    use cosmon_core::model_realization::{
+        LatestModelEvidence, ModelEvidenceCoverage, ModelEvidenceReason,
+    };
+
+    let d = Dispatch::seed("task-20260930-5e1f");
+    let mut first = d.arm_watcher(50, 600);
+    let mut second = d.arm_watcher(50, 600);
+    d.write_first_turn("model-a");
+    assert!(wait_until(|| {
+        d.observations().len() == 1
+            && d.assessments().iter().any(|event| {
+                matches!(
+                    event,
+                    EventV2::ModelEvidenceAssessed { assessment, .. }
+                        if assessment.coverage == ModelEvidenceCoverage::CompleteRecords
+                )
+            })
+    }));
+
+    d.append_missing_model();
+    assert!(wait_until(|| matches!(
+        d.attribution().evidence,
+        ModelEvidenceState::Assessed(ref receipt)
+            if receipt.assessment.coverage == ModelEvidenceCoverage::Degraded(
+                vec![ModelEvidenceReason::MissingAssistantModel]
+            )
+    )));
+    d.append_model("model-a");
+    assert!(wait_until(|| matches!(
+        d.attribution().evidence,
+        ModelEvidenceState::Assessed(ref receipt)
+            if receipt.assessment.coverage == ModelEvidenceCoverage::Degraded(
+                vec![ModelEvidenceReason::MissingAssistantModel]
+            ) && receipt.assessment.latest == LatestModelEvidence::ModelReported(
+                cosmon_core::model_realization::ModelId::new("model-a").unwrap()
+            )
+    )));
+
+    let before_restart = d.attribution();
+    assert_eq!(
+        before_restart.realized,
+        Realized::Observed(vec!["model-a".into()])
+    );
+    assert!(before_restart.compact_cell().starts_with("!claude"));
+    assert!(before_restart.detail_line().contains("coverage degraded"));
+    assert_eq!(
+        cosmon_state::ops::realized_attribution(&d.state_dir, &d.mol).unwrap(),
+        before_restart,
+        "the filtered state projection must agree with full journal replay"
+    );
+    assert_eq!(d.observations().len(), 1);
+    first.kill().unwrap();
+    first.wait().unwrap();
+    second.kill().unwrap();
+    second.wait().unwrap();
+
+    let receipt_count = d.assessments().len();
+    let mut restarted = d.arm_watcher(50, 600);
+    d.append_missing_model();
+    assert!(
+        wait_until(|| {
+            d.assessments().len() > receipt_count
+                && matches!(
+                    d.attribution().evidence,
+                    ModelEvidenceState::Assessed(ref receipt)
+                        if receipt.assessment.coverage == ModelEvidenceCoverage::Degraded(
+                            vec![ModelEvidenceReason::MissingAssistantModel]
+                        ) && receipt.assessment.latest == LatestModelEvidence::ModelMissing
+                )
+        }),
+        "restarted capture must advance the receipt without healing the gap"
+    );
+    d.collapse();
+    wait_for_exit(&mut restarted, "restarted concurrent watcher");
+    assert_eq!(d.observations().len(), 1);
+    assert_eq!(
+        cosmon_state::ops::realized_attribution(&d.state_dir, &d.mol).unwrap(),
+        d.attribution(),
+        "restart and final capture must agree with full journal replay"
+    );
+
+    // A new attempt on the same adapter must not inherit the old receipt.
+    cosmon_state::event_log::emit_one(
+        &cosmon_state::event_log::resolve_events_log_path(&d.state_dir),
+        EventV2::WorkerSpawned {
+            worker_id: WorkerId::new("worker-2").unwrap(),
+            molecule: Some(d.mol.clone()),
+            session_name: "next".into(),
+            role: "polecat".into(),
+            adapter_name: "claude".into(),
+            loop_ownership: Default::default(),
+        },
+        None,
+    )
+    .unwrap();
+    let next = d.attribution();
+    assert_eq!(next.realized, Realized::Unknown);
+    assert_eq!(next.evidence, ModelEvidenceState::NotAssessed);
 }
 
 /// task-20260727-3f46, through the production entrypoint: the container /
