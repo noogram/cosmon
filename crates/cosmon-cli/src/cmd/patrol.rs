@@ -6377,7 +6377,18 @@ mod tests {
         );
         store.save_molecule(&mol.id, &mol).unwrap();
         let molecules = store.list_molecules(&MoleculeFilter::default()).unwrap();
-        let backend = mock_with_worker("w1", "Update available! 1 → 2\n› 1. Update\n  2. Skip");
+        let backend = mock_with_worker(
+            "w1",
+            include_str!("../../../../tests/fixtures/codex-update-menu-real.txt"),
+        );
+        let wid = WorkerId::new("w1").unwrap();
+        let initial_brief = cosmon_cli::injection_provenance::tackle_briefing(
+            &mol.id,
+            &store.molecule_dir(&mol.id),
+        );
+        backend
+            .send_input_observed(&wid, "briefing.md", &initial_brief)
+            .unwrap();
         let version = Arc::new(Mutex::new("codex-cli 1".to_owned()));
         let updater = FakeVersion(Arc::clone(&version));
         codex_update_sweep(
@@ -6391,6 +6402,19 @@ mod tests {
         );
         assert!(backend.calls().iter().any(|call| matches!(call,
             MockCall::SendInput { input, .. } if input.is_empty())));
+        let dialogue = dialogue_scan_sweep(
+            &store,
+            tmp.path(),
+            &molecules,
+            Some(&backend),
+            &DialogueScanOpts {
+                codex_update_policy: cosmon_core::config::CodexUpdatePolicy::Auto,
+                ..opts(false)
+            },
+            Utc::now(),
+        )
+        .unwrap();
+        assert!(dialogue.findings.is_empty());
         *version.lock().unwrap() = "codex-cli 2".to_owned();
         backend.set_canned_output("Update ran successfully! Please restart Codex");
         codex_update_sweep(
@@ -6423,8 +6447,14 @@ mod tests {
         let calls = backend.calls();
         assert!(calls.iter().any(|call| matches!(call,
             MockCall::Terminate { worker_id } if worker_id == "w1")));
-        assert!(calls.iter().any(|call| matches!(call,
-            MockCall::SendInput { input, .. } if input == "briefing.md")));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| matches!(call,
+            MockCall::SendInput { input, .. } if input == "briefing.md"))
+                .count(),
+            2
+        );
         let update_record =
             std::fs::read_to_string(store.molecule_dir(&mol.id).join("codex-updates.jsonl"))
                 .unwrap();
