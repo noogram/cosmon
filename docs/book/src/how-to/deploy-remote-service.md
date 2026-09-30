@@ -46,6 +46,13 @@ installed `cs`, you already have the connector — there is no separate client
 fetch. The steps below cover only the **host**; run the `cosmon-remote` commands
 from Step 4 on the machine where you installed `cs`.
 
+Remote harvest has two explicit profiles. **Scoped** lets a binding-granted
+`cosmon:molecule:harvest` credential close and merge ordinary work. **Sealed**
+also requires an independently signed grant installed for that molecule or
+mission. Neither profile is selected by an upgrade. See the
+[remote harvest contract](../../../specs/remote-harvest-contract.md) for the
+policy table and typed refusals.
+
 The service delegates work to `cs tackle`; it is not a second scheduler. On
 the host, `cs` resolves the selected worker adapter. For this setup it uses the
 built-in `local` adapter: an in-process Ollama `/v1` client. No Node.js,
@@ -156,6 +163,7 @@ EOF
     --noyau demo --sub demo-operator \
     --iss https://idp.test.cosmon-oidc-testkit --aud cosmon-rpp-test \
     --scope cosmon:molecule:read --scope cosmon:molecule:write \
+    --scope cosmon:molecule:harvest \
     > "$COSMON_HOME/state/nucleons/demo/oidc-identity.toml"
 '
 ```
@@ -269,6 +277,29 @@ The service is deliberately loopback-only here. The tunnel is the sole L0 path
 to its HTTP surface; the client does not use a direct shell or container-exec
 path to create, tackle, or fetch work.
 
+For the harvest administration commands below, give the adapter a separate
+host-controlled admin credential at boot. On the operator machine, prepare a
+file with `umask 077; openssl rand -hex 32 > "$HOME/.config/cosmon/harvest-admin.token"`
+after creating that directory, then install the same bytes as a mode-0600
+secret file on the host. Set `COSMON_ADMIN_TOKEN_FILE` to that host file's
+absolute path in the adapter's supervised environment and restart the adapter.
+Use the operator-side file with `--admin-token-file`; never put the credential
+in a tenant bearer, a URL, or a tracked config file. An absent or unreadable
+host secret leaves the admin route closed (`admin_disabled`).
+
+For the example `/opt/cosmon` layout in `rpp.toml`, the provisioning step is:
+
+```sh
+mkdir -p "$HOME/.config/cosmon"
+umask 077
+openssl rand -hex 32 > "$HOME/.config/cosmon/harvest-admin.token"
+scp "$HOME/.config/cosmon/harvest-admin.token" \
+  <remote>:/opt/cosmon/state/security/harvest-admin.token
+ssh <remote> 'chmod 600 /opt/cosmon/state/security/harvest-admin.token'
+# Set COSMON_ADMIN_TOKEN_FILE=/opt/cosmon/state/security/harvest-admin.token
+# in the adapter service manager, then restart the adapter.
+```
+
 ## Step 4: Open the tunnel, mint a demo token, and create a client profile
 
 On the client machine, open a tunnel. It maps the remote service's loopback
@@ -315,6 +346,111 @@ Verify both liveness and the identity that the service resolved:
 cosmon-remote healthz
 cosmon-remote auth me
 ```
+
+### Provision remote harvest
+
+First grant `cosmon:molecule:harvest` in the **binding for this exact issuer,
+subject and audience**. Add it to the `--scope` list in Step 2 when rendering
+a new binding, or to the existing binding's `[scopes].allowed` list and reload
+the adapter. A token claiming the scope cannot supply it when the binding
+omits it. For the demo issuer, mint a fresh token with that scope as well; the
+token's `write` scope by itself cannot authorize either explicit profile.
+Keep `read` for status and other observations, `write` for nucleation and
+ordinary mutations, and add `cosmon:worker:spawn` only when dispatch or
+auto-propel is intended. A binding reload does not add harvest to existing
+bindings automatically.
+
+For the demo identity in Step 4, after updating and reloading its binding,
+replace the exported token with one that includes the new scope:
+
+```sh
+TOKEN=$(ssh <remote> '
+  curl --fail --silent --show-error -X POST \
+    "http://127.0.0.1:8444/issue?sub=demo-operator&aud=cosmon-rpp-test&scopes=cosmon:molecule:read,cosmon:molecule:write,cosmon:molecule:harvest" \
+    | jq -r .access_token
+')
+export COSMON_REMOTE_TOKEN="$TOKEN"
+```
+
+On a freshly provisioned galaxy with `[harvest_authority] required` absent or
+false, select the scoped profile from the operator machine. The
+[policy fragment](../../../../crates/cosmon-rpp-adapter/deploy/harvest-policy.toml.example)
+shows the corresponding explicit galaxy setting; the command makes the
+compare-and-set administrative write:
+
+```sh
+cosmon-remote harvest configure --policy scoped \
+  --admin-token-file "$HOME/.config/cosmon/harvest-admin.token"
+cosmon-remote harvest status --json
+cosmon-remote molecule done <completed-molecule-id> \
+  --reason "reviewed for remote integration" --json
+```
+
+Check `policy: scoped`, `provenance: explicit`, and `merged: true` in the
+responses, then inspect the tenant base branch for the merge. The dedicated
+harvest scope alone does not grant `write` or `spawn`. If local
+`[harvest_authority] required = true`, selecting scoped refuses
+`harvest_policy_conflict`; resolve that local policy deliberately before
+trying again. Do not erase `required` as an automatic upgrade step.
+
+For a sealed profile, install the external `minisign` executable **on the
+operator machine**, then use the same admin credential to install only its
+public root. `init` generates an encrypted private key under
+`$XDG_CONFIG_HOME/cosmon/harvest/keys/<profile>/` (or the corresponding
+`~/.config` directory) and prompts for its password locally. Keep that
+directory outside service and worker mounts. A profile with
+`required = true` may select sealed without weakening its local seal policy.
+
+```sh
+cosmon-remote harvest init \
+  --admin-token-file "$HOME/.config/cosmon/harvest-admin.token"
+cosmon-remote harvest status --json
+cosmon-remote harvest grant --molecule <completed-molecule-id> --expires-in 1h
+cosmon-remote harvest status --molecule <completed-molecule-id> --json
+cosmon-remote molecule done <completed-molecule-id> \
+  --reason "reviewed sealed integration" --json
+```
+
+`grant` fetches current facts, checks the canonical challenge locally,
+displays the grant for review, asks the external signer to sign on this
+device, and uploads the signed result. Installation does not merge; `done`
+performs the synchronous transaction. A mission grant uses
+`--mission <root-molecule-id>` instead of `--molecule`; it applies only to
+members of that mission under the signed policy. For offline issuance, run
+`grant --molecule <id> --export <challenge.json>` on a connected client,
+`grant --sign <challenge.json>` on the signing device, then
+`grant --import <challenge.json.signed.json>` on a connected client. The
+export, sign and import modes are exclusive.
+
+Grants expire after one hour by default; use `--expires-in` to choose minutes,
+hours or days, or deliberately use `--no-expiry` until the epoch changes.
+On expiry or changed facts, inspect `harvest status --molecule` and issue a
+fresh grant. To revoke all existing grants without replacing the key, a local
+operator in the tenant galaxy can run
+`cs harvest-authority configure --policy sealed --epoch <current-epoch-plus-one>`;
+the epoch must increase. `harvest configure --policy disabled` stops remote
+harvest immediately, but restoring the old root and epoch could make an
+unexpired grant usable again, so bump the epoch before re-enabling it. To
+rotate the public root, read the current
+`key_fingerprint` from status and run `harvest init --rotate-from <fingerprint>`;
+the compare-and-set increments the epoch and invalidates older grants. A
+second `init` with the same key is idempotent. Protect the old private key
+according to your retention policy; never copy it into the service.
+
+An explicitly configured `cs` binary executor cannot perform an explicit
+remote harvest: `done` returns `harvest_effect_unsupported`. Remove that
+binary selection to use the linked library effect. On explicit profiles,
+`--force`, `--skip-pre-done-hook` and `--deploy-off-trunk` are refused
+`harvest_override_requires_ratification`; reserved work is also refused.
+Use operator review and the local workflow for those cases. A `200` with
+`merged: false` is a valid no-merge or no-op outcome; it is not evidence of
+integration. A recovery refusal (`harvest_recovery_required`) requires
+inspection of the durable journal and Git state, never receipt deletion.
+
+Existing galaxies with no `remote` setting retain their prior behavior:
+`required = false` remains disabled, while `required = true` keeps the legacy
+write-plus-seal path. `harvest status` reports `provenance: legacy`. No restart,
+upgrade or binding reload chooses scoped or changes an existing binding.
 
 ### Signing in from inside a container
 
@@ -510,10 +646,10 @@ RPP_E2E_EXPECT_SUB=<the same value> \
 pytest tests/e2e -m stack
 ```
 
-Two things must then be provisioned out of band, exactly as an operator would:
-the JWKS the adapter pins from disk must be that provider's (the adapter never
-dials the issuer — see the `rpp-jwks` volume in the compose file), and the
-redirect URI `http://127.0.0.1:7777/callback` must be registered on the client.
+Two things must then be provisioned out of band: the JWKS the adapter pins
+from disk must be that provider's (see the `rpp-jwks` volume in the compose
+file), and the redirect URI `http://127.0.0.1:7777/callback` must be
+registered on the client.
 
 ### The `tackle` leg, and why it is the interesting one
 
@@ -547,22 +683,16 @@ That is a change of verdict, and it took three issues. The door's decision half
 runs in-process (#54), so every pre-effect refusal answers with no `cs` binary
 present. The effect half became a library the adapter links, `cosmon-harvest`,
 and the *default* (#67, #68) — so a stock deployment reaches the real
-transaction instead of a `501 harvest_effect_unavailable`. What remained was
-ADR-172's second key, and the suite now turns both halves of it:
+transaction instead of a `501 harvest_effect_unavailable`. The historical
+container suite exercises the legacy sealed profile, with both conditions:
 
-- `[harvest_authority] required = true` in the throwaway galaxy, so the
-  decision half admits. Without it the door refuses `not_authorized` before it
-  has even loaded the molecule.
+- `[harvest_authority] required = true` in the throwaway galaxy. Without it,
+  legacy remote harvest is disabled.
 - an operator-**sealed**, molecule-scoped grant, so the effect half admits too.
-  An armed galaxy with no trust root refuses `not_authorized` a second time,
-  from inside the trunk lock — the shape a deployment must never be left in.
+  An armed galaxy with no trust root refuses from inside the trunk lock.
 
-Cosmon verifies operator signatures and ships nothing that produces one, so the
-seal cannot come from `cs` or from the image. It is minted on the host by
-`cs-e2e-harvest-seal`, a binary of the `publish = false`
-`cosmon-minisign-testkit` crate that appears only in `[dev-dependencies]` — the
-same structural arrangement ADR-171 uses for the takeover key, and the reason
-`takeover_unforgeable` still passes.
+The production path is the operator-side `cosmon-remote harvest init` and
+`harvest grant` sequence above.
 
 Two further tests pin the parameter surface the D4 reversal put on the wire: a
 blank `--reason` is refused `400 missing_reason` (the door never invents a

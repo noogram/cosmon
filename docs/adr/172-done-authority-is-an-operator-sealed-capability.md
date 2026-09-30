@@ -271,9 +271,9 @@ The decision is violated if any of these is true:
 
 ## Amendment (2026-09-29, issue #120 W0) — operator-side tooling, scoped remote policy, and what the effect boundary must truthfully claim
 
-**Status:** adopted as contract; **not implemented**. The implementation
-status section above stays accurate for the code as it is. The contract
-these clauses belong to is
+**Status:** adopted; W1–W7 of issue #120 implement the code and operator
+surface. Container journey acceptance remains W9. Historical status above
+describes the earlier implementation point. The contract for these clauses is
 [`docs/specs/remote-harvest-contract.md`](../specs/remote-harvest-contract.md).
 
 **Why.** An external operator of the remote service reported that the sealed
@@ -319,4 +319,3 @@ establishes the outcome. The lock excludes cooperating writers only.
 Claims in the implementation status section about facts, epoch monotonicity
 and replay are corrected by the units that implement them, when they have
 evidence, and not before.
-

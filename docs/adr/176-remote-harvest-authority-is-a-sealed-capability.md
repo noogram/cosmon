@@ -904,6 +904,12 @@ protection against a stolen API credential; it is offered because an
 operator-owned service may accept that trade and must be able to see it was
 made, not because the two are equivalent.
 
+**OQ-1 resolved by W4.** The dedicated harvest scope is granted by the
+exact issuer/subject/audience binding, checked again at the effect boundary.
+A bearer scope claim alone cannot create harvest authority. This narrows
+which admitted tenant credentials may use the scoped profile; it does not
+turn the scoped policy into an independently sealed one.
+
 **What stands.** Tenant routing, one verb and one implementation, D2's
 separation predicate, D3's branch preservation, the honest synchronous
 outcomes of §12, D7's backlog bound and refusals, and D6's spend control
@@ -923,4 +929,3 @@ loses an option it uses today.
 **§8 falsifier 6 (arming-time `base_not_fast_forward`)** stays recorded as
 unmet until the grant challenge route exists; that route is where an
 arming-time check can live, and the unit adding it owns the decision.
-

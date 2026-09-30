@@ -23,6 +23,22 @@ inside a record treated as ordinary can still escape detection.
 
 `cs harvest-authority` is an operator terminal surface for remote harvest trust administration, status, challenge construction and signed-grant import (issue #120 W6). No native UI counterpart is shipped; the RPP exposes the corresponding tenant reads and imports and a disjoint host-sealed administration route. A native UI must use the same public-root and grant validation rules before parity can be claimed.
 
+## Remote harvest operator journeys (issue #120)
+
+| Capability | Operator terminal | Native UI | Remote service |
+|---|---|---|---|
+| Select an explicit remote policy | `cosmon-remote harvest configure --policy scoped\|sealed\|disabled --admin-token-file <file>`; local `cs harvest-authority configure` | No equivalent control audited; use the terminal | Host-sealed compare-and-set admin route |
+| Create or rotate a signer key | `cosmon-remote harvest init --admin-token-file <file> [--rotate-from <fingerprint>]` on the operator device | No equivalent control audited; use the terminal | Receives only the public root and epoch |
+| Issue a molecule or mission grant | `cosmon-remote harvest grant --molecule <id>` or `--mission <id>`; `--export`, `--sign`, `--import` split the offline flow | No equivalent issuance flow audited; use the terminal | Challenge and verified grant-import routes; signing is local |
+| Inspect policy and grant validity | `cosmon-remote harvest status [--molecule <id>]`; local `cs harvest-authority status` | No equivalent view audited; use the terminal | Tenant status route reports policy provenance and grant state |
+| Close and optionally integrate a molecule | `cosmon-remote molecule done <id> --reason <text>`; local `cs done` | No equivalent control audited; use the terminal | Synchronous `done` route reports `merged` and any non-integration reason |
+
+These terminal fallbacks are the available operator surface, not a claim of
+native UI parity. The dedicated harvest scope comes from the tenant binding
+only (OQ-1); a token claim alone is insufficient. On an explicit profile,
+the sensitive override flags are refused pending exact ratification. No
+private signing key enters the service or a worker through these commands.
+
 ## Harvest diagnostics and tracked state (issue #123)
 
 | Capability | CLI | Native UI | Remote service |

@@ -2,8 +2,9 @@
 
 **Status:** Ratified by work unit W0 of issue #120 (2026-09-29).
 W4 implements the remote policy resolver, dedicated scope, binding-only
-source rule, and trusted route-to-effect transport. The operator commands,
-administrative routes, and typed refusal object remain work for later units.
+source rule, and trusted route-to-effect transport. W5–W7 add the typed
+refusals, administrative routes, and operator-side commands. The opt-in
+container acceptance cases remain for W9.
 Absent `remote` configuration retains the legacy behavior.
 
 **Amends:** [ADR-172](../adr/172-done-authority-is-an-operator-sealed-capability.md)
@@ -18,14 +19,13 @@ Absent `remote` configuration retains the legacy behavior.
 
 ## 1. The problem this contract answers
 
-A remote `done` (`POST /v1/molecules/{id}/done`) merges today only when three
-things hold: the bearer has `cosmon:molecule:write`, the tenant galaxy has
-`[harvest_authority] required = true`, and a valid operator-signed grant is
-installed under `.cosmon/state/harvest/grants/`. Cosmon ships no supported
-production command that creates the key, builds the challenge, signs it and
-installs the grant; the only signer that exists is the `publish = false`
-test kit. An external operator of the remote service reported that the
-ordinary journey therefore cannot be completed from shipped tooling.
+Before this contract, remote `done` (`POST /v1/molecules/{id}/done`) needed
+`cosmon:molecule:write`, `[harvest_authority] required = true`, and a valid
+operator-signed grant. There was no supported production key and grant
+issuance command. An external operator of the remote service could not
+complete the journey with shipped tooling. The explicit profiles and
+operator commands below close that usability gap while preserving the legacy
+policy when `remote` is absent.
 
 The seal has a real purpose — bounded authority that possession of the
 ordinary API credential cannot create — so it is kept, as an explicit
@@ -250,9 +250,7 @@ coarse labels; new clients tolerate missing or unknown fields. `cosmon-remote`
 prints the reason, one locally mapped next action and the request ID; command
 hints are never executable strings supplied by the server.
 
-## 12. Surface additions (proposed)
-
-All syntax here is **proposed** and does not exist today.
+## 12. Surface additions (implemented by W6–W7)
 
 **Routes** (each registered in `docs/guides/api-cli-coverage.md`,
 `openapi/v1.yaml`, `tests/api_surface_freeze.rs` and the surface canon, per
@@ -293,13 +291,12 @@ binding removed after route admission cannot authorize an effect.
 
 ## 14. Acceptance cases
 
-`tests/e2e/test_harvest_profiles.py` carries one case per contract clause,
-marked `contract_pending` and **deselected unless
-`RPP_E2E_CONTRACT_PENDING=1`**. Deselection, not skip: the suite's no-skip
-rule holds, and a case that has not run never reports green. The nightly
-container job does not set the variable, so these cases cannot sit red in
-any default gate before their implementation exists. The unit that implements
-a clause removes the marker from its cases in the same change.
+`tests/e2e/test_harvest_profiles.py` carries cases per contract clause. Its
+client-only operator surface cases run by default. The remaining container
+cases are marked `contract_pending` and **deselected unless
+`RPP_E2E_CONTRACT_PENDING=1`**. Deselection, not skip: a case that has not run
+never reports green. The nightly container job does not set the variable.
+W9 owns the remaining prerequisites and their final container verdicts.
 
 | Case | Clause |
 |---|---|
