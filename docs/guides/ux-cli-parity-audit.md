@@ -98,14 +98,14 @@ The marker records pane text, not the cause of a later process exit. The
 existing unharvested-work guard can require `--allow-unharvested` before
 reclamation; neither purge path collapses the molecule.
 
-## Whisper pane dialogue guard (issue #121)
+## Whisper pane dialogue guard (issues #121 and #130)
 
 | Capability | CLI | Native UI | Other CLI |
 |---|---|---|---|
-| Deliver a whisper through ordinary pane output, including status prose and an informational update banner | `cs whisper` allows the captured tail and records the delivery | No matching pane-dialogue guard audited | No matching pane-dialogue guard audited |
-| Refuse a recognised money-stake or unknown confirmation/menu widget and show the matched rule and tail lines | `cs whisper` exits 5 before persistence or paste; `cs whisper --help` states the policy | No equivalent refusal detail audited | No equivalent refusal detail audited |
+| Deliver a whisper through ordinary pane output, including status prose, an informational update banner, and earlier questions above the latest idle input field | `cs whisper` allows the active tail and records the delivery | No matching pane-dialogue guard audited | No matching pane-dialogue guard audited |
+| Refuse a recognised money-stake or unknown confirmation/menu widget, including mid-line yes/no choices and risky prompts without a permission marker, and show the matched rule and tail lines | `cs whisper` exits 5 before persistence or paste; `cs whisper --help` states the policy | No equivalent refusal detail audited | No equivalent refusal detail audited |
 
-Unknown here is a recognised widget whose choice cannot be inferred safely.
+Unknown here is a recognised widget or risky prompt whose choice cannot be inferred safely.
 Unrecognised ordinary output is deliverable. The other audited surfaces
 remain parity gaps for this refusal detail.
 

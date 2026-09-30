@@ -1230,7 +1230,7 @@ CLI seam — both invocations route to the same in-process adapter.
 
 Whisper — inject a perturbation payload into a live worker's tmux pane (v0)
 
-Molecule delivery refuses on money-stake markers and recognised unknown confirmation/menu widgets. Ordinary output and routine permission prompts remain deliverable. A dialogue refusal reports the rule and matched pane tail lines.
+Molecule delivery refuses on money-stake markers and recognised unknown confirmation/menu widgets in the active pane tail. The latest idle input field supersedes earlier scrollback. Confirmations such as [y/n] and risky prompts without a permission marker remain blocking. Ordinary output and routine permission prompts remain deliverable. A dialogue refusal reports the rule and matched pane tail lines.
 
 **Usage:** `cs whisper [OPTIONS] [MOLECULE_ID]`
 
