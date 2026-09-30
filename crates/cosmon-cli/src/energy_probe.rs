@@ -226,14 +226,26 @@ mod model_evidence_capture_tests {
         let mut file = std::fs::File::create(&path).unwrap();
         file.write_all(&vec![b'x'; SESSION_READ_CHUNK * 4 + 1])
             .unwrap();
-        file.write_all(b"\n{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n")
-            .unwrap();
         drop(file);
-        let result = tail(&path).read_new(false);
+        let mut capture = tail(&path);
+        let result = capture.read_new(false);
+        assert!(capture.skipping_oversize);
+        assert!(matches!(
+            result.coverage,
+            ModelEvidenceCoverage::Degraded(_)
+        ));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"x\n{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n")
+            .unwrap();
+        let result = capture.read_new(false);
         assert_eq!(result.trajectory.len(), 1);
         assert!(
             matches!(result.coverage, ModelEvidenceCoverage::Degraded(ref reasons)
-            if reasons.contains(&ModelEvidenceReason::OversizeRecord))
+            if reasons.contains(&ModelEvidenceReason::OversizeRecord)
+                && !reasons.contains(&ModelEvidenceReason::MalformedRecord))
         );
     }
 
@@ -1166,6 +1178,7 @@ struct SessionLogTail {
     prefix: Option<[u8; 32]>,
     continuity_lost: bool,
     read_failed: bool,
+    skipping_oversize: bool,
     prior: Option<ModelEvidenceAssessment>,
 }
 
@@ -1376,6 +1389,7 @@ impl SessionLogTail {
             prefix: None,
             continuity_lost: false,
             read_failed: false,
+            skipping_oversize: false,
             prior,
         }
     }
@@ -1396,6 +1410,7 @@ impl SessionLogTail {
         self.evidence = ModelEvidenceAccumulator::new(self.grammar());
         self.identity = None;
         self.prefix = None;
+        self.skipping_oversize = false;
         self.continuity_lost |= continuity_lost;
         self.generation.0 = self.generation.0.saturating_add(1);
     }
@@ -1438,7 +1453,6 @@ impl SessionLogTail {
         }
         let mut remaining = len - self.offset;
         let mut buf: Vec<u8> = Vec::new();
-        let mut skipping = false;
         while remaining > 0 {
             let want = usize::try_from(remaining)
                 .unwrap_or(SESSION_READ_CHUNK)
@@ -1456,11 +1470,11 @@ impl SessionLogTail {
                 break;
             }
             remaining -= got as u64;
-            if skipping {
+            if self.skipping_oversize {
                 if let Some(end) = buf.iter().position(|b| *b == b'\n') {
                     self.offset += end as u64 + 1;
                     buf.drain(..=end);
-                    skipping = false;
+                    self.skipping_oversize = false;
                 } else {
                     self.offset += buf.len() as u64;
                     buf.clear();
@@ -1474,7 +1488,7 @@ impl SessionLogTail {
                         .note_input_loss(ModelEvidenceInputLoss::OversizeRecord);
                     self.offset += buf.len() as u64;
                     buf.clear();
-                    skipping = true;
+                    self.skipping_oversize = true;
                 }
                 continue;
             };
