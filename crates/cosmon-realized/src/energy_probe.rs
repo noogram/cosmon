@@ -12,9 +12,9 @@
 //!
 //! Codex chain: worker → tmux pane cwd (`#{pane_current_path}`, with the
 //! fleet-recorded worktree as post-mortem fallback) →
-//! [`resolve_codex_session_by_cwd`] (the `session_meta.payload.cwd` join)
+//! `resolve_codex_session_by_cwd` (the `session_meta.payload.cwd` join)
 //! → [`cosmon_core::codex_energy`] token parser + price manifest →
-//! [`WorkerEnergy`]. Cumulative deltas are priced against their exact realized
+//! [`crate::energy_probe::WorkerEnergy`]. Cumulative deltas are priced against their exact realized
 //! models. A `ChatGPT` allowance and API-equivalent USD remain independent;
 //! an unpriced segment keeps its real counters and explicit partial coverage.
 //!
@@ -359,11 +359,11 @@ pub fn load_worker_energy(
 /// an incremental [`JournalFold`] instead of re-parsing `events.jsonl` on
 /// every refresh (issue #116).
 #[must_use]
-pub fn load_worker_energy_with_adapters(
+pub fn load_worker_energy_with_adapters<S: std::hash::BuildHasher>(
     state_dir: &Path,
     backends: &[cosmon_transport::TmuxBackend],
     fleet: &cosmon_state::Fleet,
-    adapters: &HashMap<MoleculeId, String>,
+    adapters: &HashMap<MoleculeId, String, S>,
 ) -> HashMap<WorkerId, WorkerEnergy> {
     let mut map: HashMap<WorkerId, WorkerEnergy> = HashMap::new();
 
@@ -519,7 +519,7 @@ impl JournalFold {
 
     /// `mol_id -> last selected adapter`, the input of
     /// [`load_worker_energy_with_adapters`] — the same answer
-    /// [`fold_last_adapters`] gives, from the retained events.
+    /// `fold_last_adapters` gives, from the retained events.
     #[must_use]
     pub fn last_adapters(&self) -> HashMap<MoleculeId, String> {
         self.events
@@ -560,9 +560,9 @@ pub fn with_journal_fold<T>(
 ///
 /// The `adapter` that ran the worker's molecule (the last
 /// [`EventV2::AdapterSelected`] on `events.jsonl`, resolved by the caller —
-/// batched once via [`fold_last_adapters`], or for one molecule by a
+/// batched once via `fold_last_adapters`, or for one molecule by a
 /// [`RealizedCapture`]) selects the chain: `codex` reads the codex rollout
-/// log via [`probe_codex_worker_energy`]; `claude` — and the legacy case
+/// log via `probe_codex_worker_energy`; `claude` — and the legacy case
 /// where no selection was ever recorded (`adapter == None`) — reads the
 /// Claude Code session log via the PID-sidecar chain, unchanged. In-process
 /// provider adapters (openai/anthropic/mistral) have no session log on disk

@@ -944,6 +944,7 @@ dependencies = [
  "cosmon-pilot-checkpoint",
  "cosmon-process-witness",
  "cosmon-provider",
+ "cosmon-realized",
  "cosmon-registry",
  "cosmon-remote",
  "cosmon-runtime",
@@ -1214,6 +1215,7 @@ dependencies = [
  "chrono",
  "cosmon-core",
  "cosmon-filestore",
+ "cosmon-realized",
  "cosmon-state",
  "cosmon-transport",
  "http",
@@ -1368,6 +1370,22 @@ dependencies = [
  "tokio",
  "tracing",
  "wiremock",
+]
+
+[[package]]
+name = "cosmon-realized"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "claudion",
+ "cosmon-core",
+ "cosmon-filestore",
+ "cosmon-observability",
+ "cosmon-state",
+ "cosmon-transport",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

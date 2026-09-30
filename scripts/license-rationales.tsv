@@ -48,6 +48,7 @@ cosmon-mcp	core	AGPL-3.0-only	MCP server
 cosmon-minisign-testkit	core	AGPL-3.0-only	test-only minisign signer (publish=false) — exists so `cs` has NO dependency edge to a signing path (M7-F1); dev-dependency of the pilot-lease tests
 cosmon-notary	core	AGPL-3.0-only	notary primitives — layer ② (delib-ca76)
 cosmon-observability	core	AGPL-3.0-only	observability — layer ⑥ (delib-ca76)
+cosmon-realized	core	AGPL-3.0-only	runtime session-log capture and durable model evidence shared by lifecycle surfaces; filesystem and process effects
 cosmon-oidc-testkit	core	AGPL-3.0-only	OIDC test kit binary
 cosmon-ops-tools	core	AGPL-3.0-only	ops tools — layer ③ product harness (delib-ca76)
 cosmon-pilot	core	AGPL-3.0-only	pilot UX — layer ⑥ cockpit (delib-ca76)

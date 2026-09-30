@@ -70,6 +70,7 @@ members = [
     "crates/cosmon-cockpit-http",
     "crates/cosmon-style",
     "crates/cosmon-observability",
+    "crates/cosmon-realized",
     "crates/cosmon-archive",
     "crates/cosmon-hash",
     "crates/cosmon-minisign-testkit",
@@ -225,6 +226,7 @@ notify = "8"
 nix = { version = "0.31", default-features = false, features = ["signal", "user"] }
 cosmon-cockpit = { path = "crates/cosmon-cockpit" }
 cosmon-observability = { path = "crates/cosmon-observability" }
+cosmon-realized = { path = "crates/cosmon-realized" }
 cosmon-archive = { path = "crates/cosmon-archive" }
 cosmon-hash = { path = "crates/cosmon-hash" }
 cosmon-scenario = { path = "crates/cosmon-scenario" }

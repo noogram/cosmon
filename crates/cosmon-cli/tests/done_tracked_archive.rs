@@ -5,6 +5,7 @@
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
 fn git(repo: &Path, args: &[&str]) -> Output {
     Command::new("git")
@@ -72,8 +73,7 @@ fn terminal_molecule(repo: &Path) -> String {
     id
 }
 
-#[test]
-fn sibling_harvests_leave_tracked_archive_index_clean() {
+fn tracked_archive_fixture() -> (tempfile::TempDir, String, String) {
     let tmp = tempfile::tempdir().expect("temp repo");
     let repo = tmp.path();
     git_ok(repo, &["init", "-q", "-b", "main"]);
@@ -90,7 +90,12 @@ fn sibling_harvests_leave_tracked_archive_index_clean() {
     )
     .expect("config");
     fs::write(cosmon.join("state/fleet.json"), "{}\n").expect("fleet");
-    fs::write(cosmon.join(".gitignore"), "state/*\n!state/archive/\n").expect("ignore");
+    fs::write(
+        cosmon.join(".gitignore"),
+        "state/*\n!state/archive/\n!state/frontier.json\n",
+    )
+    .expect("ignore");
+    fs::write(cosmon.join("state/frontier.json"), "seed\n").expect("frontier seed");
     let archive_events = format!("events-{}.jsonl", chrono::Utc::now().format("%Y-%m"));
     fs::write(
         cosmon.join("state/archive/events").join(archive_events),
@@ -130,7 +135,6 @@ fn sibling_harvests_leave_tracked_archive_index_clean() {
 
     let a = terminal_molecule(repo);
     let b = terminal_molecule(repo);
-    let mut dirty_after_done = Vec::new();
     for (id, file) in [(&a, "a.txt"), (&b, "b.txt")] {
         git_ok(repo, &["checkout", "-q", "-b", &format!("feat/{id}")]);
         fs::write(repo.join(file), id).expect("worker file");
@@ -138,6 +142,15 @@ fn sibling_harvests_leave_tracked_archive_index_clean() {
         git_ok(repo, &["commit", "-qm", "worker output"]);
         git_ok(repo, &["checkout", "-q", "main"]);
     }
+
+    (tmp, a, b)
+}
+
+#[test]
+fn sibling_harvests_leave_tracked_archive_index_clean() {
+    let (tmp, a, b) = tracked_archive_fixture();
+    let repo = tmp.path();
+    let mut dirty_after_done = Vec::new();
 
     for (id, file) in [(&a, "a.txt"), (&b, "b.txt")] {
         let done = cs(repo, &["--json", "done", id, "--no-auto-propel"]);
@@ -200,4 +213,74 @@ fn sibling_harvests_leave_tracked_archive_index_clean() {
         dirty_after_done.iter().all(String::is_empty),
         "harvest left tracked or stageable archive changes: {dirty_after_done:?}"
     );
+}
+
+#[test]
+fn sibling_harvest_cannot_enter_trunk_during_post_harvest_commit() {
+    let (tmp, a, b) = tracked_archive_fixture();
+    let repo = tmp.path();
+    let entered = repo.join("post-commit-entered");
+    let release = repo.join("release-post-commit");
+    let hook = repo.join(".git/hooks/prepare-commit-msg");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\ncase \"$(cat \"$1\")\" in\n  *'record harvest state'*)\n    if mkdir \"{}\" 2>/dev/null; then\n      touch \"{}\"\n      while test ! -f \"{}\"; do sleep 0.05; done\n    fi\n    ;;\nesac\n",
+            repo.join("post-commit-once").display(),
+            entered.display(),
+            release.display(),
+        ),
+    )
+    .expect("hook");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("executable hook");
+    }
+
+    let first = Command::new(env!("CARGO_BIN_EXE_cs"))
+        .args(["--json", "done", &a, "--no-auto-propel"])
+        .current_dir(repo)
+        .env("COSMON_STATE_DIR", repo.join(".cosmon/state"))
+        .env("COSMON_CONFIG", repo.join(".cosmon/config.toml"))
+        .env_remove("COSMON_PARENT_MOL_ID")
+        .env_remove("COSMON_MOL_DIR")
+        .env_remove("COSMON_BASE_BRANCH")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("first harvest");
+    let started = Instant::now();
+    while !entered.exists() && started.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if !entered.exists() {
+        let _ = fs::write(&release, "go");
+        let output = first.wait_with_output().expect("first result");
+        panic!("first harvest must reach the state commit: {output:?}");
+    }
+
+    let sibling = Command::new(env!("CARGO_BIN_EXE_cs"))
+        .args(["--json", "done", &b, "--no-auto-propel"])
+        .current_dir(repo)
+        .env("COSMON_STATE_DIR", repo.join(".cosmon/state"))
+        .env("COSMON_CONFIG", repo.join(".cosmon/config.toml"))
+        .env("COSMON_TRUNK_LOCK_NONBLOCKING", "1")
+        .env_remove("COSMON_PARENT_MOL_ID")
+        .env_remove("COSMON_MOL_DIR")
+        .env_remove("COSMON_BASE_BRANCH")
+        .output()
+        .expect("sibling harvest");
+    fs::write(&release, "go").expect("release first harvest");
+    let first_output = first.wait_with_output().expect("first result");
+    assert!(
+        first_output.status.success(),
+        "first harvest: {first_output:?}"
+    );
+    assert!(
+        !sibling.status.success() && String::from_utf8_lossy(&sibling.stderr).contains("trunk"),
+        "sibling must be refused by the held trunk lock: {sibling:?}"
+    );
+    let retry = cs(repo, &["--json", "done", &b, "--no-auto-propel"]);
+    assert!(retry.status.success(), "sibling retry: {retry:?}");
 }

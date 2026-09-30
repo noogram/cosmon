@@ -52,6 +52,7 @@ cosmon-harvest.workspace = true
 cosmon-hash.workspace = true
 cosmon-notary.workspace = true
 cosmon-observability.workspace = true
+cosmon-realized.workspace = true
 cosmon-provider.workspace = true
 cosmon-agent-harness.workspace = true
 cosmon-ops-tools.workspace = true

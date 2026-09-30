@@ -10,7 +10,13 @@ use std::path::PathBuf;
 
 mod cmd;
 mod dotpath;
+// Binary unit tests use the module's fixture helpers; normal builds share the
+// library implementation with the MCP completion surface.
+#[cfg(test)]
+#[path = "../../cosmon-realized/src/energy_probe.rs"]
 mod energy_probe;
+#[cfg(not(test))]
+use cosmon_cli::energy_probe;
 mod event_log;
 mod llm;
 mod mindguard;

@@ -35,6 +35,9 @@ pub mod work_turn_input;
 /// exercises the real re-exec, so the two can never drift.
 pub mod realized_watcher;
 
+/// Shared realized-model capture used at CLI and MCP completion seams.
+pub use cosmon_realized::energy_probe;
+
 // The briefing-submit receipt kernel, plus the durable record and argv that let
 // a detached `cs briefing-backstop` child re-run it after `cs tackle` has
 // exited (COSMON #26-B). Documented by the module's own `//!` header and NOT by

@@ -16,6 +16,7 @@ chrono.workspace = true
 cosmon-core.workspace = true
 http = "1"
 cosmon-filestore.workspace = true
+cosmon-realized.workspace = true
 cosmon-state.workspace = true
 cosmon-transport.workspace = true
 rand.workspace = true

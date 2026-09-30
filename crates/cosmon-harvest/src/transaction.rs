@@ -3954,60 +3954,66 @@ fn run_with_remote_before_lock(
     //    log.md, events.jsonl, synthesis.md, responses/, …) so the operator
     //    doesn't need to manually `git add` + `git commit` after every done.
     //    Non-blocking: failures warn but never abort teardown.
-    {
-        let mol_dir = store.molecule_dir(&mol_id);
-        let short_topic = mol
-            .variables
-            .get("topic")
-            .map(|t| {
-                let truncated: String = t.chars().take(50).collect();
-                if truncated.len() < t.len() {
-                    format!("{truncated}…")
-                } else {
-                    truncated
-                }
-            })
-            .unwrap_or_default();
-        if let Some((recorded, actual)) =
-            crate::worktree::done_worktree_mismatch(recorded_worktree.as_deref(), &repo_root)
-        {
-            warnings.push(format!(
-                "SKIPPED artifact commit — {mol_id}'s recorded worktree ({}) is not \
+    // Reacquire after fleet-purge rather than carrying the first guard across
+    // its fleet lock. Both commits below mutate the shared checkout and must
+    // exclude a sibling harvest's merge and index operations (ADR-110 I1).
+    // Keep the guard through both commits; on lock failure, skip both writes.
+    match store.lock_trunk(&format!("cs done bookkeeping {mol_id}")) {
+        Ok(_bookkeeping_guard) => {
+            let mol_dir = store.molecule_dir(&mol_id);
+            let short_topic = mol
+                .variables
+                .get("topic")
+                .map(|t| {
+                    let truncated: String = t.chars().take(50).collect();
+                    if truncated.len() < t.len() {
+                        format!("{truncated}…")
+                    } else {
+                        truncated
+                    }
+                })
+                .unwrap_or_default();
+            if let Some((recorded, actual)) =
+                crate::worktree::done_worktree_mismatch(recorded_worktree.as_deref(), &repo_root)
+            {
+                warnings.push(format!(
+                    "SKIPPED artifact commit — {mol_id}'s recorded worktree ({}) is not \
                  inside the current repo ({}); refusing to commit its artifacts into a \
                  foreign repo",
-                recorded.display(),
-                actual.display(),
-            ));
-        } else {
-            // Native attribution (task-20260717-c873; retargeted by
-            // delib-20260717-194b, F1). Reuse the SAME `coauthor_trailers`
-            // computed once at the top level (before the merge) — the merge
-            // commit is the primary carrier (F1); this artifact commit is the
-            // *fallback* carrier for artifact-producing molecules. Empty
-            // `coauthor_email` ⇒ no trailers ⇒ commit message byte-identical to
-            // a pre-attribution cosmon.
-            match commit_molecule_artifacts(
-                &repo_root,
-                &mol_dir,
-                &events_path,
-                &mol_id,
-                &short_topic,
-                &coauthor_trailers,
-            ) {
-                Ok(true) => actions.push("committed_artifacts".to_owned()),
-                Ok(false) => { /* nothing to commit — silent */ }
-                Err(e) => warnings.push(format!("artifact commit failed: {e}")),
+                    recorded.display(),
+                    actual.display(),
+                ));
+            } else {
+                // Native attribution (task-20260717-c873; retargeted by
+                // delib-20260717-194b, F1). Reuse the SAME `coauthor_trailers`
+                // computed once at the top level (before the merge) — the merge
+                // commit is the primary carrier (F1); this artifact commit is the
+                // *fallback* carrier for artifact-producing molecules. Empty
+                // `coauthor_email` ⇒ no trailers ⇒ commit message byte-identical to
+                // a pre-attribution cosmon.
+                match commit_molecule_artifacts(
+                    &repo_root,
+                    &mol_dir,
+                    &events_path,
+                    &mol_id,
+                    &short_topic,
+                    &coauthor_trailers,
+                ) {
+                    Ok(true) => actions.push("committed_artifacts".to_owned()),
+                    Ok(false) => { /* nothing to commit — silent */ }
+                    Err(e) => warnings.push(format!("artifact commit failed: {e}")),
+                }
+            }
+            // Archival and frontier writes happen after the merge, so the pre-merge
+            // flush cannot see them. Commit any trackable state they left behind before
+            // another sibling harvest attempts to merge into this checkout.
+            match commit_state_dir_changes(&repo_root, "chore(state): record harvest state") {
+                Ok(true) => actions.push("committed_post_harvest_state".to_owned()),
+                Ok(false) => {}
+                Err(e) => warnings.push(format!("post-harvest state commit failed: {e}")),
             }
         }
-    }
-
-    // Archival and frontier writes happen after the merge, so the pre-merge
-    // flush cannot see them. Commit any trackable state they left behind before
-    // another sibling harvest attempts to merge into this checkout.
-    match commit_state_dir_changes(&repo_root, "chore(state): record harvest state") {
-        Ok(true) => actions.push("committed_post_harvest_state".to_owned()),
-        Ok(false) => {}
-        Err(e) => warnings.push(format!("post-harvest state commit failed: {e}")),
+        Err(e) => warnings.push(format!("post-harvest bookkeeping lock failed: {e}")),
     }
 
     // 8. Final post-condition (task-20260606-21d4, DoD b). `cs done` must

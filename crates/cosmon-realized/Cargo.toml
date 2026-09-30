@@ -1,0 +1,25 @@
+[package]
+name = "cosmon-realized"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+description = "Shared realized-model and energy capture for Cosmon lifecycle surfaces"
+
+[dependencies]
+chrono.workspace = true
+claudion.workspace = true
+cosmon-core.workspace = true
+cosmon-filestore.workspace = true
+cosmon-observability.workspace = true
+cosmon-state.workspace = true
+cosmon-transport.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
