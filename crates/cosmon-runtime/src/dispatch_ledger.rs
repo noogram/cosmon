@@ -739,6 +739,84 @@ mod tests {
             .contains_key(&runtime_worker));
     }
 
+    /// A lifecycle writer can act after the dispatch claim and before the
+    /// ledger commit. Its decision must survive, with no worker registered.
+    #[test]
+    fn concurrent_terminal_or_freeze_transition_refuses_dispatch() {
+        for status in [MoleculeStatus::Collapsed, MoleculeStatus::Frozen] {
+            let (dir, store, claimed) = fixture();
+            let mut current = claimed.clone();
+            current.status = status;
+            if status == MoleculeStatus::Collapsed {
+                current.collapse_reason = Some("operator stopped the task".to_owned());
+            }
+            store.save_molecule(&claimed.id, &current).expect("concurrent writer");
+
+            let worker = WorkerId::new("rewrite-briefing-aaaa").expect("worker id");
+            let adapter = adapter();
+            commit_dispatch(&store, &claimed, &record(&worker, &adapter, dir.path()))
+                .expect_err("a stale claim cannot reverse a lifecycle decision");
+
+            let observed = store.load_molecule(&claimed.id).expect("re-read");
+            assert_eq!(observed.status, status);
+            assert_eq!(observed.collapse_reason, current.collapse_reason);
+            assert!(observed.process.is_none());
+            assert!(!store.load_fleet().expect("fleet").workers.contains_key(&worker));
+        }
+    }
+
+    /// Tags are operator state too: a late hold must stop the spawn rather
+    /// than disappear when the tackler writes its older snapshot.
+    #[test]
+    fn concurrent_tag_change_refuses_dispatch_without_erasing_the_tag() {
+        let (dir, store, claimed) = fixture();
+        let mut current = claimed.clone();
+        current.tags.insert(cosmon_core::tag::Tag::new("hold:pilot").expect("tag"));
+        store.save_molecule(&claimed.id, &current).expect("concurrent tag");
+
+        let worker = WorkerId::new("rewrite-briefing-aaaa").expect("worker id");
+        let adapter = adapter();
+        commit_dispatch(&store, &claimed, &record(&worker, &adapter, dir.path()))
+            .expect_err("a late pilot hold must prevent dispatch");
+
+        let observed = store.load_molecule(&claimed.id).expect("re-read");
+        assert_eq!(observed.tags, current.tags);
+        assert_eq!(observed.status, MoleculeStatus::Pending);
+        assert!(observed.process.is_none());
+        assert!(!store.load_fleet().expect("fleet").workers.contains_key(&worker));
+    }
+
+    /// Spawn failure may race a second writer after the ledger commit.
+    /// Rollback only owns the worker binding and claim it just wrote.
+    #[test]
+    fn rollback_preserves_concurrent_lifecycle_and_tag_changes() {
+        for status in [MoleculeStatus::Collapsed, MoleculeStatus::Frozen] {
+            let (dir, store, prior) = fixture();
+            let worker = WorkerId::new("rewrite-briefing-aaaa").expect("worker id");
+            let adapter = adapter();
+            commit_dispatch(&store, &prior, &record(&worker, &adapter, dir.path()))
+                .expect("commit");
+
+            let mut current = store.load_molecule(&prior.id).expect("read commit");
+            current.status = status;
+            current.tags.insert(cosmon_core::tag::Tag::new("hold:pilot").expect("tag"));
+            if status == MoleculeStatus::Collapsed {
+                current.collapse_reason = Some("operator stopped the task".to_owned());
+                current.release_process();
+            }
+            store.save_molecule(&prior.id, &current).expect("concurrent writer");
+
+            rollback_dispatch(&store, &prior, &worker);
+
+            let observed = store.load_molecule(&prior.id).expect("re-read");
+            assert_eq!(observed.status, status);
+            assert_eq!(observed.tags, current.tags);
+            assert_eq!(observed.collapse_reason, current.collapse_reason);
+            assert!(observed.process.is_none());
+            assert!(!store.load_fleet().expect("fleet").workers.contains_key(&worker));
+        }
+    }
+
     /// The dispatch records **where the transcript will be**, in a file that
     /// outlives the fleet entry.
     ///
