@@ -1693,7 +1693,7 @@ paths:
       parameters: [{"name": "id", "in": "path", "required": true, "description": "id", "schema": {"type": "string"}}, {"name": "If-None-Match", "in": "header", "required": false, "description": "Previously returned entity tag, a list of tags, or *.", "schema": {"type": "string"}}]
       responses:
         "401":
-          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, cross_tenant_pivot, sub_killed, jti_killed."
           content:
             application/json:
               schema:
@@ -1771,7 +1771,7 @@ paths:
       parameters: [{"name": "id", "in": "path", "required": true, "description": "id", "schema": {"type": "string"}}, {"name": "tail", "in": "query", "required": false, "description": "Last N entries; overrides offset/limit.", "schema": {"type": "integer", "minimum": 0}}, {"name": "offset", "in": "query", "required": false, "description": "offset", "schema": {"type": "integer", "minimum": 0, "default": 0}}, {"name": "limit", "in": "query", "required": false, "description": "Page size, clamped to 0..2000.", "schema": {"type": "integer", "minimum": 0, "default": 200}}]
       responses:
         "401":
-          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, cross_tenant_pivot, sub_killed, jti_killed."
           content:
             application/json:
               schema:
@@ -1833,7 +1833,7 @@ paths:
               "$ref": "#/components/schemas/DoneBody"
       responses:
         "401":
-          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, cross_tenant_pivot, sub_killed, jti_killed."
           content:
             application/json:
               schema:
@@ -1903,7 +1903,7 @@ paths:
       parameters: [{"name": "id", "in": "path", "required": true, "description": "id", "schema": {"type": "string"}}]
       responses:
         "401":
-          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, cross_tenant_pivot, sub_killed, jti_killed."
           content:
             application/json:
               schema:
@@ -1959,7 +1959,7 @@ paths:
       parameters: [{"name": "id", "in": "path", "required": true, "description": "id", "schema": {"type": "string"}}]
       responses:
         "401":
-          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, cross_tenant_pivot, sub_killed, jti_killed."
           content:
             application/json:
               schema:
@@ -2009,7 +2009,7 @@ paths:
       parameters: [{"name": "id", "in": "path", "required": true, "description": "id", "schema": {"type": "string"}}, {"name": "follow", "in": "query", "required": false, "description": "follow", "schema": {"type": "boolean", "default": true}}, {"name": "poll_ms", "in": "query", "required": false, "description": "Cadence clamped to 50..5000 milliseconds.", "schema": {"type": "integer", "minimum": 0, "default": 500}}, {"name": "Last-Event-ID", "in": "header", "required": false, "description": "Numeric reconnect floor; malformed values are ignored.", "schema": {"type": "string"}}]
       responses:
         "401":
-          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, cross_tenant_pivot, sub_killed, jti_killed."
           content:
             application/json:
               schema:
@@ -2379,7 +2379,7 @@ paths:
                   default: 0
       responses:
         "401":
-          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, cross_tenant_pivot, sub_killed, jti_killed."
           content:
             application/json:
               schema:
@@ -2462,7 +2462,7 @@ paths:
                   type: "string"
       responses:
         "401":
-          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, cross_tenant_pivot, sub_killed, jti_killed."
           content:
             application/json:
               schema:
@@ -2526,7 +2526,7 @@ paths:
       parameters: [{"name": "instance_id", "in": "path", "required": true, "description": "instance_id", "schema": {"type": "string"}}]
       responses:
         "401":
-          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, cross_tenant_pivot, sub_killed, jti_killed."
           content:
             application/json:
               schema:
@@ -2608,7 +2608,7 @@ paths:
                   type: "string"
       responses:
         "401":
-          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, cross_tenant_pivot, sub_killed, jti_killed."
           content:
             application/json:
               schema:
@@ -2700,7 +2700,7 @@ paths:
                   type: "string"
       responses:
         "401":
-          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, cross_tenant_pivot, sub_killed, jti_killed."
           content:
             application/json:
               schema:
@@ -2780,7 +2780,7 @@ paths:
       parameters: [{"name": "instance_id", "in": "path", "required": true, "description": "instance_id", "schema": {"type": "string"}}]
       responses:
         "401":
-          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, cross_tenant_pivot, sub_killed, jti_killed."
           content:
             application/json:
               schema:
@@ -2861,7 +2861,7 @@ paths:
       parameters: [{"name": "instance_id", "in": "path", "required": true, "description": "instance_id", "schema": {"type": "string"}}]
       responses:
         "401":
-          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, cross_tenant_pivot, sub_killed, jti_killed."
           content:
             application/json:
               schema:

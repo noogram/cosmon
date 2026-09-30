@@ -115,7 +115,7 @@ flux PKCE ouvert.
 | Invariant | Statut |
 |---|---|
 | binding `(iss,sub) → noyau` **deny-by-default** | **préservé** — un `(iss,sub)` inconnu reste rejeté ; la route ne fait qu'**ajouter** des lignes admises |
-| sceau **BLAKE3** au load + détection d'édition rétroactive (`seal_intact`) | **préservé** — `HabilitationMap::load` recalcule le sceau ; la route écrit puis reload, comme l'opérateur |
+| Validation du binding au reload | **préservée** — `HabilitationMap::load` relit les bindings ; la route écrit puis reload, comme l'opérateur. Le hash retourné décrit le fichier rendu ; il ne détecte pas une édition rétroactive. |
 | binding = **racine de confiance host-side §8j**, jamais écrit par un JWT tenant | **préservé** — l'écrivain est l'adapter-en-tant-qu'agent-opérateur, gated par le sceau host-side ; le tenant n'atteint jamais la route |
 | reload atomique `arc-swap` (`SharedHabilitationMap::store`), pas de restart | **réutilisé** — la route reload in-process, supprime même le besoin de SIGHUP |
 | renderer audité (`build_binding` / `render_oidc_identity_toml`, zéro drift de schéma) | **réutilisé tel quel** — la route est *le renderer-au-dessus-de-HTTP*, pas un second chemin d'écriture |
@@ -437,10 +437,10 @@ pub provisioner: Arc<Provisioner>,
 | E1 | Aucun sceau admin au boot | route **fermée** (403 `admin_disabled`). Fail-closed : par défaut, pas d'admin surface — il faut un geste explicite de configuration au boot. |
 | E2 | JWT tenant valide présenté à `/v1/admin/*` | **rejeté** : la route ne lit pas l'`Authorization: Bearer` ; sans `X-Cosmon-Admin-Token` ⇒ 401. Un JWT tenant n'ouvre **jamais** la porte (DoD). |
 | E3 | Deux POST concurrents même `(iss,sub)` | sérialisés par `write_lock` ; le 2e voit l'état du 1er ⇒ idempotent (200) ou 409. Pas de `.toml` corrompu, pas de double-reload incohérent. |
-| E4 | `.toml` écrit mais reload échoue (sceau/parse) | **rollback** du fichier, 503 `reload_failed`. La map en vigueur reste l'ancienne (arc-swap : les requêtes en vol gardent leur snapshot). Aucun état à demi-écrit. |
+| E4 | `.toml` écrit mais reload échoue (validation/parse) | **rollback** du fichier, 503 `reload_failed`. La map en vigueur reste l'ancienne (arc-swap : les requêtes en vol gardent leur snapshot). Aucun état à demi-écrit. |
 | E5 | `issuer` avec slash final divergent | `RenderError`/400 — le renderer audité **est** la défense anti-`issuer_not_pinned` drift (P2). La route hérite de cette validation gratuitement. |
 | E6 | `(iss,sub)` re-bind vers autre noyau | 409 `cross_noyau_rebind_refused`. Préserve `CrossTenantPivot` : un sub = un noyau. Rebind = DELETE+POST explicite. |
-| E7 | Édition rétroactive du `.toml` hors route | inchangé : `seal_intact` détecte le tamper au prochain `refresh_live_seals`. La route ne dégrade pas cette protection. |
+| E7 | Édition rétroactive du `.toml` hors route | Le prochain reload relit le fichier et applique la validation du binding. Il n'existe plus de comparaison avec un sceau antérieur ; une édition valide peut donc être chargée si l'accès host-side l'autorise. |
 | E8 | Création noyau : `/srv/cosmon/<noyau>/` existe déjà | `noyau_created=false`, pas d'écrasement ; on ne touche pas un workspace existant (mémoire : *« regarder la cible avant d'écraser »*). |
 | E9 | `habilitation_id` collisionne un dir existant d'un autre `(iss,sub)` | rejet 409 (le dir peut porter plusieurs `oidc-identity*.toml`, mais le binding `(iss,sub)` doit rester unique) — à clarifier en B2 ; défaut conservateur = refuser. |
 | E10 | Token admin dans les logs / l'audit | **interdit** : jamais loggé, jamais dans l'événement d'audit, jamais dans la réponse. Seul le `seal` (hash du *fichier rendu*, pas du token) est retourné. |

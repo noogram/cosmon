@@ -530,7 +530,8 @@ This decision is violated if any of these becomes true:
    `cosmon:molecule:harvest` scope, checked against that explicit policy, is
    the authority; the falsifier then reads *a harvest is authorised by
    anything other than that issued scope and that explicit policy*. Where
-   the scope may be sourced from is open (contract §13).
+   the dedicated harvest scope is binding-only (contract §13): a bearer
+   claim alone cannot authorise the effect.
 3. A grant issued against one base authorises an effect on another, or survives
    a change to a covered field (ADR-172 D3, inherited).
 4. A closure that did not merge deletes the branch (D3).
@@ -889,7 +890,8 @@ lives in the `publish = false`, dev-only `cosmon-minisign-testkit`.
 
 ## 13 · Amendment (2026-09-29, issue #120 W0) — D1 is the sealed profile, not the only one
 
-**Status:** adopted as contract; **not implemented**. Full contract:
+**Status:** adopted as contract; W4–W7 implemented. Container acceptance
+remains pending (contract §14). Full contract:
 [`docs/specs/remote-harvest-contract.md`](../specs/remote-harvest-contract.md).
 
 **D1 is narrowed, not superseded.** Its universal statement — remote harvest
@@ -906,9 +908,10 @@ made, not because the two are equivalent.
 
 **OQ-1 resolved by W4.** The dedicated harvest scope is granted by the
 exact issuer/subject/audience binding, checked again at the effect boundary.
-A bearer scope claim alone cannot create harvest authority. This narrows
-which admitted tenant credentials may use the scoped profile; it does not
-turn the scoped policy into an independently sealed one.
+The dedicated harvest scope is binding-only; the token's scope claim cannot
+grant it on its own. This narrows which admitted tenant credentials may use
+the scoped profile; it does not turn the scoped policy into an independently
+sealed one.
 
 **What stands.** Tenant routing, one verb and one implementation, D2's
 separation predicate, D3's branch preservation, the honest synchronous
