@@ -479,6 +479,9 @@ pub struct ArtifactPushedEnvelope {
 pub struct MoleculeResult {
     /// Source label — `result.md`, `synthesis.md`, or `artifact:<name>`.
     pub source: String,
+    /// Where the returned bytes came from; absent on older servers.
+    #[serde(default)]
+    pub provenance: Option<String>,
     /// MIME type detected from the deliverable's filename.
     pub content_type: String,
     /// `utf8` (inline text) or `base64` (binary).

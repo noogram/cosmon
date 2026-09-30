@@ -8,8 +8,8 @@
 //! returns its output. `GET .../artifacts` reads the ephemeral
 //! `COSMON_ARTIFACT_DIR` (`/tmp/cosmon/...`, tmpfs) which a default
 //! `task-work` worker never writes to: the worker deposits its
-//! deliverable in its git *worktree*, and no formula contract obliges
-//! it to copy that into the artifact dir. So `artifacts` returns `[]`
+//! deliverable in its git *worktree*, and a worker can skip the formula's
+//! artifact-dir copy. So `artifacts` returns `[]`
 //! and `GET /v1/molecules/{id}` carries no result. The first molecule
 //! of an onboarding tenant (Dave's haiku, 2026-06-05) was
 //! unrecoverable.
@@ -37,6 +37,8 @@
 //! 4. `<artifact_dir>/<single file>` — if the artifact dir holds
 //!    exactly one visible file, return it. Disambiguated to a file
 //!    named `result.*` when several are present.
+//! 5. A captured or still-live `result.md` committed on the molecule's
+//!    task-work branch, when the worker omitted the artifact-dir copy.
 //!
 //! # The honest `result_status` (C1)
 //!
@@ -86,13 +88,15 @@
 //!    keeps the onboarding flow working with the basic read grant.
 //! 4. Admission boundary (`http_request_to_spark`, reusing the
 //!    `ObserveMolecule` verb — this is a molecule read).
-//! 5. Library-direct load of the molecule (tenant-isolated), then a
-//!    pure filesystem resolution against the two candidate dirs.
+//! 5. Library-direct load of the molecule (tenant-isolated), then
+//!    resolution against the two candidate dirs and its committed branch.
 //! 6. Derive `result_status`, attach `liveness`, and return the
 //!    deliverable inline (UTF-8 text) or base64-encoded (binary) when
 //!    one resolved — or `result: null` when none did.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, State};
@@ -125,6 +129,113 @@ pub struct ResolvedResult {
     pub source: String,
     /// Absolute path the bytes are read from.
     pub path: PathBuf,
+}
+
+/// A deliverable whose bytes were actually read, with the origin reported
+/// separately from its filename so a captured branch file keeps its lineage.
+struct ReadResult {
+    source: String,
+    provenance: &'static str,
+    name: String,
+    bytes: Vec<u8>,
+}
+
+/// Read only the `result.md` declared by task-work from this molecule's
+/// committed branch. A file inherited unchanged from the base is not work
+/// produced by this molecule, so it cannot become a deliverable.
+fn committed_branch_result(tenant_root: &Path, data: &MoleculeData) -> Option<Vec<u8>> {
+    if data.formula_id.as_str() != "task-work" {
+        return None;
+    }
+    let branch = data.originating_branch.as_deref()?;
+    if branch != format!("feat/{}", data.id.as_str()) {
+        return None;
+    }
+    let config = tenant_root.join(".cosmon/config.toml");
+    let repo = cosmon_harvest::target_repo::resolve_from_config_in(&config, Some(tenant_root))
+        .ok()?
+        .root;
+    let branch_ref = format!("refs/heads/{branch}");
+    let base = data.base_branch.as_deref().unwrap_or("main");
+    let base_ref = format!("refs/heads/{base}");
+    let merge_base = Command::new("git")
+        .current_dir(&repo)
+        .args(["merge-base", &base_ref, &branch_ref])
+        .output()
+        .ok()?;
+    if !merge_base.status.success() {
+        return None;
+    }
+    let fork = std::str::from_utf8(&merge_base.stdout).ok()?.trim();
+    let changed = Command::new("git")
+        .current_dir(&repo)
+        .args(["diff", "--quiet", fork, &branch_ref, "--", "result.md"])
+        .output()
+        .ok()?;
+    if changed.status.code() != Some(1) {
+        return None;
+    }
+    let blob = Command::new("git")
+        .current_dir(&repo)
+        .args(["show", &format!("{branch_ref}:result.md")])
+        .output()
+        .ok()?;
+    blob.status.success().then_some(blob.stdout)
+}
+
+/// Capture a committed branch result before remote harvest may delete its
+/// branch. The snapshot remains in the persistent molecule directory and is
+/// labelled `branch` on the result wire. Absence is a normal outcome.
+pub(crate) fn capture_branch_result(
+    tenant_root: &Path,
+    molecule_dir: &Path,
+    artifact_dir: &Path,
+    data: &MoleculeData,
+) -> std::io::Result<()> {
+    let destination = molecule_dir.join(".branch-result.md");
+    if resolve_canonical_result(molecule_dir, artifact_dir).is_some() {
+        return Ok(());
+    }
+    let Some(bytes) = committed_branch_result(tenant_root, data) else {
+        return Ok(());
+    };
+    let mut temporary = tempfile::NamedTempFile::new_in(molecule_dir)?;
+    temporary.write_all(&bytes)?;
+    temporary
+        .persist(&destination)
+        .map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn read_canonical_result(
+    tenant_root: &Path,
+    molecule_dir: &Path,
+    artifact_dir: &Path,
+    data: &MoleculeData,
+) -> Option<ReadResult> {
+    if let Some(found) = resolve_canonical_result(molecule_dir, artifact_dir) {
+        if let Ok(bytes) = std::fs::read(&found.path) {
+            let provenance = if found.source.starts_with("artifact:") {
+                "artifact_dir"
+            } else {
+                "molecule_dir"
+            };
+            return Some(ReadResult {
+                name: file_name_lossy(&found.path),
+                source: found.source,
+                provenance,
+                bytes,
+            });
+        }
+    }
+    let bytes = committed_branch_result(tenant_root, data)
+        .or_else(|| std::fs::read(molecule_dir.join(".branch-result.md")).ok())?;
+    Some(ReadResult {
+        source: "result.md".to_owned(),
+        provenance: "branch",
+        name: "result.md".to_owned(),
+        bytes,
+    })
 }
 
 /// Pure resolution of a molecule's canonical deliverable across the
@@ -299,8 +410,8 @@ pub fn stall_timeout() -> Duration {
 /// Pure derivation of the [`ResultStatus`] from the loaded molecule
 /// state, the on-disk resolution, and `now`.
 ///
-/// `resolved` is `Some` only when a canonical deliverable was *read*
-/// from disk (not merely probed) — that is the `ready` proof. The
+/// `has_result` is true only when a canonical deliverable was *read*
+/// from a file or committed branch (not merely probed) — that is the `ready` proof. The
 /// function performs no I/O and takes the clock as a parameter so the
 /// full state space is unit-testable without spawning a worker.
 ///
@@ -321,7 +432,7 @@ pub fn stall_timeout() -> Duration {
 ///    Gated on the *reason*, never on `merged_at.is_none()` alone: a
 ///    completed molecule that simply has not been harvested yet is not an
 ///    anomaly, and must keep answering `ready`.
-/// 3. **Disk-proven** (`resolved.is_some()`) → `ready`. Checked before
+/// 3. **Byte-proven** (`has_result`) → `ready`. Checked before
 ///    the completed/running split so a deliverable written mid-run is
 ///    surfaced honestly — and so `completed` alone can *never* mint
 ///    `ready`.
@@ -334,7 +445,7 @@ pub fn stall_timeout() -> Duration {
 #[must_use]
 pub fn derive_result_status(
     data: &MoleculeData,
-    resolved: Option<&ResolvedResult>,
+    has_result: bool,
     now: DateTime<Utc>,
     stale_after: Duration,
 ) -> ResultStatus {
@@ -352,8 +463,8 @@ pub fn derive_result_status(
         return ResultStatus::NotIntegrated;
     }
 
-    // 3 — `ready` is proven only by a deliverable read from disk.
-    if resolved.is_some() {
+    // 3 — `ready` is proven only by deliverable bytes actually read.
+    if has_result {
         return ResultStatus::Ready;
     }
 
@@ -496,31 +607,24 @@ pub async fn get_result(
     //     read, not merely by an `is_file` probe: a deliverable that
     //     vanishes between probe and read degrades honestly to "no
     //     deliverable" rather than minting a false `ready`.
+    let tenant_root = state.galaxies_root.join(spark.noyau.as_str());
     let result_block =
-        resolve_canonical_result(&molecule_dir, &artifact_dir).and_then(|resolved| {
-            std::fs::read(&resolved.path)
-                .ok()
-                .map(|bytes| (resolved, bytes))
-        });
+        read_canonical_result(&tenant_root, &molecule_dir, &artifact_dir, &view.data);
 
     // The molecule EXISTS (observe succeeded), so we always answer 200
     // with a derived status — never the old silent 404. (An *absent*
     // molecule already 404'd inside `observe_with_state_dir_public`,
     // preserving the turing no-existence-oracle invariant.)
     let stale_after = stall_timeout();
-    let result_status = derive_result_status(
-        &view.data,
-        result_block.as_ref().map(|(r, _)| r),
-        Utc::now(),
-        stale_after,
-    );
+    let result_status =
+        derive_result_status(&view.data, result_block.is_some(), Utc::now(), stale_after);
 
     let result_json = match result_block {
-        Some((resolved, bytes)) => {
+        Some(resolved) => {
+            let bytes = resolved.bytes;
             let size_bytes = bytes.len() as u64;
             let hex = blake3::hash(&bytes).to_hex().to_string();
-            let name = file_name_lossy(&resolved.path);
-            let content_type = detect_content_type(&name).to_owned();
+            let content_type = detect_content_type(&resolved.name).to_owned();
 
             // UTF-8 deliverables (haiku, synthesis, markdown) inline as
             // text; binary deliverables base64-encode so the JSON
@@ -535,6 +639,7 @@ pub async fn get_result(
             };
             json!({
                 "source": resolved.source,
+                "provenance": resolved.provenance,
                 "content_type": content_type,
                 "encoding": encoding,
                 "content": content,
@@ -697,18 +802,11 @@ mod tests {
         Duration::seconds(DEFAULT_STALL_TIMEOUT_SECS)
     }
 
-    fn ready_marker() -> ResolvedResult {
-        ResolvedResult {
-            source: "result.md".to_owned(),
-            path: PathBuf::from("/seed/result.md"),
-        }
-    }
-
     #[test]
     fn derive_pending_when_never_tackled() {
         let m = mol(json!({ "status": "pending" }));
         assert_eq!(
-            derive_result_status(&m, None, now(), timeout()),
+            derive_result_status(&m, false, now(), timeout()),
             ResultStatus::Pending
         );
     }
@@ -722,7 +820,7 @@ mod tests {
             "process": active_process(),
         }));
         assert_eq!(
-            derive_result_status(&m, None, now(), timeout()),
+            derive_result_status(&m, false, now(), timeout()),
             ResultStatus::Running
         );
     }
@@ -737,7 +835,7 @@ mod tests {
             "process": active_process(),
         }));
         assert_eq!(
-            derive_result_status(&m, None, now(), timeout()),
+            derive_result_status(&m, false, now(), timeout()),
             ResultStatus::Stalled
         );
     }
@@ -757,7 +855,7 @@ mod tests {
             },
         }));
         assert_eq!(
-            derive_result_status(&m, None, now(), timeout()),
+            derive_result_status(&m, false, now(), timeout()),
             ResultStatus::Stalled
         );
     }
@@ -767,7 +865,7 @@ mod tests {
         // GARDE-FOU: completed + empty resolution is NEVER ready.
         let m = mol(json!({ "status": "completed" }));
         assert_eq!(
-            derive_result_status(&m, None, now(), timeout()),
+            derive_result_status(&m, false, now(), timeout()),
             ResultStatus::DoneNoDeliverable
         );
     }
@@ -792,7 +890,7 @@ mod tests {
             },
         }));
         assert_eq!(
-            derive_result_status(&m, Some(&ready_marker()), now(), timeout()),
+            derive_result_status(&m, true, now(), timeout()),
             ResultStatus::NotIntegrated
         );
     }
@@ -809,7 +907,7 @@ mod tests {
             },
         }));
         assert_eq!(
-            derive_result_status(&m, None, now(), timeout()),
+            derive_result_status(&m, false, now(), timeout()),
             ResultStatus::NotIntegrated
         );
     }
@@ -824,7 +922,7 @@ mod tests {
         let m = mol(json!({ "status": "completed" }));
         assert!(m.merged_at.is_none() && m.non_integration.is_none());
         assert_eq!(
-            derive_result_status(&m, Some(&ready_marker()), now(), timeout()),
+            derive_result_status(&m, true, now(), timeout()),
             ResultStatus::Ready
         );
     }
@@ -843,7 +941,7 @@ mod tests {
             },
         }));
         assert_eq!(
-            derive_result_status(&m, Some(&ready_marker()), now(), timeout()),
+            derive_result_status(&m, true, now(), timeout()),
             ResultStatus::Ready
         );
     }
@@ -860,7 +958,7 @@ mod tests {
             },
         }));
         assert_eq!(
-            derive_result_status(&m, None, now(), timeout()),
+            derive_result_status(&m, false, now(), timeout()),
             ResultStatus::Failed
         );
     }
@@ -901,7 +999,7 @@ mod tests {
         // completed + a file read from disk → ready (proven by bytes).
         let m = mol(json!({ "status": "completed" }));
         assert_eq!(
-            derive_result_status(&m, Some(&ready_marker()), now(), timeout()),
+            derive_result_status(&m, true, now(), timeout()),
             ResultStatus::Ready
         );
     }
@@ -915,7 +1013,7 @@ mod tests {
             "process": active_process(),
         }));
         assert_eq!(
-            derive_result_status(&m, Some(&ready_marker()), now(), timeout()),
+            derive_result_status(&m, true, now(), timeout()),
             ResultStatus::Ready
         );
     }
@@ -924,7 +1022,7 @@ mod tests {
     fn derive_failed_when_collapsed() {
         let m = mol(json!({ "status": "collapsed" }));
         assert_eq!(
-            derive_result_status(&m, None, now(), timeout()),
+            derive_result_status(&m, false, now(), timeout()),
             ResultStatus::Failed
         );
     }
@@ -936,7 +1034,7 @@ mod tests {
         // honest about the run.
         let m = mol(json!({ "status": "collapsed" }));
         assert_eq!(
-            derive_result_status(&m, Some(&ready_marker()), now(), timeout()),
+            derive_result_status(&m, true, now(), timeout()),
             ResultStatus::Failed
         );
     }
@@ -946,7 +1044,7 @@ mod tests {
         for status in ["frozen", "starved"] {
             let m = mol(json!({ "status": status }));
             assert_eq!(
-                derive_result_status(&m, None, now(), timeout()),
+                derive_result_status(&m, false, now(), timeout()),
                 ResultStatus::Failed,
                 "status {status} should map to failed"
             );

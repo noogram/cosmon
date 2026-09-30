@@ -2574,6 +2574,11 @@ async fn run_harvest_effect(
     let opts = options.clone();
     let state_dir = tenant_root.join(".cosmon").join("state");
     let config_path = tenant_root.join(".cosmon").join("config.toml");
+    let artifact_dir = crate::routes::artifacts::artifact_dir_for(
+        state.artifact_root.as_path(),
+        tenant.as_str(),
+        id.as_str(),
+    );
     let joined = tokio::task::spawn_blocking(move || {
         match crate::harvest_effect::snapshot_api_tokens(&root, &tenant, &id) {
             Ok(crate::harvest_effect::TokenSnapshotOutcome::CwdOutsideTenant) => {
@@ -2594,6 +2599,20 @@ async fn run_harvest_effect(
             Ok(_) => {}
         }
         let store = FileStore::new(&state_dir);
+        if let Ok(data) = store.load_molecule(&id) {
+            let molecule_dir = state_dir
+                .join("fleets")
+                .join(data.fleet_id.as_str())
+                .join("molecules")
+                .join(id.as_str());
+            crate::routes::result::capture_branch_result(
+                &root,
+                &molecule_dir,
+                &artifact_dir,
+                &data,
+            )
+            .map_err(|error| harvest_door::LandError::Fault(error.into()))?;
+        }
         let cfg = if remote.is_some() {
             cosmon_filestore::load_project_config(&config_path)
                 .map_err(harvest_door::LandError::Fault)?
