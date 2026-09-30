@@ -294,6 +294,9 @@ enum Command {
     #[command(after_help = cmd::examples::HARVEST)]
     Harvest(cmd::harvest::Args),
 
+    /// Configure and inspect remote harvest authority; issue and import grants locally.
+    HarvestAuthority(cmd::harvest_authority::Args),
+
     /// Stitch — fleet-locked sequential merge of a mission DAG into base (Phase 1 Commit 2)
     #[command(after_help = cmd::examples::STITCH, hide = true)]
     Stitch(cmd::stitch::Args),
@@ -752,6 +755,7 @@ fn main() {
         Command::Paths(args) => cmd::paths::run(&ctx, &args),
         Command::Done(args) => cmd::done::run(&ctx, &args),
         Command::Harvest(args) => cmd::harvest::run(&ctx, &args),
+        Command::HarvestAuthority(args) => cmd::harvest_authority::run(&ctx, &args),
         Command::Stitch(args) => cmd::stitch::run(&ctx, &args),
         Command::Stuck(args) => cmd::stuck::run(&ctx, &args),
         Command::AwaitOperator(args) => cmd::await_operator::run(&ctx, &args),

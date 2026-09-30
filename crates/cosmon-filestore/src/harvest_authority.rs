@@ -46,8 +46,11 @@
 //! module claims a worker cannot mutate the trunk with git plumbing — only
 //! that `cs done` will not perform an unauthorised harvest.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use cosmon_core::config::{ProjectConfig, RemoteHarvestPolicy};
 use cosmon_core::error::CosmonError;
 use cosmon_core::harvest_authorization::{
     ConsumptionRecord, DoneAuthorization, GrantEpoch, HarvestConsumptionLedger, HarvestGrant,
@@ -56,6 +59,7 @@ use cosmon_core::harvest_authorization::{
 use cosmon_core::id::MoleculeId;
 use cosmon_core::operator_attestation::{AttestationError, OperatorAttestation, OperatorKeyId};
 use cosmon_notary::minisign::{self, MinisignPublicKey, MinisignSignature};
+use cosmon_state::StateStore;
 
 /// Environment variable naming an explicit harvest trust-root path.
 pub const HARVEST_PUBKEY_ENV: &str = "COSMON_HARVEST_PUBKEY";
@@ -69,6 +73,11 @@ pub const HARVEST_PUBKEY_REL: &str = ".cosmon/harvest.pub";
 /// the operator's entire revocation gesture and must be a committed diff
 /// rather than a scratch write.
 pub const HARVEST_EPOCH_REL: &str = ".cosmon/harvest.epoch";
+
+/// Durable interruption marker for a multi-file administrative update.
+/// Authority reads refuse while it exists; a crash must never expose a
+/// partially changed key, epoch and policy as one coherent version.
+pub const HARVEST_AUTHORITY_PENDING_REL: &str = ".cosmon/harvest-authority.pending";
 
 /// Directory holding sealed grants, relative to a cosmon state root.
 ///
@@ -256,6 +265,21 @@ impl HarvestSealVerifier for NoHarvestTrustRoot {
 /// [`CosmonError::StateStore`] when the file exists but cannot be read or does
 /// not hold a decimal counter.
 pub fn read_epoch(galaxy_root: impl AsRef<Path>) -> Result<GrantEpoch, CosmonError> {
+    let pending = galaxy_root.as_ref().join(HARVEST_AUTHORITY_PENDING_REL);
+    match std::fs::symlink_metadata(&pending) {
+        Ok(_) => {
+            return Err(CosmonError::StateStore {
+                reason: "harvest_facts_unavailable: authority update needs reconciliation"
+                    .to_owned(),
+            });
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(CosmonError::StateStore {
+                reason: format!("harvest_facts_unavailable: authority marker: {e}"),
+            });
+        }
+    }
     let path = galaxy_root.as_ref().join(HARVEST_EPOCH_REL);
     let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
@@ -476,6 +500,247 @@ pub fn store_authorization(
         reason: format!("failed to write {}: {e}", path.display()),
     })?;
     Ok(path)
+}
+
+/// Expected current state and requested administrative change. All expected
+/// fields are mandatory as a group so a stale operator cannot replace a root
+/// or policy after another writer moved any of the three authority axes.
+#[derive(Debug, Clone)]
+pub struct HarvestAuthorityUpdate {
+    /// Previously observed explicit remote policy; `None` means legacy.
+    pub expected_policy: Option<RemoteHarvestPolicy>,
+    /// Digest of the effective public root, or `None` when none exists.
+    pub expected_key_digest: Option<String>,
+    /// Previously observed grant epoch.
+    pub expected_epoch: GrantEpoch,
+    /// Explicit remote policy selected by the operator.
+    pub policy: RemoteHarvestPolicy,
+    /// Optional public root, never private signing material.
+    pub public_key: Option<String>,
+    /// Optional replacement epoch. It may only increase.
+    pub epoch: Option<GrantEpoch>,
+}
+
+/// Current public authority state, safe to return to an operator or tenant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarvestAuthorityState {
+    /// Explicit policy, absent for a legacy galaxy.
+    pub policy: Option<RemoteHarvestPolicy>,
+    /// Digest of the effective public key bytes.
+    pub key_digest: Option<String>,
+    /// Current grant revocation epoch.
+    pub epoch: GrantEpoch,
+}
+
+fn authority_fault(reason: impl Into<String>) -> CosmonError {
+    CosmonError::StateStore {
+        reason: reason.into(),
+    }
+}
+
+/// Read the public, versioned administrative state without changing it.
+///
+/// # Errors
+/// Refuses malformed configuration, epoch or public root.
+pub fn authority_state(galaxy_root: &Path) -> Result<HarvestAuthorityState, CosmonError> {
+    let config_path = galaxy_root.join(".cosmon/config.toml");
+    let raw = std::fs::read_to_string(&config_path)
+        .map_err(|_| authority_fault("harvest_facts_unavailable"))?;
+    let config =
+        ProjectConfig::parse(&raw).map_err(|_| authority_fault("harvest_facts_unavailable"))?;
+    let verifier = MinisignHarvestVerifier::resolve(galaxy_root)?;
+    Ok(HarvestAuthorityState {
+        policy: config.harvest_authority.remote,
+        key_digest: verifier.map(|v| v.content_digest().to_owned()),
+        epoch: read_epoch(galaxy_root)?,
+    })
+}
+
+fn refuse_symlink(path: &Path) -> Result<(), CosmonError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(authority_fault("harvest_destination_symlink"))
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(authority_fault("harvest_facts_unavailable")),
+    }
+}
+
+static NEXT_AUTHORITY_WRITE: AtomicU64 = AtomicU64::new(0);
+
+fn atomic_authority_write(path: &Path, bytes: &[u8]) -> Result<(), CosmonError> {
+    refuse_symlink(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| authority_fault("harvest_write_failed"))?;
+    let serial = NEXT_AUTHORITY_WRITE.fetch_add(1, Ordering::Relaxed);
+    let temp = parent.join(format!(".harvest-write-{}-{serial}", std::process::id()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|_| authority_fault("harvest_write_failed"))?;
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|_| authority_fault("harvest_write_failed"))?;
+        // A cooperating writer holds trunk.lock. Recheck the destination
+        // immediately before rename to refuse an intervening symlink edit.
+        refuse_symlink(path)?;
+        std::fs::rename(&temp, path).map_err(|_| authority_fault("harvest_write_failed"))?;
+        std::fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|_| authority_fault("harvest_write_failed"))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Compare and set policy, public root and epoch under the shared trunk lock.
+/// Configuration is written last so a newly enabled sealed profile never
+/// points at a root that has yet to be installed. No signing operation exists
+/// on this path.
+///
+/// # Errors
+/// Refuses stale expectations, a local-policy conflict, key rotation without
+/// revocation, unsafe destinations and any I/O failure.
+pub fn configure_harvest_authority(
+    galaxy_root: &Path,
+    update: &HarvestAuthorityUpdate,
+) -> Result<HarvestAuthorityState, CosmonError> {
+    let state_root = galaxy_root.join(".cosmon/state");
+    let store = crate::FileStore::new(state_root);
+    let _guard = store.lock_trunk("harvest authority configure")?;
+    let config_path = galaxy_root.join(".cosmon/config.toml");
+    let key_path = galaxy_root.join(HARVEST_PUBKEY_REL);
+    let epoch_path = galaxy_root.join(HARVEST_EPOCH_REL);
+    let pending_path = galaxy_root.join(HARVEST_AUTHORITY_PENDING_REL);
+    refuse_symlink(galaxy_root)?;
+    refuse_symlink(&galaxy_root.join(".cosmon"))?;
+    for path in [&config_path, &key_path, &epoch_path] {
+        refuse_symlink(path)?;
+    }
+    let current = authority_state(galaxy_root)?;
+    if current.policy != update.expected_policy
+        || current.key_digest != update.expected_key_digest
+        || current.epoch != update.expected_epoch
+    {
+        return Err(authority_fault("harvest_authority_changed"));
+    }
+    let raw = std::fs::read_to_string(&config_path)
+        .map_err(|_| authority_fault("harvest_facts_unavailable"))?;
+    let parsed =
+        ProjectConfig::parse(&raw).map_err(|_| authority_fault("harvest_facts_unavailable"))?;
+    if update.policy == RemoteHarvestPolicy::Scoped && parsed.harvest_authority.required {
+        return Err(authority_fault("harvest_policy_conflict"));
+    }
+    if std::env::var_os(HARVEST_PUBKEY_ENV).is_some() && update.public_key.is_some() {
+        return Err(authority_fault("harvest_key_source_conflict"));
+    }
+    let next_epoch = update.epoch.unwrap_or(current.epoch);
+    if next_epoch.as_u64() < current.epoch.as_u64() {
+        return Err(authority_fault("harvest_epoch_rollback"));
+    }
+    if let Some(key) = &update.public_key {
+        if key.len() > 16 * 1024 || key.contains("PRIVATE KEY") {
+            return Err(authority_fault("harvest_public_key_invalid"));
+        }
+        MinisignHarvestVerifier::from_public_key_text(key, &key_path)
+            .map_err(|_| authority_fault("harvest_public_key_invalid"))?;
+        let digest = cosmon_core::harvest_authorization::policy_digest(key.as_bytes());
+        if current.key_digest.is_some()
+            && current.key_digest.as_deref() != Some(digest.as_str())
+            && next_epoch.as_u64() <= current.epoch.as_u64()
+        {
+            return Err(authority_fault("harvest_rotation_requires_epoch_bump"));
+        }
+    }
+    let mut document = raw
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| authority_fault("harvest_facts_unavailable"))?;
+    if !document.contains_key("harvest_authority") {
+        document["harvest_authority"] = toml_edit::table();
+    }
+    let policy = match update.policy {
+        RemoteHarvestPolicy::Disabled => "disabled",
+        RemoteHarvestPolicy::Scoped => "scoped",
+        RemoteHarvestPolicy::Sealed => "sealed",
+    };
+    document["harvest_authority"]["remote"] = toml_edit::value(policy);
+    ProjectConfig::parse(&document.to_string())
+        .map_err(|_| authority_fault("harvest_policy_conflict"))?;
+    // The marker is itself durable before the first replacement. A crash or
+    // write failure leaves it in place, so every subsequent effect refuses
+    // instead of combining old and new authority facts.
+    let mut pending_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pending_path)
+        .map_err(|_| authority_fault("harvest_recovery_required"))?;
+    pending_file
+        .write_all(b"harvest-authority-update-v1\n")
+        .and_then(|()| pending_file.sync_all())
+        .map_err(|_| authority_fault("harvest_write_failed"))?;
+    let authority_dir = galaxy_root.join(".cosmon");
+    std::fs::File::open(&authority_dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|_| authority_fault("harvest_write_failed"))?;
+    if next_epoch != current.epoch {
+        atomic_authority_write(&epoch_path, format!("{}\n", next_epoch.as_u64()).as_bytes())?;
+    }
+    if let Some(key) = &update.public_key {
+        if current.key_digest.as_deref()
+            != Some(cosmon_core::harvest_authorization::policy_digest(key.as_bytes()).as_str())
+        {
+            atomic_authority_write(&key_path, key.as_bytes())?;
+        }
+    }
+    atomic_authority_write(&config_path, document.to_string().as_bytes())?;
+    std::fs::remove_file(&pending_path).map_err(|_| authority_fault("harvest_write_failed"))?;
+    std::fs::File::open(&authority_dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|_| authority_fault("harvest_write_failed"))?;
+    authority_state(galaxy_root)
+}
+
+/// Install a pre-signed grant without allowing a symlink or torn write to
+/// replace a prior candidate. The caller must verify signature and current
+/// facts while holding the trunk lock before invoking this helper.
+///
+/// # Errors
+/// Refuses a malformed authorization or a conflicting destination.
+pub fn store_verified_authorization(
+    state_root: &Path,
+    authorization: &DoneAuthorization,
+) -> Result<String, CosmonError> {
+    authorization
+        .validate()
+        .map_err(|_| authority_fault("harvest_grant_invalid"))?;
+    let harvest_dir = state_root.join("harvest");
+    let dir = state_root.join(HARVEST_GRANTS_REL);
+    for path in [state_root, harvest_dir.as_path(), dir.as_path()] {
+        refuse_symlink(path)?;
+    }
+    std::fs::create_dir_all(&dir).map_err(|_| authority_fault("harvest_write_failed"))?;
+    for path in [harvest_dir.as_path(), dir.as_path()] {
+        refuse_symlink(path)?;
+    }
+    let fingerprint = authorization.grant().fingerprint().to_string();
+    let path = dir.join(format!("{fingerprint}.json"));
+    refuse_symlink(&path)?;
+    let encoded =
+        serde_json::to_vec(authorization).map_err(|_| authority_fault("harvest_grant_invalid"))?;
+    match std::fs::read(&path) {
+        Ok(existing) if existing == encoded => return Ok(fingerprint),
+        Ok(_) => return Err(authority_fault("harvest_grant_conflict")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(authority_fault("harvest_write_failed")),
+    }
+    atomic_authority_write(&path, &encoded)?;
+    Ok(fingerprint)
 }
 
 // ---------------------------------------------------------------------------

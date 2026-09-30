@@ -1,0 +1,17 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Print a canonical v1 grant and its exact bytes for an external signer
+
+Usage: cs harvest-authority challenge [OPTIONS]
+
+Options:
+      --config <PATH>            Path to configuration file
+      --molecule <MOLECULE>      Grant for exactly this molecule
+      --mission <MISSION>        Grant for a mission rooted here
+  -v, --verbose                  Enable verbose output
+      --expires-at <EXPIRES_AT>  Requested UTC expiry; default is one hour from now
+      --json                     Output in JSON format
+      --no-expiry                Explicitly request a grant without expiry
+  -h, --help                     Print help

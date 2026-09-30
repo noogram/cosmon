@@ -1,5 +1,5 @@
 ===== routes-v1 =====
-**43 routes `/v1/` gelées** — recomptées depuis le canon à chaque génération (`crates/cosmon-rpp-adapter/data/surface_events.txt`, cosmon). La colonne *Effet* est dérivée du scope requis (godel C5 : un scope distinct par effet coûteux ou irréversible, ADR-080 §6.5) — jamais éditée à la main.
+**47 routes `/v1/` gelées** — recomptées depuis le canon à chaque génération (`crates/cosmon-rpp-adapter/data/surface_events.txt`, cosmon). La colonne *Effet* est dérivée du scope requis (godel C5 : un scope distinct par effet coûteux ou irréversible, ADR-080 §6.5) — jamais éditée à la main.
 
 | # | Famille | Méthode | Path | Scope requis | §8p | Effet |
 |---|---|---|---|---|---|---|
@@ -19,35 +19,39 @@
 | 14 | artifact | GET | `/v1/molecules/{id}/artifacts` | `cosmon:artifact:read` | adapter-only |  |
 | 15 | artifact | GET | `/v1/molecules/{id}/artifacts/{token}` | `cosmon:artifact:read` | adapter-only |  |
 | 16 | artifact | PUT | `/v1/molecules/{id}/artifacts/{token}` | `cosmon:artifact:write` | adapter-only |  |
-| 17 | auth-claude | POST | `/v1/auth/claude/start` | — | adapter-only |  |
-| 18 | auth-claude | POST | `/v1/auth/claude/email` | — | adapter-only |  |
-| 19 | auth-claude | GET | `/v1/auth/claude/{session_id}` | — | adapter-only |  |
-| 20 | auth-claude | DELETE | `/v1/auth/claude/{session_id}` | — | adapter-only |  |
-| 21 | auth-claude | POST | `/v1/auth/claude/confirm` | — | adapter-only |  |
-| 22 | observ. | GET | `/v1/auth/me` | — | adapter-only |  |
-| 23 | observ. | GET | `/v1/events` | `cosmon:events:subscribe` | adapter-only |  |
-| 24 | observ. | GET | `/v1/molecules/{id}/logs` | `cosmon:logs:subscribe` | adapter-only |  |
-| 25 | observ. | GET | `/v1/quota` | `cosmon:molecule:read` | adapter-only |  |
-| 26 | observ. | GET | `/v1/noyaux` | — | adapter-only |  |
-| 27 | observ. | GET | `/v1/workers` | `cosmon:worker:read` | adapter-only |  |
-| 28 | observ. | GET | `/v1/vitals` | `cosmon:molecule:read` | adapter-only |  |
-| 29 | avatar-canal | POST | `/v1/avatar/converse` | `cosmon:pilote:converse` | tenant-verb |  |
-| 30 | avatar-canal | POST | `/v1/avatar/perceive` | `cosmon:world:observe` | adapter-only |  |
-| 31 | avatar-life | GET | `/v1/avatar/{instance_id}/status` | `cosmon:world:observe` | tenant-verb |  |
-| 32 | avatar-life | POST | `/v1/avatar/{instance_id}/incarnate` | `cosmon:pilote:converse` | tenant-verb |  |
-| 33 | avatar-life | POST | `/v1/avatar/{instance_id}/grant` | `cosmon:pilote:converse` | tenant-verb |  |
-| 34 | avatar-life | GET | `/v1/avatar/{instance_id}/audit` | `cosmon:world:observe` | tenant-verb |  |
-| 35 | avatar-life | GET | `/v1/avatar/{instance_id}/mould-info` | `cosmon:world:observe` | tenant-verb |  |
-| 36 | admin | POST | `/v1/admin/habilitations` | — | adapter-only |  |
-| 37 | admin | GET | `/v1/admin/habilitations` | — | adapter-only |  |
-| 38 | admin | DELETE | `/v1/admin/habilitations/{id}` | — | adapter-only |  |
-| 39 | admin | POST | `/v1/admin/reload` | — | adapter-only |  |
-| 40 | admin | POST | `/v1/admin/federations` | — | adapter-only |  |
-| 41 | admin | GET | `/v1/admin/federations` | — | adapter-only |  |
-| 42 | admin | DELETE | `/v1/admin/federations/{id}` | — | adapter-only |  |
-| 43 | admin | DELETE | `/v1/admin/federations/{id}/galaxies/{galaxy}` | — | adapter-only |  |
+| 17 | harvest | GET | `/v1/harvest/status` | `cosmon:molecule:read` | adapter-only |  |
+| 18 | harvest | POST | `/v1/harvest/challenge` | `cosmon:molecule:harvest` | adapter-only |  |
+| 19 | harvest | POST | `/v1/harvest/grants` | `cosmon:molecule:harvest` | adapter-only |  |
+| 20 | auth-claude | POST | `/v1/auth/claude/start` | — | adapter-only |  |
+| 21 | auth-claude | POST | `/v1/auth/claude/email` | — | adapter-only |  |
+| 22 | auth-claude | GET | `/v1/auth/claude/{session_id}` | — | adapter-only |  |
+| 23 | auth-claude | DELETE | `/v1/auth/claude/{session_id}` | — | adapter-only |  |
+| 24 | auth-claude | POST | `/v1/auth/claude/confirm` | — | adapter-only |  |
+| 25 | observ. | GET | `/v1/auth/me` | — | adapter-only |  |
+| 26 | observ. | GET | `/v1/events` | `cosmon:events:subscribe` | adapter-only |  |
+| 27 | observ. | GET | `/v1/molecules/{id}/logs` | `cosmon:logs:subscribe` | adapter-only |  |
+| 28 | observ. | GET | `/v1/quota` | `cosmon:molecule:read` | adapter-only |  |
+| 29 | observ. | GET | `/v1/noyaux` | — | adapter-only |  |
+| 30 | observ. | GET | `/v1/workers` | `cosmon:worker:read` | adapter-only |  |
+| 31 | observ. | GET | `/v1/vitals` | `cosmon:molecule:read` | adapter-only |  |
+| 32 | avatar-canal | POST | `/v1/avatar/converse` | `cosmon:pilote:converse` | tenant-verb |  |
+| 33 | avatar-canal | POST | `/v1/avatar/perceive` | `cosmon:world:observe` | adapter-only |  |
+| 34 | avatar-life | GET | `/v1/avatar/{instance_id}/status` | `cosmon:world:observe` | tenant-verb |  |
+| 35 | avatar-life | POST | `/v1/avatar/{instance_id}/incarnate` | `cosmon:pilote:converse` | tenant-verb |  |
+| 36 | avatar-life | POST | `/v1/avatar/{instance_id}/grant` | `cosmon:pilote:converse` | tenant-verb |  |
+| 37 | avatar-life | GET | `/v1/avatar/{instance_id}/audit` | `cosmon:world:observe` | tenant-verb |  |
+| 38 | avatar-life | GET | `/v1/avatar/{instance_id}/mould-info` | `cosmon:world:observe` | tenant-verb |  |
+| 39 | admin | POST | `/v1/admin/habilitations` | — | adapter-only |  |
+| 40 | admin | GET | `/v1/admin/habilitations` | — | adapter-only |  |
+| 41 | admin | DELETE | `/v1/admin/habilitations/{id}` | — | adapter-only |  |
+| 42 | admin | POST | `/v1/admin/reload` | — | adapter-only |  |
+| 43 | admin | POST | `/v1/admin/federations` | — | adapter-only |  |
+| 44 | admin | GET | `/v1/admin/federations` | — | adapter-only |  |
+| 45 | admin | DELETE | `/v1/admin/federations/{id}` | — | adapter-only |  |
+| 46 | admin | DELETE | `/v1/admin/federations/{id}/galaxies/{galaxy}` | — | adapter-only |  |
+| 47 | admin | PUT | `/v1/admin/noyaux/{noyau}/harvest-authority` | — | adapter-only |  |
 
-Découpage : **13** molecule + **3** artifact + **5** auth-claude + **7** observ. + **2** avatar-canal + **5** avatar-life + **8** admin = **43**.
+Découpage : **13** molecule + **3** artifact + **3** harvest + **5** auth-claude + **7** observ. + **2** avatar-canal + **5** avatar-life + **9** admin = **47**.
 
 ===== bijection-8p =====
 | Route | Statut bijection (§8p) |
@@ -68,6 +72,9 @@ Découpage : **13** molecule + **3** artifact + **5** auth-claude + **7** observ
 | `GET /v1/molecules/{id}/artifacts` | ⊘ exempte (adapter-only) |
 | `GET /v1/molecules/{id}/artifacts/{token}` | ⊘ exempte (adapter-only) |
 | `PUT /v1/molecules/{id}/artifacts/{token}` | ⊘ exempte (adapter-only) |
+| `GET /v1/harvest/status` | ⊘ exempte (adapter-only) |
+| `POST /v1/harvest/challenge` | ⊘ exempte (adapter-only) |
+| `POST /v1/harvest/grants` | ⊘ exempte (adapter-only) |
 | `POST /v1/auth/claude/start` | ⊘ exempte (adapter-only) |
 | `POST /v1/auth/claude/email` | ⊘ exempte (adapter-only) |
 | `GET /v1/auth/claude/{session_id}` | ⊘ exempte (adapter-only) |
@@ -95,6 +102,7 @@ Découpage : **13** molecule + **3** artifact + **5** auth-claude + **7** observ
 | `GET /v1/admin/federations` | ⊘ exempte (adapter-only) |
 | `DELETE /v1/admin/federations/{id}` | ⊘ exempte (adapter-only) |
 | `DELETE /v1/admin/federations/{id}/galaxies/{galaxy}` | ⊘ exempte (adapter-only) |
+| `PUT /v1/admin/noyaux/{noyau}/harvest-authority` | ⊘ exempte (adapter-only) |
 
-Bijection liée : **17** (11 molecule + 1 avatar-canal + 5 avatar-life). Exemptes : **26**. Total : **43** — recompté depuis le canon (colonne `exposure`) à chaque génération.
+Bijection liée : **17** (11 molecule + 1 avatar-canal + 5 avatar-life). Exemptes : **30**. Total : **47** — recompté depuis le canon (colonne `exposure`) à chaque génération.
 

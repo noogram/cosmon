@@ -1,0 +1,14 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Inspect effective policy, provenance, epoch and public root
+
+Usage: cs harvest-authority status [OPTIONS]
+
+Options:
+      --config <PATH>        Path to configuration file
+      --molecule <MOLECULE>  Check an installed grant against this molecule's current facts
+  -v, --verbose              Enable verbose output
+      --json                 Output in JSON format
+  -h, --help                 Print help

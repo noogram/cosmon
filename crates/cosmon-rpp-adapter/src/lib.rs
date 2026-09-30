@@ -556,6 +556,19 @@ pub fn router(state: AppState) -> Router {
             post(routes::admin::provision_habilitation).get(routes::admin::list_habilitations),
         )
         .route(
+            "/v1/admin/noyaux/{noyau}/harvest-authority",
+            axum::routing::put(routes::harvest_authority::configure),
+        )
+        .route("/v1/harvest/status", get(routes::harvest_authority::status))
+        .route(
+            "/v1/harvest/challenge",
+            post(routes::harvest_authority::challenge),
+        )
+        .route(
+            "/v1/harvest/grants",
+            post(routes::harvest_authority::import_grant),
+        )
+        .route(
             "/v1/admin/habilitations/{id}",
             delete(routes::admin::revoke_habilitation),
         )

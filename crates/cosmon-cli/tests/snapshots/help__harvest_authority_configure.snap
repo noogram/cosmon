@@ -1,0 +1,23 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Select an explicit remote policy and optionally install a public root
+
+Usage: cs harvest-authority configure [OPTIONS] --policy <POLICY>
+
+Options:
+      --config <PATH>
+          Path to configuration file
+      --policy <POLICY>
+          Disabled, scoped or sealed
+      --public-key-file <PUBLIC_KEY_FILE>
+          File containing a minisign public key, never its private half
+  -v, --verbose
+          Enable verbose output
+      --epoch <EPOCH>
+          New monotone revocation epoch; required for rotation
+      --json
+          Output in JSON format
+  -h, --help
+          Print help

@@ -128,6 +128,12 @@ pub enum Verb {
     /// set. Synchronous, because a 202 on a transaction that may
     /// integrate nothing is precisely the silent failure of issue #51.
     DoneMolecule,
+    /// Read a tenant's effective harvest policy and public authority state.
+    HarvestStatus,
+    /// Build current canonical grant bytes without creating authority.
+    HarvestChallenge,
+    /// Verify and install an independently signed harvest grant.
+    HarvestImport,
     /// `GET /v1/molecules/{id}/artifacts` — list artifacts produced
     /// by the worker for a molecule (e653 spec).
     /// Artifacts live on disk under
@@ -209,6 +215,9 @@ impl Verb {
             // ran. The operator-only clause below is what enforced the old
             // reading, and it now passes `done` for the same reason.
             Self::DoneMolecule => "done",
+            Self::HarvestStatus => "harvest_status",
+            Self::HarvestChallenge => "harvest_challenge",
+            Self::HarvestImport => "harvest_import",
             Self::ListArtifacts => "list_artifacts",
             Self::FetchArtifact => "fetch_artifact",
             Self::PushArtifact => "push_artifact",

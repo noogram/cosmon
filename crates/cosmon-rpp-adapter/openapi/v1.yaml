@@ -38,6 +38,67 @@ security:
   - bearerAuth: []
 
 paths:
+  /v1/harvest/status:
+    get:
+      operationId: getHarvestStatus
+      summary: Inspect effective remote harvest authority for the bound tenant.
+      description: Requires tenant admission and molecule read or harvest scope. Reports policy provenance, public root digest, epoch, executor support and optional molecule grant validity.
+      tags: [harvest]
+      parameters:
+        - name: molecule
+          in: query
+          required: false
+          schema: {type: string}
+      responses:
+        "200": {description: Public harvest authority status}
+        "401": {description: Missing or invalid tenant credential}
+        "403": {description: Scope missing}
+        "503": {description: Authority facts unavailable}
+  /v1/harvest/challenge:
+    post:
+      operationId: createHarvestChallenge
+      summary: Build a canonical grant challenge from current tenant facts.
+      description: Requires the binding-granted harvest scope, except legacy sealed compatibility. Creates no authority and writes no grant.
+      tags: [harvest]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                molecule: {type: string}
+                mission: {type: string}
+                expires_at: {type: string, format: date-time}
+                no_expiry: {type: boolean}
+      responses:
+        "200": {description: Current grant fields and exact canonical signed bytes}
+        "400": {description: Invalid challenge request}
+        "401": {description: Missing or invalid tenant credential}
+        "403": {description: Scope or policy refusal}
+        "503": {description: Authority facts unavailable}
+  /v1/harvest/grants:
+    post:
+      operationId: importHarvestGrant
+      summary: Verify and install an externally signed grant for the bound tenant.
+      description: Requires the binding-granted harvest scope, except legacy sealed compatibility. Verification uses current facts under the trunk lock. Installation does not consume the grant.
+      tags: [harvest]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [molecule, authorization]
+              properties:
+                molecule: {type: string}
+                authorization: {type: object}
+      responses:
+        "201": {description: Verified grant installed}
+        "400": {description: Malformed grant request}
+        "401": {description: Missing or invalid tenant credential}
+        "403": {description: Signature, scope or policy refusal}
+        "503": {description: Authority facts unavailable}
   /v1/vitals:
     get:
       operationId: getVitals
@@ -4081,6 +4142,8 @@ components:
             `tmux -L <socket> attach -t <session>` would target.
 
 tags:
+  - name: harvest
+    description: Tenant-scoped status and independently sealed grant transport.
   - name: molecules
     description: |
       The eight RPP-exposable verb routes (V0 read-only +
