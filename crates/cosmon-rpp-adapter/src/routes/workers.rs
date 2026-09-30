@@ -196,7 +196,10 @@ fn authorise_worker_read(state: &Arc<AppState>, jwt: &ValidatedJwt) -> Result<()
     emit_authz_decision_with_source(
         &state.state_dir,
         "list_workers",
-        &format!("jwt:{}", jwt.sub),
+        &format!(
+            "jwt:{}",
+            crate::rate_limit::hash_principal(&jwt.iss, &jwt.sub)
+        ),
         Some(WORKER_READ),
         decision,
         grant_source,

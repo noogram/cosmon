@@ -188,7 +188,10 @@ fn authorise_events_subscribe(state: &Arc<AppState>, jwt: &ValidatedJwt) -> Resu
     emit_authz_decision_with_source(
         &state.state_dir,
         "events_subscribe",
-        &format!("jwt:{}", jwt.sub),
+        &format!(
+            "jwt:{}",
+            crate::rate_limit::hash_principal(&jwt.iss, &jwt.sub)
+        ),
         Some(EVENTS_SUBSCRIBE),
         decision,
         grant_source,

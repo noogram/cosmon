@@ -2,7 +2,7 @@
 
 //! `GET /v1/noyaux` — discovery endpoint for multi-noyau operators.
 //!
-//! Returns the list of noyaux the JWT's `sub` is bound to, with the
+//! Returns the list of noyaux the JWT's `(iss, sub, aud)` is bound to, with the
 //! per-noyau binding count and the absolute `galaxies_root` on the
 //! adapter host. A multi-noyau operator can call `/v1/noyaux` once
 //! and then pick the noyau to scope subsequent calls against —
@@ -12,10 +12,9 @@
 //!
 //! 1. Extract `Authorization: Bearer <jwt>`; 401 if missing.
 //! 2. Validate JWT (clause a) → `ValidatedJwt`.
-//! 3. **No scope check.** A valid JWT is the whole gate — discovery
-//!    surface, not a state-mutating verb (same class as
-//!    `/v1/auth/me`).
-//! 4. Filter the sealed nucleon map by the JWT's `sub` claim. Empty
+//! 3. Apply the global and identity deny policy. No scope check is
+//!    needed for this discovery surface.
+//! 4. Filter the sealed nucleon map by the JWT's identity and audience. Empty
 //!    list when the principal is not yet bound — 200 OK with
 //!    `noyaux: []`, never 401.
 //! 5. Project to the wire shape.
@@ -40,7 +39,7 @@ use crate::AppState;
 /// Body schema for `GET /v1/noyaux`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NoyauxResponse {
-    /// One row per noyau visible to the JWT's `sub`. Empty when the
+    /// One row per noyau visible to the JWT's identity. Empty when the
     /// principal carries a valid JWT but has no nucleon binding.
     pub noyaux: Vec<NoyauEntry>,
 }
@@ -55,7 +54,7 @@ pub struct NoyauEntry {
     /// `"operator-sandbox"`).
     pub id: String,
     /// Number of `(iss, sub) → noyau` bindings backing this noyau for
-    /// the JWT's `sub`. ≥ 1 by construction (zero-count rows are not
+    /// the JWT's identity. ≥ 1 by construction (zero-count rows are not
     /// emitted).
     pub binding_count: usize,
     /// Absolute path to the noyau's galaxy tree on the adapter host
@@ -77,10 +76,27 @@ pub async fn list_noyaux(
     let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
         .map_err(|e| ApiError::from_reject(&e, None))?;
 
-    // 3. No scope check — discovery semantics (same as /v1/auth/me).
+    // 3. Refuse discovery for a revoked identity or a closed global door.
+    let policy = state.deny_list.snapshot();
+    let legacy_sub_hash = crate::rate_limit::hash_sub(&jwt.sub);
+    let denied = if policy.global_kill {
+        Some(RppRejectReason::GlobalKill)
+    } else if policy.revokes_jti(&jwt.iss, &legacy_sub_hash, &jwt.jti) {
+        Some(RppRejectReason::JtiKilled)
+    } else if policy.revokes_sub(&jwt.iss, &legacy_sub_hash) {
+        Some(RppRejectReason::SubKilled)
+    } else {
+        None
+    };
+    if let Some(reason) = denied {
+        return Err(ApiError::from_reject(&reason, None));
+    }
 
-    // 4. Filter the sealed nucleon map by sub.
-    let rows = state.nucleon_map.load().noyaux_for_sub(&jwt.sub);
+    // 4. Filter the sealed nucleon map by the exact issuer, subject and audience.
+    let rows = state
+        .nucleon_map
+        .load()
+        .noyaux_for_identity(&jwt.iss, &jwt.sub, &jwt.aud);
 
     // 5. Project to the wire shape. Resolving each noyau's
     //    galaxies_root in the response keeps the operator-host CLI

@@ -45,10 +45,36 @@ pub struct Snapshot {
     pub global_kill: bool,
     /// Set of revoked `sub` BLAKE3 hex hashes.
     pub denied_sub_hashes: Vec<String>,
+    /// Issuer-scoped subject revocations as `(issuer, legacy subject digest)`.
+    pub denied_scoped_subs: Vec<(String, String)>,
     /// Set of revoked `jti` strings.
     pub denied_jtis: Vec<String>,
+    /// Issuer-scoped token revocations as `(issuer, optional subject digest, jti)`.
+    pub denied_scoped_jtis: Vec<(String, Option<String>, String)>,
     /// Set of revoked tenants (`noyau` values).
     pub denied_noyaus: Vec<String>,
+}
+
+impl Snapshot {
+    /// Apply issuer-scoped entries and legacy subject-only entries to a principal.
+    #[must_use]
+    pub fn revokes_sub(&self, iss: &str, sub_hash: &str) -> bool {
+        self.denied_sub_hashes.iter().any(|h| h == sub_hash)
+            || self
+                .denied_scoped_subs
+                .iter()
+                .any(|(i, h)| i == iss && h == sub_hash)
+    }
+
+    /// Apply issuer-scoped entries and legacy token-only entries to a token.
+    #[must_use]
+    pub fn revokes_jti(&self, iss: &str, sub_hash: &str, jti: &str) -> bool {
+        self.denied_jtis.iter().any(|id| id == jti)
+            || self
+                .denied_scoped_jtis
+                .iter()
+                .any(|(i, h, id)| i == iss && id == jti && h.as_ref().is_none_or(|h| h == sub_hash))
+    }
 }
 
 impl DenyList {
@@ -175,11 +201,14 @@ struct DenyEntries {
 
 #[derive(Debug, Deserialize)]
 struct DeniedSub {
+    issuer: Option<String>,
     sub_hash: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct DeniedJti {
+    issuer: Option<String>,
+    sub_hash: Option<String>,
     jti: String,
 }
 
@@ -196,8 +225,31 @@ fn read_from_disk(state_dir: &std::path::Path) -> Result<Snapshot, String> {
     }
     let policy_path = state_dir.join("security/oidc-policy.toml");
     if let Some(file) = read_optional_toml::<PolicyFile>(&policy_path)? {
-        snap.denied_sub_hashes = file.deny.subs.into_iter().map(|d| d.sub_hash).collect();
-        snap.denied_jtis = file.deny.jtis.into_iter().map(|d| d.jti).collect();
+        for d in file.deny.subs {
+            if let Some(issuer) = d.issuer {
+                if issuer.trim().is_empty() {
+                    return Err("deny.sub issuer must be nonempty".to_owned());
+                }
+                snap.denied_scoped_subs.push((issuer, d.sub_hash));
+            } else {
+                snap.denied_sub_hashes.push(d.sub_hash);
+            }
+        }
+        for d in file.deny.jtis {
+            if let Some(issuer) = d.issuer {
+                if issuer.trim().is_empty() {
+                    return Err("deny.jti issuer must be nonempty".to_owned());
+                }
+                snap.denied_scoped_jtis.push((issuer, d.sub_hash, d.jti));
+            } else if d.sub_hash.is_some() {
+                return Err("deny.jti sub_hash requires issuer".to_owned());
+            } else {
+                snap.denied_jtis.push(d.jti);
+            }
+        }
+        if !snap.denied_sub_hashes.is_empty() || !snap.denied_jtis.is_empty() {
+            tracing::warn!("legacy OIDC revocations without issuer apply to every trusted issuer; add issuer to scope each entry");
+        }
         snap.denied_noyaus = file.deny.noyaus.into_iter().map(|d| d.noyau).collect();
     }
     Ok(snap)
@@ -288,6 +340,20 @@ since = "2026-04-27T17:00:00Z"
         assert!(dl.is_jti_revoked("tok-x"));
         assert!(dl.is_noyau_revoked(&Noyau::new("tenant-demo")));
         assert!(!dl.is_jti_revoked("tok-y"));
+    }
+
+    #[test]
+    fn unscoped_entries_continue_to_cover_every_issuer() {
+        let td = TempDir::new().unwrap();
+        write_policy(
+            &td,
+            "[[deny.sub]]\nsub_hash = \"digest\"\n[[deny.jti]]\njti = \"token\"\n",
+        );
+        let snapshot = DenyList::new(td.path().to_path_buf()).snapshot();
+        for issuer in ["https://issuer-a.example", "https://issuer-b.example"] {
+            assert!(snapshot.revokes_sub(issuer, "digest"));
+            assert!(snapshot.revokes_jti(issuer, "digest", "token"));
+        }
     }
 
     #[test]

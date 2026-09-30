@@ -25,7 +25,7 @@ use serde::Serialize;
 use crate::error::RppRejectReason;
 use crate::jwt::ValidatedJwt;
 use crate::nucleon_map::{HabilitationId, Resolved};
-use crate::rate_limit::hash_sub;
+use crate::rate_limit::hash_principal;
 
 /// Generate a fresh request identifier (V0: timestamp + 8 random bytes
 /// in hex). Stable enough for audit cross-reference; not a secret.
@@ -78,8 +78,7 @@ pub struct AuditRecord {
 pub struct ClaimDigest {
     /// `iss`.
     pub iss: String,
-    /// BLAKE3 hex of the JWT `sub` (the raw `sub` is *not* persisted —
-    /// turing G9).
+    /// BLAKE3 hex of `(iss, sub)` (the raw `sub` is *not* persisted).
     pub sub_hash: String,
     /// `aud`.
     pub aud: String,
@@ -116,7 +115,7 @@ pub fn materialize(
         molecule_id: molecule_id.map(str::to_owned),
         claims: ClaimDigest {
             iss: jwt.iss.clone(),
-            sub_hash: hash_sub(&jwt.sub),
+            sub_hash: hash_principal(&jwt.iss, &jwt.sub),
             aud: jwt.aud.clone(),
             jti: jwt.jti.clone(),
             lifetime_sec: jwt.lifetime_sec,
@@ -198,7 +197,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         // Raw `sub` MUST NOT leak — only the BLAKE3 hash lands.
         assert!(!text.contains("sub-123"));
-        assert!(text.contains(&hash_sub("sub-123")));
+        assert!(text.contains(&hash_principal("https://idp", "sub-123")));
         assert!(text.contains("nuc-a"));
         assert!(text.contains("tenant-demo"));
         assert!(text.contains("observe"));

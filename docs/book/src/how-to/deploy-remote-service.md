@@ -196,6 +196,24 @@ file; the next refresh restores admission from both files. A misspelled field
 in the kill switch or policy structure is an error, so check the adapter log
 after changing either file.
 
+OIDC secondary controls use the issuer and subject together. Discovery at
+`GET /v1/noyaux` lists only bindings matching the token's issuer, subject and
+audience. Rate limits and `GET /v1/quota` use an issuer-scoped bucket; after
+upgrading, existing subject-only bucket files are no longer consulted and
+each principal starts with a fresh bucket. The adapter logs this change at
+startup. Audit identity digests also change to the issuer-scoped form.
+
+For a targeted revocation, add `issuer` to a `[[deny.sub]]` entry and keep
+`sub_hash` as the BLAKE3 hex digest of the subject alone. For example,
+`issuer = "https://idp.example"` with `sub_hash = "<blake3-of-sub>"` denies
+only that issuer's subject. A `[[deny.jti]]` entry can likewise specify
+`issuer` and `sub_hash` alongside `jti` to target that principal's token.
+Existing entries without `issuer` remain valid and continue to deny every
+issuer with the matching subject digest or token ID. Keep those entries when
+the broad revocation is intentional; add `issuer` to narrow them. The adapter
+warns when it loads unscoped entries. A `sub_hash` on a `[[deny.jti]]` entry
+requires `issuer`; a malformed policy closes admission until repaired.
+
 Start `cosmon-rpp-adapter` with its state directory, tenant configuration, and
 the loopback address that the tunnel will reach. Keep this process supervised
 by the service manager available to the host.

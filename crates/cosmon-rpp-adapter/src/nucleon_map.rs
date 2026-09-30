@@ -399,23 +399,21 @@ impl HabilitationMap {
         out
     }
 
-    /// Distinct `(noyau, binding_count)` pairs for a given `sub`, in
+    /// Distinct `(noyau, binding_count)` pairs for a pinned identity, in
     /// stable first-occurrence order. Powers `GET /v1/noyaux` — a
     /// discovery endpoint that lets a multi-noyau operator enumerate the
-    /// tenants their `sub` is bound to without first guessing a `noyau`
+    /// tenants their presented identity is bound to without first guessing a `noyau`
     /// slug.
     ///
-    /// The filter matches on the `sub` value alone (across every pinned
-    /// issuer) since a multi-IdP operator may legitimately appear under
-    /// distinct `(iss, sub)` keys that all collapse to the same human
-    /// principal. `binding_count` is the number of `(iss, sub) → noyau`
-    /// rows backing the noyau for this sub.
+    /// Issuer and audience remain part of the binding key. An equal
+    /// subject string from another issuer or audience grants no visibility.
+    /// `binding_count` counts rows for this exact triple.
     #[must_use]
-    pub fn noyaux_for_sub(&self, sub: &str) -> Vec<(Noyau, usize)> {
+    pub fn noyaux_for_identity(&self, iss: &str, sub: &str, aud: &str) -> Vec<(Noyau, usize)> {
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
         let mut order: Vec<String> = Vec::new();
-        for ((_, s, _), resolved) in &self.by_key {
-            if s != sub {
+        for ((i, s, a), resolved) in &self.by_key {
+            if i != iss || s != sub || a != aud {
                 continue;
             }
             let key = resolved.noyau.as_str().to_owned();
@@ -662,7 +660,7 @@ impl SharedHabilitationMap {
     /// returned guard for the lifetime of any borrow taken from it
     /// (`resolve`, `allowed_scopes_for` return references into the
     /// snapshot); for owned-return accessors (`binding_count`,
-    /// `noyaux`, `noyaux_for_sub`) the guard may be a temporary.
+    /// `noyaux`, `noyaux_for_identity`) the guard may be a temporary.
     #[must_use]
     pub fn load(&self) -> Guard<Arc<HabilitationMap>> {
         self.0.load()
@@ -1343,7 +1341,7 @@ allowed = ["cosmon:molecule:read", "cosmon:molecule:write"]
     }
 
     #[test]
-    fn noyaux_for_sub_returns_distinct_noyaux_with_counts() {
+    fn noyaux_for_identity_counts_only_presented_binding() {
         // Three bindings for `you`:
         //   - tenant-demo-sandbox under issuer A
         //   - tenant-demo-sandbox under issuer B (same noyau, two IdPs)
@@ -1379,22 +1377,21 @@ allowed = ["cosmon:molecule:read", "cosmon:molecule:write"]
                 "aud",
             )
             .build();
-        let rows = map.noyaux_for_sub("you");
-        assert_eq!(rows.len(), 1, "single noyau collapses across two issuers");
+        let rows = map.noyaux_for_identity("https://idp-a", "you", "aud");
+        assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0.as_str(), "tenant-demo-sandbox");
-        assert_eq!(rows[0].1, 2, "two (iss, sub) bindings → count 2");
+        assert_eq!(rows[0].1, 1, "another issuer's binding is excluded");
 
         // Distinct sub maps to a distinct noyau.
-        let rows = map.noyaux_for_sub("you-second");
+        let rows = map.noyaux_for_identity("https://idp-a", "you-second", "aud");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0.as_str(), "operator-sandbox");
         assert_eq!(rows[0].1, 1);
     }
 
     #[test]
-    fn noyaux_for_sub_collapses_two_noyaux_for_same_principal() {
-        // Same sub appears under two issuers, each pointing to a
-        // different noyau — both must show up with binding_count = 1.
+    fn noyaux_for_identity_excludes_other_issuer() {
+        // Equal subject strings under two issuers remain distinct identities.
         let map = HabilitationMap::builder()
             .insert(
                 "https://idp-a",
@@ -1411,18 +1408,16 @@ allowed = ["cosmon:molecule:read", "cosmon:molecule:write"]
                 "aud",
             )
             .build();
-        let rows = map.noyaux_for_sub("you");
-        assert_eq!(rows.len(), 2);
+        let rows = map.noyaux_for_identity("https://idp-a", "you", "aud");
+        assert_eq!(rows.len(), 1);
         assert!(rows
             .iter()
             .any(|(n, c)| n.as_str() == "tenant-demo-sandbox" && *c == 1));
-        assert!(rows
-            .iter()
-            .any(|(n, c)| n.as_str() == "operator-sandbox" && *c == 1));
+        assert!(!rows.iter().any(|(n, _)| n.as_str() == "operator-sandbox"));
     }
 
     #[test]
-    fn noyaux_for_sub_empty_when_no_match() {
+    fn noyaux_for_identity_empty_when_no_match() {
         let map = HabilitationMap::builder()
             .insert(
                 "https://idp",
@@ -1432,7 +1427,9 @@ allowed = ["cosmon:molecule:read", "cosmon:molecule:write"]
                 "aud",
             )
             .build();
-        assert!(map.noyaux_for_sub("unbound-principal").is_empty());
+        assert!(map
+            .noyaux_for_identity("https://idp", "unbound-principal", "aud")
+            .is_empty());
     }
 
     #[test]

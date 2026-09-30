@@ -108,7 +108,7 @@ fn issuer_scoped_revocations_leave_other_issuers_active() {
         .build();
     let sec = td.path().join("security");
     std::fs::create_dir_all(&sec).unwrap();
-    std::fs::write(sec.join("oidc-policy.toml"), format!("[[deny.sub]]\nissuer = \"https://issuer-a.example\"\nsub_hash = {:?}\n[[deny.jti]]\nissuer = \"https://issuer-a.example\"\njti = \"token\"\n", cosmon_rpp_adapter::rate_limit::hash_sub("shared"))).unwrap();
+    std::fs::write(sec.join("oidc-policy.toml"), format!("[[deny.sub]]\nissuer = \"https://issuer-a.example\"\nsub_hash = {:?}\n[[deny.jti]]\nissuer = \"https://issuer-a.example\"\nsub_hash = {:?}\njti = \"token\"\n", cosmon_rpp_adapter::rate_limit::hash_sub("shared"), cosmon_rpp_adapter::rate_limit::hash_sub("shared"))).unwrap();
     let limiter = IngressRateLimiter::new(td.path().join("rl"), 10.0, 0.0);
     let deny = DenyList::new(td.path().to_path_buf()).with_ttl(Duration::ZERO);
     let rig = AdmissionRig {
@@ -123,6 +123,21 @@ fn issuer_scoped_revocations_leave_other_issuers_active() {
     let mut b = a.clone();
     b.iss = "https://issuer-b.example".into();
     assert!(http_request_to_spark(&rig, &a, Verb::ObserveMolecule, None).is_err());
+    assert!(http_request_to_spark(&rig, &b, Verb::ObserveMolecule, None).is_ok());
+
+    std::fs::write(
+        sec.join("oidc-policy.toml"),
+        format!(
+            "[[deny.jti]]\nissuer = \"https://issuer-a.example\"\nsub_hash = {:?}\njti = \"token\"\n",
+            cosmon_rpp_adapter::rate_limit::hash_sub("shared")
+        ),
+    )
+    .unwrap();
+    deny.invalidate();
+    assert!(matches!(
+        http_request_to_spark(&rig, &a, Verb::ObserveMolecule, None),
+        Err(RppRejectReason::JtiKilled)
+    ));
     assert!(http_request_to_spark(&rig, &b, Verb::ObserveMolecule, None).is_ok());
 }
 
@@ -401,7 +416,7 @@ fn audit_envelope_carries_blake3_sub_hash() {
         Some("mol-x"),
     )
     .unwrap();
-    let expected = cosmon_rpp_adapter::rate_limit::hash_sub("sub-1");
+    let expected = cosmon_rpp_adapter::rate_limit::hash_principal("https://idp", "sub-1");
     let text = std::fs::read_to_string(&spark.inbox_path).unwrap();
     assert!(
         text.contains(&expected),

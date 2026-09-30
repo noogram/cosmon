@@ -223,6 +223,13 @@ async fn audit_trail_records_grant_source_binding_when_binding_admits() {
         .expect("nucleate audit event present");
     assert_eq!(nucleate_event.decision, AuthzDecision::Allow);
     assert_eq!(
+        nucleate_event.subject_kind,
+        format!(
+            "jwt:{}",
+            cosmon_rpp_adapter::rate_limit::hash_principal(oidc.issuer(), "admin-a")
+        )
+    );
+    assert_eq!(
         nucleate_event.grant_source.as_deref(),
         Some("binding"),
         "grant_source must record that the binding (not the JWT) carried the scope"

@@ -133,7 +133,7 @@ pub const DEFAULT_TACKLE_CEILING_PER_NOYAU: usize = 4;
 /// resource-abuse guard, not an authorization boundary, and blocking every
 /// tackle because the fleet state momentarily failed to parse would convert
 /// a transient read hiccup into a self-inflicted denial of service. The
-/// per-`sub` rate limiter still caps request volume on that path. A read
+/// per-issuer-subject rate limiter still caps request volume on that path. A read
 /// error is surfaced via `tracing::warn!` for operator visibility.
 fn count_live_workers(tenant_root: &Path) -> usize {
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
@@ -256,7 +256,10 @@ fn authorise_scope(
     emit_authz_decision_with_source(
         &state.state_dir,
         verb,
-        &format!("jwt:{}", jwt.sub),
+        &format!(
+            "jwt:{}",
+            crate::rate_limit::hash_principal(&jwt.iss, &jwt.sub)
+        ),
         Some(audit_scope),
         decision,
         grant_source,

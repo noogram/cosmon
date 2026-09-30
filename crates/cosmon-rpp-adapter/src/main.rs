@@ -368,6 +368,7 @@ async fn main() -> anyhow::Result<()> {
     let rate_limiter = Arc::new(IngressRateLimiter::default_in(
         state_dir.join("security/oidc-rate-limit"),
     ));
+    tracing::warn!("OIDC rate-limit buckets now use issuer and subject; legacy subject-only bucket files are no longer consulted and each principal starts with a fresh bucket");
     let deny_list = Arc::new(DenyList::new(state_dir.clone()));
     // Read before serving so a broken operator file is reported at boot,
     // rather than only when the first tenant request reaches admission.

@@ -40,7 +40,7 @@ use crate::audit::new_request_id;
 use crate::auth::scopes::{MOLECULE_READ, MOLECULE_WRITE};
 use crate::error::{ApiError, RppRejectReason};
 use crate::jwt::{JwtVerifier, ValidatedJwt};
-use crate::rate_limit::{hash_sub, RateState};
+use crate::rate_limit::{hash_principal, RateState};
 use crate::AppState;
 
 /// Header name for the bucket capacity (max tokens). Pinned as a const
@@ -154,7 +154,7 @@ pub async fn get_quota(
     )
     .unwrap_or(i64::MAX);
 
-    let sub_hash = hash_sub(&jwt.sub);
+    let sub_hash = hash_principal(&jwt.iss, &jwt.sub);
     let snapshot = state
         .rate_limiter
         .current_state(&sub_hash, now_ms)
@@ -232,7 +232,7 @@ pub fn snapshot_for_jwt(state: &Arc<AppState>, jwt: &ValidatedJwt) -> Option<Rat
             .map_or(0, |d| d.as_millis()),
     )
     .unwrap_or(i64::MAX);
-    let sub_hash = hash_sub(&jwt.sub);
+    let sub_hash = hash_principal(&jwt.iss, &jwt.sub);
     state.rate_limiter.current_state(&sub_hash, now_ms).ok()
 }
 

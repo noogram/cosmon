@@ -486,7 +486,10 @@ fn authorise_artifact_scope(
     emit_authz_decision_with_source(
         &state.state_dir,
         verb,
-        &format!("jwt:{}", jwt.sub),
+        &format!(
+            "jwt:{}",
+            crate::rate_limit::hash_principal(&jwt.iss, &jwt.sub)
+        ),
         Some(wanted),
         decision,
         grant_source,
