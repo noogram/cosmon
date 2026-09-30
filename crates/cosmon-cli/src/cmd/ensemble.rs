@@ -313,6 +313,43 @@ struct MoleculeSummary {
     tier_2: usize,
 }
 
+/// Project identity used by the resident snapshot and local diagnostics.
+pub(crate) fn configured_project_id(ctx: &Context) -> Option<cosmon_core::id::ProjectId> {
+    let config_path = super::resolve_config_from_context(ctx);
+    cosmon_filestore::load_project_config(&config_path)
+        .ok()
+        .and_then(|config| config.project.project_id)
+}
+
+/// Add only legacy predecessors explicitly referenced by the scoped graph.
+///
+/// Their absent `project_id` predates project scoping; the edge is the
+/// ownership witness. A molecule stamped for another project is never
+/// imported, and an absent record remains absent so the scheduler holds it.
+pub(crate) fn include_referenced_legacy_blockers(
+    mut scoped: Vec<cosmon_state::MoleculeData>,
+    all: &[cosmon_state::MoleculeData],
+) -> Vec<cosmon_state::MoleculeData> {
+    let by_id: std::collections::HashMap<_, _> = all.iter().map(|m| (&m.id, m)).collect();
+    let mut seen: std::collections::HashSet<_> = scoped.iter().map(|m| m.id.clone()).collect();
+    let mut index = 0;
+    while index < scoped.len() {
+        let predecessors: Vec<_> = scoped[index].blocked_by().into_iter().cloned().collect();
+        for id in predecessors {
+            if seen.contains(&id) {
+                continue;
+            }
+            if let Some(legacy) = by_id.get(&id).filter(|m| m.project_id.is_none()) {
+                seen.insert(id);
+                scoped.push((*legacy).clone());
+            }
+        }
+        index += 1;
+    }
+    scoped.sort_by(|left, right| left.id.cmp(&right.id));
+    scoped
+}
+
 /// Execute the `ensemble` command.
 #[allow(clippy::too_many_lines)]
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
@@ -328,10 +365,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let project_id = if args.all {
         None
     } else {
-        let config_path = super::resolve_config_from_context(ctx);
-        cosmon_filestore::load_project_config(&config_path)
-            .ok()
-            .and_then(|c| c.project.project_id)
+        configured_project_id(ctx)
     };
 
     let filter = MoleculeFilter {
@@ -606,12 +640,19 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let worker_roles = summarize_worker_roles(&fleet);
 
     if ctx.json {
+        let molecule_states = if filter.project.is_some() && args.tags.is_empty() {
+            let all = store.list_molecules(&MoleculeFilter::default())?;
+            let resident_molecules = include_referenced_legacy_blockers(molecules.clone(), &all);
+            build_molecule_states(&resident_molecules)
+        } else {
+            build_molecule_states(&molecules)
+        };
         let output = EnsembleOutput {
             stall_alert: stall_alert(&rows, &molecules, Utc::now()),
             workers: rows,
             worker_roles,
             molecules: mol_summary,
-            molecule_states: build_molecule_states(&molecules),
+            molecule_states,
         };
         let json = serde_json::to_string_pretty(&output)?;
         println!("{json}");

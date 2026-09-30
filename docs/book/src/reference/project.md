@@ -134,7 +134,7 @@ EXAMPLES:
   cs status                   # pulse + staleness: age, reconcile, unmerged growth
   cs status --verbose         # the same, as a dashboard with a Backlog section
   cs status --fleet research
-  cs status --json            # adds `backlog`, `unmerged`, `galaxies`, `hygiene` blocks
+  cs status --json            # adds `backlog`, `unmerged`, `galaxies`, `hygiene`, `missing_blockers`
   cs status task-20260907-b25f        # one molecule: status/phase/updated_at/terminal
   cs status task-20260907-b25f --json # same four fields, machine-readable
 
@@ -142,6 +142,10 @@ BLOCKED-BY: only completion satisfies a dependency. A collapsed or frozen
       blocker keeps pending dependents held. Human status names those dependents;
       finish and harvest a frozen blocker (`cs complete`, then `cs done`), or collapse and re-nucleate a
       dependent with a new --blocked-by edge after its blocker collapses.
+      The pulse also names pending dependents of absent blockers and blockers
+      outside the current project. Re-nucleate the dependent with a valid
+      --blocked-by edge, or omit the edge. A referenced legacy blocker without
+      project_id remains visible to the resident scheduler.
 
 STALENESS: the pulse carries derivatives, not only levels — `oldest 39d · 2 >48h`
       is the age of the oldest waiting molecule and how many are past the

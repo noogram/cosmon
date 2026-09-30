@@ -95,6 +95,8 @@ struct StatusOutput {
     /// The harvest queue — `Completed`, un-archived molecules whose work
     /// exists only on `feat/<id>` until `cs done` or `cs collapse` runs.
     harvestable: HarvestableInfo,
+    /// Pending dependents held by a blocker absent from the resident view.
+    missing_blockers: Vec<MissingBlocker>,
     attention: AttentionInfo,
     /// Four-family taxonomy snapshot.
     /// Keyed by kind token (`infra | project | social-hub | editorial
@@ -254,6 +256,16 @@ struct HarvestableInfo {
     items: Vec<super::work_location::WorkLocation>,
 }
 
+/// A dependency the scheduler cannot clear because its source is not visible.
+#[derive(serde::Serialize)]
+struct MissingBlocker {
+    dependent: MoleculeId,
+    blocker: MoleculeId,
+    reason: &'static str,
+    /// The operator gesture required to replace the broken edge.
+    repair: String,
+}
+
 /// Unmerged-branch level and its movement since the last sample.
 ///
 /// `delta` is what the old line could not say. The sample lives in
@@ -365,6 +377,17 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let fleet = store.load_fleet()?;
     let molecules = store.list_molecules(&MoleculeFilter::default())?;
+    let resident_view = if let Some(project_id) = super::ensemble::configured_project_id(ctx) {
+        let scoped = molecules
+            .iter()
+            .filter(|m| m.project_id.as_ref() == Some(&project_id))
+            .cloned()
+            .collect();
+        super::ensemble::include_referenced_legacy_blockers(scoped, &molecules)
+    } else {
+        molecules.clone()
+    };
+    let missing_blockers = missing_blockers(&resident_view, &molecules);
 
     // Which molecules carry a pilot lease. Read once, from the ledger
     // directory, so no id is hard-coded anywhere: the live instance
@@ -551,6 +574,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 leases_excluded: backlog.leases_excluded,
             },
             harvestable,
+            missing_blockers,
             attention: AttentionInfo {
                 alive,
                 budget,
@@ -598,8 +622,50 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             release_guidance(status, &dependent, &blocker)
         );
     }
+    for missing in &missing_blockers {
+        println!(
+            "  Blocked: {} waits for {} ({}); {}",
+            missing.dependent, missing.blocker, missing.reason, missing.repair
+        );
+    }
 
     Ok(())
+}
+
+/// Find predecessors absent from the resident view, without releasing edges.
+fn missing_blockers(
+    molecules: &[cosmon_state::MoleculeData],
+    all: &[cosmon_state::MoleculeData],
+) -> Vec<MissingBlocker> {
+    let by_id: std::collections::HashSet<_> = molecules.iter().map(|m| m.id.clone()).collect();
+    let all_ids: std::collections::HashSet<_> = all.iter().map(|m| m.id.clone()).collect();
+    let mut missing = Vec::new();
+    for dependent in molecules
+        .iter()
+        .filter(|m| m.status == MoleculeStatus::Pending)
+    {
+        for blocker in dependent.blocked_by() {
+            if !by_id.contains(blocker) {
+                missing.push(MissingBlocker {
+                    dependent: dependent.id.clone(),
+                    blocker: blocker.clone(),
+                    reason: if all_ids.contains(blocker) {
+                        "outside current project"
+                    } else {
+                        "missing molecule"
+                    },
+                    repair: format!(
+                        "run `cs collapse {} --reason <reason>`, then re-nucleate it with --blocked-by <valid-blocker> or without the edge",
+                        dependent.id
+                    ),
+                });
+            }
+        }
+    }
+    missing.sort_by(|left, right| {
+        (&left.dependent, &left.blocker).cmp(&(&right.dependent, &right.blocker))
+    });
+    missing
 }
 
 /// Pending dependents whose named blocker has frozen or collapsed.

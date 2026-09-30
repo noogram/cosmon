@@ -18,7 +18,8 @@ use std::process::Command;
 use chrono::Utc;
 use cosmon_core::agent::AgentRole;
 use cosmon_core::clearance::Clearance;
-use cosmon_core::id::{AgentId, FleetId, FormulaId, MoleculeId, WorkerId};
+use cosmon_core::id::{AgentId, FleetId, FormulaId, MoleculeId, ProjectId, WorkerId};
+use cosmon_core::interaction::MoleculeLink;
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_core::worker::WorkerStatus;
 use cosmon_filestore::FileStore;
@@ -259,4 +260,151 @@ fn status_lists_every_item_and_honors_a_worktree_override() {
         text.contains(&root.join("overrides/status-location").display().to_string()),
         "{text}"
     );
+}
+
+/// A pending dependent must name an absent blocker and the gesture that
+/// repairs its edge in both operator and machine status.
+#[test]
+fn status_surfaces_missing_blocker_with_repair_guidance() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let mut dependent = completed("task-20260101-dddd", false);
+    dependent.status = MoleculeStatus::Pending;
+    dependent.typed_links.push(MoleculeLink::BlockedBy {
+        source: MoleculeId::new("task-20260101-aaaa").expect("valid blocker id"),
+    });
+    seed(&state_dir, &[dependent]);
+
+    let value = status_json(tmp.path(), &state_dir);
+    assert_eq!(
+        value["missing_blockers"][0]["dependent"],
+        "task-20260101-dddd"
+    );
+    assert_eq!(
+        value["missing_blockers"][0]["blocker"],
+        "task-20260101-aaaa"
+    );
+    let text = status_text(tmp.path(), &state_dir);
+    assert!(text.contains("task-20260101-dddd"), "{text}");
+    assert!(text.contains("task-20260101-aaaa"), "{text}");
+    assert!(text.contains("missing molecule"), "{text}");
+    assert!(text.contains("cs collapse task-20260101-dddd"), "{text}");
+    assert!(text.contains("re-nucleate"), "{text}");
+}
+
+/// A referenced pre-project-id predecessor belongs to this dependency
+/// closure, while an unrelated foreign-project record does not.
+#[test]
+fn ensemble_resolves_referenced_legacy_blocker() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    std::fs::create_dir_all(&state_dir).expect("state dir");
+    std::fs::write(
+        state_dir.join("config.toml"),
+        "[project]\nproject_id = \"current-aaaa\"\n",
+    )
+    .expect("config");
+    let mut legacy = completed("task-20260101-aaaa", true);
+    legacy.merged_at = Some(Utc::now());
+    let mut dependent = completed("task-20260101-bbbb", false);
+    dependent.status = MoleculeStatus::Pending;
+    dependent.project_id = Some(ProjectId::new("current-aaaa").expect("project id"));
+    dependent
+        .tags
+        .insert(cosmon_core::tag::Tag::new("selected").expect("valid tag"));
+    dependent.typed_links.push(MoleculeLink::BlockedBy {
+        source: legacy.id.clone(),
+    });
+    let mut foreign = completed("task-20260101-cccc", true);
+    foreign.project_id = Some(ProjectId::new("foreign-bbbb").expect("project id"));
+    let mut outsider_dependent = completed("task-20260101-dddd", false);
+    outsider_dependent.status = MoleculeStatus::Pending;
+    outsider_dependent.project_id = dependent.project_id.clone();
+    outsider_dependent
+        .typed_links
+        .push(MoleculeLink::BlockedBy {
+            source: foreign.id.clone(),
+        });
+    seed(
+        &state_dir,
+        &[legacy, dependent, foreign, outsider_dependent],
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_cs"))
+        .current_dir(tmp.path())
+        .env_remove("COSMON_PARENT_MOL_ID")
+        .env_remove("COSMON_MOL_DIR")
+        .args([
+            "--json",
+            "--config",
+            state_dir.to_str().expect("state path"),
+            "ensemble",
+        ])
+        .output()
+        .expect("run ensemble");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("ensemble JSON");
+    let ids: Vec<&str> = value["molecule_states"]
+        .as_array()
+        .expect("states")
+        .iter()
+        .filter_map(|state| state["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "task-20260101-aaaa",
+            "task-20260101-bbbb",
+            "task-20260101-dddd"
+        ]
+    );
+    use cosmon_runtime::{Decision, EnsembleSnapshot, ReadyFrontierScheduler, ResidentScheduler};
+    let snapshot = EnsembleSnapshot::from_json(&String::from_utf8_lossy(&out.stdout))
+        .expect("resident snapshot");
+    let decisions = ReadyFrontierScheduler::default().next_decisions(&snapshot);
+    assert!(decisions.iter().any(|decision| matches!(decision, Decision::Tackle { molecule_id, .. } if molecule_id == "task-20260101-bbbb")), "legacy merged blocker releases its dependent: {decisions:?}");
+    assert!(!decisions.iter().any(|decision| matches!(decision, Decision::Tackle { molecule_id, .. } if molecule_id == "task-20260101-dddd")), "foreign blocker keeps its dependent held: {decisions:?}");
+    let status = status_json(tmp.path(), &state_dir);
+    assert_eq!(
+        status["missing_blockers"][0]["blocker"],
+        "task-20260101-cccc"
+    );
+    assert_eq!(
+        status["missing_blockers"][0]["reason"],
+        "outside current project"
+    );
+    assert_eq!(status["missing_blockers"].as_array().map(Vec::len), Some(1));
+
+    let tagged = Command::new(env!("CARGO_BIN_EXE_cs"))
+        .current_dir(tmp.path())
+        .env_remove("COSMON_PARENT_MOL_ID")
+        .env_remove("COSMON_MOL_DIR")
+        .args([
+            "--json",
+            "--config",
+            state_dir.to_str().expect("state path"),
+            "ensemble",
+            "--tag",
+            "selected",
+        ])
+        .output()
+        .expect("run tagged ensemble");
+    assert!(
+        tagged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&tagged.stderr)
+    );
+    let tagged_value: serde_json::Value =
+        serde_json::from_slice(&tagged.stdout).expect("tagged ensemble JSON");
+    let tagged_ids: Vec<&str> = tagged_value["molecule_states"]
+        .as_array()
+        .expect("tagged states")
+        .iter()
+        .filter_map(|state| state["id"].as_str())
+        .collect();
+    assert_eq!(tagged_ids, vec!["task-20260101-bbbb"]);
 }
