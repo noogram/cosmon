@@ -375,6 +375,15 @@ pub enum EffectFailure {
     /// code cannot carry them. What the record must no longer do is
     /// **rename** this refusal, or erase it by being absent.
     Refused(DoorRefusal),
+    /// The effect refused with a safe authorization cause as well as the
+    /// historic door label and exit code.
+    AuthorizationRefused(
+        DoorRefusal,
+        crate::harvest_authorization::HarvestAuthorizationCause,
+    ),
+    /// A read or recovery fault with a safe classification; still a fault,
+    /// never a grant refusal or permission to retry mutation blindly.
+    AuthorizationFault(crate::harvest_authorization::HarvestAuthorizationCause),
     /// The effect ran and failed with no name of its own. The string is
     /// the implementation's own message; the door re-reads the trunk-side
     /// record and derives the named refusal from *that* rather than from
@@ -387,7 +396,10 @@ impl fmt::Display for EffectFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unavailable => f.write_str("no harvest effect is wired in this deployment"),
-            Self::Refused(refusal) => write!(f, "the effect refused: {}", refusal.as_str()),
+            Self::Refused(refusal) | Self::AuthorizationRefused(refusal, _) => {
+                write!(f, "the effect refused: {}", refusal.as_str())
+            }
+            Self::AuthorizationFault(cause) => write!(f, "the effect faulted: {}", cause.reason()),
             Self::Failed(message) => write!(f, "the effect failed: {message}"),
         }
     }

@@ -150,13 +150,22 @@ impl Deployment {
     /// suite is that the bytes cross a wire the client's own `reqwest` stack
     /// wrote and read. `oneshot` would skip exactly the layer under test.
     async fn start(tenants: TenantWorkspaces) -> Self {
+        Self::start_with_library(tenants, false).await
+    }
+
+    async fn start_with_library(tenants: TenantWorkspaces, library_effect: bool) -> Self {
         let oidc = OidcMock::start_with(OidcMockConfig {
             audiences: vec![AUDIENCE.to_owned()],
             ..OidcMockConfig::default()
         })
         .await;
         let security_dir = tempfile::tempdir().unwrap();
-        let app = router(make_state(&oidc, &tenants, security_dir.path()));
+        let mut state = make_state(&oidc, &tenants, security_dir.path());
+        if library_effect {
+            state.harvest_effect =
+                std::sync::Arc::new(cosmon_rpp_adapter::harvest_effect::LibraryHarvestEffect);
+        }
+        let app = router(state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -471,6 +480,244 @@ fn arm_harvest_authority(tenant: &cosmon_oidc_testkit::TenantPath) {
         "[harvest_authority]\nrequired = true\n",
     )
     .unwrap();
+}
+
+/// Give the library effect a real repository so it can reach the sealed
+/// authority check without a Git setup fault masking the missing key.
+fn arm_git_harvest_tenant(tenant: &cosmon_oidc_testkit::TenantPath, id: &str) {
+    let repo = &tenant.root;
+    for args in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "worker@example.com"],
+        vec!["config", "user.name", "Worker"],
+        vec!["config", "commit.gpgsign", "false"],
+    ] {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::create_dir_all(repo.join(".cosmon/state")).unwrap();
+    std::fs::write(
+        repo.join(".cosmon/config.toml"),
+        "[project]\nproject_id = \"wire-harvest\"\n[harvest_authority]\nrequired = true\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join(".cosmon/state/fleet.json"), "{\"workers\":{}}\n").unwrap();
+    std::fs::write(repo.join(".gitignore"), ".cosmon/\n.worktrees/\n").unwrap();
+    std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["add", ".gitignore", "base.txt"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["commit", "-qm", "base"])
+        .status()
+        .unwrap()
+        .success());
+    tenant
+        .insert_molecule(id, &json!({"status": "completed"}))
+        .unwrap();
+    let branch = format!("feat/{id}");
+    assert!(std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["checkout", "-q", "-b", &branch, "main"])
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(repo.join("worker.txt"), "worker\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["add", "worker.txt"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["commit", "-qm", "worker output"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["checkout", "-q", "main"])
+        .status()
+        .unwrap()
+        .success());
+}
+
+#[tokio::test]
+async fn armed_without_key_reports_key_missing_to_the_real_client() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add(NOYAU);
+    let id = "task-20260930-f544";
+    arm_git_harvest_tenant(&tenant, id);
+    let dep = Deployment::start_with_library(tenants, true).await;
+    let client = dep.client(&["cosmon:molecule:write"], "jti-key-missing");
+    let err = client
+        .done(
+            id,
+            &cosmon_remote::client::DoneRequest::new("verify key cause"),
+        )
+        .await
+        .expect_err("no trust root");
+    let Error::Api { status, body } = err else {
+        panic!("expected API error")
+    };
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "not_authorized");
+    assert_eq!(body["harvest_authorization"]["gate"], "key");
+    assert_eq!(
+        body["harvest_authorization"]["reason"],
+        "harvest_key_missing"
+    );
+    assert_eq!(body["harvest_authorization"]["action"], "init_harvest");
+}
+
+#[tokio::test]
+async fn missing_molecule_has_no_harvest_diagnostic() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add(NOYAU);
+    arm_harvest_authority(&tenant);
+    let dep = Deployment::start(tenants).await;
+    let client = dep.client(&["cosmon:molecule:write"], "jti-missing-harvest-target");
+    let err = client
+        .done(
+            "task-20260930-f545",
+            &cosmon_remote::client::DoneRequest::new("missing target"),
+        )
+        .await
+        .expect_err("missing molecule");
+    let Error::Api { status, body } = err else {
+        panic!("expected API error")
+    };
+    assert_eq!(status, 404);
+    assert_eq!(body["error"], "not_found");
+    assert!(body.get("harvest_authorization").is_none());
+}
+
+#[tokio::test]
+async fn conflicting_policy_is_a_typed_configuration_fault() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add(NOYAU);
+    tenant
+        .insert_molecule("task-20260930-f546", &json!({"status": "completed"}))
+        .unwrap();
+    std::fs::create_dir_all(tenant.root.join(".cosmon")).unwrap();
+    std::fs::write(
+        tenant.root.join(".cosmon/config.toml"),
+        "[harvest_authority]\nrequired = true\nremote = \"scoped\"\n",
+    )
+    .unwrap();
+    let dep = Deployment::start(tenants).await;
+    let client = dep.client(&["cosmon:molecule:write"], "jti-policy-conflict");
+    let err = client
+        .done(
+            "task-20260930-f546",
+            &cosmon_remote::client::DoneRequest::new("conflicting policy"),
+        )
+        .await
+        .expect_err("invalid policy");
+    let Error::Api { status, body } = err else {
+        panic!("expected API error")
+    };
+    assert_eq!(status, 503);
+    assert_eq!(
+        body["harvest_authorization"]["reason"],
+        "harvest_policy_conflict"
+    );
+    assert_eq!(
+        body["harvest_authorization"]["action"],
+        "repair_configuration"
+    );
+
+    let err = client
+        .done(
+            "task-20260930-f547",
+            &cosmon_remote::client::DoneRequest::new("missing target"),
+        )
+        .await
+        .expect_err("missing molecule under conflicting policy");
+    let Error::Api { status, body } = err else {
+        panic!("expected API error")
+    };
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"], "not_found");
+    assert!(body.get("harvest_authorization").is_none());
+}
+
+#[tokio::test]
+async fn explicit_policy_requires_the_dedicated_scope_with_a_typed_cause() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add(NOYAU);
+    tenant
+        .insert_molecule("task-20260930-f547", &json!({"status": "completed"}))
+        .unwrap();
+    std::fs::create_dir_all(tenant.root.join(".cosmon")).unwrap();
+    std::fs::write(
+        tenant.root.join(".cosmon/config.toml"),
+        "[harvest_authority]\nremote = \"sealed\"\n",
+    )
+    .unwrap();
+    let dep = Deployment::start(tenants).await;
+    let client = dep.client(&["cosmon:molecule:write"], "jti-missing-harvest-scope");
+    let err = client
+        .done(
+            "task-20260930-f547",
+            &cosmon_remote::client::DoneRequest::new("scope check"),
+        )
+        .await
+        .expect_err("write is not harvest scope");
+    let Error::Api { status, body } = err else {
+        panic!("expected API error")
+    };
+    assert_eq!(status, 403);
+    assert_eq!(body["error"], "forbidden");
+    assert_eq!(body["harvest_authorization"]["gate"], "scope");
+    assert_eq!(
+        body["harvest_authorization"]["reason"],
+        "harvest_scope_missing"
+    );
+}
+
+#[tokio::test]
+async fn unreadable_authority_config_is_a_fault_without_path_on_the_wire() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add(NOYAU);
+    tenant
+        .insert_molecule("task-20260930-f548", &json!({"status": "completed"}))
+        .unwrap();
+    std::fs::create_dir_all(tenant.root.join(".cosmon/config.toml")).unwrap();
+    let dep = Deployment::start(tenants).await;
+    let client = dep.client(&["cosmon:molecule:write"], "jti-unreadable-config");
+    let err = client
+        .done(
+            "task-20260930-f548",
+            &cosmon_remote::client::DoneRequest::new("read fault"),
+        )
+        .await
+        .expect_err("config cannot be read");
+    let Error::Api { status, body } = err else {
+        panic!("expected API error")
+    };
+    assert_eq!(status, 503);
+    assert_eq!(
+        body["harvest_authorization"]["reason"],
+        "harvest_facts_unavailable"
+    );
+    assert!(!body.to_string().contains("config.toml"));
 }
 
 /// The effect half, as the CLIENT sees it: `501 harvest_effect_unavailable`.

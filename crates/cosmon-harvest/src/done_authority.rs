@@ -36,8 +36,8 @@ use cosmon_core::error::CosmonError;
 use cosmon_core::harness::Clock;
 use cosmon_core::harvest_authorization::{
     authorize, reservations_crossed, AuthorizedHarvest, ConsumptionRecord, DoneAuthorization,
-    HarvestAction, HarvestConsumptionLedger, HarvestFacts, HarvestRefusal, HarvestScope,
-    HarvestSealVerifier,
+    HarvestAction, HarvestAuthorizationCause, HarvestConsumptionLedger, HarvestFacts,
+    HarvestRefusal, HarvestScope, HarvestSealVerifier,
 };
 use cosmon_core::id::MoleculeId;
 use cosmon_filestore::harvest_authority::{
@@ -60,8 +60,9 @@ pub enum HarvestDecision {
     /// Historical variant name for a prior reservation. The transaction must
     /// inspect its progress journal before reporting any outcome or touching Git.
     AlreadyLanded(Box<ConsumptionRecord>),
-    /// No authorisation covers this harvest. The string is the operator-facing
-    /// message — every candidate grant and why each was refused.
+    /// No authorisation covers this harvest. The string is the local
+    /// operator-facing account of every candidate; the cause is the only
+    /// diagnostic safe to send to a remote client.
     ///
     /// A *decision*, not an error, and the distinction is the point. Every
     /// path out of [`authorize_harvest`] used to be
@@ -73,7 +74,37 @@ pub enum HarvestDecision {
     /// name. Separating it here is what lets the transaction answer
     /// `not_authorized` (exit 71) for the refusal while a genuine I/O fault
     /// stays a fault.
-    Refused(String),
+    Refused(String, HarvestAuthorizationCause),
+}
+
+/// A classified authority fault. The detailed source stays local; only the
+/// closed cause can be sent to a remote client.
+#[derive(Debug)]
+pub(crate) struct AuthorizationFailure {
+    /// Local state or I/O error.
+    pub source: Box<CosmonError>,
+    /// Safe, stable remote classification.
+    pub cause: HarvestAuthorizationCause,
+}
+
+impl AuthorizationFailure {
+    fn new(source: CosmonError, cause: HarvestAuthorizationCause) -> Self {
+        Self {
+            source: Box::new(source),
+            cause,
+        }
+    }
+}
+
+impl HarvestDecision {
+    /// Return the safe refusal cause, when the decision denied authority.
+    #[must_use]
+    pub const fn authorization_cause(&self) -> Option<HarvestAuthorizationCause> {
+        match self {
+            Self::Refused(_, cause) => Some(*cause),
+            _ => None,
+        }
+    }
 }
 
 /// Legacy positional facts for callers that have not migrated to the strict
@@ -168,16 +199,21 @@ pub fn authorize_harvest(
         None => &NoHarvestTrustRoot,
     };
 
-    let candidates = cosmon_filestore::harvest_authority::load_authorizations(state_root)?;
+    let candidates =
+        cosmon_filestore::harvest_authority::load_authorizations_with_diagnostics(state_root)?;
     authorize_candidates(
-        state_root,
-        molecule,
-        base,
-        invocation_id,
+        CandidateContext {
+            state_root,
+            molecule,
+            base,
+            invocation_id,
+        },
         &candidates,
         verifier,
+        pinned.is_some(),
         |_| Ok(facts.clone()),
     )
+    .map_err(|failure| *failure.source)
 }
 
 /// Verify and reserve authority using the strict snapshot read under the
@@ -194,7 +230,7 @@ pub(crate) fn authorize_harvest_from_facts(
     facts: &AuthorizationFacts,
     request: &LockedHarvestRequest<'_>,
     require_seal: bool,
-) -> Result<HarvestDecision, CosmonError> {
+) -> Result<HarvestDecision, AuthorizationFailure> {
     if !require_seal {
         return Ok(HarvestDecision::NotInForce);
     }
@@ -203,43 +239,58 @@ pub(crate) fn authorize_harvest_from_facts(
         .verifier
         .as_ref()
         .map_or(&no_root, |v| v as &dyn HarvestSealVerifier);
-    let candidates = cosmon_filestore::harvest_authority::load_authorizations(request.state_root)?;
-    authorize_candidates(
+    let candidates = cosmon_filestore::harvest_authority::load_authorizations_with_diagnostics(
         request.state_root,
-        request.molecule,
-        &facts.base.branch,
-        request.invocation_id,
+    )
+    .map_err(|source| {
+        AuthorizationFailure::new(source, HarvestAuthorizationCause::FactsUnavailable)
+    })?;
+    authorize_candidates(
+        CandidateContext {
+            state_root: request.state_root,
+            molecule: request.molecule,
+            base: &facts.base.branch,
+            invocation_id: request.invocation_id,
+        },
         &candidates,
         verifier,
+        facts.verifier.is_some(),
         |authorization| {
-            let mission = match &authorization.grant().scope {
-                HarvestScope::Molecule { .. } => None,
-                HarvestScope::Mission { .. } => {
-                    let before = match request.preliminary_mission {
-                        Some(Ok(before)) => before,
-                        Some(Err(_)) => {
-                            return Err(CosmonError::StateStore {
+            let mission =
+                match &authorization.grant().scope {
+                    HarvestScope::Molecule { .. } => None,
+                    HarvestScope::Mission { .. } => {
+                        let before = match request.preliminary_mission {
+                            Some(Ok(before)) => before,
+                            Some(Err(_)) => {
+                                return Err(AuthorizationFailure::new(CosmonError::StateStore {
                                 reason: "harvest_facts_unavailable: preliminary mission ancestry"
                                     .to_owned(),
-                            });
-                        }
-                        None => {
-                            return Err(CosmonError::StateStore {
+                            }, HarvestAuthorizationCause::FactsUnavailable));
+                            }
+                            None => {
+                                return Err(AuthorizationFailure::new(CosmonError::StateStore {
                                 reason: "harvest_facts_changed: mission grant appeared after gates"
                                     .to_owned(),
-                            });
-                        }
-                    };
-                    let current = strict_mission_ancestry(request.store, request.molecule)?;
-                    if before != &current {
-                        return Err(CosmonError::StateStore {
+                            }, HarvestAuthorizationCause::FactsChanged));
+                            }
+                        };
+                        let current = strict_mission_ancestry(request.store, request.molecule)
+                            .map_err(|source| {
+                                AuthorizationFailure::new(
+                                    source,
+                                    HarvestAuthorizationCause::FactsUnavailable,
+                                )
+                            })?;
+                        if before != &current {
+                            return Err(AuthorizationFailure::new(CosmonError::StateStore {
                             reason: "harvest_facts_changed: mission ancestry changed after gates"
                                 .to_owned(),
-                        });
+                        }, HarvestAuthorizationCause::FactsChanged));
+                        }
+                        Some(current.root)
                     }
-                    Some(current.root)
-                }
-            };
+                };
             Ok(facts.for_effect(request.molecule, mission, request.clock.now()))
         },
     )
@@ -261,20 +312,31 @@ pub(crate) struct LockedHarvestRequest<'a> {
     pub clock: &'a dyn Clock,
 }
 
-fn authorize_candidates(
-    state_root: &Path,
-    molecule: &MoleculeId,
-    base: &str,
-    invocation_id: &str,
-    candidates: &[DoneAuthorization],
-    verifier: &dyn HarvestSealVerifier,
-    mut fact_for: impl FnMut(&DoneAuthorization) -> Result<HarvestFacts, CosmonError>,
-) -> Result<HarvestDecision, CosmonError> {
-    let ledger = FileConsumptionLedger::at_state_root(state_root);
+struct CandidateContext<'a> {
+    state_root: &'a Path,
+    molecule: &'a MoleculeId,
+    base: &'a str,
+    invocation_id: &'a str,
+}
 
-    let mut refusals: Vec<String> = Vec::new();
-    let mut fact_fault: Option<CosmonError> = None;
-    for authorization in candidates {
+fn authorize_candidates(
+    context: CandidateContext<'_>,
+    candidates: &cosmon_filestore::harvest_authority::AuthorizationCandidates,
+    verifier: &dyn HarvestSealVerifier,
+    root_present: bool,
+    mut fact_for: impl FnMut(&DoneAuthorization) -> Result<HarvestFacts, AuthorizationFailure>,
+) -> Result<HarvestDecision, AuthorizationFailure> {
+    let ledger = FileConsumptionLedger::at_state_root(context.state_root);
+
+    let mut refusals: Vec<(String, Option<HarvestAuthorizationCause>)> = Vec::new();
+    if candidates.malformed {
+        refusals.push((
+            "  - an installed harvest grant is malformed".to_owned(),
+            Some(HarvestAuthorizationCause::GrantInvalid),
+        ));
+    }
+    let mut fact_fault: Option<AuthorizationFailure> = None;
+    for authorization in &candidates.authorizations {
         let facts = match fact_for(authorization) {
             Ok(facts) => facts,
             Err(error) => {
@@ -284,14 +346,19 @@ fn authorize_candidates(
         };
         let mut prior: Option<ConsumptionRecord> = None;
         for permit in authorization.receipt_ids(&facts.molecule) {
-            if let Some(record) = ledger
-                .recorded(&permit)
-                .map_err(|reason| CosmonError::StateStore { reason })?
-            {
+            if let Some(record) = ledger.recorded(&permit).map_err(|reason| {
+                AuthorizationFailure::new(
+                    CosmonError::StateStore { reason },
+                    HarvestAuthorizationCause::RecoveryRequired,
+                )
+            })? {
                 if record.grant != authorization.grant().fingerprint() {
-                    return Err(CosmonError::StateStore {
-                        reason: format!("harvest receipt for {permit} names a different grant"),
-                    });
+                    return Err(AuthorizationFailure::new(
+                        CosmonError::StateStore {
+                            reason: format!("harvest receipt for {permit} names a different grant"),
+                        },
+                        HarvestAuthorizationCause::RecoveryRequired,
+                    ));
                 }
                 if let Some(previous) = &prior {
                     if previous.grant != record.grant
@@ -299,12 +366,15 @@ fn authorize_candidates(
                         || previous.key_id != record.key_id
                         || previous.invocation_id != record.invocation_id
                     {
-                        return Err(CosmonError::StateStore {
-                            reason: format!(
-                                "conflicting harvest receipt aliases for {}",
-                                authorization.grant().fingerprint()
-                            ),
-                        });
+                        return Err(AuthorizationFailure::new(
+                            CosmonError::StateStore {
+                                reason: format!(
+                                    "conflicting harvest receipt aliases for {}",
+                                    authorization.grant().fingerprint()
+                                ),
+                            },
+                            HarvestAuthorizationCause::RecoveryRequired,
+                        ));
                     }
                 } else {
                     prior = Some(record);
@@ -321,14 +391,20 @@ fn authorize_candidates(
                     grant: granted.grant.clone(),
                     effect: granted.effect.clone(),
                     key_id: granted.key_id,
-                    invocation_id: invocation_id.to_owned(),
+                    invocation_id: context.invocation_id.to_owned(),
                 };
-                ledger
-                    .consume(&record)
-                    .map_err(|reason| CosmonError::StateStore { reason })?;
+                ledger.consume(&record).map_err(|reason| {
+                    AuthorizationFailure::new(
+                        CosmonError::StateStore { reason },
+                        HarvestAuthorizationCause::RecoveryRequired,
+                    )
+                })?;
                 return Ok(HarvestDecision::Authorized(Box::new(record)));
             }
-            Err(refusal) => refusals.push(refusal_line(&refusal)),
+            Err(refusal) => refusals.push((
+                refusal_line(&refusal),
+                targets_molecule(authorization, &facts).then(|| refusal.authorization_cause()),
+            )),
         }
     }
 
@@ -336,14 +412,45 @@ fn authorize_candidates(
         return Err(error);
     }
 
-    Ok(HarvestDecision::Refused(refusal_message(
-        molecule, base, &refusals,
-    )))
+    let cause = if !root_present {
+        HarvestAuthorizationCause::KeyMissing
+    } else if candidates.authorizations.is_empty() && candidates.malformed {
+        HarvestAuthorizationCause::GrantInvalid
+    } else if candidates.authorizations.is_empty() {
+        HarvestAuthorizationCause::GrantMissing
+    } else {
+        // A valid covering candidate returned above. For diagnostics of the
+        // rejected set, prefer a malformed/signature failure to a stale or
+        // unrelated grant. The ordering is independent of directory order.
+        [
+            HarvestAuthorizationCause::GrantInvalid,
+            HarvestAuthorizationCause::SignatureInvalid,
+            HarvestAuthorizationCause::GrantExpired,
+            HarvestAuthorizationCause::GrantRevoked,
+            HarvestAuthorizationCause::GrantMismatch,
+            HarvestAuthorizationCause::KeyMissing,
+        ]
+        .into_iter()
+        .find(|candidate| refusals.iter().any(|(_, seen)| *seen == Some(*candidate)))
+        .unwrap_or(HarvestAuthorizationCause::GrantMissing)
+    };
+    let lines: Vec<String> = refusals.into_iter().map(|(line, _)| line).collect();
+    Ok(HarvestDecision::Refused(
+        refusal_message(context.molecule, context.base, &lines),
+        cause,
+    ))
 }
 
 /// One refused candidate, rendered for the operator.
 fn refusal_line(refusal: &HarvestRefusal) -> String {
     format!("  - {refusal}")
+}
+
+fn targets_molecule(authorization: &DoneAuthorization, facts: &HarvestFacts) -> bool {
+    match &authorization.grant().scope {
+        HarvestScope::Molecule { molecule } => molecule == &facts.molecule,
+        HarvestScope::Mission { mission, .. } => facts.mission.as_ref() == Some(mission),
+    }
 }
 
 /// The message a refused harvest prints.
@@ -478,14 +585,132 @@ mod tests {
 
     /// The refusal message from a run that must refuse.
     ///
-    /// A refusal is `Ok(HarvestDecision::Refused(_))` and a fault is `Err`, so
+    /// A refusal is `Ok(HarvestDecision::Refused(..))` and a fault is `Err`, so
     /// these tests say which of the two they are asserting rather than
     /// accepting either.
     fn refusal_text(result: Result<HarvestDecision, CosmonError>, why: &str) -> String {
         match result {
-            Ok(HarvestDecision::Refused(message)) => message,
+            Ok(HarvestDecision::Refused(message, _)) => message,
             other => panic!("{why}: {other:?}"),
         }
+    }
+
+    #[test]
+    fn armed_without_a_key_reports_key_missing_before_grant_missing() {
+        let w = world();
+        std::fs::remove_file(w.galaxy.join(cosmon_filestore::HARVEST_PUBKEY_REL))
+            .expect("remove fixture key");
+        let molecule = mol("task-20260930-a001");
+        let decision = run(&w, &required(), &molecule, &[], "main").expect("decision");
+        assert_eq!(
+            decision.authorization_cause(),
+            Some(cosmon_core::harvest_authorization::HarvestAuthorizationCause::KeyMissing)
+        );
+    }
+
+    #[test]
+    fn candidate_priority_is_stable_and_a_valid_grant_wins() {
+        let w = world();
+        let molecule = mol("task-20260930-a002");
+        assert_eq!(
+            run(&w, &required(), &molecule, &[], "main")
+                .expect("missing grant decision")
+                .authorization_cause(),
+            Some(HarvestAuthorizationCause::GrantMissing)
+        );
+
+        let expired = HarvestGrant::new(
+            "cosmon",
+            HarvestScope::Molecule {
+                molecule: molecule.clone(),
+            },
+            "main",
+            HarvestAction::Done,
+            Vec::<String>::new(),
+            GrantEpoch::first(),
+            Some(Utc::now() - chrono::Duration::hours(1)),
+        )
+        .expect("expired grant fixture");
+        let mismatch = grant_for(&molecule, "release", &[]);
+        for (name, grant) in [
+            (mol("task-20260930-a003"), expired),
+            (mol("task-20260930-a004"), mismatch),
+        ] {
+            let attestation = seal(&w, &grant);
+            store_authorization(
+                &w.state,
+                &name,
+                &DoneAuthorization::Ratified(
+                    OperatorHarvestSeal::new(grant, attestation).expect("seal"),
+                ),
+            )
+            .expect("store");
+        }
+        assert_eq!(
+            run(&w, &required(), &molecule, &[], "main")
+                .expect("rejected candidates")
+                .authorization_cause(),
+            Some(HarvestAuthorizationCause::GrantExpired)
+        );
+
+        let current = grant_for(&molecule, "main", &[]);
+        let attestation = seal(&w, &current);
+        store_authorization(
+            &w.state,
+            &molecule,
+            &DoneAuthorization::Ratified(
+                OperatorHarvestSeal::new(current, attestation).expect("seal"),
+            ),
+        )
+        .expect("store covering grant");
+        assert!(matches!(
+            run(&w, &required(), &molecule, &[], "main"),
+            Ok(HarvestDecision::Authorized(_))
+        ));
+    }
+
+    #[test]
+    fn an_unrelated_grant_does_not_hide_a_missing_target_grant() {
+        let w = world();
+        let target = mol("task-20260930-a006");
+        let other = mol("task-20260930-a007");
+        let grant = grant_for(&other, "main", &[]);
+        let attestation = seal(&w, &grant);
+        store_authorization(
+            &w.state,
+            &other,
+            &DoneAuthorization::Ratified(
+                OperatorHarvestSeal::new(grant, attestation).expect("seal"),
+            ),
+        )
+        .expect("store unrelated grant");
+        assert_eq!(
+            run(&w, &required(), &target, &[], "main")
+                .expect("target decision")
+                .authorization_cause(),
+            Some(HarvestAuthorizationCause::GrantMissing)
+        );
+    }
+
+    #[test]
+    fn malformed_grant_is_distinct_from_an_unreadable_grant_directory() {
+        let w = world();
+        let molecule = mol("task-20260930-a005");
+        let dir = w
+            .state
+            .join(cosmon_filestore::harvest_authority::HARVEST_GRANTS_REL);
+        std::fs::create_dir_all(&dir).expect("grants directory");
+        std::fs::write(dir.join("broken.json"), "{broken").expect("malformed candidate");
+        assert_eq!(
+            run(&w, &required(), &molecule, &[], "main")
+                .expect("malformed candidate decision")
+                .authorization_cause(),
+            Some(HarvestAuthorizationCause::GrantInvalid)
+        );
+        std::fs::remove_file(dir.join("broken.json")).expect("remove candidate");
+        std::fs::remove_dir(&dir).expect("remove directory");
+        std::fs::write(&dir, "not a directory").expect("I/O fault fixture");
+        assert!(run(&w, &required(), &molecule, &[], "main").is_err());
     }
 
     fn run(
@@ -593,6 +818,12 @@ mod tests {
             "an edited grant must not verify",
         );
         assert!(text.contains("not an authorised harvest gesture"), "{text}");
+        assert_eq!(
+            run(&w, &required(), &molecule, &[], "release")
+                .expect("signature refusal")
+                .authorization_cause(),
+            Some(HarvestAuthorizationCause::SignatureInvalid)
+        );
     }
 
     #[test]
@@ -626,7 +857,7 @@ mod tests {
 
         assert!(matches!(
             run(&w, &required(), &molecule, &[], "main"),
-            Ok(HarvestDecision::Refused(_))
+            Ok(HarvestDecision::Refused(_, _))
         ));
     }
 
@@ -661,7 +892,7 @@ mod tests {
         assert!(
             matches!(
                 run(&w, &required(), &fresh, &[], "main"),
-                Ok(HarvestDecision::Refused(_))
+                Ok(HarvestDecision::Refused(_, _))
             ),
             "deleting the trust root must stop harvests, not unlock them"
         );

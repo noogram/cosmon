@@ -511,7 +511,7 @@ impl HarvestEffectPort for LibraryHarvestEffect {
         let args =
             cosmon_harvest::Args::from_harvest_options(molecule.as_str().to_owned(), options);
         cosmon_harvest::run_remote(&ctx, &args, admission, validator)
-            .map_err(|err| harvest_error_from(&err))
+            .map_err(|err| remote_harvest_error_from(&err))
     }
 }
 
@@ -523,21 +523,25 @@ pub struct AdapterRemoteValidator {
 }
 
 impl RemoteAdmissionValidator for AdapterRemoteValidator {
-    fn validate(&self, admission: &RemoteHarvestAdmission) -> Result<(), String> {
+    fn validate(
+        &self,
+        admission: &RemoteHarvestAdmission,
+    ) -> Result<(), cosmon_core::harvest_authorization::HarvestAuthorizationCause> {
+        use cosmon_core::harvest_authorization::HarvestAuthorizationCause as Cause;
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|e| format!("clock unavailable: {e}"))?
+            .map_err(|_| Cause::FactsUnavailable)?
             .as_secs();
         if now >= admission.expires_at {
-            return Err("harvest_scope_missing: credential expired".to_owned());
+            return Err(Cause::ScopeMissing);
         }
         let map = self.state.nucleon_map.load();
         let resolved = map
             .resolve_for_audience(&admission.issuer, &admission.subject, &admission.audience)
-            .ok_or_else(|| "harvest_scope_missing: binding removed".to_owned())?;
+            .ok_or(Cause::ScopeMissing)?;
         if resolved.noyau.as_str() != admission.tenant {
-            return Err("harvest_scope_missing: binding changed".to_owned());
+            return Err(Cause::ScopeMissing);
         }
         let scopes = map.allowed_scopes_for_audience(
             &admission.issuer,
@@ -559,7 +563,7 @@ impl RemoteAdmissionValidator for AdapterRemoteValidator {
             }
         };
         if !granted {
-            return Err("harvest_scope_missing: binding does not grant harvest".to_owned());
+            return Err(Cause::ScopeMissing);
         }
         self.state.deny_list.invalidate();
         let snapshot = self.state.deny_list.snapshot();
@@ -570,7 +574,7 @@ impl RemoteAdmissionValidator for AdapterRemoteValidator {
                 .contains(&crate::rate_limit::hash_sub(&admission.subject))
             || snapshot.denied_noyaus.contains(&admission.tenant)
         {
-            return Err("harvest_scope_missing: credential revoked".to_owned());
+            return Err(Cause::ScopeMissing);
         }
         Ok(())
     }
@@ -588,6 +592,23 @@ fn harvest_error_from(err: &anyhow::Error) -> EffectFailure {
         .map_or_else(
             || EffectFailure::Failed(format!("{err:#}")),
             |refused| EffectFailure::Refused(refused.refusal),
+        )
+}
+
+fn remote_harvest_error_from(err: &anyhow::Error) -> EffectFailure {
+    if let Some(fault) = err.downcast_ref::<cosmon_harvest::HarvestAuthorizationFault>() {
+        return EffectFailure::AuthorizationFault(fault.cause);
+    }
+    err.downcast_ref::<cosmon_harvest::RefusedHarvest>()
+        .map_or_else(
+            || harvest_error_from(err),
+            |refused| {
+                refused
+                    .authorization_cause
+                    .map_or(EffectFailure::Refused(refused.refusal), |cause| {
+                        EffectFailure::AuthorizationRefused(refused.refusal, cause)
+                    })
+            },
         )
 }
 
@@ -1052,6 +1073,7 @@ mod tests {
             let err: anyhow::Error = cosmon_harvest::RefusedHarvest {
                 refusal,
                 detail: None,
+                authorization_cause: None,
             }
             .into();
             match harvest_error_from(&err) {

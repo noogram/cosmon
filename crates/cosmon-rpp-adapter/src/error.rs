@@ -25,6 +25,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use cosmon_core::harvest_authorization::HarvestAuthorizationCause;
 use serde_json::json;
 
 use crate::nucleon_map::Noyau;
@@ -277,9 +278,149 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Harvest-only error wrapper that preserves the old label and status while
+/// adding a safe, typed authorization diagnostic for admitted callers.
+pub struct HarvestApiError {
+    /// The pre-existing API error envelope and request correlation.
+    pub api: ApiError,
+    /// Closed cause; never a raw grant or filesystem error string.
+    pub cause: Option<HarvestAuthorizationCause>,
+}
+
+impl HarvestApiError {
+    /// Add a classified cause and its required status to a harvest error.
+    #[must_use]
+    pub fn with_cause(mut api: ApiError, cause: HarvestAuthorizationCause) -> Self {
+        use HarvestAuthorizationCause as Cause;
+        match cause {
+            Cause::PolicyConflict | Cause::FactsUnavailable => {
+                api.status = StatusCode::SERVICE_UNAVAILABLE;
+                api.label = "harvest_failed";
+            }
+            Cause::FactsChanged | Cause::RecoveryRequired => {
+                api.status = StatusCode::CONFLICT;
+                api.label = "harvest_failed";
+            }
+            Cause::EffectUnsupported => {
+                api.status = StatusCode::NOT_IMPLEMENTED;
+                api.label = "harvest_effect_unavailable";
+            }
+            Cause::ScopeMissing => {
+                api.status = StatusCode::FORBIDDEN;
+                api.label = "forbidden";
+            }
+            _ => {
+                api.status = StatusCode::FORBIDDEN;
+                api.label = "not_authorized";
+            }
+        }
+        Self {
+            api,
+            cause: Some(cause),
+        }
+    }
+}
+
+impl From<ApiError> for HarvestApiError {
+    fn from(api: ApiError) -> Self {
+        Self { api, cause: None }
+    }
+}
+
+impl IntoResponse for HarvestApiError {
+    fn into_response(self) -> Response {
+        let Some(cause) = self.cause else {
+            return self.api.into_response();
+        };
+        let mut body = json!({
+            "error": self.api.label,
+            "harvest_authorization": {
+                "gate": cause.gate(),
+                "reason": cause.reason(),
+                "action": cause.action(),
+            },
+        });
+        if let Some(id) = self.api.request_id {
+            body["request_id"] = json!(id);
+        }
+        (self.api.status, Json(body)).into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn harvest_causes_preserve_coarse_status_and_expose_only_closed_tokens() {
+        use HarvestAuthorizationCause as Cause;
+        for (cause, status, label) in [
+            (Cause::ScopeMissing, StatusCode::FORBIDDEN, "forbidden"),
+            (Cause::Disabled, StatusCode::FORBIDDEN, "not_authorized"),
+            (
+                Cause::PolicyConflict,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "harvest_failed",
+            ),
+            (Cause::KeyMissing, StatusCode::FORBIDDEN, "not_authorized"),
+            (Cause::GrantMissing, StatusCode::FORBIDDEN, "not_authorized"),
+            (Cause::GrantInvalid, StatusCode::FORBIDDEN, "not_authorized"),
+            (
+                Cause::SignatureInvalid,
+                StatusCode::FORBIDDEN,
+                "not_authorized",
+            ),
+            (
+                Cause::GrantMismatch,
+                StatusCode::FORBIDDEN,
+                "not_authorized",
+            ),
+            (Cause::GrantExpired, StatusCode::FORBIDDEN, "not_authorized"),
+            (Cause::GrantRevoked, StatusCode::FORBIDDEN, "not_authorized"),
+            (Cause::FactsChanged, StatusCode::CONFLICT, "harvest_failed"),
+            (
+                Cause::FactsUnavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "harvest_failed",
+            ),
+            (
+                Cause::RecoveryRequired,
+                StatusCode::CONFLICT,
+                "harvest_failed",
+            ),
+            (
+                Cause::EffectUnsupported,
+                StatusCode::NOT_IMPLEMENTED,
+                "harvest_effect_unavailable",
+            ),
+            (
+                Cause::OverrideRequiresRatification,
+                StatusCode::FORBIDDEN,
+                "not_authorized",
+            ),
+        ] {
+            let response = HarvestApiError::with_cause(
+                ApiError {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    label: "harvest_failed",
+                    request_id: Some("req-safe".into()),
+                },
+                cause,
+            )
+            .into_response();
+            assert_eq!(response.status(), status, "{}", cause.reason());
+            let body = axum::body::to_bytes(response.into_body(), 2048)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"], label);
+            assert_eq!(body["request_id"], "req-safe");
+            assert_eq!(body["harvest_authorization"]["gate"], cause.gate());
+            assert_eq!(body["harvest_authorization"]["reason"], cause.reason());
+            assert_eq!(body["harvest_authorization"]["action"], cause.action());
+            assert_eq!(body.as_object().unwrap().len(), 3, "no detail field");
+        }
+    }
 
     #[test]
     fn label_is_stable() {

@@ -121,6 +121,54 @@ pub fn label_of(body: &serde_json::Value) -> Option<&str> {
     body.get("error").and_then(|v| v.as_str())
 }
 
+/// One locally mapped gesture for a recognized harvest reason/action pair.
+/// Unknown or malformed diagnostics fall back to the historic coarse error.
+#[must_use]
+pub fn for_harvest_authorization(body: &serde_json::Value) -> Option<(String, &'static str)> {
+    let diagnostic = crate::client::HarvestAuthorizationWire::from_error_body(body)?;
+    let gesture = match (diagnostic.reason.as_str(), diagnostic.action.as_str()) {
+        ("harvest_scope_missing", "issue_scope") => {
+            "ask the administrator to issue cosmon:molecule:harvest, then refresh credentials"
+        }
+        ("harvest_disabled", "configure_harvest") => {
+            "ask the administrator to run harvest configure"
+        }
+        ("harvest_policy_conflict", "repair_configuration") => {
+            "ask the administrator to resolve the harvest policy conflict"
+        }
+        ("harvest_key_missing", "init_harvest") => {
+            "run cosmon-remote harvest init on the operator device"
+        }
+        ("harvest_grant_missing", "mint_grant") => {
+            "run cosmon-remote harvest grant for this molecule or mission"
+        }
+        ("harvest_grant_invalid" | "harvest_signature_invalid", "inspect_grant") => {
+            "inspect harvest status and import a correctly signed grant"
+        }
+        (
+            "harvest_grant_mismatch" | "harvest_grant_expired" | "harvest_grant_revoked",
+            "mint_grant",
+        ) => "inspect current harvest status, then mint a matching grant",
+        ("harvest_facts_changed", "retry_after_status") => {
+            "inspect harvest status, then retry the request"
+        }
+        ("harvest_facts_unavailable", "repair_configuration") => {
+            "ask the administrator to repair unreadable harvest state"
+        }
+        ("harvest_recovery_required", "reconcile_harvest") => {
+            "reconcile durable harvest evidence before retrying"
+        }
+        ("harvest_effect_unsupported", "use_library_effect") => {
+            "remove the explicit binary selection to use the library effect"
+        }
+        ("harvest_override_requires_ratification", "operator_review") => {
+            "use the operator review and local workflow"
+        }
+        _ => return None,
+    };
+    Some((diagnostic.reason, gesture))
+}
+
 /// Actionable line for a `result` call that returned **no deliverable**.
 /// Keyed by the **molecule's
 /// derived status** (`result_status`), NOT by a

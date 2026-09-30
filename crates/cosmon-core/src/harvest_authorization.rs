@@ -960,6 +960,131 @@ pub enum HarvestRefusal {
     },
 }
 
+/// Safe, closed diagnostic for a remote harvest authorization refusal.
+///
+/// No variant contains grant bytes, tenant identity, paths, or free-form
+/// details. The server can project these tokens without exposing the facts
+/// that led to the decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarvestAuthorizationCause {
+    /// The admitted credential lacks the dedicated harvest scope.
+    ScopeMissing,
+    /// The administrator disabled remote harvest.
+    Disabled,
+    /// The configured policy has incompatible settings.
+    PolicyConflict,
+    /// No trusted public key is pinned for sealed harvest.
+    KeyMissing,
+    /// No candidate grant is installed.
+    GrantMissing,
+    /// A candidate violates the grant format or semantic rules.
+    GrantInvalid,
+    /// A candidate's signature does not verify.
+    SignatureInvalid,
+    /// A signed grant does not cover the current effect.
+    GrantMismatch,
+    /// A covering grant has expired.
+    GrantExpired,
+    /// The epoch revoked a grant.
+    GrantRevoked,
+    /// Authoritative facts changed after preliminary gates.
+    FactsChanged,
+    /// Authoritative facts could not be read.
+    FactsUnavailable,
+    /// Durable effect evidence is ambiguous and needs reconciliation.
+    RecoveryRequired,
+    /// The selected executor cannot carry explicit remote authority.
+    EffectUnsupported,
+    /// A requested override has no signed ratification format.
+    OverrideRequiresRatification,
+}
+
+impl HarvestAuthorizationCause {
+    /// Stable gate token in the additive wire diagnostic.
+    #[must_use]
+    pub const fn gate(self) -> &'static str {
+        match self {
+            Self::ScopeMissing => "scope",
+            Self::Disabled | Self::PolicyConflict => "policy",
+            Self::KeyMissing => "key",
+            Self::GrantMissing
+            | Self::GrantInvalid
+            | Self::SignatureInvalid
+            | Self::GrantMismatch
+            | Self::GrantExpired
+            | Self::GrantRevoked => "grant",
+            Self::FactsChanged | Self::FactsUnavailable => "facts",
+            Self::RecoveryRequired => "receipt",
+            Self::EffectUnsupported => "executor",
+            Self::OverrideRequiresRatification => "override",
+        }
+    }
+
+    /// Stable reason token in the additive wire diagnostic.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::ScopeMissing => "harvest_scope_missing",
+            Self::Disabled => "harvest_disabled",
+            Self::PolicyConflict => "harvest_policy_conflict",
+            Self::KeyMissing => "harvest_key_missing",
+            Self::GrantMissing => "harvest_grant_missing",
+            Self::GrantInvalid => "harvest_grant_invalid",
+            Self::SignatureInvalid => "harvest_signature_invalid",
+            Self::GrantMismatch => "harvest_grant_mismatch",
+            Self::GrantExpired => "harvest_grant_expired",
+            Self::GrantRevoked => "harvest_grant_revoked",
+            Self::FactsChanged => "harvest_facts_changed",
+            Self::FactsUnavailable => "harvest_facts_unavailable",
+            Self::RecoveryRequired => "harvest_recovery_required",
+            Self::EffectUnsupported => "harvest_effect_unsupported",
+            Self::OverrideRequiresRatification => "harvest_override_requires_ratification",
+        }
+    }
+
+    /// A client-side action token, never an executable server instruction.
+    #[must_use]
+    pub const fn action(self) -> &'static str {
+        match self {
+            Self::ScopeMissing => "issue_scope",
+            Self::Disabled => "configure_harvest",
+            Self::PolicyConflict | Self::FactsUnavailable => "repair_configuration",
+            Self::KeyMissing => "init_harvest",
+            Self::GrantMissing | Self::GrantMismatch | Self::GrantExpired | Self::GrantRevoked => {
+                "mint_grant"
+            }
+            Self::GrantInvalid | Self::SignatureInvalid => "inspect_grant",
+            Self::FactsChanged => "retry_after_status",
+            Self::RecoveryRequired => "reconcile_harvest",
+            Self::EffectUnsupported => "use_library_effect",
+            Self::OverrideRequiresRatification => "operator_review",
+        }
+    }
+}
+
+impl HarvestRefusal {
+    /// Classify a rejected candidate without serializing its sensitive facts.
+    #[must_use]
+    pub const fn authorization_cause(&self) -> HarvestAuthorizationCause {
+        match self {
+            Self::InvalidGrant(_) => HarvestAuthorizationCause::GrantInvalid,
+            Self::NotSealed(crate::operator_attestation::AttestationError::NoTrustRoot) => {
+                HarvestAuthorizationCause::KeyMissing
+            }
+            Self::NotSealed(_) => HarvestAuthorizationCause::SignatureInvalid,
+            Self::EpochSuperseded { .. } => HarvestAuthorizationCause::GrantRevoked,
+            Self::Expired { .. } => HarvestAuthorizationCause::GrantExpired,
+            Self::WrongGalaxy { .. }
+            | Self::OutOfScope { .. }
+            | Self::WrongBase { .. }
+            | Self::WrongAction { .. }
+            | Self::ReservationNotNamed { .. }
+            | Self::ReservationRemoved { .. }
+            | Self::AlreadySpentElsewhere { .. } => HarvestAuthorizationCause::GrantMismatch,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Ports
 // ---------------------------------------------------------------------------

@@ -332,9 +332,9 @@ pub fn read_policy_bytes(galaxy_root: impl AsRef<Path>) -> Result<Option<Vec<u8>
 /// `$COSMON_HARVEST_GRANT`, when set, names exactly one file and nothing else
 /// is read — an operator handing a specific grant to a specific invocation
 /// meant that one. Otherwise every `*.json` under
-/// `<state>/harvest/grants` is read and the unreadable ones are skipped
-/// rather than fatal: a torn file is a grant that did not happen, exactly like
-/// a signature that does not check.
+/// `<state>/harvest/grants` is read. A storage read failure is a fault, and a
+/// malformed candidate is reported by the diagnostic reader. The legacy
+/// reader still skips torn JSON in a scanned directory for compatibility.
 ///
 /// The molecule is *not* filtered on here. Scope is decided by
 /// [`cosmon_core::harvest_authorization::authorize`] against facts re-derived
@@ -343,53 +343,111 @@ pub fn read_policy_bytes(galaxy_root: impl AsRef<Path>) -> Result<Option<Vec<u8>
 ///
 /// # Errors
 ///
-/// [`CosmonError::StateStore`] when an explicitly named grant cannot be read
-/// or parsed. A missing grants directory yields an empty list.
+/// [`CosmonError::StateStore`] when grant storage is unreadable, an explicitly
+/// selected candidate is invalid, or decoded semantics fail. A missing grants
+/// directory yields an empty list; torn JSON in a scanned directory is skipped.
 pub fn load_authorizations(
     state_root: impl AsRef<Path>,
 ) -> Result<Vec<DoneAuthorization>, CosmonError> {
+    let candidates = load_authorizations_with_diagnostics(state_root)?;
+    if candidates.legacy_invalid {
+        return Err(CosmonError::StateStore {
+            reason: "invalid harvest grant semantics or encoding".to_owned(),
+        });
+    }
+    Ok(candidates.authorizations)
+}
+
+/// Candidate grants and whether an on-disk candidate was malformed.
+/// The malformed flag is safe to classify; it never carries path or payload.
+pub struct AuthorizationCandidates {
+    /// Decoded and semantically valid candidates in deterministic order.
+    pub authorizations: Vec<DoneAuthorization>,
+    /// At least one candidate could not be decoded or validated.
+    pub malformed: bool,
+    // Preserve the historical loader's fault for explicit or semantically
+    // invalid grants while allowing it to skip a torn JSON file.
+    legacy_invalid: bool,
+}
+
+/// Load grants with a safe malformed-candidate classification for the effect.
+/// A directory or file read failure remains a state fault, never absence.
+///
+/// # Errors
+///
+/// Returns [`CosmonError::StateStore`] for I/O failures reading grant storage.
+pub fn load_authorizations_with_diagnostics(
+    state_root: impl AsRef<Path>,
+) -> Result<AuthorizationCandidates, CosmonError> {
     if let Some(explicit) = std::env::var_os(HARVEST_GRANT_ENV) {
         let path = PathBuf::from(explicit);
         if path.as_os_str().is_empty() {
-            return Ok(Vec::new());
+            return Ok(AuthorizationCandidates {
+                authorizations: Vec::new(),
+                malformed: false,
+                legacy_invalid: false,
+            });
         }
         let text = std::fs::read_to_string(&path).map_err(|e| CosmonError::StateStore {
             reason: format!("failed to read harvest grant {}: {e}", path.display()),
         })?;
-        let one: DoneAuthorization =
-            serde_json::from_str(&text).map_err(|e| CosmonError::StateStore {
-                reason: format!("{} is not a harvest authorisation: {e}", path.display()),
-            })?;
-        one.validate().map_err(|e| CosmonError::StateStore {
-            reason: format!("{} has invalid harvest semantics: {e}", path.display()),
-        })?;
-        return Ok(vec![one]);
+        let one = serde_json::from_str::<DoneAuthorization>(&text)
+            .ok()
+            .filter(|one| one.validate().is_ok());
+        return Ok(AuthorizationCandidates {
+            malformed: one.is_none(),
+            legacy_invalid: one.is_none(),
+            authorizations: one.into_iter().collect(),
+        });
     }
 
     let dir = state_root.as_ref().join(HARVEST_GRANTS_REL);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(Vec::new());
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AuthorizationCandidates {
+                authorizations: Vec::new(),
+                malformed: false,
+                legacy_invalid: false,
+            });
+        }
+        Err(e) => {
+            return Err(CosmonError::StateStore {
+                reason: format!("failed to read harvest grants {}: {e}", dir.display()),
+            })
+        }
     };
     let mut out = Vec::new();
-    for entry in entries.flatten() {
+    let mut malformed = false;
+    let mut legacy_invalid = false;
+    for entry in entries {
+        let entry = entry.map_err(|e| CosmonError::StateStore {
+            reason: format!("failed to list harvest grants {}: {e}", dir.display()),
+        })?;
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if let Ok(parsed) = serde_json::from_str::<DoneAuthorization>(&text) {
-            parsed.validate().map_err(|e| CosmonError::StateStore {
-                reason: format!("{} has invalid harvest semantics: {e}", path.display()),
-            })?;
-            out.push(parsed);
+        let text = std::fs::read_to_string(&path).map_err(|e| CosmonError::StateStore {
+            reason: format!("failed to read harvest grant {}: {e}", path.display()),
+        })?;
+        match serde_json::from_str::<DoneAuthorization>(&text) {
+            Ok(parsed) if parsed.validate().is_ok() => out.push(parsed),
+            Ok(_) => {
+                malformed = true;
+                legacy_invalid = true;
+            }
+            Err(_) => malformed = true,
         }
     }
     // Deterministic order, so which grant is tried first does not depend on
     // the directory's iteration order.
     out.sort_by_key(|a| a.grant().fingerprint().as_str().to_owned());
-    Ok(out)
+    Ok(AuthorizationCandidates {
+        authorizations: out,
+        malformed,
+        legacy_invalid,
+    })
 }
 
 /// Write a sealed authorisation to the grants directory.

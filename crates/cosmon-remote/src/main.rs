@@ -579,6 +579,7 @@ enum ArtifactCmd {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
+    let json_requested = std::env::args_os().any(|arg| arg == "--json");
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_env("COSMON_REMOTE_LOG").unwrap_or_else(|_| EnvFilter::new("warn")),
@@ -591,13 +592,25 @@ async fn main() {
         // `NoDeliverable` (C4) already rendered its actionable next
         // gesture at the call site — it is not a transport failure.
         // Carry only the exit code; do not re-print a terse "error:".
-        if !matches!(err, Error::NoDeliverable { .. }) {
+        if json_requested {
+            if let Error::Api { body, .. } = &err {
+                println!("{body}");
+            } else if !matches!(err, Error::NoDeliverable { .. }) {
+                eprintln!("error: {err}");
+            }
+        } else if !matches!(err, Error::NoDeliverable { .. }) {
             eprintln!("error: {err}");
             // Actionable hint (smithy C1): when the wire label is one
             // the binary understands, say the probable cause and THE
             // repair command under the raw error — never instead of it.
             if let Error::Api { status, body } = &err {
-                if let Some(hint) =
+                if let Some((reason, gesture)) = hints::for_harvest_authorization(body) {
+                    let request_id = body.get("request_id").and_then(|v| v.as_str());
+                    eprintln!("  ↳ {reason}: {gesture}");
+                    if let Some(id) = request_id {
+                        eprintln!("  ↳ request_id: {id}");
+                    }
+                } else if let Some(hint) =
                     hints::label_of(body).and_then(|l| hints::for_api_error(*status, l))
                 {
                     for line in hint.lines() {
