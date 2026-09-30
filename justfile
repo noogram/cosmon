@@ -245,6 +245,7 @@ quick:
     ./scripts/no-pilot-env.sh ./scripts/check-workflow-yaml.test.sh
     ./scripts/no-pilot-env.sh ./scripts/check-docs-one-gate.sh
     ./scripts/no-pilot-env.sh ./scripts/check-docs-one-gate.test.sh
+    ./scripts/no-pilot-env.sh python3 scripts/check-remote-harvest-docs.py
     ./scripts/no-pilot-env.sh ./scripts/check-book-links.sh
     ./scripts/no-pilot-env.sh ./scripts/check-book-links.test.sh
     ./scripts/no-pilot-env.sh ./scripts/source-provenance.test.sh

@@ -13,9 +13,9 @@
 \*   #122  Retackle(m) re-spawns a worker for a Running molecule whose
 \*         worker died (ProcessCrash models the codex self-update that
 \*         kills a pane). PurgeNeverCollapses: Purge never writes
-\*         mol_status. The model has always said so; the implementation
-\*         (`cs purge` of a dead worker) still collapses the molecule,
-\*         which PreFix "PurgeCollapses" reproduces.
+\*         mol_status. The implementation preserves the Running molecule
+\*         after purging its dead worker. PreFix "PurgeCollapses" reproduces
+\*         the earlier behaviour.
 \*   #117  PatrolObserve / PatrolCollapse: the patrol auto-collapse acts
 \*         only after the spawn grace (in_grace) and on a fresh liveness
 \*         re-read. NoCollapseOfLiveOrGraceWorker. PreFix
@@ -342,10 +342,9 @@ LockRelease(m) == /\ events_writer_lock[m] # "None"
 \*
 \* Purge reclaims the WORKER and never writes mol_status: a Running
 \* molecule whose worker was purged stays Running and re-tackleable
-\* (Retackle). Invariant PurgeNeverCollapses states it. As of
-\* 2026-09-29 the implementation does NOT honour this: `cs purge` of a
-\* dead worker collapses its molecule (issue #122, open). PreFix
-\* "PurgeCollapses" models that implementation behaviour, and
+\* (Retackle). Invariant PurgeNeverCollapses states it. The implementation
+\* preserves this state after `cs purge` of a dead worker. PreFix
+\* "PurgeCollapses" models the earlier behaviour, and
 \* CosmonRun_PurgeCollapsesCounterexample.cfg exhibits the violation.
 Purge(m) == /\ fleet_desired[m] = "Registered"
             /\ ~worker_pid_alive[m]
