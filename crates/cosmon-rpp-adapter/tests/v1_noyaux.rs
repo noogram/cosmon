@@ -28,6 +28,56 @@ use cosmon_rpp_adapter::{router, AppState, BackendHealthRegistry, JwksStore, Pos
 use serde_json::Value;
 use tower::ServiceExt;
 
+#[tokio::test]
+async fn discovery_respects_presented_identity_and_audience() {
+    let tenants = TenantWorkspaces::new();
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-tenant".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&oidc, &tenants, vec![], security_dir.path());
+    let map = HabilitationMap::builder()
+        .insert(
+            "https://other-issuer.example",
+            "shared-subject",
+            HabilitationId::new("nuc-other"),
+            Noyau::new("other-tenant"),
+            "cosmon-rpp-tenant",
+        )
+        .insert(
+            oidc.issuer(),
+            "shared-subject",
+            HabilitationId::new("nuc-other-audience"),
+            Noyau::new("other-audience"),
+            "cosmon-rpp-other",
+        )
+        .build();
+    state.nucleon_map = cosmon_rpp_adapter::SharedHabilitationMap::new(map);
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "shared-subject",
+        audience: Some("cosmon-rpp-tenant"),
+        scopes: &[],
+        lifetime_secs: Some(60),
+        jti: Some("jti-discovery"),
+    });
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v1/noyaux")
+                .header("Authorization", format!("Bearer {jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["noyaux"], serde_json::json!([]));
+}
+
 fn make_state(
     oidc: &OidcMock,
     tenants: &TenantWorkspaces,
