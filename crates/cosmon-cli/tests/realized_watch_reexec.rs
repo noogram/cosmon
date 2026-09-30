@@ -237,6 +237,35 @@ impl Dispatch {
             .collect()
     }
 
+    /// Assessment receipts from the real detached watcher's journal.
+    fn assessments(&self) -> Vec<EventV2> {
+        read_events(&self.state_dir)
+            .into_iter()
+            .filter(|event| matches!(event, EventV2::ModelEvidenceAssessed { .. }))
+            .collect()
+    }
+
+    /// Append a response with no model to the same resolved session.
+    fn append_missing_model(&self) {
+        let encoded: String = self
+            .worktree
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let path = self
+            .home
+            .join(".claude/projects")
+            .join(encoded)
+            .join("sess.jsonl");
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+            "{{\"type\":\"assistant\",\"message\":{{}}}}"
+        )
+        .unwrap();
+    }
+
     /// Fold the molecule's journal into its adapter attribution — the shape
     /// the operator surfaces (`cs observe`, `compact_cell`) actually read.
     fn attribution(&self) -> cosmon_core::adapter_attribution::AdapterAttribution {
@@ -377,6 +406,77 @@ fn reexeced_watcher_observes_first_turn_then_winds_down() {
         d.attribution().realized,
         cosmon_core::adapter_attribution::Realized::Observed(vec!["claude-opus-4-8".to_string()]),
         "the folded attribution names the model the worker actually ran"
+    );
+}
+
+/// A later response with no model must qualify the old model even though the
+/// historical trajectory has not changed.
+#[test]
+fn reexeced_watcher_persists_missing_model_coverage_without_transition() {
+    use cosmon_core::model_realization::ModelEvidenceCoverage;
+
+    let d = Dispatch::seed("task-20260930-5567");
+    let mut child = d.arm_watcher(50, 600);
+    d.write_first_turn("model-a");
+    assert!(wait_until(|| !d.assessments().is_empty()));
+    d.append_missing_model();
+    assert!(
+        wait_until(|| {
+            d.assessments().iter().any(|event| {
+                matches!(
+                    event,
+                    EventV2::ModelEvidenceAssessed { assessment, .. }
+                        if matches!(assessment.coverage, ModelEvidenceCoverage::Degraded(_))
+                )
+            })
+        }),
+        "a model-less assistant response must persist degraded coverage"
+    );
+    d.collapse();
+    wait_for_exit(&mut child, "missing-model watcher");
+    assert_eq!(d.observations().len(), 1);
+}
+
+/// A new watcher must rebuild the same gap before making any healthy claim.
+#[test]
+fn reexeced_watcher_restart_does_not_heal_a_missing_model() {
+    use cosmon_core::model_realization::ModelEvidenceCoverage;
+
+    let d = Dispatch::seed("task-20260930-5570");
+    let mut first = d.arm_watcher(50, 600);
+    d.write_first_turn("model-a");
+    assert!(wait_until(|| !d.assessments().is_empty()));
+    d.append_missing_model();
+    assert!(wait_until(|| d.assessments().iter().any(|event| matches!(
+        event,
+        EventV2::ModelEvidenceAssessed { assessment, .. }
+            if matches!(assessment.coverage, ModelEvidenceCoverage::Degraded(_))
+    ))));
+    first.kill().unwrap();
+    first.wait().unwrap();
+
+    let mut restarted = d.arm_watcher(50, 600);
+    std::thread::sleep(Duration::from_millis(300));
+    d.collapse();
+    wait_for_exit(&mut restarted, "restarted watcher");
+    let receipts = d.assessments();
+    let first_degraded = receipts
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                EventV2::ModelEvidenceAssessed { assessment, .. }
+                    if matches!(assessment.coverage, ModelEvidenceCoverage::Degraded(_))
+            )
+        })
+        .unwrap();
+    assert!(
+        receipts[first_degraded..].iter().all(|event| matches!(
+            event,
+            EventV2::ModelEvidenceAssessed { assessment, .. }
+                if matches!(assessment.coverage, ModelEvidenceCoverage::Degraded(_))
+        )),
+        "rebuilding the source cannot make the historical gap healthy"
     );
 }
 
