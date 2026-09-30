@@ -2994,6 +2994,11 @@ fn run_with_remote_before_lock(
             args.propel_message.as_deref(),
             &merge_trailers,
             protected_paths,
+            preliminary_git
+                .as_ref()
+                .and_then(|(_, branch_head)| branch_head.as_deref()),
+            remote.is_some(),
+            std::thread::sleep,
         );
         match merge_result {
             Ok(MergeLoopOutcome::Merged) => {
@@ -4466,10 +4471,10 @@ Your branch has conflicts with the base branch. Please:\n\
 1. `git fetch origin && git rebase origin/main` (or the appropriate base branch)\n\
 2. Resolve conflicts, preserving both sides where possible\n\
 3. Run the full test suite (`cargo test --workspace`)\n\
-4. Commit and push your changes\n\
-5. Do NOT call `cs done` yourself — the orchestrator will retry the merge\n\
+4. Commit your changes\n\
+5. Do NOT call `cs done` yourself — a fresh harvest must repeat the gates\n\
 \n\
-This is an automated escalation. The merge will be retried after you complete the rebase.";
+This is an automated escalation. A changed branch head will not be merged by this attempt.";
 
 /// Backoff durations for escalation retries (seconds).
 const ESCALATION_BACKOFF_SECS: [u64; 3] = [30, 60, 120];
@@ -4502,6 +4507,9 @@ fn try_merge_with_escalation(
     custom_message: Option<&str>,
     coauthor_trailers: &[String],
     protected_paths: &[String],
+    admitted_head: Option<&str>,
+    remote_effect: bool,
+    retry_wait: impl Fn(std::time::Duration),
 ) -> anyhow::Result<MergeLoopOutcome> {
     // The most recent set of conflicting files, carried from the first attempt
     // through every escalation retry so the final `Conflict` outcome can list
@@ -4618,15 +4626,43 @@ fn try_merge_with_escalation(
         }
 
         // Sleep with backoff to give the worker time to rebase.
-        std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
+        retry_wait(std::time::Duration::from_secs(backoff_secs));
 
-        // The worker committed during the backoff, so the branch checked
-        // before the first attempt is not the branch about to merge. Check
-        // the protected paths again (issue #94).
+        // A remote admission may expire or be revoked during the wait. Its
+        // effect-time verdict cannot be reused for a later merge attempt.
+        // Likewise, a new local branch tip has not passed the pre-lock gates.
+        // A fresh `cs done` invocation replays the complete gate sequence.
+        if remote_effect {
+            record_escalation(store, mol_id, retry, "refused_freshness");
+            return Err(anyhow::anyhow!(
+                "teardown aborted: remote escalation requires a fresh harvest admission"
+            ));
+        }
+        let current_head = branch_head_oid(repo_root, branch)?;
+        if current_head.as_deref() != admitted_head || admitted_head.is_none() {
+            record_escalation(store, mol_id, retry, "refused_freshness");
+            return Err(anyhow::anyhow!(
+                "teardown aborted: branch head changed during escalation; rerun cs done for fresh gates"
+            ));
+        }
+
+        // The branch still names the admitted head. Recheck protected paths
+        // before attempting even that same head (issue #94).
         check_protected_paths(repo_root, branch, base, protected_paths)?;
 
-        // Retry the merge.
-        match try_merge_branch(repo_root, branch, base, strategy, coauthor_trailers) {
+        // Merge the exact admitted object, even if the branch ref moves
+        // between the freshness probe and Git's merge invocation.
+        let merge_target = admitted_head.ok_or_else(|| {
+            anyhow::anyhow!("teardown aborted: branch head admission is unavailable")
+        })?;
+        match try_merge_branch_target(
+            repo_root,
+            branch,
+            merge_target,
+            base,
+            strategy,
+            coauthor_trailers,
+        ) {
             MergeOutcome::Merged => {
                 if verify_merge(repo_root, branch, base) {
                     record_escalation(store, mol_id, retry, "merged");
@@ -4639,6 +4675,11 @@ fn try_merge_with_escalation(
                 ));
             }
             MergeOutcome::AlreadyMerged => {
+                if !verify_merge(repo_root, branch, base) {
+                    return Err(anyhow::anyhow!(
+                        "teardown aborted: branch moved during escalation verification"
+                    ));
+                }
                 record_escalation(store, mol_id, retry, "merged");
                 return Ok(MergeLoopOutcome::MergedAfterEscalation { retries: retry + 1 });
             }
@@ -4894,6 +4935,20 @@ fn try_merge_branch(
     strategy: MergeStrategy,
     coauthor_trailers: &[String],
 ) -> MergeOutcome {
+    try_merge_branch_target(repo_root, branch, branch, base, strategy, coauthor_trailers)
+}
+
+// Keep the display branch separate from the Git object to merge. Escalation
+// retries use the admitted object ID, so a concurrent ref update cannot make
+// Git integrate a different head after the freshness check.
+fn try_merge_branch_target(
+    repo_root: &Path,
+    branch: &str,
+    merge_target: &str,
+    base: &str,
+    strategy: MergeStrategy,
+    coauthor_trailers: &[String],
+) -> MergeOutcome {
     // Does the branch exist?
     if !branch_exists(repo_root, branch) {
         return MergeOutcome::NoBranch;
@@ -4926,7 +4981,7 @@ fn try_merge_branch(
     // a HEAD-based probe falsely returned AlreadyMerged when `cs done` was
     // invoked outside a main-branch checkout. Bookkeeping commits that
     // share the molecule's name never qualify — only topology does.
-    if is_branch_merged(repo_root, branch, base) {
+    if is_branch_merged(repo_root, merge_target, base) {
         return MergeOutcome::AlreadyMerged;
     }
 
@@ -4960,7 +5015,7 @@ fn try_merge_branch(
     cmd.args(["-C", &repo_arg, "merge"]);
     match strategy {
         MergeStrategy::FfOnly => {
-            cmd.args(["--ff-only", branch]);
+            cmd.args(["--ff-only", merge_target]);
         }
         MergeStrategy::Merge => {
             // `--no-ff` always creates a merge commit even if a
@@ -4978,14 +5033,18 @@ fn try_merge_branch(
             // pre-attribution cosmon (F9). `git merge`'s default subject when
             // merging `feat/x` into the current branch is `Merge branch
             // 'feat/x'`, reproduced here so history reads the same.
-            if coauthor_trailers.is_empty() {
+            if coauthor_trailers.is_empty() && merge_target == branch {
                 // `--no-edit` stops git from launching $EDITOR for the merge
                 // commit message.
-                cmd.args(["--no-ff", "--no-edit", branch]);
+                cmd.args(["--no-ff", "--no-edit", merge_target]);
             } else {
                 let subject = format!("Merge branch '{branch}'");
-                let trailers = coauthor_trailers.join("\n");
-                cmd.args(["--no-ff", "-m", &subject, "-m", &trailers, branch]);
+                cmd.args(["--no-ff", "-m", &subject]);
+                if !coauthor_trailers.is_empty() {
+                    let trailers = coauthor_trailers.join("\n");
+                    cmd.args(["-m", &trailers]);
+                }
+                cmd.arg(merge_target);
             }
         }
     }
@@ -12518,6 +12577,9 @@ mod tests {
             None,
             &[],
             &[],
+            None,
+            false,
+            |_| {},
         );
 
         match result.expect("conflict is a first-class Ok outcome, not Err") {
@@ -12600,6 +12662,9 @@ mod tests {
             None,
             &[],
             &[],
+            None,
+            false,
+            |_| {},
         );
 
         assert!(result.is_ok());
@@ -12685,6 +12750,9 @@ mod tests {
             None,
             &[],
             &[],
+            None,
+            false,
+            |_| {},
         );
 
         match result.expect("exhausted conflict is a first-class Ok outcome") {
@@ -12712,6 +12780,163 @@ mod tests {
             branch_exists(repo, "feat/esc-exhaust"),
             "the worker's branch must be preserved after exhaustion"
         );
+    }
+
+    #[test]
+    fn escalation_refuses_a_branch_head_changed_after_admission() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        commit_file(repo, "shared.txt", "base\n", "seed shared");
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/esc-freshness"])
+            .status
+            .success());
+        commit_file(repo, "shared.txt", "branch\n", "branch edit");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        commit_file(repo, "shared.txt", "main\n", "main edit");
+        let admitted_head = branch_head_oid(repo, "feat/esc-freshness")
+            .unwrap()
+            .unwrap();
+        let main_before = git_head(repo).unwrap();
+
+        let (state_tmp, store) = make_store();
+        let mol = sample_mol("task-20260411-e007", MoleculeStatus::Completed);
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let ctx = Context {
+            verbose: false,
+            json: true,
+            config: Some(state_tmp.path().to_path_buf()),
+            repo_root: None,
+        };
+
+        let result = try_merge_with_escalation(
+            &ctx,
+            &store,
+            &mol.id,
+            repo,
+            "feat/esc-freshness",
+            "main",
+            crate::base_branch::BaseSource::Default,
+            MergeStrategy::Merge,
+            "task-20260411-e007",
+            "test-socket",
+            true,
+            1,
+            None,
+            &[],
+            &[],
+            Some(&admitted_head),
+            false,
+            |_| {
+                // The first merge conflicted. A worker now advances its branch
+                // while the orchestrator waits to retry.
+                assert!(git(repo, &["checkout", "-q", "-b", "feat/esc-ready"])
+                    .status
+                    .success());
+                commit_file(repo, "ready.txt", "ready\n", "resolve branch");
+                let ready_head = git_head(repo).unwrap();
+                assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+                assert!(git(
+                    repo,
+                    &["update-ref", "refs/heads/feat/esc-freshness", &ready_head]
+                )
+                .status
+                .success());
+            },
+        );
+
+        assert_ne!(
+            branch_head_oid(repo, "feat/esc-freshness")
+                .unwrap()
+                .unwrap(),
+            admitted_head
+        );
+        assert!(result.is_err(), "a changed head must require fresh gates");
+        assert_eq!(git_head(repo).unwrap(), main_before, "base must not move");
+        assert!(!repo.join("ready.txt").exists(), "new work must not land");
+    }
+
+    #[test]
+    fn remote_escalation_requires_fresh_admission() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        commit_file(repo, "shared.txt", "base\n", "seed shared");
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/esc-remote"])
+            .status
+            .success());
+        commit_file(repo, "shared.txt", "branch\n", "branch edit");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        commit_file(repo, "shared.txt", "main\n", "main edit");
+        let admitted_head = branch_head_oid(repo, "feat/esc-remote").unwrap().unwrap();
+        let main_before = git_head(repo).unwrap();
+
+        let (state_tmp, store) = make_store();
+        let mol = sample_mol("task-20260411-e008", MoleculeStatus::Completed);
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let ctx = Context {
+            verbose: false,
+            json: true,
+            config: Some(state_tmp.path().to_path_buf()),
+            repo_root: None,
+        };
+
+        let result = try_merge_with_escalation(
+            &ctx,
+            &store,
+            &mol.id,
+            repo,
+            "feat/esc-remote",
+            "main",
+            crate::base_branch::BaseSource::Default,
+            MergeStrategy::Merge,
+            "task-20260411-e008",
+            "test-socket",
+            true,
+            1,
+            None,
+            &[],
+            &[],
+            Some(&admitted_head),
+            true,
+            |_| {},
+        );
+
+        assert!(result.is_err(), "remote retry needs fresh admission");
+        assert_eq!(git_head(repo).unwrap(), main_before, "base must not move");
+        assert_eq!(
+            branch_head_oid(repo, "feat/esc-remote").unwrap().unwrap(),
+            admitted_head
+        );
+    }
+
+    #[test]
+    fn merge_target_keeps_the_admitted_commit_when_the_ref_moves() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/esc-pinned"])
+            .status
+            .success());
+        commit_file(repo, "admitted.txt", "admitted\n", "admitted change");
+        let admitted_head = branch_head_oid(repo, "feat/esc-pinned").unwrap().unwrap();
+        commit_file(repo, "later.txt", "later\n", "later change");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+
+        let outcome = try_merge_branch_target(
+            repo,
+            "feat/esc-pinned",
+            &admitted_head,
+            "main",
+            MergeStrategy::Merge,
+            &[],
+        );
+
+        assert!(matches!(outcome, MergeOutcome::Merged));
+        assert!(repo.join("admitted.txt").exists());
+        assert!(!repo.join("later.txt").exists());
+        assert!(branch_is_ancestor_of(repo, &admitted_head, "main"));
+        assert!(!branch_is_ancestor_of(repo, "feat/esc-pinned", "main"));
     }
 
     // NOTE: the end-to-end exit-code assertions for the conflict-vs-clean
@@ -12786,6 +13011,9 @@ mod tests {
             None,
             &[],
             &[],
+            None,
+            false,
+            |_| {},
         );
 
         assert!(matches!(result.unwrap(), MergeLoopOutcome::AlreadyMerged));
@@ -12824,6 +13052,9 @@ mod tests {
             None,
             &[],
             &[],
+            None,
+            false,
+            |_| {},
         );
 
         assert!(matches!(result.unwrap(), MergeLoopOutcome::NoBranch));
