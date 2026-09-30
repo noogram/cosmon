@@ -110,6 +110,13 @@ pub enum DispatchLedgerError {
         model: String,
     },
 
+    /// A lifecycle or tag writer changed the claim's starting state.
+    #[error("dispatch claim changed before commit; current status is {status}")]
+    ClaimChanged {
+        /// The current lifecycle status, for a useful refusal without a spawn.
+        status: MoleculeStatus,
+    },
+
     /// The `WorkerSpawned` event could not be appended to `events.jsonl`.
     ///
     /// The dispatch is refused (and its partial writes undone) because a
@@ -245,8 +252,24 @@ pub fn commit_dispatch(
                     .unwrap_or_else(|| "adapter default (unrecorded)".to_owned()),
             });
         }
+        return Err(DispatchLedgerError::ClaimChanged {
+            status: current.status,
+        });
     }
-    let mut updated = mol.clone();
+    if current.status != mol.status
+        || current.tags != mol.tags
+        || current.assigned_worker != mol.assigned_worker
+        || current.session_name != mol.session_name
+        || current.tackled_by != mol.tackled_by
+        || current.tackled_at != mol.tackled_at
+    {
+        return Err(DispatchLedgerError::ClaimChanged {
+            status: current.status,
+        });
+    }
+    // Only the dispatch fields below belong to this transition. Preserve
+    // every other writer's fields from the state read under the fleet lock.
+    let mut updated = current.clone();
     if matches!(
         updated.status,
         MoleculeStatus::Pending | MoleculeStatus::Queued | MoleculeStatus::Frozen
@@ -272,9 +295,9 @@ pub fn commit_dispatch(
         record.adapter,
         record.loop_ownership,
     ) {
-        // `mol` is the pre-commit snapshot by construction — this function
-        // took it by reference and only ever mutated the `updated` clone.
-        undo_committed_writes(store, mol, record.worker);
+        // Undo against the state read under this lock, which can contain
+        // independent changes made after the caller took its snapshot.
+        undo_committed_writes(store, &current, record.worker);
         return Err(e);
     }
 
@@ -451,8 +474,8 @@ pub fn stamp_pid_witness(
 
 /// Undo the ledger entry when the spawn it authorised did not happen.
 ///
-/// Restores the molecule exactly as it stood before [`commit_dispatch`]
-/// (the caller passes the pre-commit snapshot) and removes the worker from
+/// Reverses only this worker's binding, claim and status promotion while
+/// retaining later lifecycle and tag changes. Removes the worker from
 /// `fleet.json`. Best-effort throughout: this runs on a path that is
 /// already returning an error, and a rollback failure must not mask the
 /// original cause. What it leaves behind on failure is the recoverable
@@ -479,7 +502,26 @@ fn undo_committed_writes(store: &FileStore, prior: &MoleculeData, worker: &Worke
     let mut fleet = store.load_fleet().unwrap_or_default();
     fleet.workers.remove(worker);
     let _ = store.save_fleet(&fleet);
-    let _ = store.save_molecule(&prior.id, prior);
+    if let Ok(mut current) = store.load_molecule(&prior.id) {
+        // A collapse may already have released the process, or a new
+        // dispatch may have replaced it. Neither state belongs to this undo.
+        if current
+            .process
+            .as_ref()
+            .is_some_and(|process| &process.worker_id == worker)
+        {
+            if current.status == MoleculeStatus::Running {
+                current.status = prior.status;
+            }
+            current.process.clone_from(&prior.process);
+            current.assigned_worker.clone_from(&prior.assigned_worker);
+            current.session_name.clone_from(&prior.session_name);
+            current.tackled_by.clone_from(&prior.tackled_by);
+            current.tackled_at.clone_from(&prior.tackled_at);
+            current.updated_at = chrono::Utc::now();
+            let _ = store.save_molecule(&prior.id, &current);
+        }
+    }
 }
 
 /// A live worker session whose molecule does not say it is running.
@@ -737,6 +779,129 @@ mod tests {
             .expect("fleet")
             .workers
             .contains_key(&runtime_worker));
+    }
+
+    /// A lifecycle writer can act after the dispatch claim and before the
+    /// ledger commit. Its decision must survive, with no worker registered.
+    #[test]
+    fn concurrent_terminal_or_freeze_transition_refuses_dispatch() {
+        for status in [MoleculeStatus::Collapsed, MoleculeStatus::Frozen] {
+            let (dir, store, claimed) = fixture();
+            let mut current = claimed.clone();
+            current.status = status;
+            if status == MoleculeStatus::Collapsed {
+                current.collapse_reason = Some("operator stopped the task".to_owned());
+            }
+            store
+                .save_molecule(&claimed.id, &current)
+                .expect("concurrent writer");
+
+            let worker = WorkerId::new("rewrite-briefing-aaaa").expect("worker id");
+            let adapter = adapter();
+            commit_dispatch(&store, &claimed, &record(&worker, &adapter, dir.path()))
+                .expect_err("a stale claim cannot reverse a lifecycle decision");
+
+            let observed = store.load_molecule(&claimed.id).expect("re-read");
+            assert_eq!(observed.status, status);
+            assert_eq!(observed.collapse_reason, current.collapse_reason);
+            assert!(observed.process.is_none());
+            assert!(!store
+                .load_fleet()
+                .expect("fleet")
+                .workers
+                .contains_key(&worker));
+        }
+    }
+
+    /// Tags are operator state too: a late hold must stop the spawn rather
+    /// than disappear when the tackler writes its older snapshot.
+    #[test]
+    fn concurrent_tag_change_refuses_dispatch_without_erasing_the_tag() {
+        let (dir, store, claimed) = fixture();
+        let mut current = claimed.clone();
+        current
+            .tags
+            .insert(cosmon_core::tag::Tag::new("hold:pilot").expect("tag"));
+        store
+            .save_molecule(&claimed.id, &current)
+            .expect("concurrent tag");
+
+        let worker = WorkerId::new("rewrite-briefing-aaaa").expect("worker id");
+        let adapter = adapter();
+        commit_dispatch(&store, &claimed, &record(&worker, &adapter, dir.path()))
+            .expect_err("a late pilot hold must prevent dispatch");
+
+        let observed = store.load_molecule(&claimed.id).expect("re-read");
+        assert_eq!(observed.tags, current.tags);
+        assert_eq!(observed.status, MoleculeStatus::Pending);
+        assert!(observed.process.is_none());
+        assert!(!store
+            .load_fleet()
+            .expect("fleet")
+            .workers
+            .contains_key(&worker));
+    }
+
+    /// Spawn failure may race a second writer after the ledger commit.
+    /// Rollback only owns the worker binding and claim it just wrote.
+    #[test]
+    fn rollback_preserves_concurrent_lifecycle_and_tag_changes() {
+        for status in [MoleculeStatus::Collapsed, MoleculeStatus::Frozen] {
+            let (dir, store, prior) = fixture();
+            let worker = WorkerId::new("rewrite-briefing-aaaa").expect("worker id");
+            let adapter = adapter();
+            commit_dispatch(&store, &prior, &record(&worker, &adapter, dir.path()))
+                .expect("commit");
+
+            let mut current = store.load_molecule(&prior.id).expect("read commit");
+            current.status = status;
+            current
+                .tags
+                .insert(cosmon_core::tag::Tag::new("hold:pilot").expect("tag"));
+            if status == MoleculeStatus::Collapsed {
+                current.collapse_reason = Some("operator stopped the task".to_owned());
+                current.release_process();
+            }
+            store
+                .save_molecule(&prior.id, &current)
+                .expect("concurrent writer");
+
+            rollback_dispatch(&store, &prior, &worker);
+
+            let observed = store.load_molecule(&prior.id).expect("re-read");
+            assert_eq!(observed.status, status);
+            assert_eq!(observed.tags, current.tags);
+            assert_eq!(observed.collapse_reason, current.collapse_reason);
+            assert!(observed.process.is_none());
+            assert!(!store
+                .load_fleet()
+                .expect("fleet")
+                .workers
+                .contains_key(&worker));
+        }
+    }
+
+    /// A tag added after commit remains even when rollback restores Pending.
+    #[test]
+    fn rollback_preserves_a_tag_added_after_commit() {
+        let (dir, store, prior) = fixture();
+        let worker = WorkerId::new("rewrite-briefing-aaaa").expect("worker id");
+        let adapter = adapter();
+        commit_dispatch(&store, &prior, &record(&worker, &adapter, dir.path())).expect("commit");
+
+        let mut current = store.load_molecule(&prior.id).expect("read commit");
+        current
+            .tags
+            .insert(cosmon_core::tag::Tag::new("priority:high").expect("tag"));
+        store
+            .save_molecule(&prior.id, &current)
+            .expect("concurrent tag");
+
+        rollback_dispatch(&store, &prior, &worker);
+        let observed = store.load_molecule(&prior.id).expect("re-read");
+        assert_eq!(observed.status, MoleculeStatus::Pending);
+        assert_eq!(observed.tags, current.tags);
+        assert!(observed.process.is_none());
     }
 
     /// The dispatch records **where the transcript will be**, in a file that

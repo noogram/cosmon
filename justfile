@@ -468,6 +468,11 @@ tla-verify:
             CosmonRun_CrashesI3.cfg)              expected_violation="I3_FleetMirrorsSession" ;;
             CosmonRun_CrashesI4.cfg)              expected_violation="I4_SessionImpliesLiveProcess" ;;
             CosmonRun_I9Counterexample.cfg)       expected_violation="I9_BranchMergedOnlyIfCompleted" ;;
+            CosmonRun_PurgeCollapsesCounterexample.cfg) expected_violation="PurgeNeverCollapses" ;;
+            CosmonRun_PatrolGraceCounterexample.cfg) expected_violation="NoCollapseOfLiveOrGraceWorker" ;;
+            CosmonRun_BlockerReleaseCounterexample.cfg) expected_violation="DependentRunsOnlyAfterBlockerCompleted" ;;
+            CosmonRun_DispatchClaimCounterexample.cfg) expected_violation="OneDispatchPerMolecule" ;;
+            CosmonRun_StaleDispatchCounterexample.cfg) expected_violation="NoWriterOverwritten" ;;
             CosmonRunScheduler_ConvoyCascade.cfg) expected_violation="S3_PurgeBeforeRespawn" ;;
         esac
         case "$cfg" in
