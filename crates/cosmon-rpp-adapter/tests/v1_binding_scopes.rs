@@ -548,3 +548,86 @@ async fn a_binding_removed_after_admission_refuses_at_the_effect_port() {
     );
     assert!(validator.validate(&admission).is_err());
 }
+
+#[tokio::test]
+async fn effect_recheck_applies_issuer_scoped_policy() {
+    use cosmon_core::config::{HarvestAuthorityConfig, RemoteHarvestPolicy};
+    use cosmon_core::harvest_door::HarvestOptions;
+    use cosmon_core::id::MoleculeId;
+    use cosmon_core::remote_harvest::{
+        resolve_remote_policy, RemoteAdmissionValidator, RemoteHarvestAdmission,
+    };
+    use cosmon_rpp_adapter::harvest_effect::AdapterRemoteValidator;
+    use cosmon_rpp_adapter::rate_limit::hash_sub;
+
+    let mut tenants = TenantWorkspaces::new();
+    tenants.add("a");
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = Arc::new(make_state(
+        &oidc,
+        &tenants,
+        vec![(
+            "admin-a",
+            "nuc-a",
+            "a",
+            "cosmon-rpp-a",
+            &["cosmon:molecule:harvest"],
+        )],
+        dir.path(),
+    ));
+    let admission = RemoteHarvestAdmission {
+        issuer: oidc.issuer().to_owned(),
+        subject: "admin-a".to_owned(),
+        audience: "cosmon-rpp-a".to_owned(),
+        tenant: "a".to_owned(),
+        molecule: MoleculeId::new("task-20260930-c004").unwrap(),
+        options: HarvestOptions::new("close"),
+        expires_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60,
+        token_id: "jti-effect".to_owned(),
+        authority_source: cosmon_core::remote_harvest::RemoteAuthoritySource::BindingHarvest,
+        policy: resolve_remote_policy(&HarvestAuthorityConfig {
+            remote: Some(RemoteHarvestPolicy::Scoped),
+            ..HarvestAuthorityConfig::default()
+        })
+        .unwrap(),
+    };
+    let validator = AdapterRemoteValidator { state };
+    let path = dir.path().join("security/oidc-policy.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    assert!(validator.validate(&admission).is_ok());
+
+    for entry in [
+        format!(
+            "[[deny.sub]]\nissuer = {:?}\nsub_hash = {:?}\n",
+            oidc.issuer(),
+            hash_sub("admin-a")
+        ),
+        format!(
+            "[[deny.jti]]\nissuer = {:?}\njti = \"jti-effect\"\n",
+            oidc.issuer()
+        ),
+        format!(
+            "[[deny.jti]]\nissuer = {:?}\nsub_hash = {:?}\njti = \"jti-effect\"\n",
+            oidc.issuer(),
+            hash_sub("admin-a")
+        ),
+    ] {
+        std::fs::write(&path, entry).unwrap();
+        assert!(validator.validate(&admission).is_err());
+    }
+    std::fs::write(
+        &path,
+        "[[deny.jti]]\nissuer = \"other-issuer\"\njti = \"jti-effect\"\n",
+    )
+    .unwrap();
+    assert!(validator.validate(&admission).is_ok());
+}

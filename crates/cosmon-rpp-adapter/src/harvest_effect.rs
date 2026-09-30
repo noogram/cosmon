@@ -567,11 +567,10 @@ impl RemoteAdmissionValidator for AdapterRemoteValidator {
         }
         self.state.deny_list.invalidate();
         let snapshot = self.state.deny_list.snapshot();
+        let sub_hash = crate::rate_limit::hash_sub(&admission.subject);
         if snapshot.global_kill
-            || snapshot.denied_jtis.contains(&admission.token_id)
-            || snapshot
-                .denied_sub_hashes
-                .contains(&crate::rate_limit::hash_sub(&admission.subject))
+            || snapshot.revokes_jti(&admission.issuer, &sub_hash, &admission.token_id)
+            || snapshot.revokes_sub(&admission.issuer, &sub_hash)
             || snapshot.denied_noyaus.contains(&admission.tenant)
         {
             return Err(Cause::ScopeMissing);
