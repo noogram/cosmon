@@ -3495,18 +3495,20 @@ pub enum AdapterSelectionSource {
 ///
 /// 1. [`ModelSelectionSource::Flag`] — `cs tackle --model <id>` (the
 ///    operator's in-the-moment choice; always wins).
-/// 2. [`ModelSelectionSource::FormulaPin`] — no flag, and the currently
+/// 2. [`ModelSelectionSource::MoleculePin`] — a child model recorded at
+///    nucleation, below an explicit tackle flag and above the formula.
+/// 3. [`ModelSelectionSource::FormulaPin`] — no higher pin, and the currently
 ///    executing formula step pins `model = "<id>"` (per-workflow override).
-/// 3. [`ModelSelectionSource::EnvVar`] — no flag, no step pin, and a model
+/// 4. [`ModelSelectionSource::EnvVar`] — no pin, and a model
 ///    env var (`$COSMON_DEFAULT_MODEL`, else the legacy `$ANTHROPIC_MODEL`)
 ///    is set non-empty.
-/// 4. [`ModelSelectionSource::Config`] — no flag, no step pin, no env, and
+/// 5. [`ModelSelectionSource::Config`] — no pin or env, and
 ///    the per-galaxy `.cosmon/config.toml::[adapters.<name>].default_model`
 ///    resolved the id.
-/// 5. [`ModelSelectionSource::GlobalConfig`] — as above but the per-galaxy
+/// 6. [`ModelSelectionSource::GlobalConfig`] — as above but the per-galaxy
 ///    config carried no `default_model`, so the global
 ///    `~/.config/cosmon/config.toml::[adapters.<name>].default_model` won.
-/// 6. [`ModelSelectionSource::Default`] — nothing above resolved, so the
+/// 7. [`ModelSelectionSource::Default`] — nothing above resolved, so the
 ///    **floor is `None`**: cosmon pins no model and the adapter's own
 ///    default applies (von-neumann's minimax floor — byte-identical to
 ///    today's no-pin behaviour; a *strong* model is never reachable from
@@ -3524,6 +3526,9 @@ pub enum ModelSelectionSource {
         /// The verbatim model id the operator (or driver) passed.
         flag: String,
     },
+    /// A model explicitly recorded on this molecule at nucleation, above
+    /// its formula step and below an operator's `cs tackle --model` flag.
+    MoleculePin,
     /// The selection came from the currently executing formula step's
     /// `model = "<id>"` pin (a per-workflow override). Ranks above every
     /// default but below [`Flag`](Self::Flag). Pins do **not** propagate
@@ -3922,6 +3927,10 @@ mod tests {
                     flag: "claude-fable-5".to_owned(),
                 },
                 "\"source\":\"flag\"",
+            ),
+            (
+                ModelSelectionSource::MoleculePin,
+                "\"source\":\"molecule_pin\"",
             ),
             (
                 ModelSelectionSource::FormulaPin {

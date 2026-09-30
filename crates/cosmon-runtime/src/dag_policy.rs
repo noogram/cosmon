@@ -1089,17 +1089,12 @@ pub fn load_parallel_limits(
 /// `model = "<id>"` pin. A step with no pin is absent from the map — its
 /// molecule pre-resolves to `None` (unbound) and is dispatched last.
 ///
-/// This is the **pre-resolution of the ADR-142 Incarnation model** at
-/// frontier-ordering time. Only the formula-step pin is consulted, and that
-/// is deliberate: it is the sole *per-molecule* model source. A tiered model
-/// is reachable only from `cs tackle --model` or a formula-step `model =`
-/// pin (ADR-142; strong is never inherited from a config/env default —
-/// tackle's C4 safe-default guard). `--model` is a tackle-time human input
-/// that does not exist for a still-pending frontier molecule, so it is out
-/// of scope here by construction; config/env defaults are galaxy-global and
-/// collapse every molecule into one bucket, where affinity is a no-op. The
-/// formula-step pin is therefore the *only* source that produces the
-/// per-molecule model variation affinity ordering exists to exploit.
+/// This map supplies the formula tier of the pre-dispatch model decision.
+/// The CLI affinity resolver checks each pending molecule's `cosmon_model`
+/// recommendation first, then this map. An explicit `cs tackle --model` is
+/// a tackle-time input that does not exist for a pending frontier molecule;
+/// config and environment defaults are galaxy-wide and do not separate
+/// molecules into useful affinity buckets.
 ///
 /// Keyed by `step.order` to match [`load_parallel_limits`] and the
 /// `(formula_id, current_step)` lookup the dispatch caps use — the same

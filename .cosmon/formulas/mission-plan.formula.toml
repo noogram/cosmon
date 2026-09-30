@@ -56,6 +56,8 @@ editorial pipeline looks like (who feeds whom). For each [[agents]] \
 entry, extract and preserve the `prompt` field verbatim — this is the \
 role prompt that will be injected into child molecules' briefing.md \
 in the decompose step. \
+Record each role's optional `model` field in analysis.md. A model choice \
+for a child is dispatch intent, not merely prose in the DAG manifest. \
 Read the source material referenced in the goal to discover the \
 concrete work units (e.g. topics from a PDF, modules from a codebase). \
 \
@@ -109,6 +111,14 @@ Concretely: \
     the child visible under cs deps --transitive without making the frozen \
     mission a completion prerequisite. NEVER use a --blocked-by edge to the \
     mission; only pipeline predecessors block. \
+  - When the plan recommends a model for this child (including a role's \
+    `[[agents]].model` value), pass `--var cosmon_model=<id>` to `cs nucleate`. \
+    When it recommends an adapter, pass `--adapter <name>`. Record both \
+    recommendations beside the child ID in dag-manifest.md. Omit either \
+    option when no recommendation was made. The child model pin outranks \
+    its task-work formula step and defaults; an explicit later \
+    `cs tackle --model` outranks the child pin. `cs run` honours the \
+    recorded child model during dispatch. \
 \
 ROLE-SPECIFIC BRIEFING (critical — without this the worker has no context): \
 After nucleating each child molecule, write a custom briefing.md to the \

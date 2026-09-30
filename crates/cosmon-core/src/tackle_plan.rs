@@ -109,6 +109,8 @@ pub struct SelectionRequest<'a> {
     pub adapter_flag: Option<&'a str>,
     /// `--model <id>` if the operator passed it.
     pub model_flag: Option<&'a str>,
+    /// Model recommendation recorded on this molecule at nucleation.
+    pub molecule_model: Option<&'a str>,
     /// The resolved formula, when its id resolved.
     pub formula: Option<&'a Formula>,
     /// Zero-based index of the currently executing step (the step whose
@@ -141,6 +143,12 @@ pub struct SelectionRequest<'a> {
     /// overriding the step with nothing.
     pub harness_flag: &'a HarnessMap,
 }
+
+/// Explicit variable key for a child's durable model recommendation.
+///
+/// Ordinary task variables remain untouched; only this opt-in key changes
+/// dispatch. A planner records it with `cs nucleate --var cosmon_model=<id>`.
+pub const MOLECULE_MODEL_VAR: &str = "cosmon_model";
 
 /// The resolved **who-runs-this** half of a tackle decision: adapter, model,
 /// and the axes the spawn seam derives from them.
@@ -250,6 +258,15 @@ pub fn resolve_selection(req: &SelectionRequest<'_>) -> Result<TackleSelection, 
         req.global_adapters,
         req.global_config_path,
     );
+    let (preferred_model, model_source) = if req.model_flag.is_none_or(str::is_empty) {
+        req.molecule_model
+            .filter(|model| !model.trim().is_empty())
+            .map_or((preferred_model, model_source), |model| {
+                (Some(model.to_owned()), ModelSelectionSource::MoleculePin)
+            })
+    } else {
+        (preferred_model, model_source)
+    };
     let model_source = sharpen_model_fallback(model_source, req.formula_absence);
 
     // The harness map, read from the same step as the two pins above. The
@@ -791,6 +808,7 @@ pub fn adapter_strong_set(
 pub fn describe_model_source(source: &ModelSelectionSource) -> String {
     match source {
         ModelSelectionSource::Flag { .. } => "the `--model` flag".to_owned(),
+        ModelSelectionSource::MoleculePin => "the molecule's `cosmon_model` pin".to_owned(),
         ModelSelectionSource::FormulaPin { formula, step_id } => {
             format!("the formula-step pin `{formula}` / `{step_id}`")
         }
@@ -1679,6 +1697,7 @@ mod tests {
         let selection_req = SelectionRequest {
             adapter_flag: Some("claude"),
             model_flag: None,
+            molecule_model: None,
             formula: None,
             current_step: 0,
             env_default_adapter: None,
@@ -1852,6 +1871,7 @@ mod tests {
         let req = SelectionRequest {
             adapter_flag: Some("definitely-not-an-adapter"),
             model_flag: None,
+            molecule_model: None,
             formula: None,
             current_step: 0,
             env_default_adapter: None,
@@ -1875,6 +1895,7 @@ mod tests {
         let req = SelectionRequest {
             adapter_flag: None,
             model_flag: None,
+            molecule_model: None,
             formula: None,
             current_step: 0,
             env_default_adapter: None,

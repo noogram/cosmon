@@ -242,7 +242,9 @@ SEE ALSO: cs tackle (launch a worker on the molecule you just nucleated).
 
    `stress-test` opts the molecule into the two-layer pre-commitment seal at dispatch (Layer 1 runtime precondition + Layer 2 witness-quorum, ADR-085 §2-§3) and out of autopilot drain. The remaining classes are gate-equivalent to the legacy default; this flag is a marker, not a runtime mode.
 * `--assign <ASSIGN>` — Assign a worker to the new molecule
-* `--var <KEY=VALUE>` — Set a variable (repeatable: --var key=value)
+* `--var <KEY=VALUE>` — Set a variable (repeatable: --var key=value).
+
+   `--var cosmon_model=<id>` records a child model recommendation for later `cs tackle` and `cs run` dispatch. It outranks the formula-step model; an explicit `cs tackle --model` still wins. Omit it to keep ordinary model resolution unchanged.
 * `--var-file <KEY=PATH>` — Read a variable value from a UTF-8 file (repeatable: --var-file key=path).
 
    The file contents are passed verbatim, including trailing newlines. Explicit `--var` bindings override a same-named `--var-file` binding.
