@@ -6,7 +6,7 @@
 
 | Capability | CLI | Native UI | Remote service |
 |---|---|---|---|
-| Show latest-turn context occupancy | `cs peek` TUI and `--snapshot` divide the last reported turn's input by the model window; unknown inputs show no percentage. `cs peek --json` publishes the same unrounded percentage or `null`. IN/CACHED/OUT/RSN remain cumulative. | No matching gauge audited | No matching gauge audited |
+| Show latest-turn context occupancy | `cs peek` TUI and `--snapshot` divide the last reported turn's input by the model window; unknown inputs show no percentage. `cs peek --json` has no context percentage and keeps its existing cumulative usage schema. IN/CACHED/OUT/RSN remain cumulative. | No matching gauge audited | No matching gauge audited |
 
 The snapshot and TUI renderers share the worker energy observation. A model
 window without a last-turn count is insufficient to infer occupancy.

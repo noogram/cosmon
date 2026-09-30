@@ -220,7 +220,7 @@ struct CodexTokenCountInfo {
     #[serde(default)]
     total_token_usage: Option<CodexTokenUsage>,
     #[serde(default)]
-    last_token_usage: Option<CodexTurnInput>,
+    last_token_usage: Option<TurnInput>,
     #[serde(default)]
     model_context_window: Option<u64>,
 }
@@ -228,7 +228,7 @@ struct CodexTokenCountInfo {
 /// The part of a turn reading needed for context occupancy. Other turn
 /// counters may change shape without invalidating the cumulative reading.
 #[derive(Debug, Deserialize)]
-struct CodexTurnInput {
+struct TurnInput {
     #[serde(default)]
     input_tokens: Option<u64>,
 }
