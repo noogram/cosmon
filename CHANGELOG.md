@@ -21,6 +21,14 @@ this stage.
 
 ### Security
 
+- **RPP token time validation is stricter.** The adapter now rejects `iat`
+  and `nbf` more than 30 seconds ahead of its clock and checks the active
+  posture's 15-minute cap against both the declared lifetime and remaining
+  validity. Prepared posture retains its warn-only 24-hour cap, but rejects
+  future-dated tokens beyond the same clock allowance. Refusals and excess
+  prepared lifetimes are logged; deployments should synchronize issuer and
+  adapter clocks and mint tokens within the posture's lifetime.
+
 - **RPP discovery and secondary controls now use issuer-scoped identity.**
   `GET /v1/noyaux` filters by issuer, subject and audience. Rate-limit and
   quota buckets, revocations, and authz audit keys distinguish equal subject

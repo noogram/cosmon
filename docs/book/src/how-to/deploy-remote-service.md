@@ -184,6 +184,15 @@ prior live configuration in place.
 For a production deployment, configure the issuer's `jwks_uri` in
 `trusted-issuers.toml` and keep the issuer and binding rules explicit.
 
+The adapter checks token times against its own clock. It rejects a token whose
+`iat` or optional `nbf` is more than 30 seconds in the future. In `active`
+posture, both the declared `exp - iat` lifetime and the remaining `exp - now`
+time must be at most 15 minutes. In `prepared` posture, a lifetime or remaining
+time over 24 hours is logged as a warning; future `iat` and `nbf` values still
+cause rejection. Issuers that mint tokens ahead of the adapter clock or issue
+longer lived tokens may now receive `not_yet_valid` or `expired` refusals.
+Synchronize the issuer and adapter clocks and use the posture's token lifetime.
+
 ## Step 3: Start the fente on loopback
 
 The adapter reads `state/security/oidc-kill.toml` and
