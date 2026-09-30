@@ -56,6 +56,10 @@
     "reason": "Host-sealed operator revocation of a binding; outside the tenant client promise."
   },
   {
+    "path": "/v1/admin/noyaux/{noyau}/harvest-authority",
+    "reason": "Host-sealed compare-and-set of remote harvest policy, public root and epoch; tenant credentials cannot authorize it."
+  },
+  {
     "path": "/v1/admin/reload",
     "reason": "Host-sealed operator action that reloads authorization bindings; tenant JWTs cannot authorize it."
   }

@@ -43,6 +43,7 @@ pub mod freeze;
 pub mod galaxies;
 pub mod guard;
 pub mod harvest;
+pub mod harvest_authority;
 pub mod health;
 pub mod heartbeat;
 pub mod help;

@@ -2,6 +2,8 @@
 
 # CLI and UI parity audit
 
+`cs harvest-authority` is an operator terminal surface for remote harvest trust administration, status, challenge construction and signed-grant import (issue #120 W6). No native UI counterpart is shipped; the RPP exposes the corresponding tenant reads and imports and a disjoint host-sealed administration route. A native UI must use the same public-root and grant validation rules before parity can be claimed.
+
 ## RPP identity discovery and quota (issue #45)
 
 | Capability | CLI | Native UI | Remote service |

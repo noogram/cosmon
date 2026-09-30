@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use cosmon_minisign_testkit::Operator;
 use cosmon_rpp_adapter::admin_seal::AdminSeal;
 use cosmon_rpp_adapter::deny_list::DenyList;
 use cosmon_rpp_adapter::image_init::ImageInit;
@@ -35,6 +36,186 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 const ADMIN_TOKEN: &str = "s3cret-operator-token";
+
+#[tokio::test]
+async fn harvest_authority_admin_route_rejects_a_tenant_bearer_before_body_parsing() {
+    let td = tempfile::tempdir().unwrap();
+    let (state, _) = make_state(td.path(), AdminSeal::from_token(ADMIN_TOKEN));
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/admin/noyaux/demo/harvest-authority")
+                .header("authorization", "Bearer tenant-credential")
+                .header("content-type", "application/json")
+                .body(Body::from("{"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn harvest_status_route_requires_tenant_admission() {
+    let td = tempfile::tempdir().unwrap();
+    let (state, _) = make_state(td.path(), AdminSeal::from_token(ADMIN_TOKEN));
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v1/harvest/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn sealed_admin_compare_and_set_selects_explicit_policy_once() {
+    let td = tempfile::tempdir().unwrap();
+    let (state, _) = make_state(td.path(), AdminSeal::from_token(ADMIN_TOKEN));
+    let galaxy = state.galaxies_root.join("demo");
+    std::fs::create_dir_all(galaxy.join(".cosmon/state")).unwrap();
+    let config = galaxy.join(".cosmon/config.toml");
+    std::fs::write(&config, "[project]\nproject_id = \"demo-project\"\n").unwrap();
+    let app = router(state);
+    let request_body = json!({
+        "expected_policy": null,
+        "expected_key_digest": null,
+        "expected_epoch": 1,
+        "policy": "scoped"
+    });
+    let send = |body: Value| {
+        Request::builder()
+            .method("PUT")
+            .uri("/v1/admin/noyaux/demo/harvest-authority")
+            .header("x-cosmon-admin-token", ADMIN_TOKEN)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let first = app
+        .clone()
+        .oneshot(send(request_body.clone()))
+        .await
+        .unwrap();
+    let first_status = first.status();
+    let first_body = read_json(first).await;
+    assert_eq!(first_status, StatusCode::OK, "{first_body}");
+    assert_eq!(first_body["policy"], "scoped");
+    assert!(std::fs::read_to_string(&config)
+        .unwrap()
+        .contains("remote = \"scoped\""));
+    let stale = app.oneshot(send(request_body)).await.unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn public_root_rotation_requires_prior_digest_and_epoch_bump() {
+    let td = tempfile::tempdir().unwrap();
+    let (state, _) = make_state(td.path(), AdminSeal::from_token(ADMIN_TOKEN));
+    let galaxy = state.galaxies_root.join("demo");
+    std::fs::create_dir_all(galaxy.join(".cosmon/state")).unwrap();
+    std::fs::write(
+        galaxy.join(".cosmon/config.toml"),
+        "[project]\nproject_id = \"demo-project\"\n",
+    )
+    .unwrap();
+    let app = router(state);
+    let first_key = Operator::from_seed(41).public_key_file();
+    let second_key = Operator::from_seed(42).public_key_file();
+    let send = |body: Value| {
+        Request::builder()
+            .method("PUT")
+            .uri("/v1/admin/noyaux/demo/harvest-authority")
+            .header("x-cosmon-admin-token", ADMIN_TOKEN)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let first = app
+        .clone()
+        .oneshot(send(json!({
+            "expected_policy": null,
+            "expected_key_digest": null,
+            "expected_epoch": 1,
+            "policy": "sealed",
+            "public_key": first_key
+        })))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = read_json(first).await;
+    let digest = first["key_fingerprint"].as_str().unwrap();
+
+    let rotation = |epoch: Option<u64>| {
+        json!({
+            "expected_policy": "sealed",
+            "expected_key_digest": digest,
+            "expected_epoch": 1,
+            "policy": "sealed",
+            "public_key": second_key,
+            "epoch": epoch
+        })
+    };
+    let unrevoked = app.clone().oneshot(send(rotation(None))).await.unwrap();
+    assert_eq!(unrevoked.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        std::fs::read_to_string(galaxy.join(".cosmon/harvest.pub")).unwrap(),
+        first_key
+    );
+
+    let rotated = app.clone().oneshot(send(rotation(Some(2)))).await.unwrap();
+    assert_eq!(rotated.status(), StatusCode::OK);
+    let rotated = read_json(rotated).await;
+    assert_eq!(rotated["epoch"], 2);
+    assert_eq!(
+        std::fs::read_to_string(galaxy.join(".cosmon/harvest.pub")).unwrap(),
+        second_key
+    );
+    let stale = app.oneshot(send(rotation(Some(3)))).await.unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sealed_admin_refuses_symlinked_config_without_touching_target() {
+    use std::os::unix::fs::symlink;
+    let td = tempfile::tempdir().unwrap();
+    let (state, _) = make_state(td.path(), AdminSeal::from_token(ADMIN_TOKEN));
+    let galaxy = state.galaxies_root.join("demo");
+    std::fs::create_dir_all(galaxy.join(".cosmon/state")).unwrap();
+    let outside = td.path().join("outside.toml");
+    std::fs::write(&outside, "[project]\nproject_id = \"outside\"\n").unwrap();
+    symlink(&outside, galaxy.join(".cosmon/config.toml")).unwrap();
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/admin/noyaux/demo/harvest-authority")
+                .header("x-cosmon-admin-token", ADMIN_TOKEN)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "expected_policy": null,
+                        "expected_key_digest": null,
+                        "expected_epoch": 1,
+                        "policy": "scoped"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        std::fs::read_to_string(outside).unwrap(),
+        "[project]\nproject_id = \"outside\"\n"
+    );
+}
 
 /// Build an `AppState` whose admin seal is `seal` and whose provisioner
 /// shares the returned [`SharedHabilitationMap`] handle with the admission

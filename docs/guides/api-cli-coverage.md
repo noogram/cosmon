@@ -100,6 +100,10 @@ advance → terminate → infrastructure → introspection.
 | `cs prime` | NO | — | Pre-flight checks; local-shell convenience. |
 | `cs migrate` | NO | — | Schema/state migration; operator-only. |
 | `cs harvest` | NO | — | Scheduler-only (cron-driven); not a remote act. |
+| `cs harvest-authority configure` | ADMIN | `PUT /v1/admin/noyaux/{noyau}/harvest-authority` | Host-sealed compare-and-set of public root, epoch and explicit remote policy; no tenant scope can administer trust. |
+| `cs harvest-authority status` | V1 | `GET /v1/harvest/status` | Tenant status requires read or harvest scope and reports effective policy and provenance. |
+| `cs harvest-authority challenge` | V1 | `POST /v1/harvest/challenge` | Builds current canonical grant bytes, without signing or installation. |
+| `cs harvest-authority import` | V1 | `POST /v1/harvest/grants` | Verifies an external signature against current locked facts and installs without spending. |
 | `cs reconcile` | **NO (NEVER)** | — | Idempotent projection across STATUS.md, ISSUES.md, GitHub Issues. Long-running. Not a human act on the network — operator only. ADR-080 §5.1. |
 | `cs project` | NO | — | Alias of `cs reconcile`; same answer. |
 | `cs verify` | NO (V2 candidate) | (TBD) `GET /v1/molecules/:id/verify` | Read-only seal audit; conditional V2 exposure if turing's oracle-side-channel constraints met (ADR-080 §5.3). |
