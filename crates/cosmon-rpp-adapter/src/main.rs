@@ -240,7 +240,7 @@ async fn main() -> anyhow::Result<()> {
     let (jwks, jwks_provider) = if let Some(trusted) = trusted {
         let (store, provider) =
             load_allowlisted_jwks(&state_dir, trusted, cfg.resolved_jwks_refresh_ttl()).await?;
-        (store, Some(provider))
+        (store, provider)
     } else {
         let store = SharedJwksStore::new(JwksStore::load(&state_dir)?);
         let key_counts = store.load().key_counts_by_issuer();
@@ -266,7 +266,12 @@ async fn main() -> anyhow::Result<()> {
                 "JWKS load summary (file-stage fallback)",
             );
         }
-        (store, None)
+        let provider = cosmon_rpp_adapter::JwksProvider::for_reload(
+            store.clone(),
+            cosmon_rpp_adapter::JwksFetcher::new()?,
+        );
+        tokio::spawn(provider.clone().run(cfg.resolved_jwks_refresh_ttl()));
+        (store, provider)
     };
 
     // Nucleon-binding seed (smithy autonomie-pool, task-20260614-f16f):

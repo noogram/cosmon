@@ -54,6 +54,10 @@ pub struct AuthorizationFacts {
     pub base: ResolvedBase,
     /// Current molecule tags in canonical order.
     pub tags: Vec<String>,
+    /// Protected reference paths used by the preliminary gate.
+    pub protected_paths: Vec<String>,
+    /// Raw declared scope perimeter used by the preliminary gate.
+    pub scope_allow: Option<String>,
     /// Current epoch; an absent epoch has the documented first value.
     pub epoch: GrantEpoch,
     /// Current policy bytes; `None` means no optional policy exists.
@@ -127,12 +131,15 @@ impl AuthorizationFacts {
         let mut parents: Vec<MoleculeId> = mol.blocked_by().into_iter().cloned().collect();
         parents.sort();
         let tags = mol.tags.iter().map(ToString::to_string).collect();
+        let scope_allow = mol.variables.get("scope_allow").cloned();
         Ok(Self {
             config,
             project_id,
             status: mol.status,
             base,
             tags,
+            protected_paths: mol.protected_paths,
+            scope_allow,
             epoch: read_epoch(sources.galaxy_root)?,
             policy_bytes: read_policy_bytes(sources.galaxy_root)?,
             verifier: MinisignHarvestVerifier::resolve(sources.galaxy_root)?,
@@ -168,6 +175,8 @@ impl AuthorizationFacts {
             || self.status != current.status
             || self.base != current.base
             || self.tags != current.tags
+            || self.protected_paths != current.protected_paths
+            || self.scope_allow != current.scope_allow
             || self.persisted_base != current.persisted_base
             || self.parents != current.parents
             || self.molecule_project_id != current.molecule_project_id
@@ -199,6 +208,8 @@ impl AuthorizationFacts {
             || self.persisted_base != preliminary.base_branch
             || self.parents != parents
             || self.tags != tags
+            || self.protected_paths != preliminary.protected_paths
+            || self.scope_allow != preliminary.variables.get("scope_allow").cloned()
             || self.molecule_project_id != preliminary.project_id
             || self.merged_at != preliminary.merged_at
             || self.archived != preliminary.archived

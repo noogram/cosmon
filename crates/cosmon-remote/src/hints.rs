@@ -130,6 +130,15 @@ pub fn for_harvest_authorization(body: &serde_json::Value) -> Option<(String, &'
         ("harvest_scope_missing", "issue_scope") => {
             "ask the administrator to issue cosmon:molecule:harvest, then refresh credentials"
         }
+        ("harvest_credential_expired", "refresh_credential") => {
+            "refresh the credential, then retry the harvest"
+        }
+        ("harvest_credential_revoked", "contact_administrator") => {
+            "ask the administrator to review the credential revocation"
+        }
+        ("harvest_binding_changed", "inspect_binding") => {
+            "ask the administrator to inspect the current identity binding"
+        }
         ("harvest_disabled", "configure_harvest") => {
             "ask the administrator to run harvest configure"
         }

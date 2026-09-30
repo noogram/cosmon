@@ -336,6 +336,19 @@ impl JwksProvider {
         }
     }
 
+    /// Attach a fetcher to a file-stage boot without changing its live keys.
+    /// A later allowlist reload populates the issuer configuration on the
+    /// shared store, after which this provider can fetch those issuers.
+    #[must_use]
+    pub fn for_reload(shared: SharedJwksStore, fetcher: JwksFetcher) -> Self {
+        Self {
+            shared,
+            fetcher,
+            cooldown: DEFAULT_CACHE_MISS_COOLDOWN,
+            runtime: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
     /// Override the cache-miss cooldown (tests use a short value to
     /// exercise back-to-back refetches deterministically).
     #[must_use]

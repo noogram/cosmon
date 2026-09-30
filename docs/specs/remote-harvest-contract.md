@@ -230,6 +230,9 @@ stable reason and one action token:
 | Gate / reason | Status | Next gesture |
 |---|---|---|
 | `scope / harvest_scope_missing` | 403 | administrator issues `cosmon:molecule:harvest`; client refreshes credentials |
+| `credential / harvest_credential_expired` | 403 | refresh the credential and retry |
+| `credential / harvest_credential_revoked` | 403 | administrator reviews the revocation |
+| `binding / harvest_binding_changed` | 403 | administrator inspects the current identity binding |
 | `policy / harvest_disabled` | 403 `not_authorized` | administrator runs `harvest configure` |
 | `policy / harvest_policy_conflict` | 503 | administrator resolves R5 |
 | `key / harvest_key_missing` | 403 `not_authorized` | operator runs `harvest init` |
