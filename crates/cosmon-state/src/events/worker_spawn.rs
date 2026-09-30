@@ -32,11 +32,14 @@ use chrono::{DateTime, Utc};
 use cosmon_core::algorithmic_provenance::AlgorithmicProvenance;
 use cosmon_core::event_v2::{
     AdapterHandleState, AdapterProbeKind, AdapterProbeResult, AdapterSelectionSource, EventV2,
-    HarnessLaunchStatus, LoopOwnershipTag, ModelSelectionSource, PerturbationChannel,
+    HarnessLaunchStatus, LoopOwnershipTag, ModelEvidenceGeneration, ModelSelectionSource,
+    PerturbationChannel,
 };
 use cosmon_core::harness_settings::HarnessArg;
 use cosmon_core::id::{MoleculeId, WorkerId};
-use cosmon_core::model_realization::ModelObservationSource;
+use cosmon_core::model_realization::{
+    ModelEvidenceAssessment, ModelEvidenceCoverage, ModelEvidenceGrammar, ModelObservationSource,
+};
 use cosmon_core::spawn_seam::LoopOwnership;
 
 use crate::event_log::{emit_one, resolve_events_log_path};
@@ -642,6 +645,25 @@ impl Drop for ObservationEmitLock {
 /// `(worker, adapter)` — the dispatch scope an observation belongs to (F-02).
 type Scope = (WorkerId, String);
 
+/// One source assessment captured while the observation lock is held.
+/// The caller supplies a fresh bounded capture through the publication closure.
+#[derive(Debug, Clone)]
+pub struct ModelAssessmentSnapshot {
+    /// Provider grammar used to assess this input.
+    pub observation_basis: ModelEvidenceGrammar,
+    /// Monotone local continuity epoch for the source being assessed.
+    pub generation: ModelEvidenceGeneration,
+    /// Complete-byte assessment and historical trajectory at this boundary.
+    pub assessment: ModelEvidenceAssessment,
+    /// Whether this is the final capture of the source.
+    pub final_capture: bool,
+    /// Side channel that reported the concrete model identities.
+    pub observed_source: ModelObservationSource,
+}
+
+/// Current version of the durable model-evidence assessment policy.
+pub const MODEL_EVIDENCE_POLICY_VERSION: u16 = 1;
+
 /// What `events.jsonl` says about **one** molecule's dispatch, folded
 /// incrementally: the current adapter and worker, and the realized
 /// model/effort trajectories and unavailability findings already recorded per
@@ -683,6 +705,33 @@ struct LedgerFold {
     models: std::collections::HashMap<Scope, Vec<cosmon_core::model_realization::ModelId>>,
     efforts: std::collections::HashMap<Scope, Vec<cosmon_core::model_realization::EffortLevel>>,
     unavailable: std::collections::HashSet<Scope>,
+    assessments: std::collections::HashMap<Scope, LedgerAssessment>,
+}
+
+#[derive(Debug, Clone)]
+struct LedgerAssessment {
+    policy_version: u16,
+    observation_basis: ModelEvidenceGrammar,
+    generation: ModelEvidenceGeneration,
+    assessment: ModelEvidenceAssessment,
+    captured_at: DateTime<Utc>,
+}
+
+fn assessment_changed(
+    prior: Option<&LedgerAssessment>,
+    snapshot: &ModelAssessmentSnapshot,
+    has_fresh_model: bool,
+) -> bool {
+    prior.is_none_or(|prior| {
+        prior.policy_version != MODEL_EVIDENCE_POLICY_VERSION
+            || prior.observation_basis != snapshot.observation_basis
+            || prior.generation != snapshot.generation
+            || prior.assessment.coverage != snapshot.assessment.coverage
+            || prior.assessment.latest != snapshot.assessment.latest
+            || has_fresh_model
+            || (snapshot.final_capture
+                && prior.assessment.complete_bytes != snapshot.assessment.complete_bytes)
+    })
 }
 
 impl LedgerFold {
@@ -737,6 +786,27 @@ impl LedgerFold {
             } if mol_id == *own => {
                 self.unavailable.insert((worker_id, adapter_name));
             }
+            EventV2::ModelEvidenceAssessed {
+                mol_id,
+                worker_id,
+                adapter_name,
+                policy_version,
+                observation_basis,
+                generation,
+                assessment,
+                captured_at,
+            } if mol_id == *own => {
+                self.assessments.insert(
+                    (worker_id, adapter_name),
+                    LedgerAssessment {
+                        policy_version,
+                        observation_basis,
+                        generation,
+                        assessment,
+                        captured_at,
+                    },
+                );
+            }
             _ => {}
         }
     }
@@ -782,6 +852,149 @@ impl ObservationLedger {
     pub fn last_worker(&mut self) -> Option<WorkerId> {
         let _ = self.catch_up();
         self.folded.worker.clone()
+    }
+
+    /// Capture and publish one model-evidence assessment under the observation
+    /// lock. The closure must recheck the current input and return the newest
+    /// bounded snapshot; `None` skips publication after an unreadable capture.
+    ///
+    /// A degradation is written before any accompanying model facts. A healthy
+    /// receipt follows successful readback of every required model fact. The
+    /// journal tail supplies dedup state, so a failed append is retried later.
+    /// Returns whether this call durably appended an assessment receipt.
+    pub fn publish_model_assessment(
+        &mut self,
+        worker_id: &WorkerId,
+        adapter_name: &str,
+        capture: impl FnOnce() -> Option<ModelAssessmentSnapshot>,
+        provenance: &AlgorithmicProvenance,
+    ) -> bool {
+        let Some(_guard) = ObservationEmitLock::acquire(&self.state_dir) else {
+            return false;
+        };
+        if self.catch_up().is_err() {
+            return false;
+        }
+        if self.folded.worker.as_ref() != Some(worker_id)
+            || self.folded.adapter.as_deref() != Some(adapter_name)
+        {
+            return false;
+        }
+        let Some(snapshot) = capture() else {
+            return false;
+        };
+        // Dispatch and non-observer writers do not share this lock. A capture
+        // may take time, so re-read their journal changes before publishing.
+        if self.catch_up().is_err()
+            || self.folded.worker.as_ref() != Some(worker_id)
+            || self.folded.adapter.as_deref() != Some(adapter_name)
+        {
+            return false;
+        }
+        let scope = (worker_id.clone(), adapter_name.to_owned());
+        let recorded = self
+            .folded
+            .models
+            .get(&scope)
+            .map_or(&[][..], Vec::as_slice);
+        let fresh = newly_observed(recorded, &snapshot.assessment.trajectory).to_vec();
+        let has_fresh_model = !fresh.is_empty();
+        let divergent = !recorded.is_empty()
+            && snapshot.assessment.trajectory.get(..recorded.len()) != Some(recorded);
+        if divergent
+            && !matches!(
+                snapshot.assessment.coverage,
+                ModelEvidenceCoverage::Degraded(_)
+            )
+        {
+            return false;
+        }
+        let prior = self.folded.assessments.get(&scope);
+        if let Some(prior) = prior {
+            if snapshot.generation.0 < prior.generation.0
+                || (snapshot.generation == prior.generation
+                    && snapshot.assessment.complete_bytes < prior.assessment.complete_bytes)
+            {
+                return false;
+            }
+            // The same input boundary cannot silently repair an earlier gap.
+            if snapshot.generation == prior.generation
+                && snapshot.assessment.complete_bytes == prior.assessment.complete_bytes
+                && matches!(
+                    prior.assessment.coverage,
+                    ModelEvidenceCoverage::Degraded(_)
+                )
+                && !matches!(
+                    snapshot.assessment.coverage,
+                    ModelEvidenceCoverage::Degraded(_)
+                )
+            {
+                return false;
+            }
+        }
+        let changed = assessment_changed(prior, &snapshot, has_fresh_model);
+        let degraded = matches!(
+            snapshot.assessment.coverage,
+            ModelEvidenceCoverage::Degraded(_)
+        );
+        if changed && degraded && !self.append_assessment(worker_id, adapter_name, &snapshot) {
+            return false;
+        }
+        for model in fresh {
+            emit_model_observed(
+                &self.state_dir,
+                &self.mol_id,
+                worker_id,
+                adapter_name,
+                model.as_str(),
+                snapshot.observed_source,
+                provenance,
+            );
+            if self.catch_up().is_err()
+                || self
+                    .folded
+                    .models
+                    .get(&scope)
+                    .is_none_or(|models| models.last() != Some(&model))
+            {
+                return false;
+            }
+        }
+        if changed && !degraded {
+            return self.append_assessment(worker_id, adapter_name, &snapshot);
+        }
+        if changed && degraded && has_fresh_model {
+            // The first degraded receipt guards the crash cut before a new
+            // positive fact; this second one covers facts that landed after it.
+            return self.append_assessment(worker_id, adapter_name, &snapshot);
+        }
+        changed && degraded
+    }
+
+    fn append_assessment(
+        &mut self,
+        worker_id: &WorkerId,
+        adapter_name: &str,
+        snapshot: &ModelAssessmentSnapshot,
+    ) -> bool {
+        let captured_at = Utc::now();
+        let event = EventV2::ModelEvidenceAssessed {
+            mol_id: self.mol_id.clone(),
+            worker_id: worker_id.clone(),
+            adapter_name: adapter_name.to_owned(),
+            policy_version: MODEL_EVIDENCE_POLICY_VERSION,
+            observation_basis: snapshot.observation_basis,
+            generation: snapshot.generation,
+            assessment: snapshot.assessment.clone(),
+            captured_at,
+        };
+        write_event(&self.state_dir, event);
+        self.catch_up().is_ok()
+            && self
+                .folded
+                .assessments
+                .get(&(worker_id.clone(), adapter_name.to_owned()))
+                .is_some_and(|receipt| receipt.captured_at == captured_at)
     }
 
     /// Ledger form of [`emit_new_model_observations`].
@@ -1098,6 +1311,7 @@ pub(super) fn write_event(state_dir: &Path, event: EventV2) {
 mod tests {
     use super::*;
     use cosmon_core::event_v2::Envelope;
+    use cosmon_core::model_realization::assess_claude_model_evidence;
     use std::fs;
     use tempfile::tempdir;
 
@@ -1116,6 +1330,354 @@ mod tests {
             .filter(|l| !l.trim().is_empty())
             .map(|l| Envelope::from_line(l).expect("envelope must parse"))
             .collect()
+    }
+
+    fn seed_attempt(state_dir: &Path, worker: &WorkerId) {
+        write_event(
+            state_dir,
+            EventV2::AdapterSelected {
+                mol_id: mol(),
+                adapter_name: "claude".to_owned(),
+                selected_at: Utc::now(),
+                selection_source: AdapterSelectionSource::Cli {
+                    flag: "claude".to_owned(),
+                },
+                role_hint: None,
+                loop_ownership: LoopOwnershipTag::default(),
+            },
+        );
+        write_event(
+            state_dir,
+            EventV2::WorkerSpawned {
+                worker_id: worker.clone(),
+                molecule: Some(mol()),
+                session_name: "worker-pane".to_owned(),
+                role: "worker".to_owned(),
+                adapter_name: "claude".to_owned(),
+                loop_ownership: LoopOwnershipTag::default(),
+            },
+        );
+    }
+
+    fn claude_snapshot(input: &[u8], final_capture: bool) -> ModelAssessmentSnapshot {
+        ModelAssessmentSnapshot {
+            observation_basis: ModelEvidenceGrammar::Claude,
+            generation: ModelEvidenceGeneration(1),
+            assessment: assess_claude_model_evidence(input, final_capture),
+            final_capture,
+            observed_source: ModelObservationSource::ClaudeStreamJson,
+        }
+    }
+
+    #[test]
+    fn unchanged_model_still_needs_distinct_quality_receipts() {
+        let dir = tempdir().unwrap();
+        let worker = wkr();
+        seed_attempt(dir.path(), &worker);
+        let mut ledger = ObservationLedger::new(dir.path(), &mol());
+        let provenance = AlgorithmicProvenance::adapter_silent("claude");
+        for input in [
+            b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n".as_slice(),
+            b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n{\"type\":\"assistant\",\"message\":{}}\n".as_slice(),
+            b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n{\"type\":\"assistant\",\"message\":{}}\n{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n".as_slice(),
+        ] {
+            assert!(ledger.publish_model_assessment(
+                &worker, "claude", || Some(claude_snapshot(input, true)), &provenance,
+            ));
+            assert!(!ledger.publish_model_assessment(
+                &worker, "claude", || Some(claude_snapshot(input, true)), &provenance,
+            ));
+        }
+        let events = read_envelopes(dir.path());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event, EventV2::ModelObserved { .. }))
+                .count(),
+            1
+        );
+        let receipts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                EventV2::ModelEvidenceAssessed { assessment, .. } => Some(assessment),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(receipts.len(), 3);
+        assert!(matches!(
+            receipts[0].coverage,
+            ModelEvidenceCoverage::CompleteRecords
+        ));
+        assert!(matches!(
+            receipts[1].coverage,
+            ModelEvidenceCoverage::Degraded(_)
+        ));
+        assert!(matches!(
+            receipts[2].coverage,
+            ModelEvidenceCoverage::Degraded(_)
+        ));
+        assert_ne!(receipts[1].latest, receipts[2].latest);
+    }
+
+    #[test]
+    fn stale_healthy_snapshot_cannot_replace_newer_degradation() {
+        let dir = tempdir().unwrap();
+        let worker = wkr();
+        seed_attempt(dir.path(), &worker);
+        let a = b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n";
+        let gap = b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n{\"type\":\"assistant\",\"message\":{}}\n";
+        let provenance = AlgorithmicProvenance::adapter_silent("claude");
+        let mut first = ObservationLedger::new(dir.path(), &mol());
+        let mut second = ObservationLedger::new(dir.path(), &mol());
+        assert!(first.publish_model_assessment(
+            &worker,
+            "claude",
+            || Some(claude_snapshot(a, false)),
+            &provenance
+        ));
+        assert!(second.publish_model_assessment(
+            &worker,
+            "claude",
+            || Some(claude_snapshot(gap, false)),
+            &provenance
+        ));
+        assert!(!first.publish_model_assessment(
+            &worker,
+            "claude",
+            || Some(claude_snapshot(a, false)),
+            &provenance
+        ));
+        assert_eq!(
+            read_envelopes(dir.path())
+                .iter()
+                .filter(|env| matches!(env.event, EventV2::ModelEvidenceAssessed { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn degraded_receipt_brackets_a_new_model_fact() {
+        use cosmon_core::adapter_attribution::{AdapterAttribution, ModelEvidenceState};
+
+        let dir = tempdir().unwrap();
+        let worker = wkr();
+        seed_attempt(dir.path(), &worker);
+        let input = b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n{\"type\":\"assistant\",\"message\":{}}\n{\"type\":\"assistant\",\"message\":{\"model\":\"model-b\"}}\n";
+        let mut ledger = ObservationLedger::new(dir.path(), &mol());
+        assert!(ledger.publish_model_assessment(
+            &worker,
+            "claude",
+            || Some(claude_snapshot(input, true)),
+            &AlgorithmicProvenance::adapter_silent("claude"),
+        ));
+        let events = read_envelopes(dir.path());
+        let kinds: Vec<_> = events
+            .iter()
+            .skip(2)
+            .map(|env| match env.event {
+                EventV2::ModelEvidenceAssessed { .. } => "assessment",
+                EventV2::ModelObserved { .. } => "model",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["assessment", "model", "model", "assessment"]);
+        let attribution = AdapterAttribution::fold(events.iter().map(|env| &env.event));
+        assert!(matches!(
+            attribution.evidence,
+            ModelEvidenceState::Assessed(_)
+        ));
+        assert!(attribution.detail_line().contains("coverage degraded"));
+    }
+
+    #[test]
+    fn failed_append_remains_retryable_and_cannot_certify_a_model() {
+        let dir = tempdir().unwrap();
+        let worker = wkr();
+        seed_attempt(dir.path(), &worker);
+        let path = resolve_events_log_path(dir.path());
+        let backup = dir.path().join("saved-events.jsonl");
+        let input = b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n";
+        let provenance = AlgorithmicProvenance::adapter_silent("claude");
+        let mut ledger = ObservationLedger::new(dir.path(), &mol());
+        assert!(!ledger.publish_model_assessment(
+            &worker,
+            "claude",
+            || {
+                fs::rename(&path, &backup).unwrap();
+                fs::create_dir(&path).unwrap();
+                Some(claude_snapshot(input, true))
+            },
+            &provenance
+        ));
+        fs::remove_dir(&path).unwrap();
+        fs::rename(&backup, &path).unwrap();
+        assert_eq!(
+            read_envelopes(dir.path())
+                .iter()
+                .filter(|env| matches!(env.event, EventV2::ModelEvidenceAssessed { .. }))
+                .count(),
+            0
+        );
+        assert!(ledger.publish_model_assessment(
+            &worker,
+            "claude",
+            || Some(claude_snapshot(input, true)),
+            &provenance
+        ));
+        let events = read_envelopes(dir.path());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|env| matches!(env.event, EventV2::ModelObserved { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|env| matches!(env.event, EventV2::ModelEvidenceAssessed { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn worker_change_during_capture_rejects_old_attempt_snapshot() {
+        let dir = tempdir().unwrap();
+        let worker = wkr();
+        seed_attempt(dir.path(), &worker);
+        let mut ledger = ObservationLedger::new(dir.path(), &mol());
+        assert!(!ledger.publish_model_assessment(
+            &worker,
+            "claude",
+            || {
+                seed_attempt(dir.path(), &WorkerId::new("worker-next").unwrap());
+                Some(claude_snapshot(
+                    b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n",
+                    true,
+                ))
+            },
+            &AlgorithmicProvenance::adapter_silent("claude"),
+        ));
+        assert_eq!(
+            read_envelopes(dir.path())
+                .iter()
+                .filter(|env| matches!(env.event, EventV2::ModelEvidenceAssessed { .. }))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn counter_growth_is_bounded_but_final_boundary_is_recorded() {
+        let dir = tempdir().unwrap();
+        let worker = wkr();
+        seed_attempt(dir.path(), &worker);
+        let first = b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n";
+        let second = b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n";
+        let provenance = AlgorithmicProvenance::adapter_silent("claude");
+        let mut ledger = ObservationLedger::new(dir.path(), &mol());
+        assert!(ledger.publish_model_assessment(
+            &worker,
+            "claude",
+            || Some(claude_snapshot(first, false)),
+            &provenance
+        ));
+        assert!(!ledger.publish_model_assessment(
+            &worker,
+            "claude",
+            || Some(claude_snapshot(second, false)),
+            &provenance
+        ));
+        assert!(ledger.publish_model_assessment(
+            &worker,
+            "claude",
+            || Some(claude_snapshot(second, true)),
+            &provenance
+        ));
+        assert!(!ledger.publish_model_assessment(
+            &worker,
+            "claude",
+            || Some(claude_snapshot(second, true)),
+            &provenance
+        ));
+        let receipts: Vec<_> = read_envelopes(dir.path())
+            .into_iter()
+            .filter_map(|env| match env.event {
+                EventV2::ModelEvidenceAssessed { assessment, .. } => Some(assessment),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].complete_bytes, first.len() as u64);
+        assert_eq!(receipts[1].complete_bytes, second.len() as u64);
+    }
+
+    #[test]
+    fn two_assessment_emitters_serialize_and_replay_in_order() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempdir().unwrap();
+        let worker = wkr();
+        seed_attempt(dir.path(), &worker);
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let state_dir = dir.path().to_path_buf();
+                let worker = worker.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut ledger = ObservationLedger::new(&state_dir, &mol());
+                    barrier.wait();
+                    ledger.publish_model_assessment(
+                        &worker,
+                        "claude",
+                        || {
+                            Some(claude_snapshot(
+                                b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n",
+                                false,
+                            ))
+                        },
+                        &AlgorithmicProvenance::adapter_silent("claude"),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .filter(|published| *published)
+                .count(),
+            1
+        );
+        let events = read_envelopes(dir.path());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|env| matches!(env.event, EventV2::ModelObserved { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|env| matches!(env.event, EventV2::ModelEvidenceAssessed { .. }))
+                .count(),
+            1
+        );
+        let mut replay = ObservationLedger::new(dir.path(), &mol());
+        replay.catch_up().unwrap();
+        assert!(!replay.publish_model_assessment(
+            &worker,
+            "claude",
+            || Some(claude_snapshot(
+                b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n",
+                false,
+            )),
+            &AlgorithmicProvenance::adapter_silent("claude")
+        ));
     }
 
     /// WS-1: a spawn-attempted emission is reachable from
