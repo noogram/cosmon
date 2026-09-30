@@ -100,6 +100,7 @@ advance → terminate → infrastructure → introspection.
 | `cs prime` | NO | — | Pre-flight checks; local-shell convenience. |
 | `cs migrate` | NO | — | Schema/state migration; operator-only. |
 | `cs harvest` | NO | — | Scheduler-only (cron-driven); not a remote act. |
+| `cs harvest-authority` | NO | — | Local parent command; configure, status, challenge and import have separate classifications and routes below. |
 | `cs harvest-authority configure` | ADMIN | `PUT /v1/admin/noyaux/{noyau}/harvest-authority` | Host-sealed compare-and-set of public root, epoch and explicit remote policy; no tenant scope can administer trust. |
 | `cs harvest-authority status` | V1 | `GET /v1/harvest/status` | Tenant status requires read or harvest scope and reports effective policy and provenance. |
 | `cs harvest-authority challenge` | V1 | `POST /v1/harvest/challenge` | Builds current canonical grant bytes, without signing or installation. |
