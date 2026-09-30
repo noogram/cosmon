@@ -13,6 +13,7 @@
 //! reading the persistent molecule dir (where panel formulas already
 //! write `synthesis.md`) with the artifact dir as fallback.
 
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -147,6 +148,71 @@ async fn get_result(fx: &Fixture, id: &str, jwt: &str) -> axum::http::Response<B
         )
         .await
         .unwrap()
+}
+
+fn git(repo: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn result_reads_committed_branch_deliverable_when_worker_skips_copy() {
+    let fx = fixture().await;
+    let id = "task-20260930-copy";
+    let branch = format!("feat/{id}");
+    let repo = &fx.tenant.root;
+    git(repo, &["init", "-q", "-b", "main"]);
+    git(repo, &["config", "user.name", "Noogram"]);
+    git(repo, &["config", "user.email", "test@noogram.org"]);
+    git(repo, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("base.txt"), b"base\n").unwrap();
+    git(repo, &["add", "base.txt"]);
+    git(repo, &["commit", "-qm", "base"]);
+    git(repo, &["checkout", "-q", "-b", &branch]);
+    let expected = b"exact committed bytes\nwith a second line\n";
+    std::fs::write(repo.join("result.md"), expected).unwrap();
+    git(repo, &["add", "result.md"]);
+    git(repo, &["commit", "-qm", "result"]);
+    git(repo, &["checkout", "-q", "main"]);
+    fx.tenant
+        .insert_molecule(
+            id,
+            &serde_json::json!({
+                "status": "completed", "originating_branch": branch
+            }),
+        )
+        .unwrap();
+
+    let jwt = jwt_with_scopes(&fx.oidc, &["cosmon:molecule:read"], "jti-copy");
+    let resp = get_result(&fx, id, &jwt).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(body["result_status"], "ready");
+    assert_eq!(
+        body["result"]["content"],
+        String::from_utf8_lossy(expected).as_ref()
+    );
+    assert_eq!(body["result"]["provenance"], "branch");
+
+    git(repo, &["checkout", "-q", &branch]);
+    git(repo, &["rm", "-q", "result.md"]);
+    git(repo, &["commit", "-qm", "remove result"]);
+    git(repo, &["checkout", "-q", "main"]);
+    let absent = get_result(&fx, id, &jwt).await;
+    let body: Value =
+        serde_json::from_slice(&to_bytes(absent.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(body["result_status"], "done-no-deliverable");
+    assert!(body["result"].is_null());
 }
 
 #[tokio::test]

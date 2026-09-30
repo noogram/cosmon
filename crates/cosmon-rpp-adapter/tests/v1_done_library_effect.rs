@@ -165,7 +165,10 @@ fn arm_git_tenant(tenant: &TenantPath) {
 /// for.
 fn plant_completed_with_work(tenant: &TenantPath, id: &str) {
     tenant
-        .insert_molecule(id, &json!({"status": "completed"}))
+        .insert_molecule(
+            id,
+            &json!({"status": "completed", "originating_branch": format!("feat/{id}")}),
+        )
         .unwrap();
     let repo = &tenant.root;
     let branch = format!("feat/{id}");
@@ -174,6 +177,62 @@ fn plant_completed_with_work(tenant: &TenantPath, id: &str) {
     git_ok(repo, &["add", "worker.txt"]);
     git_ok(repo, &["commit", "-qm", "worker output"]);
     git_ok(repo, &["checkout", "-q", "main"]);
+}
+
+#[tokio::test]
+async fn harvest_preserves_committed_result_when_artifact_copy_was_skipped() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add("a");
+    arm_git_tenant(&tenant);
+    let id = "task-20260930-copy";
+    plant_completed_with_work(&tenant, id);
+    let branch = format!("feat/{id}");
+    git_ok(&tenant.root, &["checkout", "-q", &branch]);
+    let expected = b"committed result\nexact second line\n";
+    std::fs::write(tenant.root.join("result.md"), expected).unwrap();
+    git_ok(&tenant.root, &["add", "result.md"]);
+    git_ok(&tenant.root, &["commit", "-qm", "result"]);
+    git_ok(&tenant.root, &["checkout", "-q", "main"]);
+    seal_grant_for(&tenant, id, "main");
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let app = router(stock_state(&oidc, &tenants, security_dir.path()));
+    let jwt = jwt_with(&oidc, "jti-result-capture");
+    let done = app
+        .clone()
+        .oneshot(done_request(&jwt, id, "result captured"))
+        .await
+        .unwrap();
+    let done_body: Value =
+        serde_json::from_slice(&to_bytes(done.into_body(), 8192).await.unwrap()).unwrap();
+    assert_eq!(done_body["harvest"]["outcome"], "landed", "{done_body}");
+    assert!(!git(
+        &tenant.root,
+        &["show-ref", "--verify", &format!("refs/heads/{branch}")]
+    )
+    .status
+    .success());
+
+    let result = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/molecules/{id}/result"))
+                .header("Authorization", format!("Bearer {jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(result.into_body(), 64 * 1024).await.unwrap()).unwrap();
+    assert_eq!(body["result_status"], "ready");
+    assert_eq!(
+        body["result"]["content"],
+        String::from_utf8_lossy(expected).as_ref()
+    );
+    assert_eq!(body["result"]["provenance"], "branch");
 }
 
 /// A directory holding a `cs` that must never run, and the witness it writes

@@ -81,6 +81,7 @@ sha2 = { workspace = true }
 subtle = "2"
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tempfile = { workspace = true }
 # SSE bridge from `tokio::sync::broadcast` → `Stream` for axum's
 # `Sse` response (task-20260522-c46a). The `sync` feature unlocks
 # `BroadcastStream`, the only wrapper used today.
@@ -115,7 +116,6 @@ http-body-util = { workspace = true }
 # EventBus and the I3 ADDITIVE-COUNTERS fold. See
 # tests/proptest_event_bus.rs and tests/proptest_i3_additive_counters.rs.
 proptest = { workspace = true }
-tempfile = { workspace = true }
 
 [lints]
 workspace = true
