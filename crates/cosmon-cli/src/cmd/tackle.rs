@@ -10109,7 +10109,15 @@ mod tests {
             .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
             .unwrap()
             .id;
-        backend.set_canned_output("Update available! 0.159.0 → 0.159.2\n› 1. Update\n  2. Skip");
+        backend.set_canned_output(include_str!(
+            "../../../../tests/fixtures/codex-update-menu-real.txt"
+        ));
+        assert_eq!(
+            codex_launch_dialogue(&backend, &wid)
+                .unwrap()
+                .map(|scan| scan.class),
+            Some(cosmon_core::dialogue::DialogueClass::Unknown)
+        );
         let pane = backend.capture_output(&wid, 40).unwrap();
         let acted = select_codex_update_menu(
             &backend,
@@ -10120,10 +10128,16 @@ mod tests {
         )
         .unwrap();
         assert!(acted);
-        assert!(backend.calls().iter().any(|call| matches!(
-            call,
-            MockCall::SendInput { input, .. } if input.is_empty()
-        )));
+        let keys: Vec<_> = backend
+            .calls()
+            .iter()
+            .filter_map(|call| match call {
+                MockCall::MenuDirection { down, .. } => Some(if *down { "Down" } else { "Up" }),
+                MockCall::SendInput { input, .. } if input.is_empty() => Some("Enter"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, ["Enter"]);
     }
 
     #[test]
@@ -10166,7 +10180,7 @@ mod tests {
     #[test]
     fn codex_update_skip_moves_to_skip_and_operator_sends_nothing() {
         use cosmon_transport::mock::{MockBackend, MockCall};
-        let pane = "Update available! 0.159.0 → 0.159.2\n› 1. Update\n  2. Skip";
+        let pane = include_str!("../../../../tests/fixtures/codex-update-menu-real.txt");
         let backend = MockBackend::new();
         let agent = cosmon_core::transport::AgentDefinition {
             id: cosmon_core::id::AgentId::new("codex-update-choice").unwrap(),

@@ -42,10 +42,10 @@ SESSION_ID_BARE_TRAILER_RE='^[[:space:]]*(Session|Thread|Conversation)[-_](Id|ID
 #    one.
 SESSION_ID_LINK_RE='https?://[A-Za-z0-9.-]+(/[A-Za-z0-9._-]+)*/(session|sessions|thread|threads|conversation|conversations)[_/-][A-Za-z0-9_-]{4,}'
 
-# D. Vendor consoles whose URL grammar does not spell the word — the path
-#    segment itself is the console, and everything under it is one private
-#    task or thread.
-SESSION_ID_VENDOR_LINK_RE='https?://(chatgpt\.com|chat\.openai\.com)/(codex|c|g)/[A-Za-z0-9_/-]{3,}'
+# D. Vendor consoles whose URL grammar does not spell the word. Require the
+#    final opaque path segment to end before punctuation or whitespace; a
+#    public file route such as `/codex/install.sh` is not a conversation link.
+SESSION_ID_VENDOR_LINK_RE='https?://(chatgpt\.com|chat\.openai\.com)/(codex|c|g)/[A-Za-z0-9_/-]{3,}($|[^A-Za-z0-9._/-])'
 
 # rule-name<TAB>ERE — iterated by both callers so a new rule is added once.
 SESSION_ID_RULES=$'harness-session-trailer\t'"$SESSION_ID_TRAILER_RE"$'\nharness-session-trailer-bare\t'"$SESSION_ID_BARE_TRAILER_RE"$'\nharness-session-deep-link\t'"$SESSION_ID_LINK_RE"$'\nvendor-console-deep-link\t'"$SESSION_ID_VENDOR_LINK_RE"

@@ -192,7 +192,8 @@ pub enum CodexMenuMove {
     Stay,
 }
 
-/// Return a key plan only for a live, two-choice codex update menu.
+/// Return a key plan only for a live codex update menu with numbered Update
+/// and Skip choices.
 /// Transcript mentions of an update, other menus, and ambiguous selections
 /// return `None`, so they can never drive an autonomous key.
 #[must_use]
@@ -205,10 +206,15 @@ pub fn codex_update_menu_move(text: &str, select_update: bool) -> Option<CodexMe
         .iter()
         .rposition(|line| line.to_ascii_lowercase().contains("update available"))?;
     let tail = &lines[start..];
+    let tail = &tail[..tail
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map_or(0, |index| index + 1)];
     if tail.len() > 12
         || tail
             .iter()
             .any(|line| line.to_ascii_lowercase().contains("please restart"))
+        || tail.iter().skip(1).any(|line| idle_input(line))
     {
         return None;
     }
@@ -219,38 +225,45 @@ pub fn codex_update_menu_move(text: &str, select_update: bool) -> Option<CodexMe
         let trimmed = line.trim().trim_start_matches(['│', '┃', '║']).trim();
         let is_selected = trimmed.starts_with('›') || trimmed.starts_with('❯');
         let label = trimmed.trim_start_matches(['›', '❯', ' ']).trim();
-        let label = label
-            .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')' || c == ' ');
         let lower = label.to_ascii_lowercase();
-        if lower.starts_with("update") || lower.starts_with("yes") {
-            update_row = Some(index);
-        } else if lower.starts_with("skip") || lower.starts_with("no") {
-            skip_row = Some(index);
+        if lower
+            .strip_prefix("1.")
+            .or_else(|| lower.strip_prefix("1)"))
+            .is_some_and(|choice| {
+                let choice = choice.trim_start();
+                choice.starts_with("update") || choice.starts_with("yes")
+            })
+        {
+            if update_row.replace(index).is_some() {
+                return None;
+            }
+        } else if lower
+            .strip_prefix("2.")
+            .or_else(|| lower.strip_prefix("2)"))
+            .is_some_and(|choice| {
+                let choice = choice.trim_start();
+                choice.starts_with("skip") || choice.starts_with("no")
+            })
+            && skip_row.replace(index).is_some()
+        {
+            return None;
         }
         if is_selected && selected.replace(index).is_some() {
             return None;
         }
     }
     let (update, skip, selected) = (update_row?, skip_row?, selected?);
-    if update.abs_diff(skip) != 1 {
-        return None;
-    }
-    if tail[update.max(skip) + 1..].iter().any(|line| {
-        let line = line.trim();
-        line.starts_with('›') || line.starts_with('❯')
-    }) {
+    if update >= skip || skip - update > 3 || (selected != update && selected != skip) {
         return None;
     }
     let target = if select_update { update } else { skip };
-    if selected == target {
-        Some(CodexMenuMove::Stay)
-    } else if selected + 1 == target {
-        Some(CodexMenuMove::Down)
-    } else if target + 1 == selected {
-        Some(CodexMenuMove::Up)
+    Some(if selected == target {
+        CodexMenuMove::Stay
+    } else if selected == update {
+        CodexMenuMove::Down
     } else {
-        None
-    }
+        CodexMenuMove::Up
+    })
 }
 
 /// The verdict of [`classify_pane`]: the [`DialogueClass`] plus the pane line
@@ -819,6 +832,20 @@ mod tests {
         assert_eq!(
             codex_update_menu_move("Select Reasoning Level\n› 1. Medium\n  2. High", true),
             None
+        );
+    }
+
+    #[test]
+    fn real_update_menu_after_idle_prompt_has_policy_keys() {
+        let pane = include_str!("../../../tests/fixtures/codex-update-menu-real.txt");
+        assert_eq!(classify_pane(pane).class, DialogueClass::Unknown);
+        assert_eq!(
+            codex_update_menu_move(pane, true),
+            Some(CodexMenuMove::Stay)
+        );
+        assert_eq!(
+            codex_update_menu_move(pane, false),
+            Some(CodexMenuMove::Down)
         );
     }
 
