@@ -5,34 +5,20 @@ The contract is ``docs/specs/remote-harvest-contract.md``; each case below
 names the clause it asserts. The cases are written against commands and
 fields that the contract specifies
 (``cosmon-remote harvest ...``, the ``harvest_authorization`` refusal
-object, ``[harvest_authority] remote``). They are the specification the
-implementation units of #120 turn green, one clause at a time.
+object, ``[harvest_authority] remote``). The container cases exercise the
+shipped operator commands against a disposable service and tenant galaxy.
 
-Opt-in, by deselection
-----------------------
-
-The client-only operator surface runs by default. Remaining container cases
-carry the ``contract_pending`` marker, and ``conftest.py``
-deselects those unless ``RPP_E2E_CONTRACT_PENDING=1``. Deselection rather
-than skip, for the reason the rest of this suite gives: a case that has
-not run must never read as green. The nightly container job does not set
-the variable, so nothing here sits red in a default gate before the code
-it specifies exists. The unit that implements a clause removes the marker
-from its cases in the same change::
-
-    RPP_E2E_CONTRACT_PENDING=1 pytest tests/e2e/test_harvest_profiles.py
+The client-only operator surface needs no stack. The remaining cases run in
+the container suite, so the normal runner exercises both policy profiles.
 
 Prerequisites are not verdicts
 ------------------------------
 
-Some cases need things the stock harness does not provision yet: the
-admin credential of the stack (``RPP_E2E_ADMIN_TOKEN_FILE``), a way to
-issue the harvest scope in the tenant's binding (a
-``ComposeStack.grant_binding_scope`` hook), and an external signer on the
-operator side (``minisign``). Their fixtures fail with a message that says
-*prerequisite missing*, never with an assertion about the product. A red
-caused by a missing prerequisite is not the intended RED of a case, and
-must not be recorded as one.
+The harness provisions a disposable admin credential and materialises the
+harvest scope in the throwaway binding. Sealed cases also need the external
+operator-side ``minisign`` binary. Their fixtures fail with a message that
+says *prerequisite missing*, never with an assertion about the product. A red
+caused by a missing prerequisite is not the intended RED of a case.
 
 What the fixtures here do on the host
 -------------------------------------
@@ -47,9 +33,12 @@ request writes ``remote`` behind the operator's back.
 """
 from __future__ import annotations
 
-import os
+import json
+import hashlib
 import shutil
 import subprocess
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -83,6 +72,38 @@ def _config(cfg) -> Path:
     return cfg.galaxy / ".cosmon" / "config.toml"
 
 
+def _merged_branch_witness(cfg, molecule: str, before: str, worker_commit: str, expect) -> str:
+    """Read the landed content and lineage from tenant Git, not the reply."""
+    after = _git(cfg.galaxy, "rev-parse", cfg.base_branch)
+    expect.truthy(before and after and before != after, "the tenant base branch advanced")
+    expect.truthy(worker_commit, "the worker branch had a commit before integration")
+    ancestor = subprocess.run(
+        ["git", "-C", str(cfg.galaxy), "merge-base", "--is-ancestor", worker_commit, after],
+        capture_output=True, text=True,
+    )
+    expect.equals(ancestor.returncode, 0, "the exact worker commit is in the tenant base history")
+    worker_content = _git(cfg.galaxy, "show", f"{worker_commit}:worker-output-{molecule}.txt")
+    expect.truthy(worker_content, "the disposable worker committed nonempty output")
+    expect.truthy(
+        _git(cfg.galaxy, "show", f"{cfg.base_branch}:worker-output-{molecule}.txt")
+        == worker_content,
+        "the disposable worker's committed content landed on the base branch",
+    )
+    message = _git(cfg.galaxy, "log", "-1", "--format=%B", cfg.base_branch)
+    expect.truthy(f"Mol-Id: {molecule}" in message, "the merge has a molecule lineage trailer")
+    witness = {
+        "molecule": molecule,
+        "base_before": before,
+        "base_after": after,
+        "worker_commit": worker_commit,
+        "worker_content_sha256": hashlib.sha256(worker_content.encode()).hexdigest(),
+        "merge_message": message,
+    }
+    with (cfg.artifacts / "git-witness.ndjson").open("a", encoding="utf-8") as out:
+        out.write(json.dumps(witness, sort_keys=True) + "\n")
+    return after
+
+
 def _prerequisite(message: str):
     """Fail as a missing prerequisite, never as a product assertion."""
     pytest.fail(f"prerequisite missing (not a contract verdict): {message}", pytrace=False)
@@ -104,21 +125,18 @@ def _operator(binary: Path, home: Path, *args: str) -> subprocess.CompletedProce
 
 
 @pytest.fixture(scope="session")
-def admin_token_file() -> Path:
+def admin_token_file(compose_stack) -> Path:
     """The stack's admin credential, as the operator holds it (contract §8)."""
-    value = os.environ.get("RPP_E2E_ADMIN_TOKEN_FILE", "")
-    if not value or not Path(value).is_file():
-        _prerequisite(
-            "RPP_E2E_ADMIN_TOKEN_FILE must name the admin token the stack was booted "
-            "with (COSMON_ADMIN_TOKEN_FILE); the stock e2e stack enables no admin surface"
-        )
-    return Path(value)
+    path = compose_stack.admin_token_file
+    if not path.is_file():
+        _prerequisite("the staged stack has no disposable admin credential")
+    return path
 
 
 @pytest.fixture(scope="session")
 def external_signer() -> str:
     """The operator-side signer the proposed ``harvest init`` drives."""
-    path = shutil.which("minisign", path="/usr/bin:/bin:/usr/local/bin")
+    path = shutil.which("minisign")
     if not path:
         _prerequisite("`minisign` must be installed on the operator side")
     return path
@@ -127,13 +145,7 @@ def external_signer() -> str:
 @pytest.fixture(scope="class")
 def harvest_scope_issued(stack):
     """The administrator grants ``cosmon:molecule:harvest`` in the binding."""
-    hook = getattr(stack, "grant_binding_scope", None)
-    if hook is None:
-        _prerequisite(
-            "the harness has no ComposeStack.grant_binding_scope hook to issue "
-            f"{HARVEST_SCOPE} through the documented binding path"
-        )
-    hook(HARVEST_SCOPE)
+    stack.grant_binding_scope(HARVEST_SCOPE)
     return HARVEST_SCOPE
 
 
@@ -197,7 +209,6 @@ class TestOperatorSurface:
 
 
 @pytest.mark.stack
-@pytest.mark.contract_pending
 class TestScopedConflict:
     """Contract R5 and §4: ``configure scoped`` on a ``required = true`` galaxy."""
 
@@ -208,7 +219,7 @@ class TestScopedConflict:
         rc, payload, stderr = _configure(logged_in, "scoped", admin_token_file)
         expect.truthy(rc != 0, f"R5 must refuse, not merge the policies: {stderr[-400:]}")
         expect.equals(
-            _refusal(payload).get("reason"), "harvest_policy_conflict",
+            (payload or {}).get("error"), "harvest_policy_conflict",
             "the refusal names the conflict so the administrator resolves `required`",
         )
         expect.equals(
@@ -221,7 +232,6 @@ class TestScopedConflict:
 
 
 @pytest.mark.stack
-@pytest.mark.contract_pending
 class TestScopedProfile:
     """Contract R4 and §5: harvest scope, no key, no grant."""
 
@@ -258,13 +268,20 @@ class TestScopedProfile:
             "the scoped profile is exercised with no trust root installed",
         )
         before = _git(cfg.galaxy, "rev-parse", cfg.base_branch)
+        worker_commit = _git(cfg.galaxy, "rev-parse", f"feat/{molecule}")
         rc, payload, stderr = logged_in.done(molecule, "closed under the scoped profile")
         expect.equals(rc, 0, f"R4: harvest scope and explicit scoped policy merge: {stderr[-600:]}")
         harvest = (payload or {}).get("harvest", {})
         expect.equals(harvest.get("outcome"), "landed", "the scoped merge lands")
         expect.equals(harvest.get("merged"), True, "`merged` is the integration answer")
-        after = _git(cfg.galaxy, "rev-parse", cfg.base_branch)
-        expect.truthy(before and after and before != after, "the base branch advanced")
+        after = _merged_branch_witness(cfg, molecule, before, worker_commit, expect)
+        events = cfg.galaxy / ".cosmon" / "state" / "fleets" / "default" / "molecules" / molecule / "events.jsonl"
+        event_bytes = events.read_bytes()
+        retry_rc, retry, retry_stderr = logged_in.done(molecule, "retry scoped integration")
+        expect.equals(retry_rc, 0, f"a recorded completion is retryable: {retry_stderr[-400:]}")
+        expect.equals(_git(cfg.galaxy, "rev-parse", cfg.base_branch), after, "retry adds no merge")
+        expect.equals(events.read_bytes(), event_bytes, "retry adds no lifecycle event")
+        expect.equals((retry or {}).get("harvest", {}).get("merged"), True, "retry reports recorded integration")
 
     def test_status_reports_explicit_scoped(self, scoped_policy, logged_in, expect):
         rc, payload, stderr = logged_in.json("harvest", "status", step="harvest status")
@@ -274,7 +291,6 @@ class TestScopedProfile:
 
 
 @pytest.mark.stack
-@pytest.mark.contract_pending
 class TestScopedWithoutHarvestScope:
     """Contract R4: ``cosmon:molecule:write`` is not sufficient."""
 
@@ -293,11 +309,69 @@ class TestScopedWithoutHarvestScope:
         expect.equals(_git(cfg.galaxy, "rev-parse", cfg.base_branch), before, "nothing merged")
 
 
+@pytest.mark.stack
+class TestHarvestOnlyCredential:
+    """R4: an identity with only the bound harvest scope can integrate."""
+
+    @pytest.mark.requires_dispatch
+    def test_harvest_only_binding_merges(
+        self, unsealed_galaxy, harvest_scope_issued, logged_in, admin_token_file,
+        worked, molecule, stack, cfg, expect,
+    ):
+        rc, _, stderr = _configure(logged_in, "scoped", admin_token_file)
+        expect.equals(rc, 0, f"operator selects scoped policy: {stderr[-400:]}")
+        subject = stack.grant_harvest_only_identity()
+        query = urllib.parse.urlencode({
+            "sub": subject, "aud": cfg.audience, "scopes": HARVEST_SCOPE,
+        })
+        request = urllib.request.Request(cfg.issuer + "/issue?" + query, data=b"", method="POST")
+        with urllib.request.urlopen(request, timeout=15) as response:
+            token = json.load(response)["access_token"]
+        rc, me, stderr = logged_in.json("auth", "me", token_override=token, step="harvest-only auth me")
+        expect.equals(rc, 0, f"the second bound identity is admitted: {stderr[-400:]}")
+        expect.equals((me or {}).get("sub"), subject, "the server resolved the separate identity")
+        scopes = (me or {}).get("scopes", [])
+        expect.truthy(HARVEST_SCOPE in scopes, "the binding grants harvest")
+        expect.truthy("cosmon:molecule:write" not in scopes, "the identity has no write authority")
+        before = _git(cfg.galaxy, "rev-parse", cfg.base_branch)
+        worker_commit = _git(cfg.galaxy, "rev-parse", f"feat/{molecule}")
+        rc, payload, stderr = logged_in.done(
+            molecule, "reviewed with harvest-only authority", token_override=token,
+        )
+        expect.equals(rc, 0, f"harvest alone admits done: {stderr[-500:]}")
+        expect.equals((payload or {}).get("harvest", {}).get("merged"), True, "the request integrated")
+        _merged_branch_witness(cfg, molecule, before, worker_commit, expect)
+
+
+@pytest.mark.stack
+class TestScopedNoMerge:
+    """§6: explicit scoped closure preserves both Git refs."""
+
+    @pytest.mark.requires_dispatch
+    def test_no_merge_preserves_branch_and_retries_honestly(
+        self, unsealed_galaxy, harvest_scope_issued, logged_in, admin_token_file,
+        worked, molecule, cfg, expect,
+    ):
+        rc, _, stderr = _configure(logged_in, "scoped", admin_token_file)
+        expect.equals(rc, 0, f"operator selects scoped policy: {stderr[-400:]}")
+        base = _git(cfg.galaxy, "rev-parse", cfg.base_branch)
+        branch = _git(cfg.galaxy, "rev-parse", f"feat/{molecule}")
+        expect.truthy(branch, "the disposable worker committed on its branch")
+        rc, payload, stderr = logged_in.done(molecule, "close without integration", no_merge=True)
+        expect.equals(rc, 0, f"scoped closure succeeds: {stderr[-500:]}")
+        expect.equals((payload or {}).get("harvest", {}).get("merged"), False, "no merge is reported")
+        expect.equals(_git(cfg.galaxy, "rev-parse", cfg.base_branch), base, "base is unchanged")
+        expect.equals(_git(cfg.galaxy, "rev-parse", f"feat/{molecule}"), branch, "branch survives")
+        retry_rc, retry, retry_stderr = logged_in.done(molecule, "retry no-merge", no_merge=True)
+        expect.equals(retry_rc, 0, f"no-merge retry is admitted: {retry_stderr[-400:]}")
+        expect.equals((retry or {}).get("harvest", {}).get("merged"), False, "retry reports no integration")
+        expect.equals(_git(cfg.galaxy, "rev-parse", cfg.base_branch), base, "retry leaves base unchanged")
+
+
 # -- R6/R7: the sealed profile, with production tooling -------------------
 
 
 @pytest.mark.stack
-@pytest.mark.contract_pending
 class TestSealedProfile:
     """Contract R6/R7, §8 and §12: production key init, then a grant."""
 
@@ -310,7 +384,7 @@ class TestSealedProfile:
             raise AssertionError(f"harvest init failed: {stderr[-800:]}")
         return logged_in.home / ".config" / "cosmon" / "harvest" / "keys" / "e2e"
 
-    def test_key_stays_on_the_operator_side(self, sealed_policy, cfg, expect):
+    def test_key_stays_on_the_operator_side(self, sealed_policy, cfg, stack, expect):
         keys = list(sealed_policy.glob("*.key"))
         expect.truthy(keys, f"`harvest init` keeps its key under {sealed_policy} (contract §8)")
         leaked = [p for p in cfg.galaxies_root.rglob("*.key")]
@@ -319,6 +393,24 @@ class TestSealedProfile:
             (cfg.galaxy / ".cosmon" / "harvest.pub").is_file(),
             "only the public half is installed in the tenant galaxy",
         )
+        container = stack.compose("ps", "-q", "rpp-adapter").stdout.strip()
+        inspected = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .Mounts}}", container],
+            capture_output=True, text=True, check=True,
+        )
+        mounts = json.loads(inspected.stdout)
+        for key in keys:
+            resolved = key.resolve()
+            for mount in mounts:
+                source = Path(mount["Source"]).resolve()
+                expect.truthy(
+                    resolved != source and source not in resolved.parents,
+                    "the operator key path is absent from service and worker mounts",
+                )
+            secret_bytes = key.read_bytes()
+            for root in (cfg.galaxies_root, cfg.staged_deploy, cfg.artifacts, stack.logs_dir):
+                leaked = [p for p in root.rglob("*") if p.is_file() and secret_bytes in p.read_bytes()]
+                expect.equals(leaked, [], "disposable key material never reaches tenant or run artifacts")
 
     @pytest.mark.requires_dispatch
     def test_missing_grant_is_typed(self, sealed_policy, worked, logged_in, molecule, cfg, expect):
@@ -343,18 +435,41 @@ class TestSealedProfile:
             "installing a grant reports an installation receipt, never a merge",
         )
         before = _git(cfg.galaxy, "rev-parse", cfg.base_branch)
+        worker_commit = _git(cfg.galaxy, "rev-parse", f"feat/{molecule}")
         rc, payload, stderr = logged_in.done(molecule, "closed under a production grant")
         expect.equals(rc, 0, f"a production grant admits the merge: {stderr[-600:]}")
         expect.equals((payload or {}).get("harvest", {}).get("outcome"), "landed", "landed")
-        after = _git(cfg.galaxy, "rev-parse", cfg.base_branch)
-        expect.truthy(before and after and before != after, "the base branch advanced")
+        _merged_branch_witness(cfg, molecule, before, worker_commit, expect)
+
+
+@pytest.mark.stack
+class TestSealedMissingRoot:
+    """R6: selecting sealed without installing a root grants nothing."""
+
+    @pytest.mark.requires_dispatch
+    def test_done_refuses_missing_public_root(
+        self, unsealed_galaxy, harvest_scope_issued, logged_in, admin_token_file,
+        worked, molecule, cfg, expect,
+    ):
+        rc, _, stderr = _configure(logged_in, "sealed", admin_token_file)
+        expect.equals(rc, 0, f"the operator can select sealed before key installation: {stderr[-400:]}")
+        expect.truthy(
+            not (cfg.galaxy / ".cosmon" / "harvest.pub").exists(),
+            "no public root was installed in the disposable galaxy",
+        )
+        base = _git(cfg.galaxy, "rev-parse", cfg.base_branch)
+        branch = _git(cfg.galaxy, "rev-parse", f"feat/{molecule}")
+        rc, payload, stderr = logged_in.done(molecule, "sealed without a public root")
+        expect.truthy(rc != 0, f"an unkeyed sealed profile must refuse: {stderr[-400:]}")
+        expect.equals(_refusal(payload).get("reason"), "harvest_key_missing", "the key gate refuses")
+        expect.equals(_git(cfg.galaxy, "rev-parse", cfg.base_branch), base, "base is unchanged")
+        expect.equals(_git(cfg.galaxy, "rev-parse", f"feat/{molecule}"), branch, "branch is unchanged")
 
 
 # -- R1 and §4: upgrade preserves ------------------------------------------
 
 
 @pytest.mark.stack
-@pytest.mark.contract_pending
 class TestLegacyUpgrade:
     """Contract R1 and §4. R2 (legacy sealed) is ``test_tenant_journey.py``."""
 
@@ -377,13 +492,21 @@ class TestLegacyUpgrade:
 
 
 @pytest.mark.stack
-@pytest.mark.contract_pending
 class TestDisabledProfile:
     """Contract R3: an explicit ``disabled`` refuses even with a valid grant."""
 
     def test_valid_grant_does_not_enable(
-        self, logged_in, admin_token_file, sealed, molecule, cfg, expect
+        self, harvest_scope_issued, logged_in, admin_token_file, external_signer,
+        worked, molecule, cfg, expect,
     ):
+        rc, _, stderr = logged_in.json(
+            "harvest", "init", "--admin-token-file", str(admin_token_file), step="harvest init"
+        )
+        expect.equals(rc, 0, f"production operator key init succeeds: {stderr[-400:]}")
+        rc, _, stderr = logged_in.json(
+            "harvest", "grant", "--molecule", molecule, step="harvest grant"
+        )
+        expect.equals(rc, 0, f"production grant is installed before disabling: {stderr[-400:]}")
         rc, _, stderr = _configure(logged_in, "disabled", admin_token_file)
         if rc != 0:
             raise AssertionError(f"harvest configure --policy disabled failed: {stderr[-800:]}")

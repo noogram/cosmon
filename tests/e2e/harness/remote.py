@@ -17,6 +17,12 @@ allocated". Scope the redirect to the process that asked for it.
 from __future__ import annotations
 
 import json
+import os
+import pty
+import re
+import secrets
+import select
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -39,26 +45,31 @@ class RemoteCli:
         # a reason that has nothing to do with what it tests.
         self.home = cfg.run_dir / "home" / slot
         self.home.mkdir(parents=True, exist_ok=True)
+        self._signing_password = secrets.token_urlsafe(24)
 
-    def _env(self) -> dict:
+    def _env(self, token_override: Optional[str] = None) -> dict:
         return {
             "HOME": str(self.home),
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
+            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             # The file backend keeps the credential inside the run dir;
             # the OS keychain is neither touched nor needed.
             "COSMON_REMOTE_CRED_BACKEND": "file",
-            "COSMON_REMOTE_TOKEN": "",
+            "COSMON_REMOTE_TOKEN": token_override or "",
             # Headless login: `login` opens the authorization URL with
             # this command instead of a browser (no shell; the URL is
             # appended as the last argument).
             "COSMON_REMOTE_BROWSER": "curl -sS -L -o /dev/null",
         }
 
-    def run(self, *args: str, step: Optional[str] = None, timeout: int = 300) -> subprocess.CompletedProcess:
+    def run(self, *args: str, step: Optional[str] = None, timeout: int = 300,
+            token_override: Optional[str] = None) -> subprocess.CompletedProcess:
         """Invoke the CLI, record the exchange, return the process."""
         cmd = [str(self.binary), "--profile", "e2e", *args]
         started = time.time()
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=self._env(), timeout=timeout)
+        interactive = "harvest" in args and ("init" in args or "grant" in args)
+        proc = self._run_signer(cmd, timeout) if interactive else subprocess.run(
+            cmd, capture_output=True, text=True, env=self._env(token_override), timeout=timeout
+        )
         self.recorder.exchange(
             step=step or " ".join(args[:2]) or "cosmon-remote",
             request="cosmon-remote " + " ".join(["--profile", "e2e", *args]),
@@ -69,9 +80,48 @@ class RemoteCli:
         )
         return proc
 
-    def json(self, *args: str, step: Optional[str] = None) -> Tuple[int, Any, str]:
+    def _run_signer(self, cmd: List[str], timeout: int) -> subprocess.CompletedProcess:
+        """Answer only the external signer's password prompts on a PTY.
+
+        The production client still invokes minisign. The generated test
+        password stays in memory and never enters argv or the recorder.
+        """
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execve(cmd[0], cmd, self._env())
+        chunks = bytearray()
+        answered_at = 0
+        deadline = time.monotonic() + timeout
+        try:
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([fd], [], [], min(1, max(0, deadline - time.monotonic())))
+                if not ready:
+                    continue
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                chunks.extend(chunk)
+                tail = bytes(chunks[-256:])
+                match = re.search(rb"Password(?: \(one more time\))?:\s*$", tail)
+                if match and len(chunks) > answered_at:
+                    os.write(fd, (self._signing_password + "\n").encode())
+                    answered_at = len(chunks)
+            else:
+                os.kill(pid, signal.SIGKILL)
+                raise subprocess.TimeoutExpired(cmd, timeout)
+        finally:
+            os.close(fd)
+        _, status = os.waitpid(pid, 0)
+        output = chunks.decode(errors="replace").replace(self._signing_password, "<redacted>")
+        return subprocess.CompletedProcess(cmd, os.waitstatus_to_exitcode(status), output, "")
+
+    def json(self, *args: str, step: Optional[str] = None,
+             token_override: Optional[str] = None) -> Tuple[int, Any, str]:
         """Invoke with ``--json`` and parse. Returns (rc, parsed|None, stderr)."""
-        proc = self.run("--json", *args, step=step)
+        proc = self.run("--json", *args, step=step, token_override=token_override)
         try:
             parsed = json.loads(proc.stdout)
         except ValueError:
@@ -133,6 +183,7 @@ class RemoteCli:
         reason: str,
         strategy: Optional[str] = None,
         no_merge: bool = False,
+        token_override: Optional[str] = None,
     ) -> Tuple[int, Any, str]:
         """``POST /v1/molecules/:id/done`` — the harvest door.
 
@@ -156,4 +207,4 @@ class RemoteCli:
             args += ["--strategy", strategy]
         if no_merge:
             args.append("--no-merge")
-        return self.json(*args, step="done")
+        return self.json(*args, step="done", token_override=token_override)
