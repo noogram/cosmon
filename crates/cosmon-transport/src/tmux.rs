@@ -1047,6 +1047,31 @@ impl TransportBackend for TmuxBackend {
         self.send_input_observed(id, input, &InjectionProvenance::unattributed())
     }
 
+    fn send_menu_direction(
+        &self,
+        id: &WorkerId,
+        down: bool,
+        provenance: &InjectionProvenance,
+    ) -> Result<(), TransportError> {
+        let resolved = self.resolve_session(id);
+        let session_name = resolved.as_deref().unwrap_or_default().to_owned();
+        record_injection(
+            id,
+            &session_name,
+            if down { "Down" } else { "Up" },
+            provenance,
+        );
+        let session_name = resolved?;
+        self.tmux_cmd(&[
+            "send-keys",
+            "-t",
+            &session_name,
+            if down { "Down" } else { "Up" },
+        ])
+        .map(|_| ())
+        .map_err(|e| TransportError::Io(format!("send-keys menu move failed: {e}")))
+    }
+
     fn send_input_observed(
         &self,
         id: &WorkerId,

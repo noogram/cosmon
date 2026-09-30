@@ -193,6 +193,19 @@ pub trait TransportBackend {
         self.send_input(id, input)
     }
 
+    /// Move a menu selection by one row without pasting text into the worker.
+    /// Only a verified, named menu should drive this operation.
+    fn send_menu_direction(
+        &self,
+        _id: &WorkerId,
+        _down: bool,
+        _provenance: &InjectionProvenance,
+    ) -> Result<(), TransportError> {
+        Err(TransportError::Io(
+            "menu keys unavailable on this transport".to_owned(),
+        ))
+    }
+
     /// Capture the last `lines` lines of output from a worker's session.
     ///
     /// # Errors

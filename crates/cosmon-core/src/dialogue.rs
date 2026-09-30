@@ -180,6 +180,79 @@ pub fn classify_codex_dialog(text: &str) -> Option<CodexDialogKind> {
     None
 }
 
+/// The cursor move needed to select an update-menu choice. `None` means the
+/// desired choice is already selected; callers then send only Enter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexMenuMove {
+    /// The selected row is immediately above the desired row.
+    Down,
+    /// The selected row is immediately below the desired row.
+    Up,
+    /// The desired row is already selected.
+    Stay,
+}
+
+/// Return a key plan only for a live, two-choice codex update menu.
+/// Transcript mentions of an update, other menus, and ambiguous selections
+/// return `None`, so they can never drive an autonomous key.
+#[must_use]
+pub fn codex_update_menu_move(text: &str, select_update: bool) -> Option<CodexMenuMove> {
+    if classify_pane(text).class != DialogueClass::Unknown {
+        return None;
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .rposition(|line| line.to_ascii_lowercase().contains("update available"))?;
+    let tail = &lines[start..];
+    if tail.len() > 12
+        || tail
+            .iter()
+            .any(|line| line.to_ascii_lowercase().contains("please restart"))
+    {
+        return None;
+    }
+    let mut update_row = None;
+    let mut skip_row = None;
+    let mut selected = None;
+    for (index, line) in tail.iter().enumerate() {
+        let trimmed = line.trim().trim_start_matches(['│', '┃', '║']).trim();
+        let is_selected = trimmed.starts_with('›') || trimmed.starts_with('❯');
+        let label = trimmed.trim_start_matches(['›', '❯', ' ']).trim();
+        let label = label
+            .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')' || c == ' ');
+        let lower = label.to_ascii_lowercase();
+        if lower.starts_with("update") || lower.starts_with("yes") {
+            update_row = Some(index);
+        } else if lower.starts_with("skip") || lower.starts_with("no") {
+            skip_row = Some(index);
+        }
+        if is_selected && selected.replace(index).is_some() {
+            return None;
+        }
+    }
+    let (update, skip, selected) = (update_row?, skip_row?, selected?);
+    if update.abs_diff(skip) != 1 {
+        return None;
+    }
+    if tail[update.max(skip) + 1..].iter().any(|line| {
+        let line = line.trim();
+        line.starts_with('›') || line.starts_with('❯')
+    }) {
+        return None;
+    }
+    let target = if select_update { update } else { skip };
+    if selected == target {
+        Some(CodexMenuMove::Stay)
+    } else if selected + 1 == target {
+        Some(CodexMenuMove::Down)
+    } else if target + 1 == selected {
+        Some(CodexMenuMove::Up)
+    } else {
+        None
+    }
+}
+
 /// The verdict of [`classify_pane`]: the [`DialogueClass`] plus the pane line
 /// that triggered it, kept as evidence for the audit event and the operator
 /// alert. `evidence` is `None` exactly when `class == DialogueClass::None`.
@@ -722,6 +795,30 @@ mod tests {
         assert_eq!(
             classify_codex_dialog(pane),
             Some(CodexDialogKind::UpdateAvailable)
+        );
+    }
+
+    #[test]
+    fn update_choice_requires_a_live_menu_not_quoted_output() {
+        let live = "Update available! 1 → 2\n› 1. Update\n  2. Skip";
+        assert_eq!(
+            codex_update_menu_move(live, true),
+            Some(CodexMenuMove::Stay)
+        );
+        assert_eq!(
+            codex_update_menu_move(live, false),
+            Some(CodexMenuMove::Down)
+        );
+        let skip_selected = "Update available! 1 → 2\n  1. Update\n› 2. Skip";
+        assert_eq!(
+            codex_update_menu_move(skip_selected, true),
+            Some(CodexMenuMove::Up)
+        );
+        let quoted = format!("{live}\n› Ask codex to do anything");
+        assert_eq!(codex_update_menu_move(&quoted, true), None);
+        assert_eq!(
+            codex_update_menu_move("Select Reasoning Level\n› 1. Medium\n  2. High", true),
+            None
         );
     }
 

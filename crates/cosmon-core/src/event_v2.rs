@@ -691,6 +691,23 @@ pub enum EventV2 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocked_seconds: Option<u64>,
     },
+    /// An update changed the installed codex version outside the worker pane
+    /// or through a verified update menu followed by an in-place restart.
+    CodexUpdated {
+        /// Molecule whose worker receives the updated binary.
+        molecule_id: MoleculeId,
+        /// Version reported before the update.
+        from: String,
+        /// Version verified after the update.
+        to: String,
+    },
+    /// An updater failed; dispatch continues on the installed version.
+    CodexUpdateFailed {
+        /// Molecule whose dispatch saw the failed attempt.
+        molecule_id: MoleculeId,
+        /// Bounded diagnostic without installer output or credentials.
+        reason: String,
+    },
     /// A capability-bearing worker paused for an operator decision at an
     /// irreversibility boundary (ADR-123 — operator-block doctrine).
     ///
@@ -2814,6 +2831,8 @@ impl EventV2 {
             | Self::WorkerExited { molecule_id, .. }
             | Self::WorkerSilenceDetected { molecule_id, .. }
             | Self::BlockingDialogueDetected { molecule_id, .. }
+            | Self::CodexUpdated { molecule_id, .. }
+            | Self::CodexUpdateFailed { molecule_id, .. }
             | Self::WorkerBlockedOnOperator { molecule_id, .. }
             | Self::QueryStepEvaluated { molecule_id, .. }
             | Self::ExternalChannelTimeout { molecule_id, .. }
@@ -4233,6 +4252,15 @@ mod tests {
                 action: "alerted".to_owned(),
                 blocked_seconds: Some(300),
             },
+            EventV2::CodexUpdated {
+                molecule_id: mid("cs-20260411-aaaa"),
+                from: "codex-cli 1".to_owned(),
+                to: "codex-cli 2".to_owned(),
+            },
+            EventV2::CodexUpdateFailed {
+                molecule_id: mid("cs-20260411-aaaa"),
+                reason: "installer failed".to_owned(),
+            },
             EventV2::NativeStarted {
                 molecule_id: mid("cs-20260411-aaaa"),
                 step_id: "reconcile".to_owned(),
@@ -4686,6 +4714,8 @@ mod tests {
             | EventV2::WorkerHeartbeat { .. }
             | EventV2::WorkerSilenceDetected { .. }
             | EventV2::BlockingDialogueDetected { .. }
+            | EventV2::CodexUpdated { .. }
+            | EventV2::CodexUpdateFailed { .. }
             | EventV2::WorkerBlockedOnOperator { .. }
             | EventV2::EnergyTick { .. }
             | EventV2::UsageObserved { .. }

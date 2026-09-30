@@ -179,6 +179,17 @@ pub fn dialogue_auto_confirm(mol_id: &MoleculeId, mol_state_dir: &Path) -> Injec
     )
 }
 
+/// A menu key sent only after identifying the live codex update widget.
+#[must_use]
+pub fn codex_update(mol_id: &MoleculeId, mol_state_dir: &Path) -> InjectionProvenance {
+    stamped(
+        InjectionOrigin::CodexUpdate,
+        "codex-update-menu",
+        mol_id,
+        mol_state_dir,
+    )
+}
+
 /// `cs whisper` — operator-authored text sent to a live worker.
 #[must_use]
 pub fn whisper(mol_id: &MoleculeId, mol_state_dir: &Path) -> InjectionProvenance {

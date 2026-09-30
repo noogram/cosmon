@@ -453,7 +453,10 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              from the worker by default (a codex login/ChatGPT worker must \
              not be diverted onto a stale key frozen into the tmux server's \
              env); [adapters.codex].pass_api_key = true opts back into \
-             pass-through for an installation that bills codex by API key.\n  \
+             pass-through for an installation that bills codex by API key. \
+             [adapters.codex].update = \"auto\" (default) checks before \
+             launch and resolves update menus; \"skip\" disables the \
+             launch check and skips a menu; \"operator\" only alerts.\n  \
              opencode      (TmuxPane,  External, Vendor)    opencode \
              (sst/opencode) CLI in a tmux pane — vendor cloud.\n  \
              openai        (InProcess, Cosmon,   Vendor)    OpenAI chat-\

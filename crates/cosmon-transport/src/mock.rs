@@ -39,6 +39,11 @@ pub enum MockCall {
         worker_id: String,
         input: String,
     },
+    /// A menu cursor move, distinct from text pasted into a composer.
+    MenuDirection {
+        worker_id: String,
+        down: bool,
+    },
     CaptureOutput {
         worker_id: String,
         lines: usize,
@@ -228,6 +233,24 @@ impl TransportBackend for MockBackend {
         }
 
         Ok(())
+    }
+
+    fn send_menu_direction(
+        &self,
+        id: &WorkerId,
+        down: bool,
+        _provenance: &cosmon_core::injection::InjectionProvenance,
+    ) -> Result<(), TransportError> {
+        let mut state = self.state.lock().unwrap();
+        state.calls.push(MockCall::MenuDirection {
+            worker_id: id.to_string(),
+            down,
+        });
+        if state.sessions.contains_key(id.as_str()) {
+            Ok(())
+        } else {
+            Err(TransportError::NotFound(id.clone()))
+        }
     }
 
     fn capture_output(&self, id: &WorkerId, lines: usize) -> Result<String, TransportError> {

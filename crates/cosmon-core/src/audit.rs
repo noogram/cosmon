@@ -212,6 +212,8 @@ impl Action {
             // the spec transition system never sees a fired action because
             // none fired — that absence is the whole point.
             | EventV2::ConfigDriftDetected { .. }
+            | EventV2::CodexUpdated { .. }
+            | EventV2::CodexUpdateFailed { .. }
             // COSMON #26 residual: `InputInjected` attributes keystrokes sent
             // into a worker pane. Pure provenance — it says who wrote to a
             // composer, never that a molecule advanced. The spec transition

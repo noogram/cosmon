@@ -4665,6 +4665,7 @@ pub(super) fn spawn_and_prompt(
             prompt,
             mol,
             mol_state_dir,
+            state_dir,
             adapter_entry,
             preferred_model,
             &harness_argv(harness_args),
@@ -6480,7 +6481,7 @@ fn mint_codex_work_hook_home(mol_state_dir: &std::path::Path) -> Option<std::pat
 /// is the surface-lie guard applied to codex: an `[exited]` carcass pane
 /// (binary missing on PATH, crash on launch) is caught here instead of the
 /// prompt firing into a dead pane.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn spawn_codex_and_prompt(
     backend: &TmuxBackend,
     wid: &cosmon_core::id::WorkerId,
@@ -6489,6 +6490,7 @@ fn spawn_codex_and_prompt(
     prompt: &str,
     mol: &MoleculeData,
     mol_state_dir: &std::path::Path,
+    state_dir: &std::path::Path,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
     // Pre-rendered `-c key=value` token pairs for the harness settings this
@@ -6510,6 +6512,25 @@ fn spawn_codex_and_prompt(
     let extra_args = adapter_entry
         .map(|e| e.extra_args.clone())
         .unwrap_or_default();
+    let update_policy = adapter_entry.and_then(|e| e.update).unwrap_or_default();
+    let prelaunch_update = if update_policy == cosmon_core::config::CodexUpdatePolicy::Auto {
+        super::codex_update::operator_cosmon_home().map_or_else(
+            |error| super::codex_update::UpdateOutcome::Failed(error.to_string()),
+            |home| {
+                super::codex_update::update_before_launch(
+                    &home,
+                    &super::codex_update::InstalledCodex,
+                )
+            },
+        )
+    } else {
+        super::codex_update::UpdateOutcome::Unchanged
+    };
+    if let Err(error) =
+        super::codex_update::record_outcome(state_dir, mol_state_dir, &mol.id, &prelaunch_update)
+    {
+        tracing::warn!(target: "cosmon::dispatch", %error, "codex update result could not be recorded");
+    }
 
     // Resolve the operator git identity to pin on the codex worker
     // (delib-20260717-194b, F3). codex runs its own git process out of cosmon's
@@ -6550,6 +6571,8 @@ fn spawn_codex_and_prompt(
 
     // Codex-worker API-key posture (observed 2026-09-26): `false` unless the
     // operator opted in via `[adapters.codex].pass_api_key = true`.
+    let launch_harness_args =
+        codex_update_launch_args(harness_args, update_policy, &prelaunch_update);
     let config = codex::CodexSessionConfig {
         socket: backend.socket().to_owned(),
         session_name: session_name.to_owned(),
@@ -6563,7 +6586,7 @@ fn spawn_codex_and_prompt(
         pre_existing_worker: None,
         git_identity,
         writable_roots,
-        harness_args: harness_args.to_vec(),
+        harness_args: launch_harness_args,
         pass_api_key: resolve_codex_pass_api_key(adapter_entry, warn_codex_api_key_stripped),
         work_hook_home: mint_codex_work_hook_home(mol_state_dir),
     };
@@ -6617,12 +6640,89 @@ fn spawn_codex_and_prompt(
     // submit while it holds the briefing, record the outcome, and fail the
     // spawn rather than report a worker that will never start.
     if mode == codex::CodexMode::Interactive {
-        return codex_launch_before_briefing(backend, wid, || {
-            deliver_codex_tackle_briefing(backend, wid, prompt, mol, mol_state_dir, session_name)
-        });
+        let updater = super::codex_update::InstalledCodex;
+        let before = (update_policy == cosmon_core::config::CodexUpdatePolicy::Auto)
+            .then(|| super::codex_update::CodexUpdater::version(&updater).ok())
+            .flatten();
+        let provenance = cosmon_cli::injection_provenance::codex_update(&mol.id, mol_state_dir);
+        return codex_launch_before_briefing(
+            backend,
+            wid,
+            update_policy,
+            &provenance,
+            || {
+                backend.terminate(wid)?;
+                codex::spawn_codex_session(&config)?;
+                let probe = cosmon_transport::readiness::CodexProbe;
+                match probe.await_live(
+                    backend,
+                    wid,
+                    std::time::Duration::from_secs(30),
+                    std::time::Duration::from_millis(200),
+                )? {
+                    cosmon_transport::readiness::Liveness::Live => {}
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "codex restart did not become live: {other}"
+                        ))
+                    }
+                }
+                if let (Some(from), Ok(to)) = (
+                    before.as_ref(),
+                    super::codex_update::CodexUpdater::version(&updater),
+                ) {
+                    let outcome = if from == &to {
+                        super::codex_update::UpdateOutcome::Failed(
+                            "restart notice appeared without a version change".to_owned(),
+                        )
+                    } else {
+                        super::codex_update::UpdateOutcome::Updated {
+                            from: from.clone(),
+                            to,
+                        }
+                    };
+                    super::codex_update::record_outcome(
+                        state_dir,
+                        mol_state_dir,
+                        &mol.id,
+                        &outcome,
+                    )?;
+                }
+                Ok(())
+            },
+            || {
+                deliver_codex_tackle_briefing(
+                    backend,
+                    wid,
+                    prompt,
+                    mol,
+                    mol_state_dir,
+                    session_name,
+                )
+            },
+        );
     }
 
     Ok(None)
+}
+
+/// Add the per-launch check override only for `skip` or a verified pre-launch
+/// version change. An ordinary `auto` launch still checks for updates.
+fn codex_update_launch_args(
+    harness_args: &[String],
+    policy: cosmon_core::config::CodexUpdatePolicy,
+    outcome: &super::codex_update::UpdateOutcome,
+) -> Vec<String> {
+    let mut args = harness_args.to_vec();
+    if policy == cosmon_core::config::CodexUpdatePolicy::Skip
+        || matches!(outcome, super::codex_update::UpdateOutcome::Updated { .. })
+    {
+        args.extend([
+            "-c".to_owned(),
+            "check_for_update_on_startup=false".to_owned(),
+        ]);
+    }
+    args
 }
 
 /// How long `cs tackle` observes a codex worker's composer for a submitted
@@ -6706,17 +6806,92 @@ fn codex_launch_dialogue(
     })
 }
 
-/// Deliver only when the launch pane has no recognised codex menu.
-/// A detected menu remains open for the operator and is reported by the caller.
-fn codex_launch_before_briefing<F>(
+/// Send keys only when the live pane contains the recognised two-choice
+/// update widget. The same seam serves launch and patrol observations.
+pub(crate) fn select_codex_update_menu(
     backend: &dyn TransportBackend,
     wid: &WorkerId,
+    pane: &str,
+    policy: cosmon_core::config::CodexUpdatePolicy,
+    provenance: &cosmon_core::injection::InjectionProvenance,
+) -> anyhow::Result<bool> {
+    use cosmon_core::dialogue::{codex_update_menu_move, CodexMenuMove};
+    let select_update = match policy {
+        cosmon_core::config::CodexUpdatePolicy::Auto => true,
+        cosmon_core::config::CodexUpdatePolicy::Skip => false,
+        cosmon_core::config::CodexUpdatePolicy::Operator => return Ok(false),
+    };
+    let Some(movement) = codex_update_menu_move(pane, select_update) else {
+        return Ok(false);
+    };
+    // Re-capture immediately before acting; a disappeared menu must never
+    // turn this Enter into a normal worker submission.
+    if backend.capture_output(wid, 40)? != pane {
+        return Ok(false);
+    }
+    match movement {
+        CodexMenuMove::Down => backend.send_menu_direction(wid, true, provenance)?,
+        CodexMenuMove::Up => backend.send_menu_direction(wid, false, provenance)?,
+        CodexMenuMove::Stay => {}
+    }
+    backend.send_input_observed(wid, "", provenance)?;
+    Ok(true)
+}
+
+/// Deliver only when the launch pane has no recognised codex menu.
+/// A detected menu remains open for the operator and is reported by the caller.
+fn codex_launch_before_briefing<F, R>(
+    backend: &dyn TransportBackend,
+    wid: &WorkerId,
+    policy: cosmon_core::config::CodexUpdatePolicy,
+    provenance: &cosmon_core::injection::InjectionProvenance,
+    restart: R,
     deliver: F,
 ) -> anyhow::Result<Option<cosmon_core::dialogue::DialogueScan>>
 where
     F: FnOnce() -> anyhow::Result<()>,
+    R: FnOnce() -> anyhow::Result<()>,
 {
+    if policy == cosmon_core::config::CodexUpdatePolicy::Auto
+        && cosmon_core::dialogue::classify_codex_dialog(&backend.capture_output(wid, 40)?)
+            == Some(cosmon_core::dialogue::CodexDialogKind::RestartRequired)
+    {
+        restart()?;
+        deliver()?;
+        return Ok(None);
+    }
     let dialogue = codex_launch_dialogue(backend, wid)?;
+    if let Some(ref scan) = dialogue {
+        let pane = backend.capture_output(wid, 40)?;
+        if cosmon_core::dialogue::classify_codex_dialog(&pane)
+            == Some(cosmon_core::dialogue::CodexDialogKind::UpdateAvailable)
+            && select_codex_update_menu(backend, wid, &pane, policy, provenance)?
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            loop {
+                let pane = backend.capture_output(wid, 40)?;
+                let kind = cosmon_core::dialogue::classify_codex_dialog(&pane);
+                if policy == cosmon_core::config::CodexUpdatePolicy::Auto
+                    && kind == Some(cosmon_core::dialogue::CodexDialogKind::RestartRequired)
+                {
+                    restart()?;
+                    deliver()?;
+                    return Ok(None);
+                }
+                if policy == cosmon_core::config::CodexUpdatePolicy::Skip
+                    && cosmon_core::dialogue::classify_pane(&pane).class
+                        == cosmon_core::dialogue::DialogueClass::None
+                {
+                    deliver()?;
+                    return Ok(None);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Ok(Some(scan.clone()));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
+    }
     if dialogue.is_some() {
         return Ok(dialogue);
     }
@@ -9906,7 +10081,10 @@ mod tests {
         ] {
             backend.set_canned_output(pane);
             let sends = Cell::new(0);
-            let finding = codex_launch_before_briefing(&backend, &wid, || {
+            let finding = codex_launch_before_briefing(&backend, &wid,
+                cosmon_core::config::CodexUpdatePolicy::Operator,
+                &cosmon_core::injection::InjectionProvenance::unattributed(),
+                || Ok(()), || {
                 sends.set(sends.get() + 1);
                 Ok(())
             })
@@ -9914,6 +10092,191 @@ mod tests {
             assert_eq!(finding.map(|scan| scan.class), expected, "pane: {pane}");
             assert_eq!(sends.get(), usize::from(expected.is_none()), "pane: {pane}");
         }
+    }
+
+    #[test]
+    fn default_codex_update_menu_is_accepted_before_briefing() {
+        use cosmon_transport::mock::{MockBackend, MockCall};
+        let backend = MockBackend::new();
+        let agent = cosmon_core::transport::AgentDefinition {
+            id: cosmon_core::id::AgentId::new("codex-update-default").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "codex".to_owned(),
+            args: vec![],
+            cwd: None,
+        };
+        let wid = backend
+            .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
+            .unwrap()
+            .id;
+        backend.set_canned_output("Update available! 0.159.0 → 0.159.2\n› 1. Update\n  2. Skip");
+        let pane = backend.capture_output(&wid, 40).unwrap();
+        let acted = select_codex_update_menu(
+            &backend,
+            &wid,
+            &pane,
+            cosmon_core::config::CodexUpdatePolicy::Auto,
+            &cosmon_core::injection::InjectionProvenance::unattributed(),
+        )
+        .unwrap();
+        assert!(acted);
+        assert!(backend.calls().iter().any(|call| matches!(
+            call,
+            MockCall::SendInput { input, .. } if input.is_empty()
+        )));
+    }
+
+    #[test]
+    fn launch_restart_notice_restarts_before_delivering_brief() {
+        use cosmon_transport::mock::MockBackend;
+        use std::cell::RefCell;
+        let backend = MockBackend::new();
+        let agent = cosmon_core::transport::AgentDefinition {
+            id: cosmon_core::id::AgentId::new("codex-restart-launch").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "codex".to_owned(),
+            args: vec![],
+            cwd: None,
+        };
+        let wid = backend
+            .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
+            .unwrap()
+            .id;
+        backend.set_canned_output("Update ran successfully! Please restart Codex");
+        let actions = RefCell::new(Vec::new());
+        let finding = codex_launch_before_briefing(
+            &backend,
+            &wid,
+            cosmon_core::config::CodexUpdatePolicy::Auto,
+            &cosmon_core::injection::InjectionProvenance::unattributed(),
+            || {
+                actions.borrow_mut().push("restart");
+                Ok(())
+            },
+            || {
+                actions.borrow_mut().push("brief");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(finding.is_none());
+        assert_eq!(*actions.borrow(), ["restart", "brief"]);
+    }
+
+    #[test]
+    fn codex_update_skip_moves_to_skip_and_operator_sends_nothing() {
+        use cosmon_transport::mock::{MockBackend, MockCall};
+        let pane = "Update available! 0.159.0 → 0.159.2\n› 1. Update\n  2. Skip";
+        let backend = MockBackend::new();
+        let agent = cosmon_core::transport::AgentDefinition {
+            id: cosmon_core::id::AgentId::new("codex-update-choice").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "codex".to_owned(),
+            args: vec![],
+            cwd: None,
+        };
+        let wid = backend
+            .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
+            .unwrap()
+            .id;
+        backend.set_canned_output(pane);
+        let stamp = cosmon_core::injection::InjectionProvenance::unattributed();
+        assert!(!select_codex_update_menu(
+            &backend,
+            &wid,
+            pane,
+            cosmon_core::config::CodexUpdatePolicy::Operator,
+            &stamp
+        )
+        .unwrap());
+        assert!(!backend.calls().iter().any(|call| matches!(
+            call,
+            MockCall::SendInput { .. } | MockCall::MenuDirection { .. }
+        )));
+        assert!(select_codex_update_menu(
+            &backend,
+            &wid,
+            pane,
+            cosmon_core::config::CodexUpdatePolicy::Skip,
+            &stamp
+        )
+        .unwrap());
+        let calls = backend.calls();
+        let keys: Vec<_> = calls
+            .iter()
+            .filter_map(|call| match call {
+                MockCall::MenuDirection { down, .. } => Some(if *down { "Down" } else { "Up" }),
+                MockCall::SendInput { input, .. } if input.is_empty() => Some("Enter"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, ["Down", "Enter"]);
+        let skip_selected = "Update available! 0.159.0 → 0.159.2\n  1. Update\n› 2. Skip";
+        backend.set_canned_output(skip_selected);
+        assert!(select_codex_update_menu(
+            &backend,
+            &wid,
+            skip_selected,
+            cosmon_core::config::CodexUpdatePolicy::Auto,
+            &stamp
+        )
+        .unwrap());
+        let keys: Vec<_> = backend
+            .calls()
+            .iter()
+            .filter_map(|call| match call {
+                MockCall::MenuDirection { down, .. } => Some(if *down { "Down" } else { "Up" }),
+                MockCall::SendInput { input, .. } if input.is_empty() => Some("Enter"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, ["Down", "Enter", "Up", "Enter"]);
+        backend.set_canned_output("Select Reasoning Level\n› 1. Medium\n  2. High");
+        assert!(!select_codex_update_menu(
+            &backend,
+            &wid,
+            "Select Reasoning Level\n› 1. Medium\n  2. High",
+            cosmon_core::config::CodexUpdatePolicy::Auto,
+            &stamp
+        )
+        .unwrap());
+        assert_eq!(
+            backend
+                .calls()
+                .iter()
+                .filter(|call| matches!(
+                    call,
+                    MockCall::SendInput { .. } | MockCall::MenuDirection { .. }
+                ))
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn codex_update_policy_changes_only_the_worker_launch_argv() {
+        use super::super::codex_update::UpdateOutcome;
+        use cosmon_core::config::CodexUpdatePolicy as Policy;
+        let pinned = vec!["-c".to_owned(), "model_reasoning_effort=high".to_owned()];
+        assert_eq!(
+            codex_update_launch_args(&pinned, Policy::Auto, &UpdateOutcome::Unchanged),
+            pinned
+        );
+        assert_eq!(
+            codex_update_launch_args(&pinned, Policy::Operator, &UpdateOutcome::Unchanged),
+            pinned
+        );
+        let skip = codex_update_launch_args(&pinned, Policy::Skip, &UpdateOutcome::Unchanged);
+        assert_eq!(&skip[..2], &pinned);
+        assert_eq!(&skip[2..], ["-c", "check_for_update_on_startup=false"]);
+        let updated = UpdateOutcome::Updated {
+            from: "1".to_owned(),
+            to: "2".to_owned(),
+        };
+        assert_eq!(
+            codex_update_launch_args(&pinned, Policy::Auto, &updated),
+            skip
+        );
     }
 
     /// COSMON #90 — the writer half of the retackle lease. `acquire` must
