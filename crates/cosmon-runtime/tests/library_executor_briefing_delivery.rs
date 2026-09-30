@@ -160,13 +160,21 @@ impl ScriptedDelivery {
 impl BriefingDelivery for ScriptedDelivery {
     fn deliver(
         &self,
-        _backend: &dyn TransportBackend,
+        backend: &dyn TransportBackend,
         ctx: &BriefingDeliveryContext<'_>,
     ) -> Result<BriefingDeliveryReport, TransportError> {
         self.seen
             .lock()
             .expect("lock")
             .push((ctx.adapter.to_owned(), ctx.worker.name().to_owned()));
+        if self.outcome == BriefingDeliveryOutcome::SessionGone {
+            backend.terminate(ctx.worker)?;
+        }
+        if self.outcome == BriefingDeliveryOutcome::NotConfirmed {
+            return Err(TransportError::SpawnFailed(
+                "readiness could not be confirmed".to_owned(),
+            ));
+        }
         Ok(BriefingDeliveryReport {
             outcome: self.outcome,
             resubmits: 3,
@@ -239,7 +247,7 @@ fn an_undelivered_briefing_fails_the_dispatch_and_tears_the_worker_down() {
 
     let err = result.expect_err("an undelivered briefing must fail the dispatch");
     assert!(
-        err.to_string().contains("briefing not delivered"),
+        err.to_string().contains("briefing not confirmed"),
         "the error must name the cause: {err}"
     );
     assert!(
@@ -264,19 +272,55 @@ fn an_undelivered_briefing_fails_the_dispatch_and_tears_the_worker_down() {
     assert!(rows[0].contains("\"undelivered\""), "{}", rows[0]);
 }
 
-/// A briefing the port could not observe proceeds, as in `cs tackle`'s
-/// claude arm: absence of evidence is not evidence of a stranded worker.
+/// A vanished session after spawn cannot confirm the briefing. The dispatch
+/// must fail now, with the typed observation retained in the event log.
 #[test]
-fn an_unobservable_delivery_does_not_fail_the_dispatch() {
-    let (_dir, _store, _id, backend, _port, result) =
-        run("task-20260925-d003", BriefingDeliveryOutcome::Unobservable);
+fn a_vanished_session_does_not_leave_a_running_unbriefed_molecule() {
+    let (_dir, store, id, backend, _port, result) =
+        run("task-20260925-d003", BriefingDeliveryOutcome::SessionGone);
 
-    result.expect("an unobservable delivery proceeds");
+    let err = result.expect_err("a vanished session cannot confirm delivery");
+    assert!(err.to_string().contains("briefing not confirmed"), "{err}");
     assert!(
-        !backend
+        backend
             .calls()
             .iter()
             .any(|c| matches!(c, MockCall::Terminate { .. })),
-        "a worker that may be working must not be terminated"
+        "the failed dispatch must attempt teardown"
     );
+    assert_ne!(
+        store.load_molecule(&id).expect("molecule").status,
+        MoleculeStatus::Running
+    );
+    let rows = delivery_rows(&store, &id);
+    assert_eq!(rows.len(), 1, "the result must be recorded: {rows:?}");
+    assert!(rows[0].contains("\"session_gone\""), "{}", rows[0]);
+}
+
+/// A pane that cannot be read also cannot sign a briefing receipt.
+#[test]
+fn an_unobservable_delivery_does_not_claim_success() {
+    let (_dir, store, id, _backend, _port, result) =
+        run("task-20260925-d004", BriefingDeliveryOutcome::Unobservable);
+    assert!(result
+        .expect_err("delivery is unconfirmed")
+        .to_string()
+        .contains("briefing not confirmed"));
+    assert_ne!(
+        store.load_molecule(&id).expect("molecule").status,
+        MoleculeStatus::Running
+    );
+}
+
+/// A readiness failure before the postcondition also gets a typed event,
+/// so the missing delivery is visible after the dispatch record rolls back.
+#[test]
+fn a_delivery_port_error_records_not_confirmed() {
+    let (_dir, store, id, _backend, _port, result) =
+        run("task-20260925-d005", BriefingDeliveryOutcome::NotConfirmed);
+    let err = result.expect_err("readiness failure must reject dispatch");
+    assert!(err.to_string().contains("briefing not confirmed"), "{err}");
+    let rows = delivery_rows(&store, &id);
+    assert_eq!(rows.len(), 1, "one outcome must be recorded: {rows:?}");
+    assert!(rows[0].contains("\"not_confirmed\""), "{}", rows[0]);
 }

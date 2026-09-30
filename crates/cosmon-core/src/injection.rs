@@ -174,6 +174,8 @@ pub enum BriefingDeliveryOutcome {
     Unobservable,
     /// The worker's session disappeared before delivery could be read.
     SessionGone,
+    /// Delivery stopped before the postcondition could produce a pane reading.
+    NotConfirmed,
 }
 
 impl BriefingDeliveryOutcome {
@@ -195,6 +197,7 @@ impl BriefingDeliveryOutcome {
             Self::Undelivered => "undelivered",
             Self::Unobservable => "unobservable",
             Self::SessionGone => "session_gone",
+            Self::NotConfirmed => "not_confirmed",
         }
     }
 }

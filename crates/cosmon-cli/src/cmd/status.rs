@@ -1625,16 +1625,27 @@ fn run_one(ctx: &Context, id: &str) -> anyhow::Result<()> {
 
     let view = cosmon_state::ops::molecule_status(store.as_ref(), &molecule_id)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let json = cosmon_state::ops::StatusJson::from_view(&view);
+    let status = cosmon_state::ops::StatusJson::from_view(&view);
+    let delivery = cosmon_state::events::input_injection::latest_briefing_delivery(
+        &store.molecule_dir(&molecule_id),
+    );
 
     if ctx.json {
-        println!("{}", serde_json::to_string_pretty(&json)?);
+        println!("{}", serde_json::to_string_pretty(&status)?);
     } else {
         println!("{} {}", view.status.emoji(), view.id);
-        println!("  status:     {}", json.status);
-        println!("  phase:      {}", json.phase);
-        println!("  updated_at: {}", json.updated_at);
-        println!("  terminal:   {}", json.terminal);
+        println!("  status:     {}", status.status);
+        println!("  phase:      {}", status.phase);
+        println!("  updated_at: {}", status.updated_at);
+        println!("  terminal:   {}", status.terminal);
+        if let Some(outcome) = delivery {
+            println!("  briefing:   {outcome}");
+            if let Some(recovery) =
+                cosmon_state::events::input_injection::briefing_recovery(&molecule_id, outcome)
+            {
+                println!("  recovery:   {recovery}");
+            }
+        }
         if matches!(
             view.status,
             MoleculeStatus::Collapsed | MoleculeStatus::Frozen

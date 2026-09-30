@@ -106,7 +106,9 @@ pub struct Args {
     /// [`BOOT_STALL_GRACE`] ago, the same grace used by `cs health`. The nudge
     /// text references `briefing.md` so the re-engaged
     /// worker re-reads its contract before continuing. Increments
-    /// [`cosmon_state::MoleculeData::nudge_count`] (M5).
+    /// [`cosmon_state::MoleculeData::nudge_count`] (M5). This flag does not
+    /// freeze or collapse molecules; those transitions require the separate
+    /// `--auto-freeze` or `--auto-collapse` flag.
     #[arg(long)]
     pub nudge: bool,
 
@@ -120,12 +122,15 @@ pub struct Args {
     #[arg(long)]
     pub expire: bool,
 
+    /// Transition orphaned molecules to `Frozen` after the spawn grace.
+    /// Without this flag, patrol reports orphans and leaves lifecycle state
+    /// unchanged. `--auto-collapse` selects a terminal transition instead.
+    #[arg(long)]
+    pub auto_freeze: bool,
+
     /// Aggressive orphan remediation: transition orphaned molecules to
-    /// `Collapsed` (terminal) instead of `Frozen` (recoverable). Default
-    /// is `Frozen` because the molecule can be revived once the worker
-    /// situation is understood; `--auto-collapse` is for cases where the
-    /// operator wants the DAG to advance past the dead work and never
-    /// revisit it.
+    /// `Collapsed` after the spawn grace. This is terminal; use
+    /// `--auto-freeze` for a recoverable transition.
     #[arg(long)]
     pub auto_collapse: bool,
 
@@ -796,27 +801,31 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         ExpireSweepReport::default()
     };
 
-    // Auto-freeze / auto-collapse orphans: close the loop between orphan
-    // detection and remediation. Previously patrol only *reported* orphans —
-    // they stayed Running forever unless a human manually collapsed them.
+    // Auto-freeze / auto-collapse orphans only when explicitly requested.
+    // A plain scan or `--nudge` reports an orphan without changing its
+    // molecule lifecycle.
     // An orphan is any Running/Queued molecule whose worker is genuinely
     // dead (desired=Stopped or missing) OR whose worker needed respawn but
     // did not get it (respawn flag absent or respawn failed this run).
-    let auto_transitioned = auto_freeze_orphans_with_grace(
-        store.as_ref(),
-        &state_dir,
-        &fleet,
-        &molecules,
-        &OrphanSweepOptions {
-            respawn: RespawnOutcome {
-                needs_respawn: &scan_result.needs_respawn,
-                respawned: &respawned,
+    let auto_transitioned = if args.auto_freeze || args.auto_collapse {
+        auto_freeze_orphans_with_grace(
+            store.as_ref(),
+            &state_dir,
+            &fleet,
+            &molecules,
+            &OrphanSweepOptions {
+                respawn: RespawnOutcome {
+                    needs_respawn: &scan_result.needs_respawn,
+                    respawned: &respawned,
+                },
+                auto_collapse: args.auto_collapse,
+                backend: backend.as_ref().map(|b| b as &dyn TransportBackend),
+                dead_worker_grace: configured_dead_worker_grace(args.dead_worker_grace_secs),
             },
-            auto_collapse: args.auto_collapse,
-            backend: backend.as_ref().map(|b| b as &dyn TransportBackend),
-            dead_worker_grace: configured_dead_worker_grace(args.dead_worker_grace_secs),
-        },
-    )?;
+        )?
+    } else {
+        Vec::new()
+    };
 
     // Harvest sweep: close the loop on Completed-but-unmerged molecules.
     // Belt-and-suspenders for cases where the tmux `pane-died` hook
@@ -3907,6 +3916,7 @@ mod tests {
             propel_api_stall: false,
             stale_after: 300,
             expire: false,
+            auto_freeze: false,
             auto_collapse: false,
             dead_worker_grace_secs: 120,
             harvest: false,
@@ -3928,6 +3938,65 @@ mod tests {
             dialogue_blocked_after: 900,
         };
         run(&ctx, &args).unwrap();
+    }
+
+    /// Nudging alone is a transport gesture and must leave lifecycle state
+    /// unchanged even when the same scan sees a dead worker.
+    #[test]
+    fn nudge_alone_does_not_freeze_an_orphan() {
+        let (tmp, store) = make_store();
+        let (wid, worker) = make_worker("gone", DesiredState::Stopped);
+        let mut fleet = Fleet::default();
+        fleet.workers.insert(wid, worker);
+        store.save_fleet(&fleet).unwrap();
+        let mut mol = make_molecule("task-20260929-1250", MoleculeStatus::Running, Some("gone"));
+        mol.tackled_at = Some(Utc::now() - chrono::Duration::minutes(10));
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let ctx = Context {
+            verbose: false,
+            json: true,
+            config: Some(tmp.path().to_path_buf()),
+        };
+        let mut args = Args {
+            respawn: false,
+            no_tmux: true,
+            propel: false,
+            propel_api_stall: false,
+            stale_after: 300,
+            expire: false,
+            auto_freeze: false,
+            auto_collapse: false,
+            dead_worker_grace_secs: 120,
+            harvest: false,
+            livelock: false,
+            livelock_stale_after: 3600,
+            nudge: true,
+            silence_detect: false,
+            silence_after: 90,
+            event_age: false,
+            event_age_after: 900,
+            abandon: false,
+            abandon_root: None,
+            abandon_quiet_hours: 24,
+            heal: false,
+            dry_run: false,
+            dialogue_scan: false,
+            auto_confirm_safe: false,
+            dialogue_lines: 40,
+            dialogue_blocked_after: 900,
+        };
+        run(&ctx, &args).unwrap();
+        assert_eq!(
+            store.load_molecule(&mol.id).unwrap().status,
+            MoleculeStatus::Running,
+            "--nudge alone must not transition the molecule"
+        );
+        args.auto_freeze = true;
+        run(&ctx, &args).unwrap();
+        assert_eq!(
+            store.load_molecule(&mol.id).unwrap().status,
+            MoleculeStatus::Frozen
+        );
     }
 
     #[test]
@@ -3953,6 +4022,7 @@ mod tests {
             propel_api_stall: false,
             stale_after: 300,
             expire: false,
+            auto_freeze: false,
             auto_collapse: false,
             dead_worker_grace_secs: 120,
             harvest: false,
@@ -3999,6 +4069,7 @@ mod tests {
             propel_api_stall: false,
             stale_after: 300,
             expire: false,
+            auto_freeze: false,
             auto_collapse: false,
             dead_worker_grace_secs: 120,
             harvest: false,
@@ -4049,6 +4120,7 @@ mod tests {
             propel_api_stall: false,
             stale_after: 300,
             expire: false,
+            auto_freeze: false,
             auto_collapse: false,
             dead_worker_grace_secs: 120,
             harvest: false,
@@ -4089,6 +4161,7 @@ mod tests {
             propel_api_stall: false,
             stale_after: 300,
             expire: false,
+            auto_freeze: false,
             auto_collapse: false,
             dead_worker_grace_secs: 120,
             harvest: false,
@@ -5854,6 +5927,7 @@ mod tests {
             propel_api_stall: false,
             stale_after: 300,
             expire: false,
+            auto_freeze: false,
             auto_collapse: false,
             dead_worker_grace_secs: 120,
             harvest: false,

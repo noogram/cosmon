@@ -175,7 +175,8 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              cs status <id>                  names dependents held by a collapsed\n                                  \
                or frozen blocker; complete the blocker\n                                   \
                or re-nucleate the dependent with a new\n                                   \
-               --blocked-by edge\n  \
+               --blocked-by edge; shows the latest recorded\n                                   \
+               briefing outcome and recovery gesture\n  \
              cs ensemble --tag temp:hot      actionable backlog snapshot\n  \
              cs wait <id> &                  block on a worker without hanging the pilot\n  \
              cs events journal <id>          one molecule's whole history, projected\n                                  \
@@ -333,7 +334,10 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              Shared kill-switch: 'touch ~/.cosmon/stand-down.lock' silences both,\n\
              and every other autonomous path (patrol, heal, cs ask --execute).\n\
              'cs patrol' waits 120 seconds after a tackle before declaring its\n  \
-             worker dead; '--dead-worker-grace-secs' configures that wait.\n\n\
+             worker dead; '--dead-worker-grace-secs' configures that wait.\n  \
+             A scan or '--nudge' reports orphans without changing molecule\n  \
+             status. '--auto-freeze' and '--auto-collapse' opt into the\n  \
+             corresponding lifecycle transitions.\n\n\
              Every patrol also scans live panes for blocking dialogs and pages\n  \
              the operator for update, reasoning, or rate-limit menus. 'cs tackle'\n  \
              checks a codex launch menu before sending its briefing. Startup\n  \

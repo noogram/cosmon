@@ -1468,6 +1468,9 @@ pub async fn stuck_molecule(
 ///   pinned model. Also refused before any effect.
 /// - **503 `subprocess_spawn_failed`** — the transport backend could not
 ///   open the worker session (the ledger has been rolled back).
+/// - **503 `briefing_not_confirmed`** — a worker spawned but its briefing
+///   lacked a positive delivery witness; the typed outcome is recorded for
+///   inspection before a retry.
 /// - **503 `tackle_unavailable`** — stable fallback for any other
 ///   dispatch failure (store fault, git fault, unknown adapter, a
 ///   session spawned whose briefing and teardown both failed).
@@ -1827,6 +1830,11 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
         TackleExecError::Spawn { .. } => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "subprocess_spawn_failed",
+            request_id: Some(request_id.to_owned()),
+        },
+        TackleExecError::BriefingNotConfirmed { .. } => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: "briefing_not_confirmed",
             request_id: Some(request_id.to_owned()),
         },
         // contract-20A outcome 2: the dispatcher is root and cannot demote, so
@@ -2971,6 +2979,20 @@ mod tests {
         );
         assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(api.label, "subprocess_spawn_failed");
+    }
+
+    #[test]
+    fn spawned_worker_without_confirmed_brief_has_its_own_wire_outcome() {
+        let api = tackle_exec_error_to_response(
+            &TackleExecError::BriefingNotConfirmed {
+                id: Box::new(MoleculeId::new("task-20260929-1250").unwrap()),
+                outcome: cosmon_core::injection::BriefingDeliveryOutcome::SessionGone,
+                reason: "session disappeared".to_owned(),
+            },
+            "req-brief",
+        );
+        assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(api.label, "briefing_not_confirmed");
     }
 
     /// Each precondition refusal carries its OWN stable label, and both

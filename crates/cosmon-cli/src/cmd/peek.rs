@@ -812,7 +812,7 @@ fn run_json(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let state_dir = ctx.state_dir();
     let socket = super::tmux_socket_name(ctx);
-    let (mut snap, _state_dirs) = super::peek_tui::build_snapshot(
+    let (mut snap, _) = super::peek_tui::build_snapshot(
         &state_dir,
         &socket,
         Some(&project_id),
@@ -824,10 +824,8 @@ fn run_json(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         super::peek_tui::filter_snapshot_by_phase(&mut snap, phase_filter);
     }
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&snapshot_to_json(&snap, phase_filter))?
-    );
+    let output = snapshot_to_json(&snap, phase_filter);
+    println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
 

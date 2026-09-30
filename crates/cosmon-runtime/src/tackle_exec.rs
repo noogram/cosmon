@@ -230,6 +230,18 @@ pub enum TackleExecError {
         reason: String,
     },
 
+    /// A spawned worker had no positive briefing delivery witness and its
+    /// session was torn down before the dispatch record was rolled back.
+    #[error("briefing not confirmed for molecule {id} ({outcome}): {reason}")]
+    BriefingNotConfirmed {
+        /// The molecule that remains available for a retry.
+        id: Box<MoleculeId>,
+        /// The typed observation made after the spawn.
+        outcome: BriefingDeliveryOutcome,
+        /// The observed cause and recovery gesture.
+        reason: String,
+    },
+
     /// The session **spawned**, its briefing could not be delivered, and
     /// the teardown of that session could not be confirmed either.
     ///
@@ -844,6 +856,9 @@ enum SpawnAttemptFailure {
     /// failed and the session was confirmed terminated. The caller rolls
     /// the ledger back as usual.
     Rolled(String),
+    /// The worker spawned, briefing confirmation failed, and teardown was
+    /// confirmed before the caller rolls the dispatch record back.
+    BriefingRolled(BriefingFailure),
     /// A session was spawned, its briefing failed, and terminating it did
     /// not succeed. The caller retains the dispatch record and worktree.
     Unterminated {
@@ -852,6 +867,13 @@ enum SpawnAttemptFailure {
         /// Why the teardown could not be confirmed.
         termination: String,
     },
+}
+
+/// Why a spawned session did not earn a briefing delivery receipt.
+#[derive(Debug)]
+struct BriefingFailure {
+    outcome: BriefingDeliveryOutcome,
+    reason: String,
 }
 
 /// Where one dispatch reads its state, formulas, and project config.
@@ -1420,6 +1442,9 @@ impl<B: TransportBackend> LibraryExecutor<B> {
     /// on ANY error returned from here (see `execute`'s docs). This function
     /// still owns the ledger rollback, because only it knows whether the
     /// commit landed.
+    // Keep the post-spawn rollback branches beside the dispatch they undo:
+    // moving them to a helper makes the resource ownership boundary opaque.
+    #[allow(clippy::too_many_lines)]
     fn dispatch_in_worktree(
         &self,
         store: &FileStore,
@@ -1564,6 +1589,21 @@ impl<B: TransportBackend> LibraryExecutor<B> {
                     reason,
                 });
             }
+            Err(SpawnAttemptFailure::BriefingRolled(failure)) => {
+                dispatch_ledger::rollback_dispatch(store, &pre_dispatch_snapshot, &wid);
+                emit_worker_spawn_rolled_back(
+                    state_dir,
+                    &plan.molecule_id,
+                    &wid,
+                    plan.adapter.as_str(),
+                    "briefing_not_confirmed",
+                );
+                return Err(TackleExecError::BriefingNotConfirmed {
+                    id: Box::new(plan.molecule_id.clone()),
+                    outcome: failure.outcome,
+                    reason: failure.reason,
+                });
+            }
             Err(SpawnAttemptFailure::Unterminated {
                 reason,
                 termination,
@@ -1629,11 +1669,16 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // would leave it running while the caller erased its registration
         // and its working directory. Terminate it first; only a CONFIRMED
         // teardown licenses the ordinary rollback.
-        if let Err(reason) = self.deliver_briefing(store, recorded, adapter, prompt, &provenance) {
+        if let Err(failure) = self.deliver_briefing(store, recorded, adapter, prompt, &provenance) {
             return Err(match self.backend.terminate(recorded.worker()) {
-                Ok(()) => SpawnAttemptFailure::Rolled(reason),
+                // The session may have exited between the failed delivery
+                // reading and teardown. `NotFound` is a confirmed absence,
+                // not a possibly-live worker whose ledger must be retained.
+                Ok(()) | Err(TransportError::NotFound(_)) => {
+                    SpawnAttemptFailure::BriefingRolled(failure)
+                }
                 Err(termination) => SpawnAttemptFailure::Unterminated {
-                    reason,
+                    reason: failure.reason,
                     termination: termination.to_string(),
                 },
             });
@@ -1659,11 +1704,8 @@ impl<B: TransportBackend> LibraryExecutor<B> {
     /// The port's report is recorded as an `EventV2::BriefingDelivery` row in
     /// the molecule's directory — the same row `cs tackle` writes — so a
     /// reader can tell a delivered briefing from a stranded one on this path
-    /// too. Only [`BriefingDeliveryOutcome::Undelivered`] fails the spawn:
-    /// the composer was seen still holding the briefing for the port's whole
-    /// budget, so the worker would otherwise wait for a keystroke nobody is
-    /// there to send. `Unobservable` and `SessionGone` proceed, as they do in
-    /// `cs tackle`'s claude arm.
+    /// too. Every outcome without positive delivery evidence fails the spawn:
+    /// a live worker without a confirmed brief cannot be counted as dispatched.
     fn deliver_briefing(
         &self,
         store: &FileStore,
@@ -1671,30 +1713,52 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         adapter: &str,
         prompt: &str,
         writer: &InjectionProvenance,
-    ) -> Result<(), String> {
+    ) -> Result<(), BriefingFailure> {
         let Some(delivery) = &self.delivery else {
             return self
                 .backend
                 .send_input_observed(recorded.worker(), prompt, writer)
-                .map_err(|e| e.to_string());
+                .map_err(|e| BriefingFailure {
+                    outcome: BriefingDeliveryOutcome::NotConfirmed,
+                    reason: e.to_string(),
+                });
         };
         let submit = InjectionProvenance::new(
             InjectionOrigin::TackleBriefing,
             "library-executor briefing submit",
         );
-        let report = delivery
-            .deliver(
-                &self.backend,
-                &BriefingDeliveryContext {
-                    molecule: recorded.molecule(),
+        let report = match delivery.deliver(
+            &self.backend,
+            &BriefingDeliveryContext {
+                molecule: recorded.molecule(),
+                adapter,
+                worker: recorded.worker(),
+                briefing: prompt,
+                writer,
+                submit: &submit,
+            },
+        ) {
+            Ok(report) => report,
+            Err(e) => {
+                cosmon_state::events::input_injection::emit_briefing_delivery(
+                    &store.molecule_dir(recorded.molecule()),
+                    Some(recorded.molecule()),
+                    recorded.worker(),
                     adapter,
-                    worker: recorded.worker(),
-                    briefing: prompt,
                     writer,
-                    submit: &submit,
-                },
-            )
-            .map_err(|e| e.to_string())?;
+                    BriefingDeliveryOutcome::NotConfirmed,
+                    0,
+                    0,
+                );
+                return Err(BriefingFailure {
+                    outcome: BriefingDeliveryOutcome::NotConfirmed,
+                    reason: format!(
+                    "briefing not confirmed for worker {}: {e}; inspect the pane, then retry with `cs tackle {} --force`",
+                    recorded.worker().name(), recorded.molecule()
+                    ),
+                });
+            }
+        };
         cosmon_state::events::input_injection::emit_briefing_delivery(
             &store.molecule_dir(recorded.molecule()),
             Some(recorded.molecule()),
@@ -1705,14 +1769,19 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             report.resubmits,
             u64::try_from(report.elapsed.as_millis()).unwrap_or(u64::MAX),
         );
-        if report.outcome == BriefingDeliveryOutcome::Undelivered {
-            return Err(format!(
-                "briefing not delivered to worker {}: the composer still held it \
-                 after {} re-issued submit(s) in {:?} (issue #81)",
+        if !report.outcome.is_delivered() {
+            return Err(BriefingFailure {
+                outcome: report.outcome,
+                reason: format!(
+                "briefing not confirmed for worker {}: {} after {} re-issued submit(s) in {:?}; \
+                 inspect the pane, then retry with `cs tackle {} --force`",
                 recorded.worker().name(),
+                report.outcome,
                 report.resubmits,
-                report.elapsed
-            ));
+                report.elapsed,
+                recorded.molecule()
+                ),
+            });
         }
         Ok(())
     }

@@ -152,6 +152,32 @@ pub fn emit_briefing_delivery(
     write_event(state_dir, event);
 }
 
+/// Read the latest recorded briefing outcome for a molecule.
+///
+/// A missing row means delivery was not measured; it never means success.
+/// The caller may show that absence separately from a confirmed result.
+#[must_use]
+pub fn latest_briefing_delivery(state_dir: &Path) -> Option<BriefingDeliveryOutcome> {
+    crate::event_log::read_all(state_dir.join("events.jsonl"))
+        .ok()?
+        .into_iter()
+        .rev()
+        .find_map(|envelope| match envelope.event {
+            EventV2::BriefingDelivery { outcome, .. } => Some(outcome),
+            _ => None,
+        })
+}
+
+/// The operator gesture for an unconfirmed briefing.
+///
+/// The molecule id is provided by the caller so the command can be copied
+/// directly from a status or peek view.
+#[must_use]
+pub fn briefing_recovery(id: &MoleculeId, outcome: BriefingDeliveryOutcome) -> Option<String> {
+    (!outcome.is_delivered())
+        .then(|| format!("inspect the worker pane; retry with `cs tackle {id} --force`"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,5 +272,44 @@ mod tests {
         assert_eq!(*input_len, 0);
         assert!(*bare_submit, "a naked Enter must be flagged as such");
         assert_eq!(*origin, InjectionOrigin::BriefingBackstop);
+    }
+
+    #[test]
+    fn latest_delivery_exposes_the_unconfirmed_outcome_and_recovery() {
+        let dir = tempdir().unwrap();
+        let id = mol();
+        let writer = InjectionProvenance::new(InjectionOrigin::TackleBriefing, "briefing");
+        emit_briefing_delivery(
+            dir.path(),
+            Some(&id),
+            &wkr(),
+            "test",
+            &writer,
+            BriefingDeliveryOutcome::SessionGone,
+            0,
+            100,
+        );
+        assert_eq!(
+            latest_briefing_delivery(dir.path()),
+            Some(BriefingDeliveryOutcome::SessionGone)
+        );
+        assert!(briefing_recovery(&id, BriefingDeliveryOutcome::SessionGone)
+            .unwrap()
+            .contains(&format!("cs tackle {id} --force")));
+        emit_briefing_delivery(
+            dir.path(),
+            Some(&id),
+            &wkr(),
+            "test",
+            &writer,
+            BriefingDeliveryOutcome::Delivered,
+            0,
+            100,
+        );
+        assert_eq!(
+            latest_briefing_delivery(dir.path()),
+            Some(BriefingDeliveryOutcome::Delivered)
+        );
+        assert!(briefing_recovery(&id, BriefingDeliveryOutcome::Delivered).is_none());
     }
 }
