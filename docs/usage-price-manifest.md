@@ -17,6 +17,13 @@ from provider documentation are accepted.
 
 ## Sources and limitations
 
+The current `standard-2026-09-30-sonnet-5-5` card was checked on 2026-09-30.
+It preserves the prior card and adds the exact `claude-sonnet-5-5` id using
+the [official model price card](https://platform.claude.com/docs/en/models/sonnet-5-5/overview):
+$2 input, $0.20 cache read, $2.50 five-minute cache write, $4 one-hour cache
+write, and $10 output per million tokens. The earlier `claude-sonnet-5` rate
+remains available for historical usage.
+
 The `standard-2026-09-28-codex` card was checked on 2026-09-28 against the
 official model cards and price lists recorded in each entry. Primary references
 are:

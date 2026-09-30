@@ -641,6 +641,7 @@ mod tests {
         // No config file at all → the pin applies. The default is the
         // single named constant; no other layer holds a model-id.
         let cfg = RppConfig::default();
+        assert_eq!(DEFAULT_CLAUDE_MODEL, "claude-sonnet-5-5");
         assert_eq!(
             cfg.resolved_claude_model().as_deref(),
             Some(DEFAULT_CLAUDE_MODEL)

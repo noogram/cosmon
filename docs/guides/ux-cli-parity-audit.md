@@ -2,6 +2,12 @@
 
 # CLI and UI parity audit
 
+## Default model selection (issue #141)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Select the default worker model | `cs tackle` probes `claude-sonnet-5-5` when no model is pinned; `claude-sonnet-5` remains an explicit pin and a historical realized-model id | No matching default selector audited | The adapter's absent-model default uses the same chain head |
+
 ## Context occupancy (issue #127)
 
 | Capability | CLI | Native UI | Remote service |

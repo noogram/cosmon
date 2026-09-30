@@ -71,7 +71,7 @@ use serde::Serialize;
 /// The ordered fallback chain — the **single source** of model-id
 /// literals, so no second copy can drift out of sync.
 ///
-/// Ordered **cost-ascending**, tried head-to-tail: `claude-sonnet-5` (the
+/// Ordered **cost-ascending**, tried head-to-tail: `claude-sonnet-5-5` (the
 /// floor, and the preferred default) → `claude-opus-5-5` (strong). Each entry
 /// is probed in order; the first that answers backs the worker — but a
 /// *strong* entry is only ever reached as a fallback when the pin itself is
@@ -87,8 +87,9 @@ use serde::Serialize;
 /// replacement follows the operator's model calibration rather than a
 /// ranking of models:
 ///
-/// - the everyday default is `claude-sonnet-5`, so it is the floor — the
-///   model silence resolves to;
+/// - the everyday default was `claude-sonnet-5` from issue #81 and moved to
+///   `claude-sonnet-5-5` in issue #141, at the same listed price; the current
+///   floor is where silence resolves;
 /// - the strong tier is `claude-opus-5-5`, which superseded `claude-opus-5`.
 ///   Strong is never inherited, so it sits last and is reachable only behind
 ///   a strong pin;
@@ -98,10 +99,12 @@ use serde::Serialize;
 ///   and a default must run on the plan alone. An operator who has credits
 ///   pins it explicitly.
 ///
-/// There is no cheaper-than-floor entry: a `claude-sonnet-5` pin that does
+/// There is no cheaper-than-floor entry: a `claude-sonnet-5-5` pin that does
 /// not answer fails closed rather than falling back to a model the
-/// calibration does not name for everyday work.
-pub const DEFAULT_MODEL_CHAIN: &[&str] = &["claude-sonnet-5", "claude-opus-5-5"];
+/// calibration does not name for everyday work. The previous floor remains
+/// accepted as an explicit pin and as historical realized-model data, but is
+/// not a default fallback: an unavailable current floor fails closed.
+pub const DEFAULT_MODEL_CHAIN: &[&str] = &["claude-sonnet-5-5", "claude-opus-5-5"];
 
 /// The subset of [`DEFAULT_MODEL_CHAIN`] that is **strong** (expensive)
 /// cost-class — cosmon's intrinsic knowledge of its *own* curated default
@@ -157,26 +160,26 @@ pub const PREFERRED_MODEL: &str = DEFAULT_MODEL_CHAIN[0];
 ///
 /// // The floor pin: the strong `claude-opus-5-5` is EXCLUDED from the
 /// // fallback tail, so the chain is the floor alone.
-/// assert_eq!(build_chain(Some("claude-sonnet-5"), &[]), vec!["claude-sonnet-5"]);
+/// assert_eq!(build_chain(Some("claude-sonnet-5-5"), &[]), vec!["claude-sonnet-5-5"]);
 ///
 /// // A strong pin is a positive act: the whole chain is available
 /// // (opus hoisted to the head, the floor behind it).
 /// assert_eq!(
 ///     build_chain(Some("claude-opus-5-5"), &[]),
-///     vec!["claude-opus-5-5", "claude-sonnet-5"],
+///     vec!["claude-opus-5-5", "claude-sonnet-5-5"],
 /// );
 ///
 /// // A novel cheap pin is prepended; its outage falls to the floor, and
 /// // strong stays excluded from the tail.
 /// assert_eq!(
 ///     build_chain(Some("claude-haiku-4-5"), &[]),
-///     vec!["claude-haiku-4-5", "claude-sonnet-5"],
+///     vec!["claude-haiku-4-5", "claude-sonnet-5-5"],
 /// );
 ///
 /// // An operator can widen the strong set: marking the floor strong drops
 /// // it from a cheap pin's tail too, leaving only the pin itself.
 /// assert_eq!(
-///     build_chain(Some("claude-haiku-4-5"), &["claude-sonnet-5".to_owned()]),
+///     build_chain(Some("claude-haiku-4-5"), &["claude-sonnet-5-5".to_owned()]),
 ///     vec!["claude-haiku-4-5"],
 /// );
 /// ```
@@ -378,7 +381,7 @@ mod tests {
     /// A cheap pin that is not the floor — its outage is what exercises the
     /// cheap → floor fallback now that the default chain has no mid tier.
     const CHEAP_PIN: &str = "claude-haiku-4-5";
-    const FLOOR: &str = "claude-sonnet-5";
+    const FLOOR: &str = "claude-sonnet-5-5";
     const STRONG: &str = "claude-opus-5-5";
 
     /// The chain head must equal the documented preferred model so the
@@ -389,6 +392,25 @@ mod tests {
         assert_eq!(PREFERRED_MODEL, FLOOR);
     }
 
+    /// The default worker probes the current everyday model first while
+    /// keeping the strong model behind an explicit strong pin.
+    #[test]
+    fn issue_141_default_probe_selects_sonnet_5_5() {
+        assert_eq!(DEFAULT_MODEL_CHAIN, &["claude-sonnet-5-5", STRONG]);
+        assert_eq!(PREFERRED_MODEL, "claude-sonnet-5-5");
+        assert_eq!(build_chain(None, &[]), vec!["claude-sonnet-5-5"]);
+        assert_eq!(
+            build_chain(Some("claude-sonnet-5"), &[]),
+            vec!["claude-sonnet-5", "claude-sonnet-5-5"]
+        );
+        let decided = decide_worker_model(Some(PREFERRED_MODEL), &[], |_| ProbeOutcome::Available)
+            .expect("the preferred model answers");
+        match decided {
+            DecidedModel::Selected { model, .. } => assert_eq!(model, "claude-sonnet-5-5"),
+            DecidedModel::OptOut => panic!("the default must select a model"),
+        }
+    }
+
     /// Issue #81 point 2: no default may be a model that runs on usage
     /// credits bought separately from the plan. Fable 5 moved to such
     /// credits; an account without them stops the worker on a credits
@@ -396,7 +418,7 @@ mod tests {
     #[test]
     fn default_chain_floor_is_not_a_credits_only_model() {
         const CREDITS_ONLY: &[&str] = &["claude-fable-5"];
-        assert_eq!(PREFERRED_MODEL, "claude-sonnet-5", "the floor");
+        assert_eq!(PREFERRED_MODEL, "claude-sonnet-5-5", "the floor");
         for m in DEFAULT_MODEL_CHAIN {
             assert!(
                 !CREDITS_ONLY.contains(m),
@@ -696,7 +718,7 @@ mod tests {
             }],
         };
         let json = serde_json::to_string(&sel).unwrap();
-        assert!(json.contains("\"chosen\":\"claude-sonnet-5\""));
+        assert!(json.contains("\"chosen\":\"claude-sonnet-5-5\""));
         assert!(json.contains("\"model_not_found\""));
     }
 }
