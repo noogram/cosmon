@@ -13,6 +13,7 @@ Commands:
   logout    Forget the persisted cosmon credential for the active profile (the reverse of "login"). Idempotent — logging out when already signed out is a no-op. Does not touch the Claude/Anthropic session
   events    Server-Sent Events stream of molecule lifecycle events (`GET /v1/events`)
   config    Profile and deployment config
+  harvest   Operator-side remote harvest authority and grants
   avatar    D-AVATAR instance lifecycle (drained from cs-thin by the fusion)
   doctor    Onboarding checks, named and falsifiable: réseau, oidc-url, badge tenant, lunettes du worker. Vert/rouge par check, la commande de réparation sur chaque ligne rouge. Run by install.sh and whenever something breaks
   healthz   Adapter liveness probe (diagnostic)

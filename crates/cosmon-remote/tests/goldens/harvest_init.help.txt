@@ -1,0 +1,19 @@
+Generate an encrypted signer key and install only its public half
+
+Usage: cosmon-remote harvest init [OPTIONS] --admin-token-file <ADMIN_TOKEN_FILE>
+
+Options:
+      --admin-token-file <ADMIN_TOKEN_FILE>
+          File holding the independent host admin credential
+      --profile <PROFILE>
+          Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --json
+          Render machine-readable JSON instead of human text where applicable
+      --rotate-from <ROTATE_FROM>
+          Required when replacing an installed public root
+      --key-file <KEY_FILE>
+          Store a key on a selected operator device instead of the default directory
+      --token <TOKEN>
+          Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+  -h, --help
+          Print help

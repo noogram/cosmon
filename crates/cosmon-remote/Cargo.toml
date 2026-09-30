@@ -44,6 +44,7 @@ cosmon-surface-canon = { path = "../cosmon-surface-canon" }
 # never a hand-typed `String`. `cosmon-core` is pure domain (zero I/O), so it
 # cross-compiles cleanly to the four static-binary targets (ADR-092 frontier).
 cosmon-core.workspace = true
+cosmon-notary.workspace = true
 dirs.workspace = true
 # `cosmon-remote` ships as a static binary cross-compiled to 4 platforms
 # (`task-20260522-aad5`), including `*-unknown-linux-musl` targets where the

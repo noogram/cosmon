@@ -4,9 +4,9 @@
 //!
 //! # What this file is falsifying
 //!
-//! ADR-172 §D2 says cosmon *verifies* an operator harvest seal and ships no
-//! path that can *produce* one. That sentence is the foundation the whole
-//! decision rests on: if a shipped `cs` path could mint an
+//! ADR-172 as amended for issue #120 permits a separate operator-device
+//! client to orchestrate an external signer. The beneficiary (`cs`, the
+//! worker and the service) still owns no signer. If a `cs` path could mint an
 //! `OperatorHarvestSeal`, then a worker could authorise its own harvest, the
 //! capability would be a label, and the panel's unanimous finding would
 //! collapse with it. The delegation named this the central falsifier of the
@@ -66,17 +66,19 @@ fn workspace_sources() -> Vec<PathBuf> {
     out
 }
 
-/// The central falsifier of ADR-172: no shipped path can mint a harvest seal.
+/// The central falsifier of ADR-172: no beneficiary path can mint a seal.
 ///
-/// The two exemptions are structural rather than conventional — the test
-/// harness, and the `publish = false` testkit crate that appears only in
-/// `[dev-dependencies]`, so `cs` has no dependency edge to a signer.
+/// The operator-side client may drive an external signer. The test harness
+/// and the unshipped testkit may also sign; none is in the beneficiary closure.
 #[test]
-fn the_shipped_tree_owns_no_signing_path_for_the_harvest_seal() {
+fn the_beneficiary_owns_no_signing_path_for_the_harvest_seal() {
     let mut offenders = Vec::new();
     for path in workspace_sources() {
         let as_str = path.display().to_string();
-        if as_str.contains("/tests/") || as_str.contains("cosmon-minisign-testkit") {
+        if as_str.contains("/tests/")
+            || as_str.contains("cosmon-minisign-testkit")
+            || as_str.contains("cosmon-remote")
+        {
             continue;
         }
         let Ok(body) = std::fs::read_to_string(&path) else {
@@ -91,11 +93,11 @@ fn the_shipped_tree_owns_no_signing_path_for_the_harvest_seal() {
     }
     assert!(
         offenders.is_empty(),
-        "cosmon must verify harvest seals and never produce one; found: {offenders:?}"
+        "the beneficiary must verify harvest seals and never produce one; found: {offenders:?}"
     );
 }
 
-/// No shipped path constructs a seal out of thin air either.
+/// No beneficiary path constructs a seal out of thin air either.
 ///
 /// The signing-key check above catches a *cryptographic* forge. This catches
 /// the cheaper one: a `cs` verb that builds an `OperatorHarvestSeal` from
@@ -106,7 +108,10 @@ fn no_shipped_verb_constructs_a_harvest_seal() {
     let mut offenders = Vec::new();
     for path in workspace_sources() {
         let as_str = path.display().to_string();
-        if as_str.contains("/tests/") || as_str.contains("cosmon-minisign-testkit") {
+        if as_str.contains("/tests/")
+            || as_str.contains("cosmon-minisign-testkit")
+            || as_str.contains("cosmon-remote")
+        {
             continue;
         }
         // The domain defines the type and the filestore round-trips sealed
@@ -130,6 +135,26 @@ fn no_shipped_verb_constructs_a_harvest_seal() {
     assert!(
         offenders.is_empty(),
         "no shipped `cs` path may mint an operator harvest seal; found: {offenders:?}"
+    );
+}
+
+/// The operator signer lives in the binary only. Beneficiaries depend on the
+/// remote client library, so the binary/library split is the decisive edge.
+#[test]
+fn operator_signer_is_not_exported_to_beneficiary_dependencies() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir");
+    let remote = crates.join("cosmon-remote/src");
+    let library = std::fs::read_to_string(remote.join("lib.rs")).expect("read remote library");
+    let binary = std::fs::read_to_string(remote.join("main.rs")).expect("read remote binary");
+    assert!(
+        binary.contains("mod harvest;"),
+        "operator binary must own harvest signer workflow"
+    );
+    assert!(
+        !library.contains("mod harvest;"),
+        "signer workflow must not enter the library dependency graph"
     );
 }
 

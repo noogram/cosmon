@@ -160,6 +160,10 @@ pub static ROUTES_USED: &[&CanonRoute] = &[
     GET_V1_QUOTA,
     GET_V1_NOYAUX,
     GET_V1_WORKERS,
+    // Harvest tenant diagnostics and grant installation (adapter-only routes).
+    GET_V1_HARVEST_STATUS,
+    POST_V1_HARVEST_CHALLENGE,
+    POST_V1_HARVEST_GRANTS,
 ];
 
 #[cfg(test)]

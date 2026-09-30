@@ -1398,6 +1398,7 @@ dependencies = [
  "clap",
  "clap_mangen",
  "cosmon-core",
+ "cosmon-notary",
  "cosmon-oidc-testkit",
  "cosmon-surface-canon",
  "cosmon-thin-cli",
