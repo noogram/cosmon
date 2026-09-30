@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Body;
+use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use cosmon_oidc_testkit::{IssueJwt, OidcMock, OidcMockConfig, TenantWorkspaces};
 use cosmon_rpp_adapter::deny_list::DenyList;
@@ -98,6 +98,51 @@ fn issue_sse_jwt(oidc: &OidcMock, sub: &str, audience: &str, jti: &str) -> Strin
         lifetime_secs: Some(60),
         jti: Some(jti),
     })
+}
+
+#[tokio::test]
+async fn open_events_stream_closes_when_credential_expires() {
+    let mut tenants = TenantWorkspaces::new();
+    let _ = tenants.add("a");
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let state = make_state(
+        &oidc,
+        &tenants,
+        vec![("sub-a", "nuc-a", "a", "cosmon-rpp-a")],
+        security_dir.path(),
+    );
+    // Keep the publisher alive after `oneshot` consumes the router.
+    let events = state.events.clone();
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "sub-a",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &["cosmon:events:subscribe"],
+        lifetime_secs: Some(3),
+        jti: Some("jti-stream-expiry"),
+    });
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events")
+                .header("Authorization", format!("Bearer {jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(events.receiver_count(), 1);
+
+    // A live SSE body must terminate even while the event bus is idle.
+    tokio::time::timeout(Duration::from_secs(7), to_bytes(response.into_body(), 1024))
+        .await
+        .expect("stream stayed open beyond token expiry")
+        .expect("SSE body failed");
 }
 
 #[tokio::test]
