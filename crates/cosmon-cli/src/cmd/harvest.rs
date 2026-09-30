@@ -141,7 +141,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             &mol_id,
             args.exit_code.as_deref(),
         );
-        record_update_from_dead_pane(ctx, store.as_ref(), &mol_id);
+        record_update_from_dead_pane(ctx, store.as_ref(), &mol_id)?;
     }
 
     let outcome = harvest_one(store.as_ref(), &state_dir, &mol_id, args.dry_run)?;
@@ -169,19 +169,23 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 /// Inspect retained scrollback after the process exit and keep any observed
 /// update or restart notice on the molecule. A missing session is an unknown
 /// observation, not evidence of a different exit cause.
-fn record_update_from_dead_pane(ctx: &Context, store: &dyn StateStore, mol_id: &MoleculeId) {
+fn record_update_from_dead_pane(
+    ctx: &Context,
+    store: &dyn StateStore,
+    mol_id: &MoleculeId,
+) -> anyhow::Result<()> {
     let Ok(mol) = store.load_molecule(mol_id) else {
-        return;
+        return Ok(());
     };
     let Some(session) = mol.tmux_session() else {
-        return;
+        return Ok(());
     };
     let backend = cosmon_transport::TmuxBackend::new(super::tmux_socket_name(ctx));
     let Ok(pane) = backend.capture_session_output(session, 80) else {
-        return;
+        return Ok(());
     };
     let kind = cosmon_core::dialogue::classify_codex_dialog(&pane);
-    super::patrol::record_update_observation(store, mol_id, kind);
+    super::patrol::record_update_observation(store, mol_id, kind)
 }
 
 /// Probe-side post-mortem for a tmux `pane-died` event. Three
@@ -648,7 +652,7 @@ mod tests {
         }
         assert!(!backend.is_alive(&worker).unwrap());
 
-        record_update_from_dead_pane(&ctx, &store, &mid);
+        record_update_from_dead_pane(&ctx, &store, &mid).unwrap();
         let reloaded = store.load_molecule(&mid).unwrap();
         assert_eq!(reloaded.status, MoleculeStatus::Running);
         assert!(reloaded

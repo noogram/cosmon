@@ -122,14 +122,17 @@ pub struct Args {
     #[arg(long)]
     pub expire: bool,
 
-    /// Transition orphaned molecules to `Frozen` after the spawn grace.
+    /// Transition orphaned molecules with a retained stopped worker to
+    /// `Frozen` after the spawn grace. A purged worker leaves its Running
+    /// molecule available for re-tackle.
     /// Without this flag, patrol reports orphans and leaves lifecycle state
     /// unchanged. `--auto-collapse` selects a terminal transition instead.
     #[arg(long)]
     pub auto_freeze: bool,
 
-    /// Aggressive orphan remediation: transition orphaned molecules to
-    /// `Collapsed` after the spawn grace. This is terminal; use
+    /// Aggressive orphan remediation: transition orphaned molecules with a
+    /// retained stopped worker to `Collapsed` after the spawn grace. A purged
+    /// worker leaves its Running molecule available for re-tackle. Use
     /// `--auto-freeze` for a recoverable transition.
     #[arg(long)]
     pub auto_collapse: bool,
@@ -804,9 +807,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // Auto-freeze / auto-collapse orphans only when explicitly requested.
     // A plain scan or `--nudge` reports an orphan without changing its
     // molecule lifecycle.
-    // An orphan is any Running/Queued molecule whose worker is genuinely
-    // dead (desired=Stopped or missing) OR whose worker needed respawn but
-    // did not get it (respawn flag absent or respawn failed this run).
+    // A transition candidate has a retained worker marked Stopped, or one
+    // whose respawn failed. Purge removes the worker but preserves a Running
+    // molecule for re-tackle, so an absent entry is report-only.
     let auto_transitioned = if args.auto_freeze || args.auto_collapse {
         auto_freeze_orphans_with_grace(
             store.as_ref(),
@@ -920,7 +923,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 blocked_after: args.dialogue_blocked_after,
             },
             Utc::now(),
-        )
+        )?
     } else {
         DialogueScanReport::default()
     };
@@ -1413,9 +1416,11 @@ pub(crate) struct RespawnOutcome<'a> {
 /// IDs that were actually transitioned.
 ///
 /// A molecule is considered orphaned when it is `Running`/`Queued` and its
-/// assigned worker either (a) has `desired=Stopped` or is missing, or (b)
+/// assigned worker either (a) has `desired=Stopped`, or (b)
 /// needed respawn this run but did not successfully come back. Respawned
-/// workers are excluded — their molecules correctly stay Running.
+/// workers are excluded — their molecules correctly stay Running. A missing
+/// fleet entry is withheld because purge deliberately retains Running work
+/// for re-tackle.
 ///
 /// # The session goes with the molecule (COSMON #35 §3)
 ///
@@ -1490,10 +1495,10 @@ fn fresh_orphan_verdict(
         return Ok(false);
     };
     let current_fleet = store.load_fleet()?;
-    let worker_dead = current_fleet
-        .workers
-        .get(wid)
-        .is_none_or(|w| w.desired == DesiredState::Stopped);
+    let Some(worker) = current_fleet.workers.get(wid) else {
+        return Ok(false);
+    };
+    let worker_dead = worker.desired == DesiredState::Stopped;
     let respawn_failed =
         options.respawn.needs_respawn.contains(wid) && !options.respawn.respawned.contains(wid);
     if !(worker_dead || respawn_failed) {
@@ -1539,10 +1544,8 @@ fn auto_freeze_orphans_with_grace(
         .filter(|m| !within_dead_worker_grace(m, now, options.dead_worker_grace))
         .filter_map(|m| {
             let wid = m.assigned_worker.as_ref()?;
-            let worker_dead = fleet
-                .workers
-                .get(wid)
-                .is_none_or(|w| w.desired == DesiredState::Stopped);
+            let worker = fleet.workers.get(wid)?;
+            let worker_dead = worker.desired == DesiredState::Stopped;
             let respawn_failed = needs_respawn.contains(wid) && !respawned.contains(wid);
             if !(worker_dead || respawn_failed) {
                 return None;
@@ -3383,7 +3386,7 @@ pub(crate) fn dialogue_scan_sweep(
     backend: Option<&dyn TransportBackend>,
     opts: &DialogueScanOpts,
     now: chrono::DateTime<Utc>,
-) -> DialogueScanReport {
+) -> anyhow::Result<DialogueScanReport> {
     use cosmon_core::dialogue::{
         classify_codex_dialog, classify_pane, CodexDialogKind, DialogueClass,
     };
@@ -3397,7 +3400,7 @@ pub(crate) fn dialogue_scan_sweep(
         ..Default::default()
     };
     let Some(be) = backend else {
-        return report;
+        return Ok(report);
     };
 
     let events_path = state_dir.join("events.jsonl");
@@ -3416,7 +3419,7 @@ pub(crate) fn dialogue_scan_sweep(
             codex_kind,
             Some(CodexDialogKind::UpdateAvailable | CodexDialogKind::RestartRequired)
         ) {
-            record_update_observation(store, &mol.id, codex_kind);
+            record_update_observation(store, &mol.id, codex_kind)?;
         }
         let scan = classify_pane(&pane);
         if scan.class == DialogueClass::None {
@@ -3490,7 +3493,7 @@ pub(crate) fn dialogue_scan_sweep(
             codex_kind,
         });
     }
-    report
+    Ok(report)
 }
 
 /// Keep a durable, visible trace of the update text actually captured from a
@@ -3499,22 +3502,23 @@ pub(crate) fn record_update_observation(
     store: &dyn StateStore,
     mol_id: &MoleculeId,
     kind: Option<cosmon_core::dialogue::CodexDialogKind>,
-) {
+) -> anyhow::Result<()> {
     use cosmon_core::dialogue::CodexDialogKind;
 
     let name = match kind {
         Some(CodexDialogKind::UpdateAvailable) => "worker-update-offered",
         Some(CodexDialogKind::RestartRequired) => "worker-restart-requested",
-        _ => return,
+        _ => return Ok(()),
     };
-    let (Ok(tag), Ok(mut mol)) = (Tag::new(name), store.load_molecule(mol_id)) else {
-        return;
-    };
+    let tag = Tag::new(name)?;
+    let _guard = store.lock_fleet()?;
+    let mut mol = store.load_molecule(mol_id)?;
     if mol.tags.insert(tag) {
         // This is an observation, not progress. Leave the molecule's progress
         // timestamp intact so dead-worker grace and stall policy stay honest.
-        let _ = store.save_molecule(mol_id, &mol);
+        store.save_molecule(mol_id, &mol)?;
     }
+    Ok(())
 }
 
 /// Maintain the live blocked marker and return whether this is a new page.
@@ -5706,6 +5710,66 @@ mod tests {
     }
 
     #[test]
+    fn purged_running_molecule_survives_auto_collapse_for_retackle() {
+        let (tmp, store) = make_store();
+        let (wid, mut worker) = make_worker("purged-w", DesiredState::Stopped);
+        let mut mol = make_molecule(
+            "task-20260930-purged",
+            MoleculeStatus::Running,
+            Some(wid.as_str()),
+        );
+        mol.tackled_at = Some(Utc::now() - Duration::minutes(5));
+        worker.current_molecule = Some(mol.id.clone());
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let mut fleet = Fleet::default();
+        fleet.workers.insert(wid.clone(), worker);
+        store.save_fleet(&fleet).unwrap();
+
+        let ctx = Context {
+            verbose: false,
+            json: true,
+            config: Some(tmp.path().to_path_buf()),
+        };
+        super::super::purge::run(
+            &ctx,
+            &super::super::purge::Args {
+                worker: Some(wid.as_str().to_owned()),
+                force: false,
+                status: None,
+                role: None,
+                allow_unharvested: true,
+                worktrees: false,
+                sessions: false,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+        let fleet = store.load_fleet().unwrap();
+        assert!(!fleet.workers.contains_key(&wid));
+
+        let transitioned = auto_freeze_orphans(
+            &store,
+            tmp.path(),
+            &fleet,
+            &[store.load_molecule(&mol.id).unwrap()],
+            RespawnOutcome {
+                needs_respawn: &[],
+                respawned: &[],
+            },
+            true,
+            None,
+        )
+        .unwrap();
+        assert!(
+            transitioned.is_empty(),
+            "purge must retain the re-tackle path"
+        );
+        let retained = store.load_molecule(&mol.id).unwrap();
+        assert_eq!(retained.status, MoleculeStatus::Running);
+        assert_eq!(retained.assigned_worker.as_ref(), Some(&wid));
+    }
+
+    #[test]
     fn auto_freeze_orphans_freezes_when_respawn_failed() {
         // Worker in needs_respawn but respawn failed → molecule auto-frozen.
         let (tmp, store) = make_store();
@@ -6009,7 +6073,8 @@ mod tests {
                 Some(&backend as &dyn TransportBackend),
                 &opts(true),
                 Utc::now(),
-            );
+            )
+            .unwrap();
 
             let reloaded = store.load_molecule(&mol.id).unwrap();
             assert_eq!(reloaded.status, MoleculeStatus::Running);
@@ -6022,6 +6087,68 @@ mod tests {
                 .iter()
                 .any(|call| matches!(call, cosmon_transport::mock::MockCall::SendInput { .. })));
         }
+    }
+
+    #[test]
+    fn update_observation_waits_for_fleet_lock_before_reading_molecule() {
+        let (tmp, store) = make_store();
+        let mol = make_molecule("task-20260930-update", MoleculeStatus::Running, Some("w1"));
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let guard = store.lock_fleet().unwrap();
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let path = tmp.path().to_path_buf();
+        let id = mol.id.clone();
+        let writer = std::thread::spawn(move || {
+            let store = FileStore::new(path);
+            started_tx.send(()).unwrap();
+            record_update_observation(
+                &store,
+                &id,
+                Some(cosmon_core::dialogue::CodexDialogKind::UpdateAvailable),
+            )
+            .unwrap();
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(150))
+                .is_err(),
+            "observation must wait for a concurrent lifecycle writer"
+        );
+        let mut advanced = store.load_molecule(&mol.id).unwrap();
+        advanced.current_step = 1;
+        store.save_molecule(&mol.id, &advanced).unwrap();
+        drop(guard);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        writer.join().unwrap();
+        let retained = store.load_molecule(&mol.id).unwrap();
+        assert_eq!(retained.current_step, 1);
+        assert!(retained
+            .tags
+            .iter()
+            .any(|tag| tag.as_str() == "worker-update-offered"));
+    }
+
+    #[test]
+    fn update_observation_reports_lock_failure() {
+        let (tmp, store) = make_store();
+        let mol = make_molecule("task-20260930-lock", MoleculeStatus::Running, Some("w1"));
+        store.save_molecule(&mol.id, &mol).unwrap();
+        std::fs::create_dir(tmp.path().join("fleet.lock")).unwrap();
+
+        let error = record_update_observation(
+            &store,
+            &mol.id,
+            Some(cosmon_core::dialogue::CodexDialogKind::UpdateAvailable),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("failed to create lock file"));
+        assert!(store.load_molecule(&mol.id).unwrap().tags.is_empty());
     }
 
     #[test]
@@ -6076,7 +6203,8 @@ mod tests {
             Some(&backend as &dyn TransportBackend),
             &opts(true),
             Utc::now(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(report.scanned, 1);
         assert_eq!(report.findings.len(), 1);
@@ -6116,7 +6244,8 @@ mod tests {
             Some(&backend as &dyn TransportBackend),
             &opts(true),
             Utc::now(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].class, DialogueClass::Permission);
@@ -6151,7 +6280,8 @@ mod tests {
             Some(&backend as &dyn TransportBackend),
             &opts(false),
             Utc::now(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(report.findings[0].action, DialogueAction::Reported);
         let sent_enter = backend
@@ -6183,7 +6313,8 @@ mod tests {
             Some(&backend as &dyn TransportBackend),
             &opts(true),
             Utc::now(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(report.findings.len(), 1);
         let f = &report.findings[0];
@@ -6219,7 +6350,8 @@ mod tests {
             Some(&backend as &dyn TransportBackend),
             &opts(true),
             Utc::now(),
-        );
+        )
+        .unwrap();
         assert_eq!(report.scanned, 1);
         assert!(report.findings.is_empty());
     }
@@ -6239,7 +6371,8 @@ mod tests {
             Some(&backend),
             &opts(false),
             Utc::now(),
-        );
+        )
+        .unwrap();
         assert_eq!(first.findings.len(), 1);
         assert!(store
             .load_molecule(&mol.id)
@@ -6257,7 +6390,8 @@ mod tests {
             Some(&backend),
             &opts(false),
             Utc::now(),
-        );
+        )
+        .unwrap();
         assert!(second.findings.is_empty());
         assert!(!store
             .load_molecule(&mol.id)

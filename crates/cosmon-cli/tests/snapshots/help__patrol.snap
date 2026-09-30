@@ -28,9 +28,9 @@ Options:
       --expire
           Expire sweep: scan molecules whose `expires_at` is in the past and apply their [`ExpiryPolicy`] (ADR-029). Idempotent — safe to run repeatedly on the same state. `Warn` tags the molecule with `expired` and emits a surface alert; `Collapse` transitions `pending` → `collapsed` with reason `expired (TTL)`; `Escalate` tags `escalated` and emits the canonical `Expired` event for downstream transforms
       --auto-freeze
-          Transition orphaned molecules to `Frozen` after the spawn grace. Without this flag, patrol reports orphans and leaves lifecycle state unchanged. `--auto-collapse` selects a terminal transition instead
+          Transition orphaned molecules with a retained stopped worker to `Frozen` after the spawn grace. A purged worker leaves its Running molecule available for re-tackle. Without this flag, patrol reports orphans and leaves lifecycle state unchanged. `--auto-collapse` selects a terminal transition instead
       --auto-collapse
-          Aggressive orphan remediation: transition orphaned molecules to `Collapsed` after the spawn grace. This is terminal; use `--auto-freeze` for a recoverable transition
+          Aggressive orphan remediation: transition orphaned molecules with a retained stopped worker to `Collapsed` after the spawn grace. A purged worker leaves its Running molecule available for re-tackle. Use `--auto-freeze` for a recoverable transition
       --dead-worker-grace-secs <DEAD_WORKER_GRACE_SECS>
           Minimum seconds after a tackle before patrol may call its worker dead or freeze/collapse its molecule. Covers spawn and forced re-tackle [default: 120]
       --harvest
