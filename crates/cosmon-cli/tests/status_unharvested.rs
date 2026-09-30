@@ -309,6 +309,9 @@ fn ensemble_resolves_referenced_legacy_blocker() {
     let mut dependent = completed("task-20260101-bbbb", false);
     dependent.status = MoleculeStatus::Pending;
     dependent.project_id = Some(ProjectId::new("current-aaaa").expect("project id"));
+    dependent
+        .tags
+        .insert(cosmon_core::tag::Tag::new("selected").expect("valid tag"));
     dependent.typed_links.push(MoleculeLink::BlockedBy {
         source: legacy.id.clone(),
     });
@@ -375,4 +378,33 @@ fn ensemble_resolves_referenced_legacy_blocker() {
         "outside current project"
     );
     assert_eq!(status["missing_blockers"].as_array().map(Vec::len), Some(1));
+
+    let tagged = Command::new(env!("CARGO_BIN_EXE_cs"))
+        .current_dir(tmp.path())
+        .env_remove("COSMON_PARENT_MOL_ID")
+        .env_remove("COSMON_MOL_DIR")
+        .args([
+            "--json",
+            "--config",
+            state_dir.to_str().expect("state path"),
+            "ensemble",
+            "--tag",
+            "selected",
+        ])
+        .output()
+        .expect("run tagged ensemble");
+    assert!(
+        tagged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&tagged.stderr)
+    );
+    let tagged_value: serde_json::Value =
+        serde_json::from_slice(&tagged.stdout).expect("tagged ensemble JSON");
+    let tagged_ids: Vec<&str> = tagged_value["molecule_states"]
+        .as_array()
+        .expect("tagged states")
+        .iter()
+        .filter_map(|state| state["id"].as_str())
+        .collect();
+    assert_eq!(tagged_ids, vec!["task-20260101-bbbb"]);
 }

@@ -640,7 +640,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let worker_roles = summarize_worker_roles(&fleet);
 
     if ctx.json {
-        let molecule_states = if filter.project.is_some() {
+        let molecule_states = if filter.project.is_some() && args.tags.is_empty() {
             let all = store.list_molecules(&MoleculeFilter::default())?;
             let resident_molecules = include_referenced_legacy_blockers(molecules.clone(), &all);
             build_molecule_states(&resident_molecules)
