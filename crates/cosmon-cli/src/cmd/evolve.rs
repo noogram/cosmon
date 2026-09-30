@@ -869,6 +869,9 @@ The molecule has NOT advanced — its state is unchanged, so this is recoverable
             commit_sha: None,
         });
 
+        if updated.status == cosmon_core::molecule::MoleculeStatus::Completed {
+            crate::energy_probe::capture_realized_at_completion(&ops_dir, &mol_id);
+        }
         // Save updated molecule (intent + state advance, atomic rename).
         store.save_molecule(&updated.id.clone(), &updated)?;
 
@@ -979,6 +982,11 @@ The molecule has NOT advanced — its state is unchanged, so this is recoverable
                                     updated.current_step = updated.total_steps;
                                 }
                                 _ => {}
+                            }
+                            if updated.status == cosmon_core::molecule::MoleculeStatus::Completed {
+                                crate::energy_probe::capture_realized_at_completion(
+                                    &ops_dir, &mol_id,
+                                );
                             }
                             store.save_molecule(&updated.id.clone(), &updated)?;
 

@@ -91,13 +91,8 @@ fn setup_repo(tmp: &Path) {
     git_ok(tmp, &["commit", "-q", "-m", "base"]);
 }
 
-/// Nucleate a `task-work` molecule and drive it to `Completed` **without ever
-/// creating a feat branch** — the exact bug fixture. `cs complete` is the
-/// worker's terminal transition: it flips the molecule to `Completed` but does
-/// NOT archive (archival is a `cs done` / `cs collapse` concern). The molecule
-/// therefore lands `{status: Completed, archived: false}` — the no_branch shape
-/// the molecule-health A8 pass keeps re-flagging until `cs done` archives it.
-fn nucleate_completed_no_branch(repo: &Path) -> String {
+/// Nucleate a `task-work` molecule without creating a feat branch.
+fn nucleate_no_branch(repo: &Path) -> String {
     let nuc = cs_isolated(repo)
         .args([
             "--json",
@@ -115,6 +110,14 @@ fn nucleate_completed_no_branch(repo: &Path) -> String {
     );
     let v: serde_json::Value = serde_json::from_slice(&nuc.stdout).unwrap();
     let mol_id = v["id"].as_str().expect("nucleate id").to_owned();
+
+    mol_id
+}
+
+/// Drive a molecule to `Completed` without creating a feat branch. `cs
+/// complete` does not archive it; that belongs to `cs done`.
+fn nucleate_completed_no_branch(repo: &Path) -> String {
+    let mol_id = nucleate_no_branch(repo);
 
     // `--ignore-mindguard`: this temp repo has no surface-verify gate machinery;
     // the hidden test escape hatch keeps the transition hermetic.
@@ -238,5 +241,126 @@ fn cs_done_archives_no_branch_molecule() {
     assert!(
         actions2.iter().any(|a| a == "already_archived"),
         "second cs done must be a no-op on the archive (already_archived), got {actions2:?}"
+    );
+}
+
+/// A controller can complete a worker from the state directory. Its session
+/// log still belongs to the worker's recorded worktree, and an immediate
+/// harvest must archive the resulting observation without a timing delay.
+#[test]
+fn immediate_done_archives_the_workers_realized_model() {
+    use cosmon_core::agent::AgentRole;
+    use cosmon_core::clearance::Clearance;
+    use cosmon_core::event_v2::{AdapterSelectionSource, EventV2};
+    use cosmon_core::id::{MoleculeId, WorkerId};
+    use cosmon_core::worker::{DesiredState, WorkerStatus};
+    use cosmon_filestore::FileStore;
+    use cosmon_state::{event_log, StateStore, WorkerData};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo(repo);
+    let state_dir = repo.join(".cosmon/state");
+    let mol_id = nucleate_no_branch(repo);
+    let mol = MoleculeId::new(&mol_id).unwrap();
+    let worker = WorkerId::new(&mol_id).unwrap();
+    let worktree = repo.join(".worktrees").join(&mol_id);
+    fs::create_dir_all(&worktree).unwrap();
+
+    let store = FileStore::new(&state_dir);
+    let mut data = store.load_molecule(&mol).unwrap();
+    data.status = cosmon_core::molecule::MoleculeStatus::Running;
+    data.assigned_worker = Some(worker.clone());
+    store.save_molecule(&mol, &data).unwrap();
+    let mut fleet = cosmon_state::Fleet::default();
+    let mut member = WorkerData::new(
+        worker.clone(),
+        cosmon_core::id::AgentId::new("worker").unwrap(),
+        AgentRole::Implementation,
+        Clearance::Write,
+        WorkerStatus::Active,
+    )
+    .with_repo(format!(".worktrees/{mol_id}"));
+    member.desired = DesiredState::Running;
+    fleet.workers.insert(worker.clone(), member);
+    store.save_fleet(&fleet).unwrap();
+
+    let log = state_dir.join("events.jsonl");
+    event_log::emit_one(
+        &log,
+        EventV2::AdapterSelected {
+            mol_id: mol.clone(),
+            adapter_name: "claude".to_owned(),
+            selected_at: chrono::Utc::now(),
+            selection_source: AdapterSelectionSource::Cli {
+                flag: "claude".to_owned(),
+            },
+            role_hint: None,
+            loop_ownership: Default::default(),
+        },
+        None,
+    )
+    .unwrap();
+    event_log::emit_one(
+        &log,
+        EventV2::WorkerSpawned {
+            worker_id: worker,
+            molecule: Some(mol),
+            session_name: mol_id.clone(),
+            role: "worker".to_owned(),
+            adapter_name: "claude".to_owned(),
+            loop_ownership: Default::default(),
+        },
+        None,
+    )
+    .unwrap();
+
+    let config = repo.join("session-config");
+    let encoded = cosmon_core::session_thread::sanitise_agent_path(&worktree.to_string_lossy());
+    let session_dir = config.join("projects").join(encoded);
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(
+        session_dir.join("session.jsonl"),
+        "{\"type\":\"assistant\",\"message\":{\"model\":\"observed-model\"}}\n",
+    )
+    .unwrap();
+
+    let complete = cs_isolated(repo)
+        .env("CLAUDE_CONFIG_DIR", &config)
+        .args(["complete", &mol_id, "--ignore-mindguard"])
+        .output()
+        .unwrap();
+    assert!(
+        complete.status.success(),
+        "complete: {}",
+        String::from_utf8_lossy(&complete.stderr)
+    );
+    let done = cs_isolated(repo)
+        .env("CLAUDE_CONFIG_DIR", &config)
+        .args(["done", &mol_id, "--no-auto-propel", "--no-worktree-remove"])
+        .output()
+        .unwrap();
+    assert!(
+        done.status.success(),
+        "done: {}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+
+    let archive_root = state_dir.join("archive");
+    let journal = fs::read_dir(&archive_root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .flat_map(|year| fs::read_dir(year.path()).unwrap().filter_map(Result::ok))
+        .map(|month| month.path().join(&mol_id).join("journal.jsonl"))
+        .find(|path| path.is_file())
+        .expect("archived journal");
+    let rows = fs::read_to_string(journal).unwrap();
+    assert!(
+        rows.lines().any(|line| {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            row["type"] == "model_observed" && row["model"] == "observed-model"
+        }),
+        "archive must retain the model observation: {rows}"
     );
 }

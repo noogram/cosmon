@@ -231,11 +231,17 @@ pub(crate) fn complete_one(
 
         if prev_status == MoleculeStatus::Completed {
             // Idempotent: already done.
+            crate::energy_probe::capture_realized_at_completion(ops_dir, mol_id);
             break 'lock prev_status;
         }
         if prev_status == MoleculeStatus::Collapsed {
             anyhow::bail!("molecule {mol_id} is collapsed — cannot complete a collapsed molecule");
         }
+
+        // Flush the worker's realized model before Completed becomes visible
+        // to an immediate `cs done` in another process. The observer is
+        // best-effort: missing session evidence never blocks completion.
+        crate::energy_probe::capture_realized_at_completion(ops_dir, mol_id);
 
         // Transition to Completed.
         //
@@ -301,13 +307,6 @@ pub(crate) fn complete_one(
             .unwrap_or_default();
         let _ = crate::pow::seal(&mol_dir, mol_id.as_str(), &formula_id);
     }
-
-    // Realized-model capture at the completion seam (delib-20260718-c70e /
-    // F-01). The worker's session log is fully written by now, so this always-on
-    // read records what actually ran — regardless of whether `cs peek` was ever
-    // open. Best-effort and trace-not-lock; runs before `MoleculeCompleted` so a
-    // fold sees the observation alongside the completion.
-    crate::energy_probe::capture_realized_at_completion(ops_dir, mol_id);
 
     // Emit legacy events.
     let events_path = ops_dir.join("events.jsonl");
