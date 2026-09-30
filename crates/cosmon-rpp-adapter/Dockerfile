@@ -233,7 +233,7 @@ CMD ["--bind", "0.0.0.0:8443", "--config", "/cosmon/.config/cosmon/rpp.toml"]
 #
 #   * a **dummy agent CLI** on `PATH` under the name the adapter spawns
 #     (`claude`). A deployment provisions the real one; the smoke must
-#     not, and must not need network or credentials either.
+#     not, and must not need network or a real worker credential either.
 #   * a **`cs` binary**, because the worker's job is `cs complete` —
 #     that is what a worker does, and a smoke whose worker cannot run it
 #     proves the spawn and nothing after it. The shipped stage still has
@@ -272,6 +272,15 @@ RUN apt-get update \
 COPY --from=e2e-builder /work/target/release/cs /usr/local/bin/cs
 COPY --from=builder /work/tests/fakes/fake-claude/claude /usr/local/bin/fake-claude
 
+# The dispatch preflight reads the same credentials file as auth/me. Give
+# this test stage a nonsecret placeholder so it can dispatch the dummy
+# worker; the dummy never contacts the external service. The shipped
+# runtime stage contains neither this file nor the dummy worker.
+RUN mkdir -p /cosmon/.claude \
+ && printf '%s\n' '{"claudeAiOauth":{"accessToken":"fake-worker-only"}}' >/cosmon/.claude/.credentials.json \
+ && chown -R cosmon:cosmon /cosmon/.claude \
+ && chmod 0600 /cosmon/.claude/.credentials.json
+
 # The adapter spawns `<adapter-name>` verbatim — `claude` — and the
 # worker envelope runs it under `env -i` with the §3.5 allow-list, which
 # `FAKE_CLAUDE_MODE` is not on and must not be: an allow-list that grows
@@ -282,6 +291,7 @@ RUN printf '%s\n' \
         '# e2e stage only: the dummy agent the rpp-adapter dispatches.' \
         'FAKE_CLAUDE_MODE=complete-molecule' \
         'export FAKE_CLAUDE_MODE' \
+        'echo " ❯ Type your message"' \
         'exec /usr/local/bin/fake-claude "$@"' \
         >/usr/local/bin/claude \
  && chmod 0755 /usr/local/bin/cs /usr/local/bin/fake-claude /usr/local/bin/claude

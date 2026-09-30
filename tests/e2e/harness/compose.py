@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -173,6 +174,7 @@ class ComposeStack:
         #: Incremented on every reinit; the reinit test reads it to prove
         #: the boundary it relies on actually happened.
         self.generation = 0
+        self.admin_token_file = cfg.run_dir / "harvest-admin.token"
 
     # -- staging ------------------------------------------------------
 
@@ -187,6 +189,12 @@ class ComposeStack:
         """
         cfg = self.cfg
         cfg.staged_deploy.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(cfg.staged_deploy / "state", ignore_errors=True)
+        cfg.run_dir.chmod(0o700)
+        self.admin_token_file.write_text(secrets.token_urlsafe(48) + "\n", encoding="utf-8")
+        # The disposable secret is mounted as a single read-only file for
+        # the service uid; the containing host run directory is private.
+        self.admin_token_file.chmod(0o644)
         for name in ("docker-compose.yml", "rpp.toml"):
             shutil.copy(cfg.deploy_src / name, cfg.staged_deploy / name)
         if cfg.e2e_stage:
@@ -316,6 +324,66 @@ class ComposeStack:
         binding.write_text(text, encoding="utf-8")
         if "cosmon:worker:spawn" not in binding.read_text(encoding="utf-8"):
             raise AssertionError(f"the operator grant cosmon:worker:spawn did not land in {binding}")
+
+    def grant_binding_scope(self, scope: str) -> None:
+        """Grant one scope in the staged binding, then reload via admin HTTP."""
+        if scope != "cosmon:molecule:harvest":
+            raise AssertionError(f"unexpected acceptance scope: {scope}")
+        binding = (
+            self.cfg.staged_deploy / "state" / "nucleons"
+            / f"nuc-{self.cfg.noyau}" / "oidc-identity.toml"
+        )
+        body = binding.read_text(encoding="utf-8")
+        old = '"cosmon:worker:spawn"]'
+        if body.count(old) != 1:
+            raise AssertionError("the binding scope row changed; refusing a silent grant")
+        binding.write_text(body.replace(old, f'"cosmon:worker:spawn", "{scope}"]'), encoding="utf-8")
+        registry = self.cfg.run_dir / "oauth-clients.toml"
+        clients = registry.read_text(encoding="utf-8")
+        if clients.count(old) != 1:
+            raise AssertionError("the published OAuth scope row changed")
+        registry.write_text(clients.replace(old, f'"cosmon:worker:spawn", "{scope}"]'), encoding="utf-8")
+        self.provision()
+        self.reload_bindings()
+
+    def grant_harvest_only_identity(self) -> str:
+        """Add a second same-tenant binding with only harvest authority."""
+        original = (
+            self.cfg.staged_deploy / "state" / "nucleons"
+            / f"nuc-{self.cfg.noyau}" / "oidc-identity.toml"
+        )
+        subject = self.cfg.idp_sub + "-harvest-only"
+        new_id = f"nuc-{self.cfg.noyau}-harvest-only"
+        text = original.read_text(encoding="utf-8")
+        old_id = f'nucleon_id = "nuc-{self.cfg.noyau}"'
+        old_sub = f'sub = "{self.cfg.idp_sub}"'
+        scope_row = 'allowed = ["cosmon:molecule:read", "cosmon:molecule:write", "cosmon:worker:spawn", "cosmon:molecule:harvest"]'
+        if any(text.count(value) != 1 for value in (old_id, old_sub, scope_row)):
+            raise AssertionError("the source binding changed; cannot create an isolated harvest identity")
+        text = text.replace(old_id, f'nucleon_id = "{new_id}"')
+        text = text.replace(old_sub, f'sub = "{subject}"')
+        text = text.replace(scope_row, 'allowed = ["cosmon:molecule:harvest"]')
+        target = original.parent.parent / new_id / "oidc-identity.toml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        self.reload_bindings()
+        return subject
+
+    def reload_bindings(self) -> None:
+        """Publish host-staged identity changes through the admin reload."""
+        request = urllib.request.Request(
+            self.cfg.host_url + "/v1/admin/reload",
+            data=b"{}",
+            headers={"X-Cosmon-Admin-Token": self.admin_token_file.read_text(encoding="utf-8").strip()},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                status = response.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        if status != 200:
+            raise AssertionError(f"admin binding reload failed: HTTP {status}")
 
     def stage_galaxy(self) -> None:
         """(Re)create the throwaway tenant tree the adapter writes into.
@@ -504,6 +572,7 @@ class ComposeStack:
                 "COSMON_RPP_HOST_PORT": str(cfg.rpp_port),
                 "COSMON_OIDC_HOST_PORT": str(cfg.oidc_port),
                 "COSMON_RPP_NAME_SUFFIX": f"-e2e-{os.getpid()}",
+                "RPP_E2E_ADMIN_TOKEN_FILE": str(self.admin_token_file),
             }
         )
         return env
@@ -544,6 +613,20 @@ class ComposeStack:
 
     def build(self) -> None:
         """Build both images. Session-scoped: this is the expensive part."""
+        adapter_pin = os.environ.get("RPP_E2E_ADAPTER_IMAGE_ID")
+        oidc_pin = os.environ.get("RPP_E2E_OIDC_IMAGE_ID")
+        if bool(adapter_pin) != bool(oidc_pin):
+            raise AssertionError("both e2e image IDs must be pinned together")
+        if adapter_pin and oidc_pin:
+            for name, expected in (("cs-rpp-adapter:e2e", adapter_pin), ("cs-oidc-mock:v0", oidc_pin)):
+                actual = _run(["docker", "image", "inspect", name, "--format", "{{.Id}}"]).stdout.strip()
+                if actual != expected:
+                    raise AssertionError(f"pinned image {name} changed: {actual or '<missing>'}")
+            self.recorder.exchange(
+                step="compose pinned images", request="docker image inspect (two exact IDs)",
+                response=f"adapter={adapter_pin} oidc={oidc_pin}", rc=0, started=time.time(),
+            )
+            return
         self.compose("build")
 
     def up(self) -> None:
@@ -594,7 +677,7 @@ class ComposeStack:
         containers, and the bind-mounted tenant galaxy tree.
         """
         self.down()
-        self.stage_galaxy()
+        self.stage()
         self.up()
         self.provision()
         self.generation += 1

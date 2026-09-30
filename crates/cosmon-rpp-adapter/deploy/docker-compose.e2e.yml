@@ -37,3 +37,6 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       COSMON_DEFAULT_ADAPTER: claude
+      COSMON_ADMIN_TOKEN_FILE: /run/secrets/harvest-admin.token
+    volumes:
+      - ${RPP_E2E_ADMIN_TOKEN_FILE}:/run/secrets/harvest-admin.token:ro

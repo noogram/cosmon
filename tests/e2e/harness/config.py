@@ -167,9 +167,12 @@ class E2EConfig:
     def from_env(cls, repo_root: Path) -> "E2EConfig":
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         # The run dir MUST sit under a path the container engine can
-        # bind-mount: colima and Docker Desktop share $HOME, not
-        # /var/folders — hence a default under the repo, not a tmpdir.
-        run_dir = Path(_env("RPP_E2E_RUN_DIR", str(repo_root / ".rpp-remote-e2e" / stamp)))
+        # The dedicated cosmon-bench VM shares /private/tmp, while a
+        # regular desktop engine shares $HOME. Both are outside this git
+        # worktree, as the operator's signing key must be.
+        shared_root = (Path("/private/tmp") if "cosmon-bench/docker.sock" in os.environ.get("DOCKER_HOST", "")
+                       else Path.home() / ".cache")
+        run_dir = Path(_env("RPP_E2E_RUN_DIR", str(shared_root / "cosmon-rpp-e2e" / f"{stamp}-{os.getpid()}")))
         if not run_dir.is_absolute():
             run_dir = (repo_root / run_dir).resolve()
         audience = _env("RPP_E2E_AUDIENCE", "cosmon-rpp-tenant-demo")
