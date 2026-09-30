@@ -175,7 +175,8 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              cs status <id>                  names dependents held by a collapsed\n                                  \
                or frozen blocker; complete the blocker\n                                   \
                or re-nucleate the dependent with a new\n                                   \
-               --blocked-by edge\n  \
+               --blocked-by edge; shows the latest recorded\n                                   \
+               briefing outcome and recovery gesture\n  \
              cs ensemble --tag temp:hot      actionable backlog snapshot\n  \
              cs wait <id> &                  block on a worker without hanging the pilot\n  \
              cs events journal <id>          one molecule's whole history, projected\n                                  \
