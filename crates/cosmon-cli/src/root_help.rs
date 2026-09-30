@@ -83,6 +83,9 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              (pilot-to-worker steering only).\n\n\
              Pilots NEVER poll 'cs observe' by hand — always use 'cs wait'. \
              Pilots NEVER skip 'cs done' — without it the branch never merges. \
+             A failed 'cs done' names the merge error and dirty checkout paths. \
+             A successful harvest commits trackable archive and event state \
+             and skips molecule directories ignored by the project. \
              Pilots NEVER run 'cs run' in the foreground — wrap it in a detached \
              tmux session: tmux new -d -s runtime cs run <root> --poll-interval 5 \
              (cs run calls cs done automatically on completion). The historical \

@@ -2,6 +2,16 @@
 
 # CLI and UI parity audit
 
+## Harvest diagnostics and tracked state (issue #123)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Explain a failed merge | `cs done` prints the merge error and dirty checkout paths; JSON includes `error` and `dirty_paths` | No equivalent diagnostic view audited | The harvest response retains the transaction error; no dirty-path projection audited |
+| Finish a harvest in a project with tracked archive state | `cs done` commits eligible archive, event, and frontier changes after teardown and skips ignored molecule directories without an artifact warning | No equivalent action audited | The shared harvest transaction applies the same state commit |
+
+The dirty-path list is a checkout observation at the failure report. It may
+include state written while recording that failure.
+
 ## RPP identity discovery and quota (issue #45)
 
 | Capability | CLI | Native UI | Remote service |
