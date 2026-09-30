@@ -151,6 +151,8 @@ Every patrol also scans live panes for blocking dialogs and pages
   An update can end a worker pane. 'cs purge <worker>' reclaims the
   dead worker without collapsing its Running molecule. Resume with
   'cs tackle <molecule> --force' in the same worktree.
+  Patrol reports the missing worker but holds its molecule for
+  re-tackle, even with '--auto-collapse'.
 
 SCHEDULER DRY-RUN OUTPUT — four row types, one per patrol:
   FIRE     patrol is due; dispatch would spawn the command now
