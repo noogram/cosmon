@@ -71,6 +71,9 @@ pub fn family(path: &str) -> Result<&'static str, String> {
     if path.starts_with("/v1/molecules") {
         return Ok("molecule");
     }
+    if path.starts_with("/v1/harvest/") {
+        return Ok("harvest");
+    }
     if path.starts_with("/v1/admin/") {
         return Ok("admin");
     }
@@ -84,6 +87,7 @@ pub fn family(path: &str) -> Result<&'static str, String> {
 const FAMILY_ORDER: &[&str] = &[
     "molecule",
     "artifact",
+    "harvest",
     "auth-claude",
     "observ.",
     "avatar-canal",
@@ -350,6 +354,9 @@ mod tests {
     fn family_classifies_the_live_canon_shapes() {
         assert_eq!(family("/v1/molecules/{id}/result").unwrap(), "molecule");
         assert_eq!(family("/v1/molecules/{id}/artifacts").unwrap(), "artifact");
+        assert_eq!(family("/v1/harvest/status").unwrap(), "harvest");
+        assert_eq!(family("/v1/harvest/challenge").unwrap(), "harvest");
+        assert_eq!(family("/v1/harvest/grants").unwrap(), "harvest");
         assert_eq!(family("/v1/auth/claude/start").unwrap(), "auth-claude");
         assert_eq!(family("/v1/auth/me").unwrap(), "observ.");
         assert_eq!(family("/v1/vitals").unwrap(), "observ.");

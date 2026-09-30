@@ -102,6 +102,11 @@ tail
 paths
 done
 harvest
+harvest-authority
+harvest-authority configure
+harvest-authority status
+harvest-authority challenge
+harvest-authority import
 stuck
 await-operator
 topology

@@ -263,82 +263,83 @@ Name stability: 'llama-cpp' is the canonical CLI name for the in-process llama.c
 Usage: cs [OPTIONS] <COMMAND>
 
 Commands:
-  ensemble        Display ensemble status — observe the fleet at a glance
-  nucleate        Nucleate a new molecule from a formula template
-  observe         Observe a molecule's current state and history
-  errors          Errors — aggregate molecule-collapse events into one failure overview: what is breaking the fleet, and which molecules are hit
-  evolve          Evolve a molecule to its next lifecycle state
-  collapse        Collapse a molecule — terminate with final state recording
-  complete        Complete a molecule — idempotent Active→Completed transition (worker-callable)
-  decay           Decay a molecule into child molecules (1 → N)
-  merge           Merge molecules into a synthesis (N → 1)
-  transform       Transform a molecule's kind (idea → task, etc.)
-  init            Bootstrap a project-local .cosmon/ directory (creates the target dir if missing)
-  inbox           Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
-  work            Work — separate molecules (e.g. an implementer and a reviewer, same or another provider) exchange findings, recorded and bounded (ADR-182)
-  spark           Spark — capture a one-line operator intent into the Inbox (ADR-061)
-  drop            Drop — universal Inbox gesture (hotkey / zsh widget / menubar) → `cs spark`
-  listen          Listen — voice → whisper.cpp → `cs nucleate spark` (MVP)
-  pilot           Pilot — interactive cognitive pilot REPL over a client-side model (--experimental). --remote pilots an avatar over the §8p wire (ADR-115)
-  kill            Kill a worker — immediate termination (no state flush)
-  quench          Quench a worker — graceful shutdown with state preservation
-  fleet           Fleet template discovery and initialization
-  galaxies        Galaxies — inspect the four-family taxonomy
-  freeze          Freeze a worker — suspend with state preservation (preemption)
-  thaw            Thaw a worker — resume a frozen worker's Claude session
-  trust           Trust — grant this repository permission to run its own formulas/hooks (the `direnv allow` of cosmon; refuses repo-supplied shell until granted)
-  prime           Prime the system — load .cosmon/config.toml and self-check gates
-  resume          Resume — convenience alias for `cs patrol --propel --molecule <id>`
-  teardown        Teardown a fleet — gracefully stop all fleet workers
-  purge           Purge dead workers from fleet state without changing molecule status
-  migrate         Migrate the galaxy's memory — legacy flat→fleet, or residence-to-residence
-  patrol          Patrol the fleet — health checks and anomaly detection
-  health          Health — read-only molecule-health anomaly catalog, federation-wide (ADR-137 §7)
-  pulse           Pulse — runtime-vitality reading: RPM tachometer, six-voyant strip (ADR-138 P1)
-  project         Project — materialize views from the ledger (STATUS.md, ISSUES.md, GitHub Issues)
-  reconcile       Reconcile — **deprecated** alias for `cs project` (ADR-052 §D3)
-  scheduler       Scheduler — read-only view onto `cosmon-scheduler`'s state (patrols, last fires, log)
-  journal         Write down what you notice while you work; anything worth doing becomes a task without you stopping to file it
-  sessions        Sessions — two agent sessions on one mission: one drives, the other watches and advises; only a human signs the relay
-  daemons         Daemons — operator view over `cosmon-daemon-supervisor` (list/status/reload/logs)
-  status          Project pulse — quick DAG overview like git status; with a molecule id, that one molecule's status
-  tackle          Tackle a molecule — claim before model selection and spawn ONE worker (for DAG walks use `cs run`)
-  claim           Claim a molecule for the pilot; the runtime defers until it is released
-  release         Release a pilot claim and return the molecule to the runtime frontier
-  tag             Tag — add or remove typed labels on a molecule
-  tail            Tail — live `notify`-driven reader over `events.jsonl` (fleet or `--all-galaxies`)
-  paths           Paths — project the write-path taxonomy (`--writes`), a pure derived view
-  done            Done — terminal teardown for a molecule (merge + cleanup, human-callable)
-  harvest         Harvest — close a completed-but-unmerged molecule by invoking `cs done`
-  stuck           Stuck — freeze a molecule and record the blocker
-  await-operator  Await-operator — the only sanctioned way to block on an operator decision at an irreversibility boundary (ADR-123). Routes on the molecule's `op-block:*` capability: block-and-emit, or surface-and-continue
-  topology        Topology — structural maps of the workspace (wraps the `topon` CLI)
-  deps            Deps — show blocking dependencies for a molecule (upstream/downstream)
-  mission         Mission — read-only DAG view joining ledger edges to completion merge commits
-  sync            Sync — base-sync the current worktree from main, stamping a Base-Sync trailer
-  diverge         Diverge — structural agreement check between two sessions on a molecule (turing §5)
-  peek            Peek — canonical fleet observation command (TUI default; `--no-tui` for plaintext stream)
-  wait            Wait — block until a molecule reaches a terminal (or requested) status
-  run             Run — walk a molecule DAG of N≥1 nodes via the resident runtime (ADR-016 Layer B)
-  spore           Spore germinates a whole polymer from a shareable `spore.toml` template (validate / run / export, ADR-140)
-  help            Show help — all commands grouped, or detailed help for one command
-  verify          Verify — walk a molecule's event hash chain (plumbing v2)
-  validate        Validate — deliberate heavyweight project-milestone gate
-  verify-trace    `verify-trace` — replay `events.jsonl` against the scheduler spec (Phase 3 CI gate)
-  verify-graph    `verify-graph` — Tarjan SCC check on the subgraph induced by a typed relation (substrate, ADR-016)
-  spec-audit      `spec-audit` — ledger audit against the TLA+ spec (catches c1cb `bypass_merge`)
-  release-audit   `release-audit` — dry-run drift detector for the public distribution (analogue of `reconcile --check`)
-  doctor          Doctor — diagnostic probes (whisper channel, …)
-  demo            Demo — one-command end-to-end chatbot surface (first-contact experience)
-  whisper         Whisper — advise a live worker; refuse unsafe pane dialogues
-  archive         Archive — operator view over durable terminal snapshots (list/show/verify/prune, ADR-030)
-  opt-in-share    Opt-in-share — first-run consent prompt for encrypted developer bundles
-  notarize        Notarize — issue or verify an operator-signed attestation for a molecule (ADR-056)
-  panel           Panel — convene a hash-pinned supermajority panel to gate a constitutional amendment
-  witness         Witness — Layer-2 witness-quorum seal for stress-test molecules (ADR-085 §3)
-  notify          Notify — push a one-line message to every configured operator channel
-  key             Key — manage the operator's Ed25519 notary key (generate, show)
-  config          Config — inspect `.cosmon/config.toml` (`show adapters`, `adapters`)
+  ensemble           Display ensemble status — observe the fleet at a glance
+  nucleate           Nucleate a new molecule from a formula template
+  observe            Observe a molecule's current state and history
+  errors             Errors — aggregate molecule-collapse events into one failure overview: what is breaking the fleet, and which molecules are hit
+  evolve             Evolve a molecule to its next lifecycle state
+  collapse           Collapse a molecule — terminate with final state recording
+  complete           Complete a molecule — idempotent Active→Completed transition (worker-callable)
+  decay              Decay a molecule into child molecules (1 → N)
+  merge              Merge molecules into a synthesis (N → 1)
+  transform          Transform a molecule's kind (idea → task, etc.)
+  init               Bootstrap a project-local .cosmon/ directory (creates the target dir if missing)
+  inbox              Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
+  work               Work — separate molecules (e.g. an implementer and a reviewer, same or another provider) exchange findings, recorded and bounded (ADR-182)
+  spark              Spark — capture a one-line operator intent into the Inbox (ADR-061)
+  drop               Drop — universal Inbox gesture (hotkey / zsh widget / menubar) → `cs spark`
+  listen             Listen — voice → whisper.cpp → `cs nucleate spark` (MVP)
+  pilot              Pilot — interactive cognitive pilot REPL over a client-side model (--experimental). --remote pilots an avatar over the §8p wire (ADR-115)
+  kill               Kill a worker — immediate termination (no state flush)
+  quench             Quench a worker — graceful shutdown with state preservation
+  fleet              Fleet template discovery and initialization
+  galaxies           Galaxies — inspect the four-family taxonomy
+  freeze             Freeze a worker — suspend with state preservation (preemption)
+  thaw               Thaw a worker — resume a frozen worker's Claude session
+  trust              Trust — grant this repository permission to run its own formulas/hooks (the `direnv allow` of cosmon; refuses repo-supplied shell until granted)
+  prime              Prime the system — load .cosmon/config.toml and self-check gates
+  resume             Resume — convenience alias for `cs patrol --propel --molecule <id>`
+  teardown           Teardown a fleet — gracefully stop all fleet workers
+  purge              Purge dead workers from fleet state without changing molecule status
+  migrate            Migrate the galaxy's memory — legacy flat→fleet, or residence-to-residence
+  patrol             Patrol the fleet — health checks and anomaly detection
+  health             Health — read-only molecule-health anomaly catalog, federation-wide (ADR-137 §7)
+  pulse              Pulse — runtime-vitality reading: RPM tachometer, six-voyant strip (ADR-138 P1)
+  project            Project — materialize views from the ledger (STATUS.md, ISSUES.md, GitHub Issues)
+  reconcile          Reconcile — **deprecated** alias for `cs project` (ADR-052 §D3)
+  scheduler          Scheduler — read-only view onto `cosmon-scheduler`'s state (patrols, last fires, log)
+  journal            Write down what you notice while you work; anything worth doing becomes a task without you stopping to file it
+  sessions           Sessions — two agent sessions on one mission: one drives, the other watches and advises; only a human signs the relay
+  daemons            Daemons — operator view over `cosmon-daemon-supervisor` (list/status/reload/logs)
+  status             Project pulse — quick DAG overview like git status; with a molecule id, that one molecule's status
+  tackle             Tackle a molecule — claim before model selection and spawn ONE worker (for DAG walks use `cs run`)
+  claim              Claim a molecule for the pilot; the runtime defers until it is released
+  release            Release a pilot claim and return the molecule to the runtime frontier
+  tag                Tag — add or remove typed labels on a molecule
+  tail               Tail — live `notify`-driven reader over `events.jsonl` (fleet or `--all-galaxies`)
+  paths              Paths — project the write-path taxonomy (`--writes`), a pure derived view
+  done               Done — terminal teardown for a molecule (merge + cleanup, human-callable)
+  harvest            Harvest — close a completed-but-unmerged molecule by invoking `cs done`
+  harvest-authority  Configure and inspect remote harvest authority; issue and import grants locally
+  stuck              Stuck — freeze a molecule and record the blocker
+  await-operator     Await-operator — the only sanctioned way to block on an operator decision at an irreversibility boundary (ADR-123). Routes on the molecule's `op-block:*` capability: block-and-emit, or surface-and-continue
+  topology           Topology — structural maps of the workspace (wraps the `topon` CLI)
+  deps               Deps — show blocking dependencies for a molecule (upstream/downstream)
+  mission            Mission — read-only DAG view joining ledger edges to completion merge commits
+  sync               Sync — base-sync the current worktree from main, stamping a Base-Sync trailer
+  diverge            Diverge — structural agreement check between two sessions on a molecule (turing §5)
+  peek               Peek — canonical fleet observation command (TUI default; `--no-tui` for plaintext stream)
+  wait               Wait — block until a molecule reaches a terminal (or requested) status
+  run                Run — walk a molecule DAG of N≥1 nodes via the resident runtime (ADR-016 Layer B)
+  spore              Spore germinates a whole polymer from a shareable `spore.toml` template (validate / run / export, ADR-140)
+  help               Show help — all commands grouped, or detailed help for one command
+  verify             Verify — walk a molecule's event hash chain (plumbing v2)
+  validate           Validate — deliberate heavyweight project-milestone gate
+  verify-trace       `verify-trace` — replay `events.jsonl` against the scheduler spec (Phase 3 CI gate)
+  verify-graph       `verify-graph` — Tarjan SCC check on the subgraph induced by a typed relation (substrate, ADR-016)
+  spec-audit         `spec-audit` — ledger audit against the TLA+ spec (catches c1cb `bypass_merge`)
+  release-audit      `release-audit` — dry-run drift detector for the public distribution (analogue of `reconcile --check`)
+  doctor             Doctor — diagnostic probes (whisper channel, …)
+  demo               Demo — one-command end-to-end chatbot surface (first-contact experience)
+  whisper            Whisper — advise a live worker; refuse unsafe pane dialogues
+  archive            Archive — operator view over durable terminal snapshots (list/show/verify/prune, ADR-030)
+  opt-in-share       Opt-in-share — first-run consent prompt for encrypted developer bundles
+  notarize           Notarize — issue or verify an operator-signed attestation for a molecule (ADR-056)
+  panel              Panel — convene a hash-pinned supermajority panel to gate a constitutional amendment
+  witness            Witness — Layer-2 witness-quorum seal for stress-test molecules (ADR-085 §3)
+  notify             Notify — push a one-line message to every configured operator channel
+  key                Key — manage the operator's Ed25519 notary key (generate, show)
+  config             Config — inspect `.cosmon/config.toml` (`show adapters`, `adapters`)
 
 Options:
       --config <PATH>
