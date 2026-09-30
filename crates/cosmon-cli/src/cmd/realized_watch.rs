@@ -155,7 +155,7 @@ pub fn watch_realized(
     }
     // Final sweep: anything the worker wrote after the last tick — or, when
     // it crashed, the durable turns its dead pane can no longer report.
-    capture.tick();
+    capture.tick_final();
     if !reported_missing_root {
         report_missing_session_log_root(&mut capture, root);
     }

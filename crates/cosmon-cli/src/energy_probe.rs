@@ -26,10 +26,12 @@ use std::path::{Path, PathBuf};
 
 use cosmon_core::codex_energy::{codex_energy_from_session, CodexSubscriptionUsage};
 use cosmon_core::energy::TokenCount;
-use cosmon_core::event_v2::EventV2;
+use cosmon_core::event_v2::{EventV2, ModelEvidenceGeneration};
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::model_realization::{
-    realized_models_from_claude_jsonl, realized_models_from_codex_session, ModelObservationSource,
+    realized_efforts_from_codex_session, realized_models_from_codex_session,
+    ModelEvidenceAccumulator, ModelEvidenceAssessment, ModelEvidenceCoverage, ModelEvidenceGrammar,
+    ModelEvidenceInputLoss, ModelEvidenceReason, ModelObservationSource,
 };
 use cosmon_core::plan_observation::{PlanObservationStore, PlanSource};
 use cosmon_core::price_manifest::{bundled_price_manifest, value_model_segments};
@@ -38,6 +40,7 @@ use cosmon_core::usage::{
     PlanApplicability, PlanUsage, TokenCount as UsageTokenCount, TokenUsage, UnavailableReason,
     UsageHistory, UsageObservationId, UsageRecord, UsageSubject, CURRENT_USAGE_SCHEMA_VERSION,
 };
+use cosmon_state::events::worker_spawn::ModelAssessmentSnapshot;
 use cosmon_state::plan_observation::FilePlanObservationStore;
 use sha2::{Digest as _, Sha256};
 
@@ -63,6 +66,214 @@ pub struct WorkerEnergy {
     pub usage: Option<UsageRecord>,
     /// Model context-window capacity, when the adapter reports it.
     pub context_window: Option<u64>,
+}
+
+#[cfg(test)]
+mod model_evidence_capture_tests {
+    use super::*;
+    use cosmon_core::model_realization::{LatestModelEvidence, ModelEvidenceReason};
+    use std::io::Write as _;
+
+    fn tail(path: &Path) -> SessionLogTail {
+        SessionLogTail::new(path.to_path_buf(), "claude", None)
+    }
+
+    #[test]
+    fn empty_and_model_less_captures_publish_assessable_states() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let mut capture = tail(&path);
+        assert_eq!(
+            capture.read_new(false).coverage,
+            ModelEvidenceCoverage::NoResponseEvidence
+        );
+        std::fs::write(&path, "{\"type\":\"assistant\",\"message\":{}}\n").unwrap();
+        let result = capture.read_new(false);
+        assert!(matches!(
+            result.coverage,
+            ModelEvidenceCoverage::Degraded(_)
+        ));
+        assert_eq!(result.latest, LatestModelEvidence::ModelMissing);
+        assert!(result.trajectory.is_empty());
+    }
+
+    #[test]
+    fn later_gap_survives_rebuild_and_read_failure_qualifies_old_model() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let first = b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n";
+        std::fs::write(&path, first).unwrap();
+        let mut capture = tail(&path);
+        let healthy = capture.read_new(false);
+        assert_eq!(healthy.coverage, ModelEvidenceCoverage::CompleteRecords);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"type\":\"assistant\",\"message\":{}}\n")
+            .unwrap();
+        let degraded = capture.read_new(false);
+        assert!(matches!(
+            degraded.coverage,
+            ModelEvidenceCoverage::Degraded(_)
+        ));
+        assert_eq!(degraded.trajectory, healthy.trajectory);
+        let mut rebuilt = SessionLogTail::new(
+            path.clone(),
+            "claude",
+            Some((capture.generation, degraded.clone())),
+        );
+        assert_eq!(rebuilt.read_new(false).coverage, degraded.coverage);
+
+        std::fs::rename(&path, dir.path().join("parked")).unwrap();
+        let unreadable = capture.read_new(false);
+        assert!(
+            matches!(unreadable.coverage, ModelEvidenceCoverage::Degraded(ref reasons)
+            if reasons.contains(&ModelEvidenceReason::ReadFailure))
+        );
+        assert_eq!(unreadable.trajectory, healthy.trajectory);
+    }
+
+    #[test]
+    fn final_torn_record_and_replaced_source_remain_degraded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n",
+        )
+        .unwrap();
+        let mut capture = tail(&path);
+        capture.read_new(false);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"type\":\"assistant\"")
+            .unwrap();
+        assert!(
+            matches!(capture.read_new(true).coverage, ModelEvidenceCoverage::Degraded(ref reasons)
+            if reasons.contains(&ModelEvidenceReason::UnassessedTail))
+        );
+        let replacement = dir.path().join("replacement");
+        std::fs::write(
+            &replacement,
+            b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-b\"}}\n",
+        )
+        .unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert!(
+            matches!(capture.read_new(false).coverage, ModelEvidenceCoverage::Degraded(ref reasons)
+            if reasons.contains(&ModelEvidenceReason::ContinuityLost))
+        );
+    }
+
+    #[test]
+    fn read_failure_qualifies_a_previously_complete_model() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n",
+        )
+        .unwrap();
+        let mut capture = tail(&path);
+        let first = capture.read_new(false);
+        assert_eq!(first.coverage, ModelEvidenceCoverage::CompleteRecords);
+        std::fs::rename(&path, dir.path().join("parked")).unwrap();
+        let failed = capture.read_new(false);
+        assert_eq!(failed.trajectory, first.trajectory);
+        assert!(
+            matches!(failed.coverage, ModelEvidenceCoverage::Degraded(ref reasons)
+            if reasons.contains(&ModelEvidenceReason::ReadFailure))
+        );
+        std::fs::rename(dir.path().join("parked"), &path).unwrap();
+        let recovered = capture.read_new(false);
+        assert_eq!(recovered.coverage, ModelEvidenceCoverage::CompleteRecords);
+        assert!(capture.generation.0 > 0);
+    }
+
+    #[test]
+    fn same_path_rewrite_is_a_continuity_finding() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n",
+        )
+        .unwrap();
+        let mut capture = tail(&path);
+        capture.read_new(false);
+        let generation = capture.generation;
+        std::fs::write(
+            &path,
+            b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-b\"}}\n",
+        )
+        .unwrap();
+        let rewritten = capture.read_new(false);
+        assert!(capture.generation.0 > generation.0);
+        assert!(
+            matches!(rewritten.coverage, ModelEvidenceCoverage::Degraded(ref reasons)
+            if reasons.contains(&ModelEvidenceReason::ContinuityLost))
+        );
+    }
+
+    #[test]
+    fn oversize_record_is_reported_and_following_model_is_kept() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(&vec![b'x'; SESSION_READ_CHUNK * 4 + 1])
+            .unwrap();
+        file.write_all(b"\n{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n")
+            .unwrap();
+        drop(file);
+        let result = tail(&path).read_new(false);
+        assert_eq!(result.trajectory.len(), 1);
+        assert!(
+            matches!(result.coverage, ModelEvidenceCoverage::Degraded(ref reasons)
+            if reasons.contains(&ModelEvidenceReason::OversizeRecord))
+        );
+    }
+
+    #[test]
+    fn worker_change_rebuilds_capture_under_new_scope() {
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root
+            .path()
+            .join(sanitize_path(&cwd.path().to_string_lossy()));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("session.jsonl"),
+            b"{\"type\":\"assistant\",\"message\":{\"model\":\"model-a\"}}\n",
+        )
+        .unwrap();
+        let mol = MoleculeId::new("task-20260930-5571").unwrap();
+        test_support::seed_dispatch(state.path(), &mol, "claude", "worker-1");
+        let mut capture = RealizedCapture::new(state.path(), &mol, cwd.path(), Some(root.path()));
+        capture.tick();
+        test_support::seed_dispatch(state.path(), &mol, "claude", "worker-2");
+        capture.tick();
+        let log = cosmon_state::event_log::resolve_events_log_path(state.path());
+        let receipts: Vec<_> = cosmon_state::event_log::read_all(&log)
+            .unwrap()
+            .into_iter()
+            .filter_map(|env| match env.event {
+                EventV2::ModelEvidenceAssessed { worker_id, .. } => Some(worker_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            receipts,
+            [
+                WorkerId::new("worker-1").unwrap(),
+                WorkerId::new("worker-2").unwrap()
+            ]
+        );
+    }
 }
 
 impl WorkerEnergy {
@@ -765,7 +976,7 @@ pub fn capture_realized_at_completion(state_dir: &Path, mol_id: &MoleculeId) {
     let Ok(cwd) = std::env::current_dir() else {
         return;
     };
-    capture_realized_from_cwd(state_dir, mol_id, &cwd);
+    RealizedCapture::new(state_dir, mol_id, &cwd, None).tick_final();
 }
 
 /// **Runtime realized-model capture** (round-3 / F-01) — called from the poll
@@ -933,10 +1144,13 @@ const CODEX_RESOLVE_EVERY_TICKS: u32 = 30;
 ///
 /// [`ObservationLedger`]: cosmon_state::events::worker_spawn::ObservationLedger
 pub struct RealizedCapture {
+    state_dir: PathBuf,
+    mol_id: MoleculeId,
     cwd: PathBuf,
     claude_projects_root: Option<PathBuf>,
     ledger: cosmon_state::events::worker_spawn::ObservationLedger,
     session: Option<SessionLogTail>,
+    session_worker: Option<WorkerId>,
     ticks_since_resolve: u32,
 }
 
@@ -945,8 +1159,14 @@ struct SessionLogTail {
     path: PathBuf,
     adapter: String,
     offset: u64,
-    models: Vec<cosmon_core::model_realization::ModelId>,
     efforts: Vec<cosmon_core::model_realization::EffortLevel>,
+    evidence: ModelEvidenceAccumulator,
+    generation: ModelEvidenceGeneration,
+    identity: Option<(u64, u64)>,
+    prefix: Option<[u8; 32]>,
+    continuity_lost: bool,
+    read_failed: bool,
+    prior: Option<ModelEvidenceAssessment>,
 }
 
 impl RealizedCapture {
@@ -960,10 +1180,13 @@ impl RealizedCapture {
         claude_projects_root: Option<&Path>,
     ) -> Self {
         Self {
+            state_dir: state_dir.to_path_buf(),
+            mol_id: mol_id.clone(),
             cwd: cwd.to_path_buf(),
             claude_projects_root: claude_projects_root.map(Path::to_path_buf),
             ledger: cosmon_state::events::worker_spawn::ObservationLedger::new(state_dir, mol_id),
             session: None,
+            session_worker: None,
             ticks_since_resolve: 0,
         }
     }
@@ -996,6 +1219,15 @@ impl RealizedCapture {
     /// emit the newly-observed tail of the realized trajectories (D4:
     /// first observation emits, unchanged emits nothing, change re-emits).
     pub fn tick(&mut self) {
+        self.capture(false);
+    }
+
+    /// Final capture after a worker exit: undelimited bytes qualify coverage.
+    pub fn tick_final(&mut self) {
+        self.capture(true);
+    }
+
+    fn capture(&mut self, final_capture: bool) {
         let adapter = self.ledger.last_adapter();
         // Fail-closed worker scoping (round-3 / F-02): every new observation
         // must be attached to the worker that produced it. No resolvable
@@ -1003,6 +1235,10 @@ impl RealizedCapture {
         let Some(worker) = self.ledger.last_worker() else {
             return;
         };
+        if self.session_worker.as_ref() != Some(&worker) {
+            self.session = None;
+            self.session_worker = Some(worker.clone());
+        }
         let (adapter_name, source) = match adapter.as_deref() {
             // Subprocess adapters whose model lives in a session log on disk.
             Some("claude") | None => ("claude", ModelObservationSource::ClaudeStreamJson),
@@ -1010,21 +1246,47 @@ impl RealizedCapture {
             // In-process providers emit at their own response seam.
             _ => return,
         };
-        let Some(path) = self.resolve_session(adapter_name) else {
+        let Some(path) = self.resolve_session(adapter_name).or_else(|| {
+            self.session
+                .as_ref()
+                .filter(|s| s.adapter == adapter_name)
+                .map(|s| s.path.clone())
+        }) else {
             return;
+        };
+        let prior = if self.session.is_none() {
+            self.last_assessment(&worker, adapter_name)
+        } else {
+            None
         };
         let session = match self.session.take() {
             Some(s) if s.path == path && s.adapter == adapter_name => s,
-            _ => SessionLogTail {
-                path,
-                adapter: adapter_name.to_owned(),
-                offset: 0,
-                models: Vec::new(),
-                efforts: Vec::new(),
-            },
+            Some(mut s) => {
+                s.reset(path, adapter_name, true);
+                s
+            }
+            None => SessionLogTail::new(path, adapter_name, prior),
         };
         let session = self.session.insert(session);
-        session.read_new();
+        let provenance = cosmon_core::algorithmic_provenance::AlgorithmicProvenance::adapter_silent(
+            adapter_name,
+        );
+        let ledger = &mut self.ledger;
+        let _ = ledger.publish_model_assessment(
+            &worker,
+            adapter_name,
+            || {
+                let assessment = session.read_new(final_capture);
+                Some(ModelAssessmentSnapshot {
+                    observation_basis: session.grammar(),
+                    generation: session.generation,
+                    assessment,
+                    final_capture,
+                    observed_source: source,
+                })
+            },
+            &provenance,
+        );
         if adapter_name == "codex" {
             // The ex-post half of ADR-177 Decision 5, read from the same bytes
             // the model axis already reads. Emitted separately from the model
@@ -1038,22 +1300,6 @@ impl RealizedCapture {
                 ModelObservationSource::CodexSessionMeta,
             );
         }
-        if session.models.is_empty() {
-            return;
-        }
-        // task-20260729-7dd4 — a session-log adapter reports a model id and
-        // nothing else about the method, so it says exactly that rather than
-        // leaving the provenance question unanswered.
-        let provenance = cosmon_core::algorithmic_provenance::AlgorithmicProvenance::adapter_silent(
-            adapter_name,
-        );
-        self.ledger.emit_new_model_observations(
-            &worker,
-            adapter_name,
-            &session.models,
-            source,
-            &provenance,
-        );
     }
 
     /// The session log to read this tick. Claude's per-cwd directory is small
@@ -1075,31 +1321,124 @@ impl RealizedCapture {
         self.ticks_since_resolve = 0;
         resolve_codex_session_by_cwd(&self.cwd)
     }
+
+    fn last_assessment(
+        &self,
+        worker: &WorkerId,
+        adapter: &str,
+    ) -> Option<(ModelEvidenceGeneration, ModelEvidenceAssessment)> {
+        let log = cosmon_state::event_log::resolve_events_log_path(&self.state_dir);
+        let mut tail = cosmon_state::event_log::EventLogTail::new(log);
+        let mut prior = None;
+        tail.read_new(|item| {
+            if let cosmon_state::event_log::TailItem::Envelope(env) = item {
+                if let EventV2::ModelEvidenceAssessed {
+                    mol_id,
+                    worker_id,
+                    adapter_name,
+                    generation,
+                    assessment,
+                    ..
+                } = env.event
+                {
+                    if mol_id == self.mol_id && worker_id == *worker && adapter_name == adapter {
+                        prior = Some((generation, assessment));
+                    }
+                }
+            }
+        })
+        .ok()?;
+        prior
+    }
 }
 
 impl SessionLogTail {
+    fn new(
+        path: PathBuf,
+        adapter: &str,
+        prior: Option<(ModelEvidenceGeneration, ModelEvidenceAssessment)>,
+    ) -> Self {
+        let grammar = if adapter == "codex" {
+            ModelEvidenceGrammar::Codex
+        } else {
+            ModelEvidenceGrammar::Claude
+        };
+        let (generation, prior) =
+            prior.map_or((ModelEvidenceGeneration(0), None), |(g, a)| (g, Some(a)));
+        Self {
+            path,
+            adapter: adapter.to_owned(),
+            offset: 0,
+            efforts: Vec::new(),
+            evidence: ModelEvidenceAccumulator::new(grammar),
+            generation,
+            identity: None,
+            prefix: None,
+            continuity_lost: false,
+            read_failed: false,
+            prior,
+        }
+    }
+
+    fn grammar(&self) -> ModelEvidenceGrammar {
+        if self.adapter == "codex" {
+            ModelEvidenceGrammar::Codex
+        } else {
+            ModelEvidenceGrammar::Claude
+        }
+    }
+
+    fn reset(&mut self, path: PathBuf, adapter: &str, continuity_lost: bool) {
+        self.path = path;
+        adapter.clone_into(&mut self.adapter);
+        self.offset = 0;
+        self.efforts.clear();
+        self.evidence = ModelEvidenceAccumulator::new(self.grammar());
+        self.identity = None;
+        self.prefix = None;
+        self.continuity_lost |= continuity_lost;
+        self.generation.0 = self.generation.0.saturating_add(1);
+    }
+
     /// Parse the complete lines appended since the last read, in bounded
     /// slices, and extend the trajectories. A file that shrank (rewritten)
     /// is re-read from the start.
-    fn read_new(&mut self) {
+    fn read_new(&mut self, final_capture: bool) -> ModelEvidenceAssessment {
         use std::io::{Read as _, Seek as _, SeekFrom};
 
         let Ok(mut file) = std::fs::File::open(&self.path) else {
-            return;
+            self.read_failed = true;
+            return self.snapshot(final_capture, &[]);
         };
-        let Ok(len) = file.metadata().map(|m| m.len()) else {
-            return;
+        let Ok(meta) = file.metadata() else {
+            self.read_failed = true;
+            return self.snapshot(final_capture, &[]);
         };
-        if len < self.offset {
-            self.offset = 0;
-            self.models.clear();
-            self.efforts.clear();
+        let len = meta.len();
+        let identity = session_file_identity(&meta);
+        let changed = self.identity.is_some_and(|old| old != identity)
+            || len < self.offset
+            || (self.offset > 0
+                && self.prefix.is_some()
+                && source_prefix(&mut file, self.offset).ok() != self.prefix);
+        if changed {
+            self.reset(self.path.clone(), &self.adapter.clone(), true);
         }
-        if len == self.offset || file.seek(SeekFrom::Start(self.offset)).is_err() {
-            return;
+        self.identity = Some(identity);
+        if len == self.offset {
+            if self.read_failed {
+                self.generation.0 = self.generation.0.saturating_add(1);
+            }
+            self.read_failed = false;
+            return self.snapshot(final_capture, &[]);
+        }
+        if file.seek(SeekFrom::Start(self.offset)).is_err() {
+            self.read_failed = true;
+            return self.snapshot(final_capture, &[]);
         }
         let mut remaining = len - self.offset;
         let mut buf: Vec<u8> = Vec::new();
+        let mut skipping = false;
         while remaining > 0 {
             let want = usize::try_from(remaining)
                 .unwrap_or(SESSION_READ_CHUNK)
@@ -1107,41 +1446,135 @@ impl SessionLogTail {
             let start = buf.len();
             buf.resize(start + want, 0);
             let Ok(got) = file.read(&mut buf[start..]) else {
-                return;
+                self.read_failed = true;
+                return self.snapshot(final_capture, &buf[..start]);
             };
             note_session_log_bytes_read(got as u64);
             buf.truncate(start + got);
             if got == 0 {
+                self.read_failed = true;
                 break;
             }
             remaining -= got as u64;
+            if skipping {
+                if let Some(end) = buf.iter().position(|b| *b == b'\n') {
+                    self.offset += end as u64 + 1;
+                    buf.drain(..=end);
+                    skipping = false;
+                } else {
+                    self.offset += buf.len() as u64;
+                    buf.clear();
+                    continue;
+                }
+            }
             // Parse up to the last complete line; carry the torn remainder.
             let Some(end) = buf.iter().rposition(|b| *b == b'\n') else {
                 if buf.len() >= SESSION_READ_CHUNK * 4 {
-                    // A single line this long carries no model record worth
-                    // the memory; skip it rather than grow without bound.
+                    self.evidence
+                        .note_input_loss(ModelEvidenceInputLoss::OversizeRecord);
                     self.offset += buf.len() as u64;
                     buf.clear();
+                    skipping = true;
                 }
                 continue;
             };
-            self.absorb(&buf[..=end]);
+            for line in buf[..=end].split_inclusive(|b| *b == b'\n') {
+                if line.len() >= SESSION_READ_CHUNK * 4 {
+                    self.evidence
+                        .note_input_loss(ModelEvidenceInputLoss::OversizeRecord);
+                } else {
+                    self.absorb(line);
+                }
+            }
             self.offset += end as u64 + 1;
             buf.drain(..=end);
         }
+        self.prefix = source_prefix(&mut file, self.offset).ok();
+        if remaining == 0 {
+            if self.read_failed {
+                self.generation.0 = self.generation.0.saturating_add(1);
+            }
+            self.read_failed = false;
+        }
+        self.snapshot(final_capture, &buf)
     }
 
     fn absorb(&mut self, bytes: &[u8]) {
+        self.evidence.push(bytes);
         let text = String::from_utf8_lossy(bytes);
         if self.adapter == "codex" {
-            extend_collapsed(&mut self.models, realized_models_from_codex_session(&text));
             extend_collapsed(
                 &mut self.efforts,
-                cosmon_core::model_realization::realized_efforts_from_codex_session(&text),
+                realized_efforts_from_codex_session(&text),
             );
-        } else {
-            extend_collapsed(&mut self.models, realized_models_from_claude_jsonl(&text));
         }
+    }
+
+    fn snapshot(&mut self, final_capture: bool, trailing: &[u8]) -> ModelEvidenceAssessment {
+        let mut evidence = self.evidence.clone();
+        evidence.push(trailing);
+        if self.read_failed {
+            evidence.note_input_loss(ModelEvidenceInputLoss::ReadFailure);
+        }
+        if self.continuity_lost {
+            evidence.note_input_loss(ModelEvidenceInputLoss::ContinuityLost);
+        }
+        let mut assessment = if final_capture {
+            evidence.finish()
+        } else {
+            evidence.assessment()
+        };
+        if let Some(prior) = if self.read_failed {
+            None
+        } else {
+            self.prior.take()
+        } {
+            let repaired_read = matches!(&prior.coverage,
+                ModelEvidenceCoverage::Degraded(reasons)
+                    if reasons.iter().all(|reason| *reason == ModelEvidenceReason::ReadFailure));
+            if repaired_read && !matches!(assessment.coverage, ModelEvidenceCoverage::Degraded(_)) {
+                self.generation.0 = self.generation.0.saturating_add(1);
+            } else if assessment.complete_bytes < prior.complete_bytes
+                || (matches!(prior.coverage, ModelEvidenceCoverage::Degraded(_))
+                    && !matches!(assessment.coverage, ModelEvidenceCoverage::Degraded(_)))
+            {
+                self.continuity_lost = true;
+                self.generation.0 = self.generation.0.saturating_add(1);
+                assessment = self.snapshot(final_capture, trailing);
+            }
+        }
+        assessment
+    }
+}
+
+fn source_prefix(file: &mut std::fs::File, boundary: u64) -> std::io::Result<[u8; 32]> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut hasher = Sha256::new();
+    let head = boundary.min(4096) as usize;
+    file.seek(SeekFrom::Start(0))?;
+    let mut buf = vec![0; head];
+    file.read_exact(&mut buf)?;
+    hasher.update(&buf);
+    if boundary > head as u64 {
+        let tail = boundary.min(4096) as usize;
+        file.seek(SeekFrom::Start(boundary - tail as u64))?;
+        buf.resize(tail, 0);
+        file.read_exact(&mut buf)?;
+        hasher.update(&buf);
+    }
+    Ok(hasher.finalize().into())
+}
+
+fn session_file_identity(meta: &std::fs::Metadata) -> (u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        (meta.dev(), meta.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        (0, 0)
     }
 }
 
