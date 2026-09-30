@@ -3,11 +3,12 @@
 \* in ADR-052 ("One Ledger, One Writer, One Witness per Field").
 \*
 \* Extended 2026-09-29 (task-20260929-2940) with four concurrency
-\* situations fixed or opened on 2026-09-28/29. All four are gated by
+\* situations fixed or opened on 2026-09-28/29. Issue #129 adds a fifth.
+\* All five are gated by
 \* CONSTANT ConcurrencyEnabled (FALSE in every pre-existing config, whose
 \* state spaces are therefore unchanged), and each fix can be reverted
 \* to its pre-fix behaviour by naming it in CONSTANT PreFix, which is
-\* how the four counterexample configs re-open the bug:
+\* how the counterexample configs re-open the bugs:
 \*
 \*   #122  Retackle(m) re-spawns a worker for a Running molecule whose
 \*         worker died (ProcessCrash models the codex self-update that
@@ -29,6 +30,10 @@
 \*         runtime) and a per-molecule dispatch claim taken before model
 \*         selection. OneDispatchPerMolecule. PreFix "UnclaimedTackle"
 \*         removes the claim.
+\*   #129  Collapse, Freeze, or a tag writer can act between model selection
+\*         and the dispatch ledger commit. The commit refuses a changed
+\*         claim. PreFix "StaleDispatchCommit" replays the old snapshot
+\*         overwrite and violates NoWriterOverwritten.
 \*
 \* collapse_cause is a ghost of the ledger's collapse reason; it lets
 \* the #122 and #117 properties be stated as state invariants.
@@ -129,7 +134,8 @@ CONSTANTS Mol, MaxSeqno, AsyncCrashesEnabled, OutOfBandEnabled,
 CONSTANTS ConcurrencyEnabled, BlockedBy, PreFix
 
 PreFixBehaviours == {"PurgeCollapses", "PatrolSnapshot",
-                     "ReleaseOnAnyTerminal", "UnclaimedTackle"}
+                     "ReleaseOnAnyTerminal", "UnclaimedTackle",
+                     "StaleDispatchCommit"}
 
 \* The two tacklers of #119: an operator's `cs tackle --model ...` and
 \* the resident runtime's automatic dispatch. Each pins its own model,
@@ -157,13 +163,14 @@ VARIABLES
     collapse_cause,          \* Mol -> {None,Operator,Patrol,Purge} — ghost of collapse reason
     claim,                   \* Mol -> {None} \cup Tacklers — dispatch claim (#119)
     selected,                \* Mol -> SUBSET Tacklers — tacklers past model selection (#119)
-    dispatched_by            \* Mol -> {None} \cup Tacklers — tackler whose spawn won (#119)
+    dispatched_by,           \* Mol -> {None} \cup Tacklers — tackler whose spawn won (#119)
+    claim_writer,            \* Mol -> {None,Collapsed,Frozen,Tagged} — concurrent state writer (#129)
+    writer_overwritten       \* Mol -> BOOLEAN — a stale commit erased that writer (#129)
 
-\* Variables added 2026-09-29. Every pre-existing action leaves them
-\* UNCHANGED except where noted (Collapse records its cause; Complete
-\* and Collapse end the spawn grace).
+\* Concurrency variables. Existing actions preserve them except for their
+\* explicitly modelled effects on cause, grace, and claim-window writers.
 ext_vars == <<in_grace, patrol_saw_dead, collapse_cause,
-              claim, selected, dispatched_by>>
+              claim, selected, dispatched_by, claim_writer, writer_overwritten>>
 
 vars == <<mol_status, fleet_desired, tmux_session, worker_pid_alive,
           branch_merged, events_seqno, events_writer_lock,
@@ -185,6 +192,8 @@ Init ==
     /\ claim              = [m \in Mol |-> "None"]
     /\ selected           = [m \in Mol |-> {}]
     /\ dispatched_by      = [m \in Mol |-> "None"]
+    /\ claim_writer       = [m \in Mol |-> "None"]
+    /\ writer_overwritten = [m \in Mol |-> FALSE]
 
 \* ---------------- StepClock helpers (hawking 8th clock) ----------------
 
@@ -271,7 +280,8 @@ Complete(m) == /\ mol_status[m] = "Running"
                /\ UNCHANGED <<branch_merged, events_seqno, events_writer_lock,
                               sealLog, now>>
                /\ UNCHANGED <<patrol_saw_dead, collapse_cause,
-                              claim, selected, dispatched_by>>
+                              claim, selected, dispatched_by,
+                              claim_writer, writer_overwritten>>
 
 \* Done has TWO premises: status = Completed (in-band) AND not yet
 \* merged (idempotence). It is the boss-stamps-ticket gesture.
@@ -292,16 +302,26 @@ Collapse(m) == /\ mol_status[m] \in {"Pending","Running","Frozen","Stalled"}
                /\ worker_pid_alive' = [worker_pid_alive EXCEPT ![m] = FALSE]
                /\ in_grace' = [in_grace EXCEPT ![m] = FALSE]
                /\ collapse_cause' = [collapse_cause EXCEPT ![m] = "Operator"]
+               /\ claim_writer' = [claim_writer EXCEPT ![m] =
+                     IF mol_status[m] = "Pending" /\ selected[m] # {}
+                        /\ dispatched_by[m] = "None"
+                     THEN "Collapsed" ELSE @]
                /\ UNCHANGED <<branch_merged, events_seqno, events_writer_lock,
                               sealLog, now>>
-               /\ UNCHANGED <<patrol_saw_dead, claim, selected, dispatched_by>>
+               /\ UNCHANGED <<patrol_saw_dead, claim, selected, dispatched_by,
+                              writer_overwritten>>
 
-Freeze(m) == /\ mol_status[m] = "Running"
+Freeze(m) == /\ (mol_status[m] = "Running"
+                 \/ (ConcurrencyEnabled /\ mol_status[m] = "Pending"
+                     /\ selected[m] # {}))
              /\ mol_status' = [mol_status EXCEPT ![m] = "Frozen"]
+             /\ claim_writer' = [claim_writer EXCEPT ![m] =
+                   IF mol_status[m] = "Pending" THEN "Frozen" ELSE @]
              /\ UNCHANGED <<fleet_desired, tmux_session, worker_pid_alive,
                             branch_merged, events_seqno, events_writer_lock,
                             sealLog, now>>
-             /\ UNCHANGED ext_vars
+             /\ UNCHANGED <<in_grace, patrol_saw_dead, collapse_cause,
+                            claim, selected, dispatched_by, writer_overwritten>>
 
 Thaw(m) == /\ mol_status[m] = "Frozen"
            /\ mol_status' = [mol_status EXCEPT ![m] = "Running"]
@@ -340,7 +360,8 @@ Purge(m) == /\ fleet_desired[m] = "Registered"
                            branch_merged, events_seqno, events_writer_lock,
                            sealLog, now>>
             /\ UNCHANGED <<in_grace, patrol_saw_dead,
-                           claim, selected, dispatched_by>>
+                           claim, selected, dispatched_by,
+                           claim_writer, writer_overwritten>>
 
 \* ---------------- StepClock / InferenceStalled (the 7th ghost) ---------
 
@@ -369,7 +390,7 @@ Tick == /\ now < MaxClock
                        events_writer_lock, sealLog>>
         /\ UNCHANGED ext_vars
 
-\* ---------------- 2026-09-29 concurrency actions ----------------
+\* ---------------- Concurrent dispatch and lifecycle actions -------------
 \* All enabled only when ConcurrencyEnabled.
 
 \* SelectModel — tackler t passes model selection for m (#119). With the
@@ -392,13 +413,39 @@ SelectModel(t, m) ==
     /\ UNCHANGED <<mol_status, fleet_desired, tmux_session, worker_pid_alive,
                    branch_merged, events_seqno, events_writer_lock,
                    sealLog, now>>
-    /\ UNCHANGED <<in_grace, patrol_saw_dead, collapse_cause, dispatched_by>>
+    /\ UNCHANGED <<in_grace, patrol_saw_dead, collapse_cause, dispatched_by,
+                   claim_writer, writer_overwritten>>
+
+\* A second writer acts after model selection but before the ledger commit.
+\* A collapse or freeze changes status; a tag changes only the tag field,
+\* represented by claim_writer = "Tagged". None of these writers takes the
+\* dispatch claim. The fixed commit re-reads and refuses each changed input.
+ConcurrentWrite(m, effect) ==
+    /\ ConcurrencyEnabled
+    /\ effect \in {"Collapsed", "Frozen", "Tagged"}
+    /\ mol_status[m] = "Pending"
+    /\ selected[m] # {}
+    /\ dispatched_by[m] = "None"
+    /\ claim_writer[m] = "None"
+    /\ claim_writer' = [claim_writer EXCEPT ![m] = effect]
+    /\ IF effect = "Tagged"
+       THEN UNCHANGED mol_status
+       ELSE mol_status' = [mol_status EXCEPT ![m] = effect]
+    /\ IF effect = "Collapsed"
+       THEN collapse_cause' = [collapse_cause EXCEPT ![m] = "Operator"]
+       ELSE UNCHANGED collapse_cause
+    /\ UNCHANGED <<fleet_desired, tmux_session, worker_pid_alive,
+                   branch_merged, events_seqno, events_writer_lock,
+                   sealLog, now>>
+    /\ UNCHANGED <<in_grace, patrol_saw_dead, claim, selected,
+                   dispatched_by, writer_overwritten>>
 
 \* SpawnBy — tackler t spawns the worker with the model it selected.
 \* Starts the spawn grace of #117.
 SpawnBy(t, m) ==
     /\ ConcurrencyEnabled
-    /\ mol_status[m] = "Pending"
+    /\ ("StaleDispatchCommit" \in PreFix
+        \/ (mol_status[m] = "Pending" /\ claim_writer[m] = "None"))
     /\ Released(m)
     /\ t \in selected[m]
     /\ ("UnclaimedTackle" \in PreFix \/ claim[m] = t)
@@ -408,6 +455,9 @@ SpawnBy(t, m) ==
     /\ worker_pid_alive' = [worker_pid_alive EXCEPT ![m] = TRUE]
     /\ in_grace'         = [in_grace EXCEPT ![m] = TRUE]
     /\ dispatched_by'    = [dispatched_by EXCEPT ![m] = t]
+    /\ writer_overwritten' = [writer_overwritten EXCEPT ![m] =
+                                @ \/ claim_writer[m] # "None"]
+    /\ claim_writer' = [claim_writer EXCEPT ![m] = "None"]
     /\ UNCHANGED <<branch_merged, events_seqno, events_writer_lock,
                    sealLog, now>>
     /\ UNCHANGED <<patrol_saw_dead, collapse_cause, claim, selected>>
@@ -429,7 +479,8 @@ Retackle(m) ==
     /\ UNCHANGED <<mol_status, branch_merged, events_seqno,
                    events_writer_lock, sealLog, now>>
     /\ UNCHANGED <<patrol_saw_dead, collapse_cause,
-                   claim, selected, dispatched_by>>
+                   claim, selected, dispatched_by,
+                   claim_writer, writer_overwritten>>
 
 \* GraceExpire — the spawn grace window elapses (#117). Time is left
 \* abstract: the grace may end at any point after the spawn.
@@ -441,7 +492,8 @@ GraceExpire(m) ==
                    branch_merged, events_seqno, events_writer_lock,
                    sealLog, now>>
     /\ UNCHANGED <<patrol_saw_dead, collapse_cause,
-                   claim, selected, dispatched_by>>
+                   claim, selected, dispatched_by,
+                   claim_writer, writer_overwritten>>
 
 \* PatrolObserve — the patrol takes its liveness snapshot of m. The
 \* snapshot can be taken before the spawn (Pending, no worker yet) or
@@ -455,7 +507,8 @@ PatrolObserve(m) ==
     /\ UNCHANGED <<mol_status, fleet_desired, tmux_session, worker_pid_alive,
                    branch_merged, events_seqno, events_writer_lock,
                    sealLog, now>>
-    /\ UNCHANGED <<in_grace, collapse_cause, claim, selected, dispatched_by>>
+    /\ UNCHANGED <<in_grace, collapse_cause, claim, selected, dispatched_by,
+                   claim_writer, writer_overwritten>>
 
 \* PatrolCollapse — the patrol auto-collapses a molecule it believes has
 \* a dead worker. With the fix it withholds the verdict during the
@@ -477,7 +530,8 @@ PatrolCollapse(m) ==
     /\ UNCHANGED <<worker_pid_alive, branch_merged, events_seqno,
                    events_writer_lock, sealLog, now>>
     /\ UNCHANGED <<in_grace, patrol_saw_dead,
-                   claim, selected, dispatched_by>>
+                   claim, selected, dispatched_by,
+                   claim_writer, writer_overwritten>>
 
 \* ---------------- Out-of-band ground-truth (asynchronous) ----------------
 
@@ -519,6 +573,8 @@ Next == \/ \E m \in Mol :
               \/ TmuxCrash(m) \/ ProcessCrash(m) \/ BypassMerge(m)
               \/ Retackle(m) \/ GraceExpire(m)
               \/ PatrolObserve(m) \/ PatrolCollapse(m)
+              \/ \E effect \in {"Collapsed", "Frozen", "Tagged"} :
+                    ConcurrentWrite(m, effect)
         \/ \E t \in Tacklers, m \in Mol : SelectModel(t, m) \/ SpawnBy(t, m)
         \/ Tick
 
@@ -605,6 +661,10 @@ OneDispatchPerMolecule == \A m \in Mol :
     /\ Cardinality(selected[m]) <= 1
     /\ dispatched_by[m] # "None" => dispatched_by[m] \in selected[m]
 
+\* #129 — a dispatch commit cannot erase an intervening lifecycle or tag
+\* writer. The boolean remembers the overwrite even after the tag is lost.
+NoWriterOverwritten == \A m \in Mol : ~writer_overwritten[m]
+
 \* ---------------- Liveness (I5 + I_StepProgress + supporting L2, L3) --
 
 I5_CompletedEventuallyMerges == \A m \in Mol :
@@ -672,6 +732,8 @@ TypeOK ==
     /\ claim              \in [Mol -> {"None"} \cup Tacklers]
     /\ selected           \in [Mol -> SUBSET Tacklers]
     /\ dispatched_by      \in [Mol -> {"None"} \cup Tacklers]
+    /\ claim_writer       \in [Mol -> {"None","Collapsed","Frozen","Tagged"}]
+    /\ writer_overwritten \in [Mol -> BOOLEAN]
     /\ PreFix             \subseteq PreFixBehaviours
     /\ BlockedBy          \subseteq Mol \X Mol
 =====================================================================

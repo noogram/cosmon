@@ -23,6 +23,7 @@ verify the invariants stated in cosmon's ADRs.
 | `CosmonRun_PatrolGraceCounterexample.cfg` | `PreFix = {"PatrolSnapshot"}` — `NoCollapseOfLiveOrGraceWorker` fails (pre-#117 patrol). |
 | `CosmonRun_BlockerReleaseCounterexample.cfg` | `PreFix = {"ReleaseOnAnyTerminal"}` — `DependentRunsOnlyAfterBlockerCompleted` fails (pre-#118 admission). |
 | `CosmonRun_DispatchClaimCounterexample.cfg` | `PreFix = {"UnclaimedTackle"}` — `OneDispatchPerMolecule` fails (pre-#119 tackle). |
+| `CosmonRun_StaleDispatchCounterexample.cfg` | `PreFix = {"StaleDispatchCommit"}` — `NoWriterOverwritten` fails when a lifecycle or tag writer acts during the claim window (#129). |
 | `CosmonRunXGalaxy_InBand.cfg`       | Closed cross-galaxy model — all five I11..I15 hold.                 |
 | `CosmonRunXGalaxy_Adversarial.cfg`  | `ForgePeerReceipt` enabled — exhibits I14 as the cross-galaxy Gödel counterexample. |
 | `CosmonDocHarness.tla`              | TLA+ meta-fleet for DOC-HARNESS mission (delib-20260519-a20b, B.4). Invariants I1 NoOrphanDoc, I2 DemoGateBeforeDoc, I3 RegistryTruth (with KebabRenameBait exclusion), I4 LyapunovDecreasing, TatouageShape. |
@@ -118,6 +119,7 @@ above is mechanised as a contract:
 | `CosmonRun_PatrolGraceCounterexample.cfg` | **fail** | `NoCollapseOfLiveOrGraceWorker`   |
 | `CosmonRun_BlockerReleaseCounterexample.cfg` | **fail** | `DependentRunsOnlyAfterBlockerCompleted` |
 | `CosmonRun_DispatchClaimCounterexample.cfg` | **fail** | `OneDispatchPerMolecule`        |
+| `CosmonRun_StaleDispatchCounterexample.cfg` | **fail** | `NoWriterOverwritten`         |
 | `CosmonRunXGalaxy_InBand.cfg`       | pass       | —                                    |
 | `CosmonRunXGalaxy_Adversarial.cfg`  | **fail**   | `I14_PeerCompletionHonest`           |
 
