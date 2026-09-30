@@ -6,7 +6,9 @@
 
 ## `cs peek`
 
-Peek — canonical fleet observation command (TUI default; `--no-tui` for plaintext stream)
+Peek — canonical fleet observation with a latest-turn context gauge (TUI default).
+
+The context gauge uses the latest reported turn's input over the model window. Unknown occupancy has no percentage; token columns stay cumulative.
 
 **Usage:** `cs peek [OPTIONS]`
 
@@ -22,6 +24,10 @@ EXAMPLES:
   cs peek --snapshot > /tmp/a     # capture from any device, then `diff` two
                                   #   captures and expect zero bytes (see
                                   #   docs/guides/peek-snapshot.md)
+
+The context gauge uses the latest reported turn's input tokens over the
+model window. An unknown turn or window shows no percentage; IN/CACHED/OUT/RSN
+remain cumulative session counters. Snapshot and JSON follow the same rule.
 
 The selected dependent's blocked-by detail names a collapsed or frozen
 blocker and the operator gesture that can release or replace the edge.

@@ -597,7 +597,7 @@ mod tests {
                 0,
                 0,
                 0,
-                cw,
+                (cw, Some(total)),
                 &cosmon_observability::EnergyCost::Unknown,
                 &[],
             );

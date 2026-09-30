@@ -66,6 +66,8 @@ pub struct WorkerEnergy {
     pub usage: Option<UsageRecord>,
     /// Model context-window capacity, when the adapter reports it.
     pub context_window: Option<u64>,
+    /// Input tokens in the last reported turn, including cached input.
+    pub latest_turn_input_tokens: Option<u64>,
 }
 
 #[cfg(test)]
@@ -646,6 +648,12 @@ fn read_claude_worker_energy(
         subscription: None,
         usage: canonical_usage,
         context_window: None,
+        latest_turn_input_tokens: session_log.turns.last().and_then(|turn| {
+            turn.input_tokens
+                .get()
+                .checked_add(turn.cache_creation_input_tokens.get())?
+                .checked_add(turn.cache_read_input_tokens.get())
+        }),
     })
 }
 
@@ -725,6 +733,7 @@ fn read_codex_worker_energy(session_path: &Path, worker_id: &WorkerId) -> Option
         subscription: snapshot.subscription,
         usage: canonical_usage,
         context_window: snapshot.model_context_window,
+        latest_turn_input_tokens: snapshot.latest_turn_input_tokens,
     })
 }
 
@@ -2482,6 +2491,7 @@ mod tests {
             subscription: None,
             usage: None,
             context_window: Some(1_000),
+            latest_turn_input_tokens: Some(80),
         };
         let (i, cached, o, reasoning) = e.token_tuple();
         assert_eq!(i, 100);

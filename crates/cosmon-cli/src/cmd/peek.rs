@@ -738,6 +738,8 @@ struct PeekMoleculeJson {
     /// Histories are deduplicated before publication; an empty array means
     /// no source observation, never measured zero.
     usage: Vec<cosmon_core::usage::UsageRecord>,
+    /// Latest-turn context occupancy. `null` when the turn or capacity is unknown.
+    context_percent: Option<f64>,
 }
 
 /// The `cs peek --json` document.
@@ -860,6 +862,10 @@ fn snapshot_to_json(
                 last_activity: row.last_activity,
                 updated_at: mol.updated_at,
                 usage: row.usage.clone(),
+                context_percent: cosmon_observability::worker::context_percent(
+                    row.latest_turn_input_tokens,
+                    row.context_window,
+                ),
             })
         })
         .collect();
@@ -1797,6 +1803,23 @@ mod tests {
             v["molecules"][0]["usage"][0]["plan"]["windows"][0]["scope"],
             "account"
         );
+    }
+
+    #[test]
+    fn json_context_percent_is_last_turn_or_null() {
+        let mut snap = json_fixture(MoleculeStatus::Running, true);
+        let mut worker = snap.workers().next().unwrap().clone();
+        worker.energy.input_tokens = 48_603_840;
+        worker.energy.context_window = Some(258_400);
+        worker.energy.latest_turn_input_tokens = Some(133_809);
+        snap.insert_worker(worker.clone());
+        let v = json_value(&snap);
+        let percent = v["molecules"][0]["context_percent"].as_f64().unwrap();
+        assert!((percent - 51.783_668_730_650_15).abs() < 0.000_001);
+
+        worker.energy.latest_turn_input_tokens = None;
+        snap.insert_worker(worker);
+        assert!(json_value(&snap)["molecules"][0]["context_percent"].is_null());
     }
 
     #[test]
