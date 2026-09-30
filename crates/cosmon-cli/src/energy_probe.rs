@@ -745,16 +745,15 @@ fn read_codex_rollout_energy(
 }
 
 /// **Always-on realized-model capture** at the completion seam
-/// (delib-20260718-c70e / F-01). Called from `cs complete`/`cs done` — the
-/// worker's session log is fully written by then, and this runs regardless of
-/// whether anyone is watching `cs peek`. `cs peek` is therefore a **strict
+/// (delib-20260718-c70e / F-01). Called before `cs complete` or the last
+/// `cs evolve` publishes `Completed`, so an immediate harvest sees the
+/// observation when the session log contains one. `cs peek` is a **strict
 /// reader**: it never emits.
 ///
-/// Resolution is filesystem-only and pane-independent: the completing `cs`
-/// process shares the worker's working directory, so the worker's session log
-/// is resolved from that `cwd` (claude via its `projects/{sanitize(cwd)}`
-/// directory, codex via the `session_meta.payload.cwd` join). The adapter that
-/// actually ran and the worker to scope observations to are read from the last
+/// Resolution is filesystem-only and pane-independent: the worker's recorded
+/// worktree is the join key, with the caller's cwd used for legacy workers
+/// lacking that record. The adapter that actually ran and the worker to scope
+/// observations to are read from the last
 /// `AdapterSelected` / `WorkerSpawned` on `events.jsonl` (F-02). The in-process
 /// provider adapters (openai/anthropic/mistral) emit during their run at the
 /// response seam, so they are skipped here.
@@ -762,7 +761,13 @@ fn read_codex_rollout_energy(
 /// Best-effort and trace-not-lock: any I/O or resolution failure yields no
 /// observation, never an error.
 pub fn capture_realized_at_completion(state_dir: &Path, mol_id: &MoleculeId) {
-    let Ok(cwd) = std::env::current_dir() else {
+    // A completion can be driven by a controller standing outside the worker's
+    // worktree. Resolve the dispatch's recorded cwd before falling back to the
+    // caller's cwd, while the fleet entry still exists ahead of harvest.
+    let cwd = last_worker_for(state_dir, mol_id)
+        .and_then(|worker| resolve_recorded_worker_cwd(state_dir, &worker))
+        .or_else(|| std::env::current_dir().ok());
+    let Some(cwd) = cwd else {
         return;
     };
     capture_realized_from_cwd(state_dir, mol_id, &cwd);
@@ -775,9 +780,9 @@ pub fn capture_realized_at_completion(state_dir: &Path, mol_id: &MoleculeId) {
 /// durable across a worker crash that never reaches `cs complete` (D4:
 /// "premier assistant turn, pas au teardown").
 ///
-/// Unlike [`capture_realized_at_completion`] the polling process does **not**
-/// share the worker's cwd (the operator runs `cs wait` from the repo root),
-/// so the worker's working directory is resolved live from its tmux pane
+/// The polling process may run outside the worker's cwd (the operator runs
+/// `cs wait` from the repo root), so the worker's working directory is
+/// resolved live from its tmux pane
 /// (`#{pane_current_path}`). The rest of the chain is the same
 /// [`capture_realized_from_cwd`] core: session-log resolution by cwd, typed
 /// parse, first-observation + on-change dedup, worker-scoped emission.
@@ -1207,8 +1212,7 @@ pub fn last_worker_for(state_dir: &Path, mol_id: &MoleculeId) -> Option<WorkerId
 }
 
 /// Resolve the claude session `*.jsonl` for a worker whose `cwd` is known: the
-/// most-recently-modified log under `~/.claude/projects/{sanitize(cwd)}/`. The
-/// completing process shares the worker's cwd, so this needs no live pane.
+/// most-recently-modified log under `~/.claude/projects/{sanitize(cwd)}/`.
 fn resolve_claude_session_by_cwd(cwd: &Path) -> Option<PathBuf> {
     resolve_claude_session_by_cwd_under(&claude_projects_dir(), cwd)
 }
