@@ -56,6 +56,7 @@ use cosmon_core::auth::{JwtClaims, Subject};
 use cosmon_core::error::CosmonError;
 use cosmon_core::harvest_door::HarvestOptions;
 use cosmon_core::id::{FleetId, MoleculeId};
+use cosmon_core::remote_harvest::{EffectiveRemotePolicy, PolicyProvenance, RemoteAuthoritySource};
 use cosmon_core::tag::Tag;
 use cosmon_core::worker_argv::CLAUDE_ADAPTER;
 use cosmon_filestore::{harvest_door, FileStore};
@@ -92,6 +93,7 @@ use crate::AppState;
 // that grants only `:write` cannot burn the operator's Anthropic
 // budget by spawning workers (delib-20260522-a069 §D5, torvalds
 // §Piège #3).
+pub use crate::auth::scopes::MOLECULE_HARVEST as SCOPE_MOLECULE_HARVEST;
 pub use crate::auth::scopes::MOLECULE_READ as SCOPE_MOLECULE_READ;
 pub use crate::auth::scopes::MOLECULE_WRITE as SCOPE_MOLECULE_WRITE;
 pub use crate::auth::scopes::WORKER_SPAWN as SCOPE_WORKER_SPAWN;
@@ -196,7 +198,10 @@ fn effective_scope_decision(
     binding_scopes: &[String],
     wanted_any: &[&str],
 ) -> (AuthzDecision, Option<&'static str>) {
-    if wanted_any.iter().any(|w| jwt.has_scope(w)) {
+    if wanted_any
+        .iter()
+        .any(|w| *w != SCOPE_MOLECULE_HARVEST && jwt.has_scope(w))
+    {
         return (AuthzDecision::Allow, Some(GRANT_SOURCE_JWT));
     }
     if wanted_any
@@ -2231,6 +2236,7 @@ impl DoneBody {
 /// **501 `harvest_effect_unavailable`** rather than a subprocess or a lie.
 ///
 /// [`DoorRefusal`]: cosmon_core::harvest_door::DoorRefusal
+#[allow(clippy::too_many_lines)]
 pub async fn done_molecule(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2242,23 +2248,42 @@ pub async fn done_molecule(
     let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
         .map_err(|e| state.reject(e))?;
 
-    // 2. Scope. `cosmon:molecule:write` alone — deliberately NOT the
-    //    `+ worker:spawn` composition that tackle and run carry. Those two
-    //    burn Anthropic credit; a harvest does not, unless auto-propel is
-    //    armed, and auto-propel injects text into a live worker session.
-    //    Requesting escalation is therefore the one option on this route
-    //    that spends agent budget, and it is refused without the spawn
-    //    scope below rather than by widening the whole route's gate.
-    authorise_scope(
-        &state,
-        &jwt,
-        "done",
-        &[SCOPE_MOLECULE_WRITE],
-        SCOPE_MOLECULE_WRITE,
-    )?;
-
-    // 3. Admission boundary (clauses a–d, materialise inbox).
+    // Resolve identity before selecting the tenant's policy. An unknown
+    // binding must never disclose which tenant directory exists.
     let spark = build_spark(&state, &jwt, Verb::DoneMolecule, Some(&molecule_id_str))?;
+    let tenant_root = state.galaxies_root.join(spark.noyau.as_str());
+    if !tenant_root.exists() {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            label: "not_found",
+            request_id: Some(spark.request_id.clone()),
+        });
+    }
+    let cfg = cosmon_filestore::load_project_config(&tenant_root.join(".cosmon/config.toml"))
+        .map_err(|_| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: "harvest_failed",
+            request_id: Some(spark.request_id.clone()),
+        })?;
+    let policy = cosmon_core::remote_harvest::resolve_remote_policy(&cfg.harvest_authority)
+        .map_err(|_| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: "harvest_failed",
+            request_id: Some(spark.request_id.clone()),
+        })?;
+    if policy.policy == EffectiveRemotePolicy::Disabled {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            label: "not_authorized",
+            request_id: Some(spark.request_id.clone()),
+        });
+    }
+    let wanted = if policy.provenance == PolicyProvenance::Legacy {
+        &[SCOPE_MOLECULE_WRITE, SCOPE_MOLECULE_HARVEST][..]
+    } else {
+        &[SCOPE_MOLECULE_HARVEST][..]
+    };
+    authorise_scope(&state, &jwt, "done", wanted, SCOPE_MOLECULE_HARVEST)?;
 
     // 4. The body. Empty is legal only in the sense that it fails the same
     //    way `{}` does — with `missing_reason`, named, rather than with a
@@ -2280,6 +2305,24 @@ pub async fn done_molecule(
     })?;
     if let Err(refusal) = options.validate() {
         return Err(door_refusal_to_api_error(refusal, &spark.request_id));
+    }
+    if policy.provenance == PolicyProvenance::Explicit
+        && cosmon_core::remote_harvest::explicit_override_requested(&options)
+    {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            label: "not_authorized",
+            request_id: Some(spark.request_id.clone()),
+        });
+    }
+    if policy.provenance == PolicyProvenance::Explicit
+        && !state.harvest_effect.supports_explicit_remote()
+    {
+        return Err(ApiError {
+            status: StatusCode::NOT_IMPLEMENTED,
+            label: "harvest_effect_unavailable",
+            request_id: Some(spark.request_id.clone()),
+        });
     }
     // Auto-propel is the one option that spends agent budget: it sends a
     // natural-language instruction into a live worker session and retries
@@ -2303,21 +2346,61 @@ pub async fn done_molecule(
         label: "not_found",
         request_id: Some(spark.request_id.clone()),
     })?;
-    let tenant_root = state.galaxies_root.join(spark.noyau.as_str());
-    if !tenant_root.exists() {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            label: "not_found",
+    let authority_source =
+        if policy.provenance == PolicyProvenance::Legacy && jwt.has_scope(SCOPE_MOLECULE_WRITE) {
+            RemoteAuthoritySource::LegacyTokenWrite
+        } else if state
+            .nucleon_map
+            .load()
+            .allowed_scopes_for_audience(&jwt.iss, &jwt.sub, &jwt.aud)
+            .iter()
+            .any(|scope| scope == SCOPE_MOLECULE_HARVEST)
+        {
+            RemoteAuthoritySource::BindingHarvest
+        } else {
+            RemoteAuthoritySource::LegacyBindingWrite
+        };
+    let admission = cosmon_core::remote_harvest::RemoteHarvestAdmission {
+        issuer: jwt.iss.clone(),
+        subject: jwt.sub.clone(),
+        audience: jwt.aud.clone(),
+        tenant: spark.noyau.as_str().to_owned(),
+        molecule: molecule_id.clone(),
+        options: options.clone(),
+        expires_at: jwt.exp,
+        token_id: jwt.jti.clone(),
+        authority_source,
+        policy,
+    };
+    let validator = crate::harvest_effect::AdapterRemoteValidator {
+        state: Arc::clone(&state),
+    };
+    cosmon_core::remote_harvest::RemoteAdmissionValidator::validate(&validator, &admission)
+        .map_err(|_| ApiError {
+            status: StatusCode::FORBIDDEN,
+            label: "forbidden",
             request_id: Some(spark.request_id.clone()),
-        });
-    }
+        })?;
 
     // 6. The decision half, in-process: the same library body the door has
     //    always run, over the tenant's own state files. Every pre-effect
     //    refusal — and the `already_landed` idempotent success — answers
     //    here without the `cs` binary existing at all.
-    match decide_harvest_in_process(&tenant_root, &molecule_id, &options, &spark.request_id).await?
-    {
+    let decision = decide_harvest_in_process(
+        &tenant_root,
+        &molecule_id,
+        &options,
+        &spark.request_id,
+        Some(policy),
+    )
+    .await?;
+    cosmon_core::remote_harvest::RemoteAdmissionValidator::validate(&validator, &admission)
+        .map_err(|_| ApiError {
+            status: StatusCode::FORBIDDEN,
+            label: "forbidden",
+            request_id: Some(spark.request_id.clone()),
+        })?;
+    match decision {
         harvest_door::DoorDecision::AlreadyLanded { merged } => {
             let outcome = cosmon_core::harvest_door::DoorOutcome::AlreadyLanded { merged };
             // The retry answers with the same three facts the first call
@@ -2365,6 +2448,7 @@ pub async fn done_molecule(
         &molecule_id,
         &options,
         &spark.request_id,
+        Some((admission, Arc::new(validator))),
     )
     .await?;
 
@@ -2425,6 +2509,10 @@ async fn run_harvest_effect(
     molecule_id: &MoleculeId,
     options: &HarvestOptions,
     request_id: &str,
+    remote: Option<(
+        cosmon_core::remote_harvest::RemoteHarvestAdmission,
+        Arc<crate::harvest_effect::AdapterRemoteValidator>,
+    )>,
 ) -> Result<(cosmon_core::harvest_door::DoorOutcome, Option<String>), ApiError> {
     let effect = Arc::clone(&state.harvest_effect);
     let root = tenant_root.to_path_buf();
@@ -2464,13 +2552,28 @@ async fn run_harvest_effect(
             Ok(_) => {}
         }
         let store = FileStore::new(&state_dir);
-        let cfg = cosmon_filestore::load_project_config(&config_path)
-            .unwrap_or_else(|_| cosmon_core::config::ProjectConfig::default());
+        let cfg = if remote.is_some() {
+            cosmon_filestore::load_project_config(&config_path)
+                .map_err(harvest_door::LandError::Fault)?
+        } else {
+            cosmon_filestore::load_project_config(&config_path)
+                .unwrap_or_else(|_| cosmon_core::config::ProjectConfig::default())
+        };
+        let (admission, validator) = remote.map_or((None, None), |(admission, validator)| {
+            (Some(admission), Some(validator))
+        });
         let mut bridge = PortBackedEffect {
             port: effect.as_ref(),
             root,
+            admission,
+            validator,
         };
-        let outcome = harvest_door::land(&store, &cfg, &id, &opts, &mut bridge)?;
+        let remote_policy = bridge.admission.as_ref().map(|admission| admission.policy);
+        let outcome = if let Some(policy) = remote_policy {
+            harvest_door::land_remote(&store, &cfg, &id, &opts, policy, &mut bridge)?
+        } else {
+            harvest_door::land(&store, &cfg, &id, &opts, &mut bridge)?
+        };
         // Read back inside the same blocking task: the effect has
         // returned, the store is open, and the tag is exactly the one the
         // result route publishes for this molecule.
@@ -2524,6 +2627,8 @@ async fn run_harvest_effect(
 struct PortBackedEffect<'a> {
     port: &'a dyn crate::harvest_effect::HarvestEffectPort,
     root: std::path::PathBuf,
+    admission: Option<cosmon_core::remote_harvest::RemoteHarvestAdmission>,
+    validator: Option<Arc<crate::harvest_effect::AdapterRemoteValidator>>,
 }
 
 impl harvest_door::SealedHarvestEffect for PortBackedEffect<'_> {
@@ -2540,7 +2645,12 @@ impl harvest_door::SealedHarvestEffect for PortBackedEffect<'_> {
         // vocabulary since the PR #62 review. The version of this bridge
         // that stringified the error is what lost a named refusal on the
         // way to the wire.
-        self.port.harvest(&self.root, molecule, options)
+        if let (Some(admission), Some(validator)) = (&self.admission, &self.validator) {
+            self.port
+                .harvest_remote(&self.root, molecule, options, admission, validator.as_ref())
+        } else {
+            self.port.harvest(&self.root, molecule, options)
+        }
     }
 }
 
@@ -2557,6 +2667,7 @@ async fn decide_harvest_in_process(
     molecule_id: &MoleculeId,
     options: &HarvestOptions,
     request_id: &str,
+    policy: Option<cosmon_core::remote_harvest::ResolvedRemotePolicy>,
 ) -> Result<harvest_door::DoorDecision, ApiError> {
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
     let tenant_config_path = tenant_root.join(".cosmon").join("config.toml");
@@ -2564,9 +2675,28 @@ async fn decide_harvest_in_process(
     let decision_options = options.clone();
     let decision = tokio::task::spawn_blocking(move || {
         let store = FileStore::new(&tenant_state_dir);
-        let cfg = cosmon_filestore::load_project_config(&tenant_config_path)
-            .unwrap_or_else(|_| cosmon_core::config::ProjectConfig::default());
-        harvest_door::decide(&store, &cfg, &decision_molecule, &decision_options)
+        let cfg = if policy.is_some() {
+            cosmon_filestore::load_project_config(&tenant_config_path)
+                .map_err(harvest_door::LandError::Fault)?
+        } else {
+            cosmon_filestore::load_project_config(&tenant_config_path)
+                .unwrap_or_else(|_| cosmon_core::config::ProjectConfig::default())
+        };
+        if let Some(policy) = policy {
+            let current =
+                cosmon_core::remote_harvest::resolve_remote_policy(&cfg.harvest_authority)
+                    .map_err(|_| {
+                        harvest_door::LandError::EffectFailed("harvest_policy_conflict".to_owned())
+                    })?;
+            if current != policy {
+                return Err(harvest_door::LandError::EffectFailed(
+                    "harvest_facts_changed".to_owned(),
+                ));
+            }
+            harvest_door::decide_remote(&store, &cfg, &decision_molecule, &decision_options, policy)
+        } else {
+            harvest_door::decide(&store, &cfg, &decision_molecule, &decision_options)
+        }
     })
     .await
     .map_err(|_| ApiError {

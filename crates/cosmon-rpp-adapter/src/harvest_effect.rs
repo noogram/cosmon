@@ -71,6 +71,9 @@ use std::process::Command;
 
 use cosmon_core::harvest_door::{DoorRefusal, HarvestOptions};
 use cosmon_core::id::{MoleculeId, NucleonId};
+use cosmon_core::remote_harvest::{
+    RemoteAdmissionValidator, RemoteAuthoritySource, RemoteHarvestAdmission,
+};
 use cosmon_state::StateStore as _;
 
 /// The one effect-error vocabulary, shared with the door's own seam.
@@ -282,6 +285,28 @@ pub trait HarvestEffectPort: Send + Sync + std::fmt::Debug {
         options: &HarvestOptions,
     ) -> Result<(), EffectFailure>;
 
+    /// Execute the remote entry with a server-created, revalidatable admission.
+    /// The default refuses explicit policies on executors that cannot carry it.
+    fn harvest_remote(
+        &self,
+        tenant_root: &Path,
+        molecule: &MoleculeId,
+        options: &HarvestOptions,
+        admission: &RemoteHarvestAdmission,
+        _validator: &dyn RemoteAdmissionValidator,
+    ) -> Result<(), EffectFailure> {
+        if admission.policy.provenance == cosmon_core::remote_harvest::PolicyProvenance::Legacy {
+            self.harvest(tenant_root, molecule, options)
+        } else {
+            Err(EffectFailure::Unavailable)
+        }
+    }
+
+    /// Whether the executor supports the trusted remote admission path.
+    fn supports_explicit_remote(&self) -> bool {
+        false
+    }
+
     /// Whether this effect acquires the trunk flock at its own effect
     /// boundary.
     ///
@@ -465,6 +490,95 @@ impl HarvestEffectPort for LibraryHarvestEffect {
         // `flock(2)` does not nest, so the door must not hold it across this
         // call.
         true
+    }
+
+    fn supports_explicit_remote(&self) -> bool {
+        true
+    }
+
+    fn harvest_remote(
+        &self,
+        tenant_root: &Path,
+        molecule: &MoleculeId,
+        options: &HarvestOptions,
+        admission: &RemoteHarvestAdmission,
+        validator: &dyn RemoteAdmissionValidator,
+    ) -> Result<(), EffectFailure> {
+        let ctx = cosmon_harvest::HarvestContext::at(
+            tenant_root.join(".cosmon").join("state"),
+            tenant_root,
+        );
+        let args =
+            cosmon_harvest::Args::from_harvest_options(molecule.as_str().to_owned(), options);
+        cosmon_harvest::run_remote(&ctx, &args, admission, validator)
+            .map_err(|err| harvest_error_from(&err))
+    }
+}
+
+/// Adapter port that rereads live identity and revocation state at the effect.
+#[derive(Debug)]
+pub struct AdapterRemoteValidator {
+    /// Shared server projections; binding reloads are observed on each check.
+    pub state: std::sync::Arc<crate::AppState>,
+}
+
+impl RemoteAdmissionValidator for AdapterRemoteValidator {
+    fn validate(&self, admission: &RemoteHarvestAdmission) -> Result<(), String> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| format!("clock unavailable: {e}"))?
+            .as_secs();
+        if now >= admission.expires_at {
+            return Err("harvest_scope_missing: credential expired".to_owned());
+        }
+        let map = self.state.nucleon_map.load();
+        let resolved = map
+            .resolve_for_audience(&admission.issuer, &admission.subject, &admission.audience)
+            .ok_or_else(|| "harvest_scope_missing: binding removed".to_owned())?;
+        if resolved.noyau.as_str() != admission.tenant
+            || !map.seal_intact_for_audience(
+                &admission.issuer,
+                &admission.subject,
+                &admission.audience,
+            )
+        {
+            return Err("harvest_scope_missing: binding changed".to_owned());
+        }
+        let scopes = map.allowed_scopes_for_audience(
+            &admission.issuer,
+            &admission.subject,
+            &admission.audience,
+        );
+        let granted = match admission.authority_source {
+            RemoteAuthoritySource::BindingHarvest => scopes
+                .iter()
+                .any(|s| s == crate::auth::scopes::MOLECULE_HARVEST),
+            RemoteAuthoritySource::LegacyTokenWrite => {
+                admission.policy.provenance == cosmon_core::remote_harvest::PolicyProvenance::Legacy
+            }
+            RemoteAuthoritySource::LegacyBindingWrite => {
+                admission.policy.provenance == cosmon_core::remote_harvest::PolicyProvenance::Legacy
+                    && scopes
+                        .iter()
+                        .any(|s| s == crate::auth::scopes::MOLECULE_WRITE)
+            }
+        };
+        if !granted {
+            return Err("harvest_scope_missing: binding does not grant harvest".to_owned());
+        }
+        self.state.deny_list.invalidate();
+        let snapshot = self.state.deny_list.snapshot();
+        if snapshot.global_kill
+            || snapshot.denied_jtis.contains(&admission.token_id)
+            || snapshot
+                .denied_sub_hashes
+                .contains(&crate::rate_limit::hash_sub(&admission.subject))
+            || snapshot.denied_noyaus.contains(&admission.tenant)
+        {
+            return Err("harvest_scope_missing: credential revoked".to_owned());
+        }
+        Ok(())
     }
 }
 

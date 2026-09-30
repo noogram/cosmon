@@ -1967,12 +1967,40 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     run_with_before_lock(ctx, args, || {})
 }
 
+/// Execute the shared transaction for a server-admitted remote harvest.
+///
+/// # Errors
+///
+/// Refuses when the admission is stale, changed or incompatible with the
+/// current tenant policy. The local entry never accepts this value.
+pub fn run_remote(
+    ctx: &Context,
+    args: &Args,
+    admission: &cosmon_core::remote_harvest::RemoteHarvestAdmission,
+    validator: &dyn cosmon_core::remote_harvest::RemoteAdmissionValidator,
+) -> anyhow::Result<()> {
+    run_with_remote_before_lock(ctx, args, Some((admission, validator)), || {})
+}
+
 // The closure is a deterministic test seam between preliminary gates and the
 // effect lock. Production passes an empty closure; no second lock is taken.
 #[allow(clippy::too_many_lines)]
 fn run_with_before_lock(
     ctx: &Context,
     args: &Args,
+    before_lock: impl FnOnce(),
+) -> anyhow::Result<()> {
+    run_with_remote_before_lock(ctx, args, None, before_lock)
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_with_remote_before_lock(
+    ctx: &Context,
+    args: &Args,
+    remote: Option<(
+        &cosmon_core::remote_harvest::RemoteHarvestAdmission,
+        &dyn cosmon_core::remote_harvest::RemoteAdmissionValidator,
+    )>,
     before_lock: impl FnOnce(),
 ) -> anyhow::Result<()> {
     // Guard: require project identity before touching transport.
@@ -1982,6 +2010,29 @@ fn run_with_before_lock(
     let store = FileStore::new(&state_dir);
 
     let mol_id = MoleculeId::new(&args.molecule)?;
+    if let Some((admission, validator)) = remote {
+        let selected_tenant = state_dir
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(std::ffi::OsStr::to_str);
+        if selected_tenant != Some(admission.tenant.as_str()) {
+            return Err(name_the_authority_refusal(
+                "remote harvest tenant changed".to_owned(),
+            ));
+        }
+        let expected = Args::from_harvest_options(args.molecule.clone(), &admission.options);
+        if admission.molecule != mol_id
+            || harvest_options_digest(args)? != harvest_options_digest(&expected)?
+        {
+            return Err(name_the_authority_refusal(
+                "remote harvest target or options changed".to_owned(),
+            ));
+        }
+        validator
+            .validate(admission)
+            .map_err(name_the_authority_refusal)?;
+    }
 
     // Issue #109 — harvest belongs to the pilot. Refused before anything is
     // read or locked, so the worker's own `cs done` lands nothing.
@@ -2142,7 +2193,7 @@ fn run_with_before_lock(
         repo_root: &repo_root,
         molecule: &mol_id,
     };
-    let preliminary_facts = if args.no_merge {
+    let preliminary_facts = if args.no_merge && remote.is_none() {
         None
     } else {
         let facts = AuthorizationFacts::load(&fact_sources)?;
@@ -2157,17 +2208,25 @@ fn run_with_before_lock(
             branch_head_oid(&repo_root, &branch_name)?,
         ))
     };
-    let preliminary_mission = if preliminary_facts
-        .as_ref()
-        .is_some_and(|facts| facts.config.harvest_authority.is_required())
-        && cosmon_filestore::harvest_authority::load_authorizations(&state_dir)?
-            .iter()
-            .any(|candidate| {
-                matches!(
-                    candidate.grant().scope,
-                    cosmon_core::harvest_authorization::HarvestScope::Mission { .. }
-                )
-            }) {
+    let preliminary_mission = if preliminary_facts.as_ref().is_some_and(|facts| {
+        if remote.is_some() {
+            cosmon_core::remote_harvest::resolve_remote_policy(&facts.config.harvest_authority)
+                .is_ok_and(|policy| {
+                    policy.policy == cosmon_core::remote_harvest::EffectiveRemotePolicy::Sealed
+                })
+        } else {
+            facts.config.harvest_authority.is_required()
+        }
+    }) && cosmon_filestore::harvest_authority::load_authorizations(
+        &state_dir,
+    )?
+    .iter()
+    .any(|candidate| {
+        matches!(
+            candidate.grant().scope,
+            cosmon_core::harvest_authorization::HarvestScope::Mission { .. }
+        )
+    }) {
         Some(crate::authorization_facts::strict_mission_ancestry(
             &store, &mol_id,
         ))
@@ -2479,10 +2538,10 @@ fn run_with_before_lock(
     //
     // `--no-merge` keeps the lock unacquired: nothing in this branch touches
     // the trunk, so contention would be a false signal.
-    if !args.no_merge {
+    if !args.no_merge || remote.is_some() {
         before_lock();
     }
-    let trunk_guard = if args.no_merge {
+    let trunk_guard = if args.no_merge && remote.is_none() {
         None
     } else {
         // ADR-131 Decision 2: object-safe trunk guard via the port. The guard
@@ -2509,132 +2568,170 @@ fn run_with_before_lock(
     let mut resuming_integrated = false;
     if let Some(guard) = trunk_guard.as_deref() {
         let current_facts = AuthorizationFacts::load_under_trunk(guard, &fact_sources)?;
+        let require_seal = if let Some((admission, validator)) = remote {
+            use cosmon_core::remote_harvest::{resolve_remote_policy, EffectiveRemotePolicy};
+            let current = resolve_remote_policy(&current_facts.config.harvest_authority)
+                .map_err(|_| name_the_authority_refusal("harvest_policy_conflict".to_owned()))?;
+            if current != admission.policy || current.policy == EffectiveRemotePolicy::Disabled {
+                return Err(name_the_authority_refusal(
+                    "remote harvest policy changed or disabled".to_owned(),
+                ));
+            }
+            if current.provenance == cosmon_core::remote_harvest::PolicyProvenance::Explicit
+                && cosmon_core::remote_harvest::explicit_override_requested(&admission.options)
+            {
+                return Err(name_the_authority_refusal(
+                    "harvest_override_requires_ratification".to_owned(),
+                ));
+            }
+            validator
+                .validate(admission)
+                .map_err(name_the_authority_refusal)?;
+            current.policy == EffectiveRemotePolicy::Sealed
+        } else {
+            current_facts.config.harvest_authority.is_required()
+        };
         if let Some(preliminary) = preliminary_facts.as_ref() {
             preliminary.require_unchanged(&current_facts)?;
         }
-        let pre_merge_base = git_head(&repo_root)?;
-        let branch_head = branch_head_oid(&repo_root, &branch_name)?;
-        if preliminary_git.as_ref() != Some(&(pre_merge_base.clone(), branch_head.clone())) {
-            anyhow::bail!("harvest_facts_changed: Git head changed; restart the gated transaction");
-        }
-        let options_digest = harvest_options_digest(args)?;
-        let hook_digest = harvest_hook_digest(&project_cfg)?;
-        let invocation_id = format!(
-            "cs-done:{}:{}",
-            mol_id.as_str(),
-            chrono::Utc::now().timestamp_millis()
-        );
-        match crate::done_authority::authorize_harvest_from_facts(
-            guard,
-            &current_facts,
-            &crate::done_authority::LockedHarvestRequest {
-                store: &store,
-                state_root: &state_dir,
-                molecule: &mol_id,
-                invocation_id: &invocation_id,
-                preliminary_mission: preliminary_mission.as_ref(),
-                clock: &cosmon_core::harness::RealClock,
-            },
-        )? {
-            crate::done_authority::HarvestDecision::NotInForce => {}
-            crate::done_authority::HarvestDecision::Authorized(receipt) => {
-                let entry = HarvestJournalRecord {
-                    version: 1,
-                    stage: HarvestJournalStage::Prepared,
-                    receipt: *receipt,
-                    branch_head,
-                    pre_merge_base,
-                    options_digest,
-                    hook_digest,
-                    merge_oid: None,
-                };
-                harvest_journal.append(&entry).map_err(|e| {
-                    anyhow::anyhow!(
-                        "harvest_recovery_required: reservation could not be journaled: {e}"
-                    )
-                })?;
-                actions.push(format!(
-                    "harvest_prepared: permit={} invocation={}",
-                    entry.receipt.permit, entry.receipt.invocation_id
-                ));
-                harvest_progress = Some(entry);
+        // A remote closure checks current admission under this lock even
+        // when no merge and therefore no seal spend is requested.
+        if !args.no_merge {
+            let pre_merge_base = git_head(&repo_root)?;
+            let branch_head = branch_head_oid(&repo_root, &branch_name)?;
+            if preliminary_git.as_ref() != Some(&(pre_merge_base.clone(), branch_head.clone())) {
+                anyhow::bail!(
+                    "harvest_facts_changed: Git head changed; restart the gated transaction"
+                );
             }
-            crate::done_authority::HarvestDecision::Refused(message) => {
-                return Err(name_the_authority_refusal(message));
-            }
-            crate::done_authority::HarvestDecision::AlreadyLanded(record) => {
-                let recorded = harvest_journal
-                    .latest(&record.permit)
-                    .map_err(|e| anyhow::anyhow!("harvest_recovery_required: {e}"))?;
-                let Some(entry) = recorded else {
-                    let latest_molecule = store.load_molecule(&mol_id)?;
-                    if legacy_landing_evidence(
-                        &repo_root,
-                        &state_dir,
-                        &latest_molecule,
-                        &base_branch,
-                    )? {
-                        actions.push(format!("harvest_legacy_landed: permit={}", record.permit));
-                        report(ctx, &mol_id, &actions, &warnings, mol.nudge_count);
-                        return Ok(());
-                    }
-                    anyhow::bail!(
-                        "harvest_recovery_required: legacy receipt has no verified outcome"
-                    );
-                };
-                if entry.receipt != *record
-                    || entry.options_digest != options_digest
-                    || entry.receipt.effect.base != base_branch
-                {
-                    anyhow::bail!("harvest_recovery_required: retry identity or options changed");
+            let options_digest = harvest_options_digest(args)?;
+            let hook_digest = harvest_hook_digest(&project_cfg)?;
+            let invocation_id = format!(
+                "cs-done:{}:{}",
+                mol_id.as_str(),
+                chrono::Utc::now().timestamp_millis()
+            );
+            match crate::done_authority::authorize_harvest_from_facts(
+                guard,
+                &current_facts,
+                &crate::done_authority::LockedHarvestRequest {
+                    store: &store,
+                    state_root: &state_dir,
+                    molecule: &mol_id,
+                    invocation_id: &invocation_id,
+                    preliminary_mission: preliminary_mission.as_ref(),
+                    clock: &cosmon_core::harness::RealClock,
+                },
+                require_seal,
+            )? {
+                crate::done_authority::HarvestDecision::NotInForce => {}
+                crate::done_authority::HarvestDecision::Authorized(receipt) => {
+                    let entry = HarvestJournalRecord {
+                        version: 1,
+                        stage: HarvestJournalStage::Prepared,
+                        receipt: *receipt,
+                        branch_head,
+                        pre_merge_base,
+                        options_digest,
+                        hook_digest,
+                        merge_oid: None,
+                    };
+                    harvest_journal.append(&entry).map_err(|e| {
+                        anyhow::anyhow!(
+                            "harvest_recovery_required: reservation could not be journaled: {e}"
+                        )
+                    })?;
+                    actions.push(format!(
+                        "harvest_prepared: permit={} invocation={}",
+                        entry.receipt.permit, entry.receipt.invocation_id
+                    ));
+                    harvest_progress = Some(entry);
                 }
-                match entry.stage {
-                    HarvestJournalStage::Prepared => {
-                        if entry.hook_digest != hook_digest {
-                            anyhow::bail!("harvest_recovery_required: hook configuration changed");
-                        }
-                        if pre_merge_base != entry.pre_merge_base
-                            || branch_head != entry.branch_head
-                        {
-                            anyhow::bail!(
-                                "harvest_recovery_required: prepared operation changed Git head"
-                            );
-                        }
-                        actions.push(format!("harvest_resumed: permit={}", record.permit));
-                    }
-                    HarvestJournalStage::Integrated | HarvestJournalStage::Finalized => {
-                        if entry.stage == HarvestJournalStage::Integrated
-                            && entry.hook_digest != hook_digest
-                        {
-                            anyhow::bail!("harvest_recovery_required: hook configuration changed");
-                        }
-                        if let Some(oid) = entry.merge_oid.as_deref() {
-                            if !branch_is_ancestor_of(&repo_root, oid, &base_branch) {
-                                anyhow::bail!(
-                                    "harvest_recovery_required: recorded integration is absent from base"
-                                );
-                            }
-                        } else if entry.stage != HarvestJournalStage::Finalized
-                            || entry.branch_head.is_some()
-                        {
-                            anyhow::bail!("harvest_recovery_required: missing integration oid");
-                        }
-                        if entry.stage == HarvestJournalStage::Finalized {
-                            actions.push(format!("harvest_finalized: permit={}", record.permit));
+                crate::done_authority::HarvestDecision::Refused(message) => {
+                    return Err(name_the_authority_refusal(message));
+                }
+                crate::done_authority::HarvestDecision::AlreadyLanded(record) => {
+                    let recorded = harvest_journal
+                        .latest(&record.permit)
+                        .map_err(|e| anyhow::anyhow!("harvest_recovery_required: {e}"))?;
+                    let Some(entry) = recorded else {
+                        let latest_molecule = store.load_molecule(&mol_id)?;
+                        if legacy_landing_evidence(
+                            &repo_root,
+                            &state_dir,
+                            &latest_molecule,
+                            &base_branch,
+                        )? {
+                            actions
+                                .push(format!("harvest_legacy_landed: permit={}", record.permit));
                             report(ctx, &mol_id, &actions, &warnings, mol.nudge_count);
                             return Ok(());
                         }
-                        if project_cfg.hooks.post_merge.is_some() {
-                            anyhow::bail!(
-                                "harvest_recovery_required: post-merge hook outcome is unknown"
-                            );
-                        }
-                        resuming_integrated = true;
-                        merge_succeeded = true;
-                        actions.push(format!("harvest_integrated: permit={}", record.permit));
+                        anyhow::bail!(
+                            "harvest_recovery_required: legacy receipt has no verified outcome"
+                        );
+                    };
+                    if entry.receipt != *record
+                        || entry.options_digest != options_digest
+                        || entry.receipt.effect.base != base_branch
+                    {
+                        anyhow::bail!(
+                            "harvest_recovery_required: retry identity or options changed"
+                        );
                     }
+                    match entry.stage {
+                        HarvestJournalStage::Prepared => {
+                            if entry.hook_digest != hook_digest {
+                                anyhow::bail!(
+                                    "harvest_recovery_required: hook configuration changed"
+                                );
+                            }
+                            if pre_merge_base != entry.pre_merge_base
+                                || branch_head != entry.branch_head
+                            {
+                                anyhow::bail!(
+                                "harvest_recovery_required: prepared operation changed Git head"
+                            );
+                            }
+                            actions.push(format!("harvest_resumed: permit={}", record.permit));
+                        }
+                        HarvestJournalStage::Integrated | HarvestJournalStage::Finalized => {
+                            if entry.stage == HarvestJournalStage::Integrated
+                                && entry.hook_digest != hook_digest
+                            {
+                                anyhow::bail!(
+                                    "harvest_recovery_required: hook configuration changed"
+                                );
+                            }
+                            if let Some(oid) = entry.merge_oid.as_deref() {
+                                if !branch_is_ancestor_of(&repo_root, oid, &base_branch) {
+                                    anyhow::bail!(
+                                    "harvest_recovery_required: recorded integration is absent from base"
+                                );
+                                }
+                            } else if entry.stage != HarvestJournalStage::Finalized
+                                || entry.branch_head.is_some()
+                            {
+                                anyhow::bail!("harvest_recovery_required: missing integration oid");
+                            }
+                            if entry.stage == HarvestJournalStage::Finalized {
+                                actions
+                                    .push(format!("harvest_finalized: permit={}", record.permit));
+                                report(ctx, &mol_id, &actions, &warnings, mol.nudge_count);
+                                return Ok(());
+                            }
+                            if project_cfg.hooks.post_merge.is_some() {
+                                anyhow::bail!(
+                                    "harvest_recovery_required: post-merge hook outcome is unknown"
+                                );
+                            }
+                            resuming_integrated = true;
+                            merge_succeeded = true;
+                            actions.push(format!("harvest_integrated: permit={}", record.permit));
+                        }
+                    }
+                    harvest_progress = Some(entry);
                 }
-                harvest_progress = Some(entry);
             }
         }
     }

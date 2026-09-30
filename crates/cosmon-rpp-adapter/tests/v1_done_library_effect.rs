@@ -209,12 +209,13 @@ fn stock_state(oidc: &OidcMock, tenants: &TenantWorkspaces, security_dir: &Path)
     let _ = oidc.write_jwks_file(security_dir).unwrap();
     let jwks = JwksStore::load(security_dir).unwrap();
     let nucleon_map = HabilitationMap::builder()
-        .insert(
+        .insert_with_scopes(
             oidc.issuer(),
             "sub-a",
             HabilitationId::new("nuc-a"),
             Noyau::new("a"),
             "cosmon-rpp-a",
+            vec!["cosmon:molecule:harvest".to_owned()],
         )
         .build();
 
@@ -426,5 +427,297 @@ async fn no_cs_process_is_spawned_on_the_library_path() {
         !witness.exists(),
         "the harvest ran a `cs` found on PATH — the library path must spawn \
          no `cs` at all, and there is deliberately no PATH discovery"
+    );
+}
+
+#[tokio::test]
+async fn explicit_scoped_policy_merges_with_harvest_scope_and_no_grant() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add("a");
+    arm_git_tenant(&tenant);
+    std::fs::write(
+        tenant.root.join(".cosmon/config.toml"),
+        "[project]\nproject_id = \"library-harvest\"\n[harvest_authority]\nremote = \"scoped\"\n",
+    )
+    .unwrap();
+    let id = "task-20260930-c001";
+    plant_completed_with_work(&tenant, id);
+    let before = git(&tenant.root, &["rev-parse", "main"]);
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "sub-a",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &["openid"],
+        lifetime_secs: Some(60),
+        jti: Some("jti-scoped-no-grant"),
+    });
+    let response = router(stock_state(&oidc, &tenants, security_dir.path()))
+        .oneshot(done_request(&jwt, id, "scoped ordinary integration"))
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 8192).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["harvest"]["outcome"], "landed");
+    assert_ne!(
+        before.stdout,
+        git(&tenant.root, &["rev-parse", "main"]).stdout
+    );
+    assert!(git(&tenant.root, &["cat-file", "-e", "main:worker.txt"])
+        .status
+        .success());
+    assert!(!tenant
+        .root
+        .join(cosmon_filestore::HARVEST_PUBKEY_REL)
+        .exists());
+}
+
+#[tokio::test]
+async fn explicit_policy_refuses_configured_binary_before_it_runs() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add("a");
+    arm_git_tenant(&tenant);
+    std::fs::write(
+        tenant.root.join(".cosmon/config.toml"),
+        "[project]\nproject_id = \"library-harvest\"\n[harvest_authority]\nremote = \"scoped\"\n",
+    )
+    .unwrap();
+    let id = "task-20260930-c002";
+    plant_completed_with_work(&tenant, id);
+    let before = git(&tenant.root, &["rev-parse", "main"]);
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let mut state = stock_state(&oidc, &tenants, security_dir.path());
+    let binary = security_dir.path().join("missing-cs");
+    state.harvest_effect = cosmon_rpp_adapter::harvest_effect::from_config(Some(binary.clone()));
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "sub-a",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &["openid"],
+        lifetime_secs: Some(60),
+        jti: Some("jti-explicit-binary"),
+    });
+    let response = router(state)
+        .oneshot(done_request(&jwt, id, "binary must refuse"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(
+        before.stdout,
+        git(&tenant.root, &["rev-parse", "main"]).stdout
+    );
+    assert!(!binary.exists());
+}
+
+#[tokio::test]
+async fn explicit_sealed_policy_still_requires_a_grant() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add("a");
+    arm_git_tenant(&tenant);
+    std::fs::write(
+        tenant.root.join(".cosmon/config.toml"),
+        "[project]\nproject_id = \"library-harvest\"\n[harvest_authority]\nremote = \"sealed\"\n",
+    )
+    .unwrap();
+    let id = "task-20260930-c003";
+    plant_completed_with_work(&tenant, id);
+    let before = git(&tenant.root, &["rev-parse", "main"]);
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "sub-a",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &["openid"],
+        lifetime_secs: Some(60),
+        jti: Some("jti-explicit-sealed"),
+    });
+    let response = router(stock_state(&oidc, &tenants, security_dir.path()))
+        .oneshot(done_request(&jwt, id, "sealed needs grant"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        before.stdout,
+        git(&tenant.root, &["rev-parse", "main"]).stdout
+    );
+}
+
+#[tokio::test]
+async fn explicit_sealed_policy_accepts_a_valid_grant() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add("a");
+    arm_git_tenant(&tenant);
+    std::fs::write(
+        tenant.root.join(".cosmon/config.toml"),
+        "[project]\nproject_id = \"library-harvest\"\n[harvest_authority]\nremote = \"sealed\"\n",
+    )
+    .unwrap();
+    let id = "task-20260930-c006";
+    plant_completed_with_work(&tenant, id);
+    seal_grant_for(&tenant, id, "main");
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "sub-a",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &["openid"],
+        lifetime_secs: Some(60),
+        jti: Some("jti-explicit-grant"),
+    });
+    let response = router(stock_state(&oidc, &tenants, security_dir.path()))
+        .oneshot(done_request(&jwt, id, "sealed grant integration"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(git(&tenant.root, &["cat-file", "-e", "main:worker.txt"])
+        .status
+        .success());
+}
+
+#[tokio::test]
+async fn scoped_no_merge_closes_without_spending_a_seal() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add("a");
+    arm_git_tenant(&tenant);
+    std::fs::write(
+        tenant.root.join(".cosmon/config.toml"),
+        "[project]\nproject_id = \"library-harvest\"\n[harvest_authority]\nremote = \"scoped\"\n",
+    )
+    .unwrap();
+    let id = "task-20260930-c007";
+    plant_completed_with_work(&tenant, id);
+    let before = git(&tenant.root, &["rev-parse", "main"]);
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "sub-a",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &["openid"],
+        lifetime_secs: Some(60),
+        jti: Some("jti-scoped-no-merge"),
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/molecules/{id}/done"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .header("Content-Type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "reason": "close without merge", "no_merge": true,
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let response = router(stock_state(&oidc, &tenants, security_dir.path()))
+        .oneshot(request)
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["harvest"]["outcome"], "closed_without_merge");
+    assert_eq!(
+        before.stdout,
+        git(&tenant.root, &["rev-parse", "main"]).stdout
+    );
+}
+
+#[tokio::test]
+async fn remote_effect_refuses_policy_changed_after_route_admission() {
+    use cosmon_core::config::{HarvestAuthorityConfig, RemoteHarvestPolicy};
+    use cosmon_core::harvest_door::HarvestOptions;
+    use cosmon_core::id::MoleculeId;
+    use cosmon_core::remote_harvest::{resolve_remote_policy, RemoteHarvestAdmission};
+    use cosmon_rpp_adapter::harvest_effect::AdapterRemoteValidator;
+
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add("a");
+    arm_git_tenant(&tenant);
+    std::fs::write(
+        tenant.root.join(".cosmon/config.toml"),
+        "[project]\nproject_id = \"library-harvest\"\n[harvest_authority]\nremote = \"disabled\"\n",
+    )
+    .unwrap();
+    let id = "task-20260930-c005";
+    plant_completed_with_work(&tenant, id);
+    let before = git(&tenant.root, &["rev-parse", "main"]);
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let state = Arc::new(stock_state(&oidc, &tenants, security_dir.path()));
+    let options = HarvestOptions::new("a previously admitted request");
+    let admission = RemoteHarvestAdmission {
+        issuer: oidc.issuer().to_owned(),
+        subject: "sub-a".to_owned(),
+        audience: "cosmon-rpp-a".to_owned(),
+        tenant: "a".to_owned(),
+        molecule: MoleculeId::new(id).unwrap(),
+        options: options.clone(),
+        expires_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60,
+        token_id: "jti-policy-stale".to_owned(),
+        authority_source: cosmon_core::remote_harvest::RemoteAuthoritySource::BindingHarvest,
+        policy: resolve_remote_policy(&HarvestAuthorityConfig {
+            remote: Some(RemoteHarvestPolicy::Scoped),
+            ..HarvestAuthorityConfig::default()
+        })
+        .unwrap(),
+    };
+    let validator = AdapterRemoteValidator {
+        state: Arc::clone(&state),
+    };
+    let outcome = state.harvest_effect.harvest_remote(
+        &tenant.root,
+        &admission.molecule,
+        &options,
+        &admission,
+        &validator,
+    );
+    assert!(
+        outcome.is_err(),
+        "a changed policy must refuse at the effect"
+    );
+    assert_eq!(
+        before.stdout,
+        git(&tenant.root, &["rev-parse", "main"]).stdout
+    );
+}
+
+#[test]
+fn local_effect_keeps_the_local_seal_requirement() {
+    use cosmon_core::harvest_door::HarvestOptions;
+    use cosmon_core::id::MoleculeId;
+    use cosmon_rpp_adapter::harvest_effect::HarvestEffectPort;
+    use cosmon_rpp_adapter::harvest_effect::LibraryHarvestEffect;
+
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add("a");
+    arm_git_tenant(&tenant);
+    std::fs::write(
+        tenant.root.join(".cosmon/config.toml"),
+        "[project]\nproject_id = \"library-harvest\"\n[harvest_authority]\nrequired = true\nremote = \"scoped\"\n",
+    ).unwrap();
+    let id = "task-20260930-c008";
+    plant_completed_with_work(&tenant, id);
+    let before = git(&tenant.root, &["rev-parse", "main"]);
+    let outcome = LibraryHarvestEffect.harvest(
+        &tenant.root,
+        &MoleculeId::new(id).unwrap(),
+        &HarvestOptions::new("local closure still needs local authority"),
+    );
+    assert!(matches!(
+        outcome,
+        Err(cosmon_core::harvest_door::EffectFailure::Refused(
+            cosmon_core::harvest_door::DoorRefusal::NotAuthorized
+        ))
+    ));
+    assert_eq!(
+        before.stdout,
+        git(&tenant.root, &["rev-parse", "main"]).stdout
     );
 }

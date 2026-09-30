@@ -35,6 +35,10 @@ pub const MOLECULE_READ: &str = "cosmon:molecule:read";
 /// (terminate).
 pub const MOLECULE_WRITE: &str = "cosmon:molecule:write";
 
+/// Authorize remote closure or integration when the exact identity binding
+/// grants it. A token carrying this literal alone does not grant authority.
+pub const MOLECULE_HARVEST: &str = "cosmon:molecule:harvest";
+
 /// Authorise the adapter to spawn a worker against a Pending molecule.
 /// Required **in addition to** [`MOLECULE_WRITE`] for
 /// `POST /v1/molecules/{id}/tackle`. Spawning is non-trivial because
@@ -144,6 +148,7 @@ pub const WORLD_OBSERVE: &str = "cosmon:world:observe";
 pub const ALL: &[&str] = &[
     MOLECULE_READ,
     MOLECULE_WRITE,
+    MOLECULE_HARVEST,
     WORKER_SPAWN,
     WORKER_READ,
     WORKER_TERMINATE,
@@ -166,6 +171,7 @@ mod tests {
             &[
                 MOLECULE_READ,
                 MOLECULE_WRITE,
+                MOLECULE_HARVEST,
                 WORKER_SPAWN,
                 WORKER_READ,
                 WORKER_TERMINATE,
@@ -181,7 +187,7 @@ mod tests {
 
     #[test]
     fn molecule_scopes_are_well_formed() {
-        for s in [MOLECULE_READ, MOLECULE_WRITE] {
+        for s in [MOLECULE_READ, MOLECULE_WRITE, MOLECULE_HARVEST] {
             assert!(
                 s.starts_with("cosmon:molecule:"),
                 "{s} must be molecule scope"

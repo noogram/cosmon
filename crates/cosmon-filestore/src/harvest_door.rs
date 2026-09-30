@@ -227,10 +227,48 @@ pub fn decide(
     molecule: &MoleculeId,
     options: &HarvestOptions,
 ) -> Result<DoorDecision, LandError> {
+    decide_with_authority(
+        store,
+        cfg,
+        molecule,
+        options,
+        cfg.harvest_authority.is_required(),
+    )
+}
+
+/// Preview a remote request using its explicitly resolved policy.
+///
+/// # Errors
+///
+/// Returns a named door refusal or a state fault.
+pub fn decide_remote(
+    store: &dyn StateStore,
+    cfg: &ProjectConfig,
+    molecule: &MoleculeId,
+    options: &HarvestOptions,
+    policy: cosmon_core::remote_harvest::ResolvedRemotePolicy,
+) -> Result<DoorDecision, LandError> {
+    use cosmon_core::remote_harvest::EffectiveRemotePolicy;
+    decide_with_authority(
+        store,
+        cfg,
+        molecule,
+        options,
+        policy.policy != EffectiveRemotePolicy::Disabled,
+    )
+}
+
+fn decide_with_authority(
+    store: &dyn StateStore,
+    cfg: &ProjectConfig,
+    molecule: &MoleculeId,
+    options: &HarvestOptions,
+    armed: bool,
+) -> Result<DoorDecision, LandError> {
     // 1. The second key. A galaxy that has not armed harvest authority has
     //    granted nobody anything, and a door that proceeded anyway would be
     //    spending an authority that was never issued. Fail-closed.
-    if !cfg.harvest_authority.is_required() {
+    if !armed {
         return Err(LandError::Refused(DoorRefused::with(
             DoorRefusal::NotAuthorized,
             "this galaxy has not armed `[harvest_authority] required`",
@@ -359,6 +397,40 @@ pub fn land(
         effect.harvest(molecule, options)
     };
 
+    interpret_effect(store, molecule, options, effect_result)
+}
+
+/// Execute the shared door for an already admitted remote request.
+///
+/// # Errors
+///
+/// Returns a named refusal or an effect fault. The effect must still recheck
+/// the remote admission under its own lock before mutation.
+pub fn land_remote(
+    store: &dyn StateStore,
+    cfg: &ProjectConfig,
+    molecule: &MoleculeId,
+    options: &HarvestOptions,
+    policy: cosmon_core::remote_harvest::ResolvedRemotePolicy,
+    effect: &mut dyn SealedHarvestEffect,
+) -> Result<DoorOutcome, LandError> {
+    options.validate().map_err(|refusal| {
+        LandError::Refused(DoorRefused {
+            refusal,
+            detail: None,
+        })
+    })?;
+    match decide_remote(store, cfg, molecule, options, policy)? {
+        DoorDecision::AlreadyLanded { merged } => return Ok(DoorOutcome::AlreadyLanded { merged }),
+        DoorDecision::NoOp => return Ok(DoorOutcome::NoOp),
+        DoorDecision::Proceed => {}
+    }
+    let effect_result = if effect.binds_trunk_lock() {
+        effect.harvest(molecule, options)
+    } else {
+        let _guard = store.lock_trunk("harvest")?;
+        effect.harvest(molecule, options)
+    };
     interpret_effect(store, molecule, options, effect_result)
 }
 

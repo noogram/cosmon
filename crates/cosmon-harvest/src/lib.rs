@@ -115,7 +115,9 @@ pub mod worktree;
 // I/O-free predicates, plus the one dirty probe both consumers now share.
 pub mod worktree_reclaim;
 
-pub use transaction::{refusal_exit_code, run, Args, MergeStrategy, RefusedHarvest, TeardownPlan};
+pub use transaction::{
+    refusal_exit_code, run, run_remote, Args, MergeStrategy, RefusedHarvest, TeardownPlan,
+};
 
 /// The slice of CLI context the harvest transaction actually reads.
 ///
