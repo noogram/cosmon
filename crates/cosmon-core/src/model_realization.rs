@@ -475,6 +475,475 @@ pub fn realized_efforts_from_codex_session(content: &str) -> Vec<EffortLevel> {
     collapse_consecutive(levels)
 }
 
+// ---- Pure evidence assessment ---------------------------------------------
+
+/// Provider grammar used by an evidence accumulator. Response records and
+/// settings records have different meanings and therefore different counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEvidenceGrammar {
+    /// Assistant records normally name the model that produced each response.
+    Claude,
+    /// Settings records can be sparse relative to ordinary response records.
+    Codex,
+}
+
+/// A bounded explanation of evidence that could not be assessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEvidenceReason {
+    /// A recognized assistant response carried no usable model field.
+    MissingAssistantModel,
+    /// A known model-bearing field carried an empty identifier.
+    InvalidModel,
+    /// The known non-model placeholder appeared in a model-bearing field.
+    PlaceholderModel,
+    /// A complete record could not be decoded as the admitted grammar.
+    MalformedRecord,
+    /// A record discriminator or subtype was outside the admitted grammar.
+    UnclassifiedRecord,
+    /// Final capture ended with bytes lacking a newline delimiter.
+    UnassessedTail,
+    /// The shell could not read some source bytes.
+    ReadFailure,
+    /// The shell discarded a record exceeding its admitted size.
+    OversizeRecord,
+    /// The shell detected replacement or loss of the assessed input prefix.
+    ContinuityLost,
+}
+
+/// Explicit shell observation that prevents a complete-coverage claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelEvidenceInputLoss {
+    /// Source read failed before all relevant bytes could be assessed.
+    ReadFailure,
+    /// A complete source record was skipped due to a size limit.
+    OversizeRecord,
+    /// An already-assessed source prefix could not be reconciled.
+    ContinuityLost,
+}
+
+/// Coverage of the assessed input, separate from the historical trajectory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelEvidenceCoverage {
+    /// No assessment receipt has been made for this attempt.
+    NotAssessed,
+    /// No response evidence was assessed; a bootstrap alone does not change it.
+    NoResponseEvidence,
+    /// Every recognized assistant response had a usable model.
+    CompleteRecords,
+    /// Settings evidence exists, but per-response confirmation is unavailable.
+    SparseSettings,
+    /// Some complete input or final tail could not support a coverage claim.
+    Degraded(Vec<ModelEvidenceReason>),
+}
+
+/// What the latest relevant record actually says about a model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LatestModelEvidence {
+    /// No response or settings report relevant to model identity was seen.
+    NoResponse,
+    /// A Claude assistant response reported this model.
+    ModelReported(ModelId),
+    /// A Claude assistant response had no usable model.
+    ModelMissing,
+    /// A codex settings record reported this model; responses remain unconfirmed.
+    SettingsReported(ModelId),
+    /// An ordinary response followed the latest settings report, or input was lost.
+    Indeterminate,
+}
+
+/// Counters whose units follow the selected provider's grammar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "grammar", rename_all = "snake_case")]
+pub enum ModelEvidenceStats {
+    /// Claude counts assistant records before trajectory deduplication.
+    Claude {
+        /// Recognized assistant records, including ones with missing models.
+        assistant_records: u64,
+        /// Assistant records with usable, non-placeholder model identifiers.
+        usable_model_records: u64,
+        /// Assistant records carrying the known placeholder.
+        placeholder_records: u64,
+        /// Complete records that failed decoding or grammar validation.
+        malformed_records: u64,
+        /// Well-formed records with an unrecognized discriminator or subtype.
+        unclassified_records: u64,
+    },
+    /// Codex counts settings separately from ordinary responses.
+    Codex {
+        /// Recognized ordinary response items, which need not name a model.
+        response_records: u64,
+        /// Recognized settings records, including effort-only changes.
+        settings_records: u64,
+        /// Settings records with a usable model identifier.
+        usable_model_records: u64,
+        /// Settings records carrying the known placeholder.
+        placeholder_records: u64,
+        /// Complete records that failed decoding or grammar validation.
+        malformed_records: u64,
+        /// Well-formed records with an unrecognized discriminator or subtype.
+        unclassified_records: u64,
+    },
+}
+
+/// Pure result at an explicit complete-byte boundary of the supplied input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelEvidenceAssessment {
+    /// Historical distinct-model trajectory found in the assessed records.
+    pub trajectory: Vec<ModelId>,
+    /// Provider-specific coverage of the assessed records.
+    pub coverage: ModelEvidenceCoverage,
+    /// Latest relevant evidence, independent of cumulative coverage.
+    pub latest: LatestModelEvidence,
+    /// Provider-tagged record counts, never a model-change-event count.
+    pub stats: ModelEvidenceStats,
+    /// Number of newline-terminated input bytes assessed.
+    pub complete_bytes: u64,
+    /// Last complete-byte position at which a usable model was reported.
+    pub last_usable_model_at: Option<u64>,
+    /// Bytes waiting for a newline, or unassessed at final capture.
+    pub trailing_bytes: u64,
+}
+
+/// Incremental, I/O-free assessment of newline-delimited model evidence.
+/// Chunk boundaries do not change a result; only complete records are parsed.
+#[derive(Debug, Clone)]
+pub struct ModelEvidenceAccumulator {
+    grammar: ModelEvidenceGrammar,
+    pending: Vec<u8>,
+    complete_bytes: u64,
+    last_usable_model_at: Option<u64>,
+    trajectory: Vec<ModelId>,
+    latest: LatestModelEvidence,
+    reasons: Vec<ModelEvidenceReason>,
+    response_records: u64,
+    settings_records: u64,
+    usable_model_records: u64,
+    placeholder_records: u64,
+    malformed_records: u64,
+    unclassified_records: u64,
+}
+
+impl ModelEvidenceAccumulator {
+    /// Begin a new assessment for one provider grammar and input generation.
+    #[must_use]
+    pub fn new(grammar: ModelEvidenceGrammar) -> Self {
+        Self {
+            grammar,
+            pending: Vec::new(),
+            complete_bytes: 0,
+            last_usable_model_at: None,
+            trajectory: Vec::new(),
+            latest: LatestModelEvidence::NoResponse,
+            reasons: Vec::new(),
+            response_records: 0,
+            settings_records: 0,
+            usable_model_records: 0,
+            placeholder_records: 0,
+            malformed_records: 0,
+            unclassified_records: 0,
+        }
+    }
+
+    /// Absorb arbitrary byte chunks; retain an incomplete final record.
+    pub fn push(&mut self, bytes: &[u8]) {
+        let mut start = 0;
+        for (index, byte) in bytes.iter().enumerate() {
+            if *byte == b'\n' {
+                self.pending.extend_from_slice(&bytes[start..index]);
+                let line = std::mem::take(&mut self.pending);
+                self.complete_bytes += line.len() as u64 + 1;
+                self.accept_line(&line);
+                start = index + 1;
+            }
+        }
+        self.pending.extend_from_slice(&bytes[start..]);
+    }
+
+    /// Record source loss observed by the caller without reading source here.
+    pub fn note_input_loss(&mut self, loss: ModelEvidenceInputLoss) {
+        let reason = match loss {
+            ModelEvidenceInputLoss::ReadFailure => ModelEvidenceReason::ReadFailure,
+            ModelEvidenceInputLoss::OversizeRecord => ModelEvidenceReason::OversizeRecord,
+            ModelEvidenceInputLoss::ContinuityLost => ModelEvidenceReason::ContinuityLost,
+        };
+        self.reason(reason);
+        self.latest = LatestModelEvidence::Indeterminate;
+    }
+
+    /// Snapshot only complete records; a torn live tail remains pending.
+    #[must_use]
+    pub fn assessment(&self) -> ModelEvidenceAssessment {
+        let coverage = if self.reasons.is_empty() {
+            match self.grammar {
+                ModelEvidenceGrammar::Claude if self.response_records > 0 => {
+                    ModelEvidenceCoverage::CompleteRecords
+                }
+                ModelEvidenceGrammar::Codex if self.usable_model_records > 0 => {
+                    ModelEvidenceCoverage::SparseSettings
+                }
+                _ => ModelEvidenceCoverage::NoResponseEvidence,
+            }
+        } else {
+            ModelEvidenceCoverage::Degraded(self.reasons.clone())
+        };
+        let stats = match self.grammar {
+            ModelEvidenceGrammar::Claude => ModelEvidenceStats::Claude {
+                assistant_records: self.response_records,
+                usable_model_records: self.usable_model_records,
+                placeholder_records: self.placeholder_records,
+                malformed_records: self.malformed_records,
+                unclassified_records: self.unclassified_records,
+            },
+            ModelEvidenceGrammar::Codex => ModelEvidenceStats::Codex {
+                response_records: self.response_records,
+                settings_records: self.settings_records,
+                usable_model_records: self.usable_model_records,
+                placeholder_records: self.placeholder_records,
+                malformed_records: self.malformed_records,
+                unclassified_records: self.unclassified_records,
+            },
+        };
+        ModelEvidenceAssessment {
+            trajectory: self.trajectory.clone(),
+            coverage,
+            latest: self.latest.clone(),
+            stats,
+            complete_bytes: self.complete_bytes,
+            last_usable_model_at: self.last_usable_model_at,
+            trailing_bytes: self.pending.len() as u64,
+        }
+    }
+
+    /// Finish capture, treating any undelimited bytes as lost evidence.
+    #[must_use]
+    pub fn finish(mut self) -> ModelEvidenceAssessment {
+        if !self.pending.is_empty() {
+            self.reason(ModelEvidenceReason::UnassessedTail);
+            self.latest = LatestModelEvidence::Indeterminate;
+        }
+        self.assessment()
+    }
+
+    fn reason(&mut self, reason: ModelEvidenceReason) {
+        if !self.reasons.contains(&reason) {
+            self.reasons.push(reason);
+        }
+    }
+
+    fn malformed(&mut self) {
+        self.malformed_records += 1;
+        self.reason(ModelEvidenceReason::MalformedRecord);
+        self.latest = LatestModelEvidence::Indeterminate;
+    }
+
+    fn unclassified(&mut self) {
+        self.unclassified_records += 1;
+        self.reason(ModelEvidenceReason::UnclassifiedRecord);
+        self.latest = LatestModelEvidence::Indeterminate;
+    }
+
+    fn report_model(&mut self, raw: Option<&str>, response: bool, required: bool) {
+        match raw {
+            Some("<synthetic>") => {
+                if response {
+                    self.placeholder_records += 1;
+                    self.reason(ModelEvidenceReason::PlaceholderModel);
+                    self.latest = LatestModelEvidence::ModelMissing;
+                }
+            }
+            Some(raw) => {
+                if let Some(id) = ModelId::new(raw) {
+                    if response || self.grammar == ModelEvidenceGrammar::Codex {
+                        self.usable_model_records += 1;
+                    }
+                    self.last_usable_model_at = Some(self.complete_bytes);
+                    if self.trajectory.last() != Some(&id) {
+                        self.trajectory.push(id.clone());
+                    }
+                    self.latest = if response {
+                        LatestModelEvidence::ModelReported(id)
+                    } else if self.grammar == ModelEvidenceGrammar::Claude {
+                        LatestModelEvidence::NoResponse
+                    } else {
+                        LatestModelEvidence::SettingsReported(id)
+                    };
+                } else {
+                    self.reason(ModelEvidenceReason::InvalidModel);
+                    self.latest = if response {
+                        LatestModelEvidence::ModelMissing
+                    } else {
+                        LatestModelEvidence::Indeterminate
+                    };
+                }
+            }
+            None if required => {
+                if response {
+                    self.reason(ModelEvidenceReason::MissingAssistantModel);
+                    self.latest = LatestModelEvidence::ModelMissing;
+                } else {
+                    self.reason(ModelEvidenceReason::InvalidModel);
+                    self.latest = LatestModelEvidence::Indeterminate;
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn accept_line(&mut self, bytes: &[u8]) {
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            self.malformed();
+            return;
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+            self.malformed();
+            return;
+        };
+        match self.grammar {
+            ModelEvidenceGrammar::Claude => self.accept_claude(&value),
+            ModelEvidenceGrammar::Codex => self.accept_codex(&value),
+        }
+    }
+
+    fn accept_claude(&mut self, value: &serde_json::Value) {
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("assistant") => {
+                self.response_records += 1;
+                let raw = value
+                    .pointer("/message/model")
+                    .and_then(serde_json::Value::as_str);
+                if raw.is_none() && value.pointer("/message/model").is_some() {
+                    self.reason(ModelEvidenceReason::InvalidModel);
+                    self.latest = LatestModelEvidence::ModelMissing;
+                } else {
+                    self.report_model(raw, true, true);
+                }
+            }
+            Some("system") => match value.get("subtype").and_then(serde_json::Value::as_str) {
+                Some("init") => {
+                    let raw = value.get("model").and_then(serde_json::Value::as_str);
+                    if raw.is_none() && value.get("model").is_some() {
+                        self.reason(ModelEvidenceReason::InvalidModel);
+                        self.latest = LatestModelEvidence::Indeterminate;
+                    } else {
+                        self.report_model(raw, false, false);
+                    }
+                }
+                Some("turn_duration" | "compact_boundary" | "stop_hook_summary") => {}
+                _ => self.unclassified(),
+            },
+            Some("user" | "result" | "progress" | "file-history-snapshot" | "queue-operation") => {}
+            _ => self.unclassified(),
+        }
+    }
+
+    fn accept_codex(&mut self, value: &serde_json::Value) {
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("turn_context") => {
+                self.settings_records += 1;
+                let raw = value
+                    .pointer("/payload/model")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| value.get("model").and_then(serde_json::Value::as_str));
+                self.report_model(raw, false, true);
+            }
+            Some("session_meta") => {
+                self.settings_records += 1;
+                let raw = value
+                    .pointer("/payload/model")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| value.get("model").and_then(serde_json::Value::as_str));
+                if raw.is_none()
+                    && (value.pointer("/payload/model").is_some() || value.get("model").is_some())
+                {
+                    self.reason(ModelEvidenceReason::InvalidModel);
+                    self.latest = LatestModelEvidence::Indeterminate;
+                } else {
+                    self.report_model(raw, false, false);
+                }
+            }
+            Some("event_msg") => match value
+                .pointer("/payload/type")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("thread_settings_applied") => {
+                    self.settings_records += 1;
+                    let Some(settings) = value
+                        .pointer("/payload/thread_settings")
+                        .and_then(serde_json::Value::as_object)
+                    else {
+                        self.malformed();
+                        return;
+                    };
+                    let raw = settings.get("model").and_then(serde_json::Value::as_str);
+                    if raw.is_none() && settings.get("model").is_some() {
+                        self.reason(ModelEvidenceReason::InvalidModel);
+                        self.latest = LatestModelEvidence::Indeterminate;
+                    } else {
+                        self.report_model(raw, false, false);
+                    }
+                }
+                Some(
+                    "task_started" | "task_complete" | "agent_message" | "user_message"
+                    | "token_count" | "turn_aborted",
+                ) => {}
+                _ => self.unclassified(),
+            },
+            Some("response_item") => {
+                match value
+                    .pointer("/payload/type")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    Some(
+                        "message"
+                        | "reasoning"
+                        | "function_call"
+                        | "function_call_output"
+                        | "custom_tool_call"
+                        | "custom_tool_call_output"
+                        | "web_search_call",
+                    ) => {
+                        self.response_records += 1;
+                        self.latest = LatestModelEvidence::Indeterminate;
+                    }
+                    _ => self.unclassified(),
+                }
+            }
+            _ => self.unclassified(),
+        }
+    }
+}
+
+/// Assess complete and pending Claude bytes without reading a file or clock.
+#[must_use]
+pub fn assess_claude_model_evidence(bytes: &[u8], final_capture: bool) -> ModelEvidenceAssessment {
+    let mut accumulator = ModelEvidenceAccumulator::new(ModelEvidenceGrammar::Claude);
+    accumulator.push(bytes);
+    if final_capture {
+        accumulator.finish()
+    } else {
+        accumulator.assessment()
+    }
+}
+
+/// Assess complete and pending codex bytes without reading a file or clock.
+#[must_use]
+pub fn assess_codex_model_evidence(bytes: &[u8], final_capture: bool) -> ModelEvidenceAssessment {
+    let mut accumulator = ModelEvidenceAccumulator::new(ModelEvidenceGrammar::Codex);
+    accumulator.push(bytes);
+    if final_capture {
+        accumulator.finish()
+    } else {
+        accumulator.assessment()
+    }
+}
+
 // ---- Provider (openai / anthropic / mistral) ------------------------------
 
 /// The realized-model-bearing field of a provider HTTP response body.

@@ -5,7 +5,10 @@
 //! These fixtures are synthetic, shaped after a measured inter-turn change;
 //! no conversation content or private log identifiers are reproduced.
 
-use cosmon_core::model_realization::realized_models_from_claude_jsonl;
+use cosmon_core::model_realization::{
+    assess_claude_model_evidence, realized_models_from_claude_jsonl, ModelEvidenceCoverage,
+    ModelEvidenceReason,
+};
 
 #[test]
 fn claude_model_change_between_turns_needs_no_bootstrap_record() {
@@ -44,4 +47,12 @@ fn claude_trajectory_alone_cannot_distinguish_missing_model_evidence() {
     assert_eq!(observed.len(), 1);
     assert_eq!(observed[0].as_str(), "model-a");
     assert_eq!(observed, realized_models_from_claude_jsonl(&complete));
+    assert_eq!(
+        assess_claude_model_evidence(format!("{complete}\n").as_bytes(), true).coverage,
+        ModelEvidenceCoverage::CompleteRecords
+    );
+    assert_eq!(
+        assess_claude_model_evidence(format!("{missing}\n").as_bytes(), true).coverage,
+        ModelEvidenceCoverage::Degraded(vec![ModelEvidenceReason::MissingAssistantModel])
+    );
 }
