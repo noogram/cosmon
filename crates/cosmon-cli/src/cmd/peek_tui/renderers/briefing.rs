@@ -10,6 +10,8 @@
 use ratatui::text::Text;
 
 use super::{read_artifact_file, render_markdown, DetailCtx, DetailRenderer};
+use cosmon_core::id::MoleculeId;
+use cosmon_state::events::input_injection::{briefing_recovery, latest_briefing_delivery};
 
 pub(crate) struct BriefingRenderer;
 
@@ -24,10 +26,31 @@ impl DetailRenderer for BriefingRenderer {
 
     fn render(&self, ctx: &DetailCtx<'_>) -> Text<'static> {
         let raw = read_artifact_file(ctx.molecule_dir, "briefing.md", "<no briefing.md>");
-        let mut document = mission_markdown(ctx);
+        let mut document = delivery_markdown(ctx);
+        document.push_str(&mission_markdown(ctx));
         document.push_str(&raw);
         render_markdown(&document)
     }
+}
+
+/// Show the recorded postcondition beside the briefing it describes.
+fn delivery_markdown(ctx: &DetailCtx<'_>) -> String {
+    let Some(dir) = ctx.molecule_dir else {
+        return String::new();
+    };
+    let Some(outcome) = latest_briefing_delivery(dir) else {
+        return String::new();
+    };
+    let mut delivery = format!("# Briefing delivery\n\nOutcome: {outcome}\n\n");
+    if let Ok(id) = MoleculeId::new(&ctx.row.mol_id) {
+        if let Some(recovery) = briefing_recovery(&id, outcome) {
+            delivery.push_str("Recovery: ");
+            delivery.push_str(&recovery);
+            delivery.push_str("\n\n");
+        }
+    }
+    delivery.push_str("---\n\n");
+    delivery
 }
 
 /// Render only the operator-supplied mission fields, leaving formula content
@@ -57,9 +80,13 @@ fn mission_markdown(ctx: &DetailCtx<'_>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::mission_markdown;
-    use crate::cmd::peek_tui::renderers::DetailCtx;
+    use super::{mission_markdown, BriefingRenderer};
+    use crate::cmd::peek_tui::renderers::{DetailCtx, DetailRenderer};
     use crate::cmd::peek_tui::RowView;
+    use cosmon_core::id::{MoleculeId, WorkerId};
+    use cosmon_core::injection::{BriefingDeliveryOutcome, InjectionOrigin, InjectionProvenance};
+    use cosmon_state::events::input_injection::emit_briefing_delivery;
+    use tempfile::tempdir;
 
     fn row(topic: Option<&str>, description: Option<&str>) -> RowView {
         RowView {
@@ -129,5 +156,38 @@ mod tests {
         };
 
         assert!(mission_markdown(&ctx).is_empty());
+    }
+
+    #[test]
+    fn briefing_pane_shows_unconfirmed_delivery_and_recovery() {
+        let dir = tempdir().unwrap();
+        let mut row = row(None, None);
+        row.mol_id = "task-20260929-25e8".into();
+        let id = MoleculeId::new(&row.mol_id).unwrap();
+        let worker = WorkerId::new("polecat-1234").unwrap();
+        emit_briefing_delivery(
+            dir.path(),
+            Some(&id),
+            &worker,
+            "test",
+            &InjectionProvenance::new(InjectionOrigin::TackleBriefing, "briefing"),
+            BriefingDeliveryOutcome::SessionGone,
+            0,
+            100,
+        );
+        let ctx = DetailCtx {
+            row: &row,
+            molecule_dir: Some(dir.path()),
+            state_dir: None,
+        };
+        let rendered = BriefingRenderer.render(&ctx);
+        let plain: String = rendered
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(plain.contains("session_gone"));
+        assert!(plain.contains("cs tackle task-20260929-25e8 --force"));
     }
 }

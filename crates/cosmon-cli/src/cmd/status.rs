@@ -1631,12 +1631,7 @@ fn run_one(ctx: &Context, id: &str) -> anyhow::Result<()> {
     );
 
     if ctx.json {
-        let mut json = serde_json::to_value(&status)?;
-        json["briefing_delivery"] = serde_json::to_value(delivery)?;
-        json["briefing_recovery"] = serde_json::to_value(delivery.and_then(|outcome| {
-            cosmon_state::events::input_injection::briefing_recovery(&molecule_id, outcome)
-        }))?;
-        println!("{}", serde_json::to_string_pretty(&json)?);
+        println!("{}", serde_json::to_string_pretty(&status)?);
     } else {
         println!("{} {}", view.status.emoji(), view.id);
         println!("  status:     {}", status.status);
