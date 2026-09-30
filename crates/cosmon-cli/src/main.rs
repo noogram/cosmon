@@ -291,6 +291,8 @@ enum Command {
     /// Done — terminal teardown for a molecule (merge + cleanup, human-callable)
     ///
     /// A failed merge reports the merge error and any dirty checkout paths.
+    /// `[project] merge_subject` may set the merge commit subject per galaxy;
+    /// its template must include `{mol_id}`. Unset, the subject is unchanged.
     /// Tracked harvest state, including archive and event files, is committed
     /// before the next sibling merge; ignored molecule directories are skipped.
     #[command(after_help = cmd::examples::DONE)]

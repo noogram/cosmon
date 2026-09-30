@@ -10,6 +10,23 @@
 
 The shipped planner formulas are a trusted shell surface and require operator review at harvest. A frozen planner exposes its first lineage child; later children still wait for their completed and integrated pipeline predecessors.
 
+## Merge subject configuration (issue #140)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Choose a per-galaxy merge subject | `cs done` reads `[project] merge_subject`; config load requires `{mol_id}`; `{title}` uses title or topic; unset preserves the existing merge subject | No matching configuration control audited | The shared harvest transaction uses the same galaxy setting; no separate remote control audited |
+
+For example, `[project] merge_subject = "chore(merge): {mol_id} {title}"` in
+`.cosmon/config.toml` selects a one-line subject. `{title}` is empty when the
+molecule has neither a `title` nor a `topic` variable. The setting changes
+only commits created by the merge strategy, including an automatically
+resolved conflict. `ff-only` makes no merge commit.
+
+`scripts/check-provenance.sh` recognizes this repository's default
+`Merge branch 'feat/<mol_id>'` subject. A galaxy using another subject must
+align its own provenance gate and subject hook with its template. This
+repository leaves `merge_subject` unset, so its existing gate remains valid.
+
 ## Default model selection (issue #141)
 
 | Capability | CLI | Native UI | Remote service |

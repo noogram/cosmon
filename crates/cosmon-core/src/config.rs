@@ -20,7 +20,7 @@
 //! format_command = "cargo fmt --all -- --check"
 //! ```
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
@@ -1458,6 +1458,17 @@ pub struct ProjectSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trunk_branch: Option<String>,
 
+    /// Optional subject for merge commits made by `cs done`. The `{mol_id}`
+    /// placeholder is mandatory so a galaxy can change its subject vocabulary
+    /// without losing the molecule reference. `{title}` uses the molecule's
+    /// title, or its topic when no title was recorded.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_merge_subject"
+    )]
+    pub merge_subject: Option<String>,
+
     /// The git repository this galaxy's work lands in — the explicit answer
     /// to *"which repository does `cs tackle` branch?"*.
     ///
@@ -1489,6 +1500,42 @@ pub struct ProjectSection {
     /// not. Write the absolute path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_repo: Option<String>,
+}
+
+fn deserialize_merge_subject<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    if let Some(subject) = &value {
+        if !subject.contains("{mol_id}") {
+            return Err(serde::de::Error::custom(
+                "[project] merge_subject must contain {mol_id}",
+            ));
+        }
+        if subject.contains(['\n', '\r']) {
+            return Err(serde::de::Error::custom(
+                "[project] merge_subject must be a single line",
+            ));
+        }
+    }
+    Ok(value)
+}
+
+impl ProjectSection {
+    /// Render the opt-in merge subject while keeping the default subject
+    /// under the caller's control when no template is configured.
+    #[must_use]
+    pub fn render_merge_subject(&self, mol_id: &str, title: &str) -> Option<String> {
+        let title = title.lines().next().unwrap_or("").trim();
+        self.merge_subject.as_ref().map(|template| {
+            template
+                .replace("{mol_id}", mol_id)
+                .replace("{title}", title)
+                .trim()
+                .to_owned()
+        })
+    }
 }
 
 impl ProjectConfig {
@@ -2273,6 +2320,32 @@ mod tests {
         // resolver falls through to origin/HEAD → main.
         let config = ProjectConfig::parse("").unwrap();
         assert_eq!(config.project.trunk_branch, None);
+    }
+
+    #[test]
+    fn merge_subject_requires_molecule_id_at_config_load() {
+        let err = ProjectConfig::parse("[project]\nmerge_subject = 'chore(merge): {title}'\n")
+            .expect_err("merge subject without molecule id must be refused");
+        assert!(err.to_string().contains("{mol_id}"), "{err}");
+    }
+
+    #[test]
+    fn merge_subject_is_opt_in_and_renders_title() {
+        let default = ProjectConfig::parse("").unwrap();
+        assert_eq!(
+            default.project.render_merge_subject("task-a", "A title"),
+            None
+        );
+
+        let config =
+            ProjectConfig::parse("[project]\nmerge_subject = 'chore(merge): {mol_id} {title}'\n")
+                .unwrap();
+        assert_eq!(
+            config
+                .project
+                .render_merge_subject("task-a", "A title\nignored"),
+            Some("chore(merge): task-a A title".to_owned())
+        );
     }
 
     #[test]

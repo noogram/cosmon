@@ -2959,6 +2959,14 @@ fn run_with_remote_before_lock(
         .chain(lineage_trailers.iter().cloned())
         .collect();
 
+    let merge_subject = project_cfg.project.render_merge_subject(
+        mol_id.as_str(),
+        mol.variables
+            .get("title")
+            .or_else(|| mol.variables.get("topic"))
+            .map_or("", String::as_str),
+    );
+
     // A fast-forward creates no commit owned by cosmon, so there is nowhere to
     // carry the merge's trailers without rewriting worker commits (forbidden by
     // delib-20260717-194b: it changes their SHAs and breaks ancestry guards).
@@ -2993,6 +3001,7 @@ fn run_with_remote_before_lock(
             args.max_retries,
             args.propel_message.as_deref(),
             &merge_trailers,
+            merge_subject.as_deref(),
             protected_paths,
             preliminary_git
                 .as_ref()
@@ -4512,6 +4521,7 @@ fn try_merge_with_escalation(
     max_retries: u32,
     custom_message: Option<&str>,
     coauthor_trailers: &[String],
+    merge_subject: Option<&str>,
     protected_paths: &[String],
     admitted_head: Option<&str>,
     remote_effect: bool,
@@ -4525,7 +4535,14 @@ fn try_merge_with_escalation(
     let mut last_conflict_files: Vec<String>;
 
     // First attempt — purely mechanical.
-    match try_merge_branch(repo_root, branch, base, strategy, coauthor_trailers) {
+    match try_merge_branch_with_subject(
+        repo_root,
+        branch,
+        base,
+        strategy,
+        coauthor_trailers,
+        merge_subject,
+    ) {
         MergeOutcome::Merged => {
             if verify_merge(repo_root, branch, base) {
                 return Ok(MergeLoopOutcome::Merged);
@@ -4661,13 +4678,14 @@ fn try_merge_with_escalation(
         let merge_target = admitted_head.ok_or_else(|| {
             anyhow::anyhow!("teardown aborted: branch head admission is unavailable")
         })?;
-        match try_merge_branch_target(
+        match try_merge_branch_target_with_subject(
             repo_root,
             branch,
             merge_target,
             base,
             strategy,
             coauthor_trailers,
+            merge_subject,
         ) {
             MergeOutcome::Merged => {
                 if verify_merge(repo_root, branch, base) {
@@ -4934,6 +4952,7 @@ enum MergeOutcome {
 /// Returns a [`MergeOutcome`] variant rather than a `Result` so callers can
 /// distinguish the branch-not-found / already-merged / conflict / hard-fail
 /// cases without string matching.
+#[cfg(test)]
 fn try_merge_branch(
     repo_root: &Path,
     branch: &str,
@@ -4941,12 +4960,32 @@ fn try_merge_branch(
     strategy: MergeStrategy,
     coauthor_trailers: &[String],
 ) -> MergeOutcome {
-    try_merge_branch_target(repo_root, branch, branch, base, strategy, coauthor_trailers)
+    try_merge_branch_with_subject(repo_root, branch, base, strategy, coauthor_trailers, None)
+}
+
+fn try_merge_branch_with_subject(
+    repo_root: &Path,
+    branch: &str,
+    base: &str,
+    strategy: MergeStrategy,
+    coauthor_trailers: &[String],
+    merge_subject: Option<&str>,
+) -> MergeOutcome {
+    try_merge_branch_target_with_subject(
+        repo_root,
+        branch,
+        branch,
+        base,
+        strategy,
+        coauthor_trailers,
+        merge_subject,
+    )
 }
 
 // Keep the display branch separate from the Git object to merge. Escalation
 // retries use the admitted object ID, so a concurrent ref update cannot make
 // Git integrate a different head after the freshness check.
+#[cfg(test)]
 fn try_merge_branch_target(
     repo_root: &Path,
     branch: &str,
@@ -4954,6 +4993,26 @@ fn try_merge_branch_target(
     base: &str,
     strategy: MergeStrategy,
     coauthor_trailers: &[String],
+) -> MergeOutcome {
+    try_merge_branch_target_with_subject(
+        repo_root,
+        branch,
+        merge_target,
+        base,
+        strategy,
+        coauthor_trailers,
+        None,
+    )
+}
+
+fn try_merge_branch_target_with_subject(
+    repo_root: &Path,
+    branch: &str,
+    merge_target: &str,
+    base: &str,
+    strategy: MergeStrategy,
+    coauthor_trailers: &[String],
+    merge_subject: Option<&str>,
 ) -> MergeOutcome {
     // Does the branch exist?
     if !branch_exists(repo_root, branch) {
@@ -5039,12 +5098,14 @@ fn try_merge_branch_target(
             // pre-attribution cosmon (F9). `git merge`'s default subject when
             // merging `feat/x` into the current branch is `Merge branch
             // 'feat/x'`, reproduced here so history reads the same.
-            if coauthor_trailers.is_empty() && merge_target == branch {
+            if coauthor_trailers.is_empty() && merge_target == branch && merge_subject.is_none() {
                 // `--no-edit` stops git from launching $EDITOR for the merge
                 // commit message.
                 cmd.args(["--no-ff", "--no-edit", merge_target]);
             } else {
-                let subject = format!("Merge branch '{branch}'");
+                let subject = merge_subject
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("Merge branch '{branch}'"));
                 cmd.args(["--no-ff", "-m", &subject]);
                 if !coauthor_trailers.is_empty() {
                     let trailers = coauthor_trailers.join("\n");
@@ -5077,6 +5138,7 @@ fn try_merge_branch_target(
                         &conflicts,
                         branch,
                         coauthor_trailers,
+                        merge_subject,
                     )
                     .is_ok()
                 {
@@ -5401,6 +5463,7 @@ fn auto_resolve_append_only_jsonl(
     files: &[String],
     branch: &str,
     coauthor_trailers: &[String],
+    merge_subject: Option<&str>,
 ) -> anyhow::Result<()> {
     let repo_arg = repo_root.to_string_lossy().to_string();
     for file in files {
@@ -5434,12 +5497,17 @@ fn auto_resolve_append_only_jsonl(
     // Either form prevents $EDITOR from firing.
     let mut commit_cmd = Command::new("git");
     commit_cmd.args(["-C", &repo_arg, "commit"]);
-    if coauthor_trailers.is_empty() {
+    if coauthor_trailers.is_empty() && merge_subject.is_none() {
         commit_cmd.arg("--no-edit");
     } else {
-        let subject = format!("Merge branch '{branch}'");
-        let trailers = coauthor_trailers.join("\n");
-        commit_cmd.args(["-m", &subject, "-m", &trailers]);
+        let subject = merge_subject
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Merge branch '{branch}'"));
+        commit_cmd.args(["-m", &subject]);
+        if !coauthor_trailers.is_empty() {
+            let trailers = coauthor_trailers.join("\n");
+            commit_cmd.args(["-m", &trailers]);
+        }
     }
     let commit = commit_cmd.output()?;
     if !commit.status.success() {
@@ -12582,6 +12650,7 @@ mod tests {
             3,
             None,
             &[],
+            None,
             &[],
             None,
             false,
@@ -12667,6 +12736,7 @@ mod tests {
             3,
             None,
             &[],
+            None,
             &[],
             None,
             false,
@@ -12755,6 +12825,7 @@ mod tests {
             0,    // exhaust immediately
             None,
             &[],
+            None,
             &[],
             None,
             false,
@@ -12830,6 +12901,7 @@ mod tests {
             1,
             None,
             &[],
+            None,
             &[],
             Some(&admitted_head),
             false,
@@ -12902,6 +12974,7 @@ mod tests {
             1,
             None,
             &[],
+            None,
             &[],
             Some(&admitted_head),
             true,
@@ -13016,6 +13089,7 @@ mod tests {
             3,
             None,
             &[],
+            None,
             &[],
             None,
             false,
@@ -13057,6 +13131,7 @@ mod tests {
             3,
             None,
             &[],
+            None,
             &[],
             None,
             false,
@@ -13571,6 +13646,51 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&body.stdout).contains("Co-Authored-By"),
             "empty trailers must not stamp the merge commit"
+        );
+    }
+
+    #[test]
+    fn configured_merge_subject_is_written_to_merge_commit() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        std::fs::create_dir_all(repo.join(".cosmon")).unwrap();
+        commit_file(
+            repo,
+            ".cosmon/config.toml",
+            "[project]\nmerge_subject = 'chore(merge): {mol_id} {title}'\n",
+            "chore: configure merge subject",
+        );
+        assert!(
+            git(repo, &["checkout", "-q", "-b", "feat/task-20260930-abcd"])
+                .status
+                .success()
+        );
+        commit_file(repo, "work.txt", "work\n", "feat: work");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+
+        let config =
+            cosmon_filestore::load_project_config(&repo.join(".cosmon/config.toml")).unwrap();
+        let subject = config
+            .project
+            .render_merge_subject("task-20260930-abcd", "work");
+        assert_eq!(
+            subject.as_deref(),
+            Some("chore(merge): task-20260930-abcd work")
+        );
+        let outcome = try_merge_branch_with_subject(
+            repo,
+            "feat/task-20260930-abcd",
+            "main",
+            MergeStrategy::Merge,
+            &[],
+            subject.as_deref(),
+        );
+        assert!(matches!(outcome, MergeOutcome::Merged), "got {outcome:?}");
+        let subject = git(repo, &["log", "-1", "--format=%s"]);
+        assert_eq!(
+            String::from_utf8_lossy(&subject.stdout).trim(),
+            "chore(merge): task-20260930-abcd work"
         );
     }
 

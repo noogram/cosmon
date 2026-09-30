@@ -84,6 +84,9 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              Pilots NEVER poll 'cs observe' by hand — always use 'cs wait'. \
              Pilots NEVER skip 'cs done' — without it the branch never merges. \
              A failed 'cs done' names the merge error and dirty checkout paths. \
+             A galaxy may set [project] merge_subject in .cosmon/config.toml \
+             with {mol_id} (required) and {title} (optional); unset keeps \
+             the default merge subject. \
              A successful harvest commits trackable archive and event state \
              and skips molecule directories ignored by the project. \
              Pilots NEVER run 'cs run' in the foreground — wrap it in a detached \
