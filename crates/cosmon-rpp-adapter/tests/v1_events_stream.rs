@@ -175,17 +175,15 @@ async fn idle_events_stream_rechecks_without_a_source_event() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let path = dir.path().join("security/oidc-kill.toml");
-    let write_policy = async move {
+    let write_policy = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, "[global]\nenabled = true\n").unwrap();
-    };
-    let read_body = to_bytes(response.into_body(), 1024);
-    let ((), result) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(write_policy, read_body)
-    })
-    .await
-    .expect("idle stream did not recheck policy on its own interval");
+    });
+    let result = tokio::time::timeout(Duration::from_secs(5), to_bytes(response.into_body(), 1024))
+        .await
+        .expect("idle stream did not recheck policy on its own interval");
+    write_policy.await.unwrap();
     result.expect("SSE body failed");
 }
 
