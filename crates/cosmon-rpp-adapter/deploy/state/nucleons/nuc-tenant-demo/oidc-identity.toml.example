@@ -46,3 +46,9 @@ sealed_at = "REPLACE_ME_SEALED_AT"
 # for a tenant you mean to let dispatch workers.
 [scopes]
 allowed = ["cosmon:molecule:read", "cosmon:molecule:write"]
+
+# For an explicitly configured remote harvest profile, add
+# "cosmon:molecule:harvest" to this exact (issuer, sub, audience) binding.
+# Neither a token claim nor the write scope supplies it. Reload the adapter
+# after editing a materialised binding. Keep it absent until the operator
+# has deliberately selected the tenant galaxy's remote policy.

@@ -1,0 +1,8 @@
+# Copy this fragment into the tenant galaxy's .cosmon/config.toml only after
+# provisioning its exact issuer/subject/audience binding with the dedicated
+# cosmon:molecule:harvest scope. An absent remote key retains legacy behavior.
+# Select "sealed" instead for operator-signed grants. The private signer key
+# belongs only on the operator device, never in this galaxy or service image.
+
+[harvest_authority]
+remote = "scoped"

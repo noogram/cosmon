@@ -153,7 +153,15 @@ async fn configure_uses_admin_seal_and_current_compare_and_set_facts() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_external_signer_installs_molecule_grant_without_exporting_its_key() {
-    if Command::new("minisign").arg("-v").output().is_err() {
+    let signer_available = Command::new("minisign")
+        .arg("-v")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !signer_available {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "minisign is required in CI for the external signer custody test"
+        );
         eprintln!("minisign unavailable: operator signer integration not exercised");
         return;
     }

@@ -579,7 +579,8 @@ seal authorises the class of effect once, at arming time, not per request.
 
 #### 5.4.1 Amendment (2026-09-29, issue #120 W0) — the tenant selects disabled, scoped or sealed
 
-**Status:** adopted as contract; **not implemented**. Full contract:
+**Status:** adopted; code paths implemented by W1–W7 of issue #120.
+The opt-in container journey remains W9 acceptance. Full contract:
 [`docs/specs/remote-harvest-contract.md`](../specs/remote-harvest-contract.md).
 
 `done` stays one lifecycle operation using the shared library transaction.
@@ -703,10 +704,11 @@ citation should name; the unit that adds the harvest scope constant
 | `cosmon:molecule:read` | observe, ensemble, vitals, `GET /v1/harvest/status` | `write` | exists |
 | `cosmon:molecule:write` | nucleate, tag, freeze, collapse, stuck; remote `done` **only** on a legacy sealed galaxy (§5.4.1) | — | exists |
 | `cosmon:worker:spawn` | tackle (with `write`); arming auto-propel or retries on `done` | — | exists |
-| `cosmon:molecule:harvest` | remote `done` on an explicit profile, including closure, no-op and retry; grant challenge and import | nothing — `write` does not imply it, and it implies neither `write` nor `spawn` | **proposed** (#120) |
+| `cosmon:molecule:harvest` | remote `done` on an explicit profile, including closure, no-op and retry; grant challenge and import | nothing — `write` does not imply it, and it implies neither `write` nor `spawn` | exists (#120 W4) |
 
-Where the harvest scope may be sourced from (binding, token, or both) is an
-open question of the contract (its §13), decided in a follow-up.
+The OQ-1 decision in the contract §13 is **binding-only** for this scope:
+the exact issuer/subject/audience binding must grant it, and the effect
+boundary checks again. A bearer scope claim alone cannot grant harvest.
 
 ---
 

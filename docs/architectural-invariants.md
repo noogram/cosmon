@@ -2265,13 +2265,16 @@ list through the successor path, and the list above is kept as written
 only so its history reads: `cs run` via ADR-124 (a bounded request door,
 ADR-080 §5.5) and `cs done` via ADR-080 §5.4 (lifecycle, not
 administration). Remote `done` authority is a per-tenant policy under
-ADR-080 §5.4.1 and the proposed
-[remote harvest contract](specs/remote-harvest-contract.md). That contract
-proposes one admin-only route (`PUT /v1/admin/noyaux/{noyau}/harvest-authority`)
+ADR-080 §5.4.1 and the ratified
+[remote harvest contract](specs/remote-harvest-contract.md). The dedicated
+harvest scope is sourced from the exact tenant binding only, including at the
+effect boundary; a bearer claim alone never supplies it. The contract adds
+one admin-only route (`PUT /v1/admin/noyaux/{noyau}/harvest-authority`)
 which, like the existing `/v1/admin/*` routes, has no `cs` verb twin and is
 classified under the admin-surface exception, and three tenant routes whose
 local counterpart is `cs harvest-authority`. Each is registered under the
-rule below in the change that adds it.
+rule below. This states only the authorized cosmon harvest boundary: a
+same-uid process with repository write access can still mutate Git directly.
 
 ### The rule
 
