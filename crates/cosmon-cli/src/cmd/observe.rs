@@ -178,9 +178,14 @@ fn run_detail(
     let mol = &view.data;
     let metrics = &view.metrics;
     let ghost = view.ghost;
+    let realization = cosmon_state::ops::realized_attribution(state_dir, &mol.id);
 
     if ctx.json {
-        let detail = ObserveJson::from_view(&view, &store.molecule_dir(&mol.id).to_string_lossy());
+        let detail = ObserveJson::from_view_with_realization(
+            &view,
+            &store.molecule_dir(&mol.id).to_string_lossy(),
+            realization.as_ref(),
+        );
         let json = serde_json::to_string_pretty(&detail)?;
         println!("{json}");
         return Ok(());
@@ -301,14 +306,16 @@ fn run_detail(
     // (flag / formula-pin / env / config / floor). Read from the latest
     // `ModelSelected` event; silent (omit-if-none) for a molecule that was
     // never tackled or predates C2's typed event.
-    if let Some(model) = &view.model {
+    if view.model.is_some() || realization.is_some() {
         println!();
         println!("  {}", "Model:".bold());
-        println!(
-            "    {} {}",
-            model.model_label().cyan(),
-            format!("← {} ({})", model.source_detail(), model.adapter_name).dimmed(),
-        );
+        if let Some(model) = &view.model {
+            println!(
+                "    {} {}",
+                model.model_label().cyan(),
+                format!("← {} ({})", model.source_detail(), model.adapter_name).dimmed(),
+            );
+        }
         // The REALIZED axis beside the pin. The pin is what was *asked for*;
         // when a seat is re-pointed mid-run — a stalled provider switched by
         // hand from inside the pane — the pin keeps naming the old model while
@@ -318,17 +325,31 @@ fn run_detail(
         // (converge-20260727-a302). Never back-filled from the pin: an
         // unobserved run says so with `?`/`-`, it does not borrow the pin's
         // confidence.
-        if let Some(realized) = cosmon_state::ops::realized_attribution(state_dir, &mol.id) {
+        if let Some(realized) = &realization {
             if let Some(drift) = realized.realized_drift_display() {
                 println!(
                     "    {} {}",
                     format!("~> {drift}").yellow(),
-                    "(realized — diverged from the pin)".dimmed(),
+                    format!(
+                        "(realized — {}; diverged from the pin)",
+                        realized.realized_disposition()
+                    )
+                    .dimmed(),
                 );
             } else if let Some(glyph) = realized.realized.compact_status() {
                 println!(
                     "    {}",
-                    format!("realized: {glyph} ({})", realized.realized.disposition()).dimmed(),
+                    format!("realized: {glyph} ({})", realized.realized_disposition()).dimmed(),
+                );
+            } else if realized.evidence_needs_warning() {
+                println!(
+                    "    {}",
+                    format!(
+                        "realized: {} ({})",
+                        realized.realized.detail_fragment(),
+                        realized.realized_disposition()
+                    )
+                    .yellow()
                 );
             }
         }

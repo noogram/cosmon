@@ -500,6 +500,17 @@ pub struct ObserveJson {
     /// its adapter). `None` when no `ModelSelected` event was recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_adapter: Option<String>,
+    /// Current-attempt realization, including unknown, silent, pending and
+    /// unavailable states. Absent only when no attribution events were read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub realized: Option<cosmon_core::adapter_attribution::Realized>,
+    /// Persisted quality receipt for that realization. `not_assessed` is an
+    /// explicit legacy state, not a complete-coverage claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_evidence: Option<cosmon_core::adapter_attribution::ModelEvidenceState>,
+    /// Shared human qualifier used by the terminal displays.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub realized_disposition: Option<String>,
     /// When this molecule's branch landed on the trunk, RFC3339. `None`
     /// while it has not.
     ///
@@ -535,6 +546,18 @@ impl ObserveJson {
     /// today).
     #[must_use]
     pub fn from_view(view: &MoleculeView, molecule_dir: &str) -> Self {
+        Self::from_view_with_realization(view, molecule_dir, None)
+    }
+
+    /// Add current-attempt model evidence to the canonical observe wire shape.
+    /// The caller supplies the advisory journal fold so legacy callers retain
+    /// their existing projection without a second implicit filesystem read.
+    #[must_use]
+    pub fn from_view_with_realization(
+        view: &MoleculeView,
+        molecule_dir: &str,
+        realization: Option<&cosmon_core::adapter_attribution::AdapterAttribution>,
+    ) -> Self {
         let mol = &view.data;
         Self {
             id: mol.id.to_string(),
@@ -575,6 +598,10 @@ impl ObserveJson {
             model: view.model.as_ref().and_then(|m| m.model.clone()),
             model_source: view.model.as_ref().map(|m| m.source_slug().to_owned()),
             model_adapter: view.model.as_ref().map(|m| m.adapter_name.clone()),
+            realized: realization.map(|a| a.realized.clone()),
+            model_evidence: realization.map(|a| a.evidence.clone()),
+            realized_disposition: realization
+                .map(cosmon_core::adapter_attribution::AdapterAttribution::realized_disposition),
             merged_at: mol.merged_at.map(|t| t.to_rfc3339()),
             non_integration: mol.non_integration.clone(),
         }
@@ -807,6 +834,34 @@ mod tests {
         let s = serde_json::to_string(&json).unwrap();
         assert!(s.contains("\"id\":\"task-20260503-cccc\""));
         assert!(s.contains("\"poll_count\":1"));
+    }
+
+    #[test]
+    fn observe_json_keeps_unassessed_realization_states_distinct() {
+        use cosmon_core::adapter_attribution::{AdapterAttribution, Realized};
+
+        let store = FakeStore::default();
+        store.insert(make_molecule("task-20260930-evid", MoleculeStatus::Running));
+        let tmp = TempDir::new().unwrap();
+        let id = MoleculeId::new("task-20260930-evid").unwrap();
+        let view = observe(&store, tmp.path(), &Subject::operator(), &id).unwrap();
+        for (realized, expected) in [
+            (Realized::Unknown, serde_json::json!("unknown")),
+            (Realized::Silent, serde_json::json!("silent")),
+            (Realized::Pending, serde_json::json!("pending")),
+            (Realized::Unobservable, serde_json::json!("unobservable")),
+        ] {
+            let attribution = AdapterAttribution {
+                adapter: Some("local".into()),
+                realized,
+                ..AdapterAttribution::default()
+            };
+            let json =
+                ObserveJson::from_view_with_realization(&view, "/tmp/molecule", Some(&attribution));
+            let wire = serde_json::to_value(json).unwrap();
+            assert_eq!(wire["realized"], expected);
+            assert_eq!(wire["model_evidence"], "not_assessed");
+        }
     }
 
     /// T-AUTHZ-INSTR integration test — observing a molecule emits

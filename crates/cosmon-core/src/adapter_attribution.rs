@@ -31,6 +31,7 @@ use crate::event_v2::{
 };
 use crate::model_realization::{ModelEvidenceAssessment, ModelEvidenceGrammar};
 use crate::model_spec::ReasoningEffort;
+use serde::Serialize;
 
 /// The **realized** model axis — what an adapter *actually* ran, folded from
 /// [`EventV2::ModelObserved`] and **only** that event (delib-20260718-c70e).
@@ -52,7 +53,8 @@ use crate::model_spec::ReasoningEffort;
 ///   same as one that ran and stayed silent ([`Self::Silent`]) — `None` would
 ///   conflate them, and rendering `-` ("ran, said nothing") for a crash invents
 ///   an execution.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Realized {
     /// No observation, and no honest evidence of what ran — the worker died
     /// before reporting any model, capture failed, `cs peek` was never run, or
@@ -210,7 +212,7 @@ pub struct AdapterAttribution {
 }
 
 /// One scoped quality receipt retained by attribution replay.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ModelEvidenceReceipt {
     /// Version of the assessment policy used for this receipt.
     pub policy_version: u16,
@@ -225,7 +227,8 @@ pub struct ModelEvidenceReceipt {
 }
 
 /// Whether the last model fact is covered by an assessment in journal order.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelEvidenceState {
     /// No quality receipt exists for this attempt, including legacy journals.
     #[default]
@@ -778,11 +781,13 @@ impl AdapterAttribution {
     ///   genuine mid-realization change stays as `a->b` inside the segment;
     /// - `codex~>gpt-4o [config]` — no pin, but a model *was* observed (shown
     ///   without a leading `/` so it never reads as an intention pin);
-    /// - `claude/opus [cli]` — realized **equals** the pin (agreement): no
-    ///   glyph, byte-identical to the pre-realized rendering;
-    /// - `claude/opus [cli]` — realized `Silent`/`Unknown`: the compact cell is
-    ///   drift-*only*, so an unobserved run adds nothing here; the honest
-    ///   `-`/`?` disposition lives in [`Self::detail_line`].
+    /// - `claude/opus [cli]` — realized **equals** the pin with no degraded
+    ///   receipt, so no drift glyph is needed;
+    /// - `!claude/opus [cli]` — the same match with degraded evidence keeps a
+    ///   leading warning visible even when the model id is truncated;
+    /// - `claude/opus [cli] ?` — an unobserved run stays distinct from a
+    ///   confirmed match. Silent, pending and unavailable have their own
+    ///   trailing status glyphs.
     ///
     /// The caller's column width clamps long model ids; this function does no
     /// truncation of its own so the same string serves a narrow TUI cell and
@@ -792,7 +797,11 @@ impl AdapterAttribution {
         let Some(adapter) = &self.adapter else {
             return EMPTY_CELL.to_string();
         };
-        let mut s = adapter.clone();
+        let mut s = if self.evidence_needs_warning() {
+            format!("!{adapter}")
+        } else {
+            adapter.clone()
+        };
         if let Some(model) = &self.model {
             s.push('/');
             s.push_str(model);
@@ -882,7 +891,39 @@ impl AdapterAttribution {
         // (silent)` rather than being confused with a confirmed match. Never
         // back-filled from the pin.
         let realized = self.realized.detail_fragment();
-        let disposition = match &self.evidence {
+        let disposition = self.realized_disposition();
+        format!(
+            "adapter: {adapter} ({adapter_src})  model: {model} ({model_src})  \
+             realized: {realized} ({disposition})  effort: {effort}"
+        )
+    }
+
+    /// Whether the current attempt's persisted receipt reports degraded
+    /// coverage, even when its last observed model agrees with the pin.
+    #[must_use]
+    pub fn evidence_is_degraded(&self) -> bool {
+        matches!(
+            &self.evidence,
+            ModelEvidenceState::Assessed(receipt) | ModelEvidenceState::Pending(receipt)
+                if matches!(receipt.assessment.coverage,
+                    crate::model_realization::ModelEvidenceCoverage::Degraded(_))
+        )
+    }
+
+    /// Whether a narrow display must keep a warning beside the adapter.
+    /// A later model fact after a complete receipt also needs this signal
+    /// until a new receipt covers it.
+    #[must_use]
+    pub fn evidence_needs_warning(&self) -> bool {
+        self.evidence_is_degraded() || matches!(&self.evidence, ModelEvidenceState::Pending(_))
+    }
+
+    /// Shared human qualifier for the realized axis in peek and observe.
+    /// The historical id remains visible while a degraded receipt withdraws
+    /// any implied claim that later responses used that same id.
+    #[must_use]
+    pub fn realized_disposition(&self) -> String {
+        match &self.evidence {
             ModelEvidenceState::Assessed(receipt) | ModelEvidenceState::Pending(receipt)
                 if matches!(
                     receipt.assessment.coverage,
@@ -894,17 +935,17 @@ impl AdapterAttribution {
                 } else {
                     self.realized.disposition()
                 };
-                format!("{basis}; coverage degraded")
+                if matches!(&self.evidence, ModelEvidenceState::Pending(_)) {
+                    format!("{basis}; coverage degraded; assessment pending")
+                } else {
+                    format!("{basis}; coverage degraded")
+                }
             }
             ModelEvidenceState::Pending(_) => {
                 format!("{}; assessment pending", self.realized.disposition())
             }
             _ => self.realized.disposition().to_owned(),
-        };
-        format!(
-            "adapter: {adapter} ({adapter_src})  model: {model} ({model_src})  \
-             realized: {realized} ({disposition})  effort: {effort}"
-        )
+        }
     }
 }
 
@@ -1033,6 +1074,12 @@ mod tests {
                     flag: "claude".into(),
                 },
             ),
+            model_selected(
+                Some("model-a"),
+                ModelSelectionSource::Flag {
+                    flag: "model-a".into(),
+                },
+            ),
             worker_spawned("claude", "worker-one"),
             model_observed_for("claude", "model-a", Some("worker-one")),
             parsed,
@@ -1046,6 +1093,7 @@ mod tests {
         assert!(attribution
             .detail_line()
             .contains("last observed; coverage degraded"));
+        assert!(attribution.compact_cell().starts_with("!claude/model-a"));
     }
 
     fn evidence_assessed(worker: &str, records: &str) -> EventV2 {
@@ -1139,10 +1187,12 @@ mod tests {
             evidence_assessed("worker-one", complete),
             model_observed_for("claude", "model-b", Some("worker-one")),
         ];
-        assert!(matches!(
-            AdapterAttribution::fold(&events).evidence,
-            ModelEvidenceState::Pending(_)
-        ));
+        let pending = AdapterAttribution::fold(&events);
+        assert!(matches!(&pending.evidence, ModelEvidenceState::Pending(_)));
+        assert!(pending.compact_cell().starts_with("!claude"));
+        assert!(pending
+            .realized_disposition()
+            .contains("assessment pending"));
         let recovered = evidence_assessed("worker-one", &complete.replace("model-a", "model-b"));
         let events_with_receipt: Vec<_> = events.iter().cloned().chain([recovered]).collect();
         assert!(matches!(
