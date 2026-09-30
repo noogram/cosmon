@@ -1903,6 +1903,19 @@ pub struct AdaptersConfig {
     pub entries: std::collections::BTreeMap<String, AdapterEntry>,
 }
 
+/// Per-galaxy codex update behavior. Absence selects [`Self::Auto`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexUpdatePolicy {
+    /// Check and update before launch, and resolve an update menu in the pane.
+    #[default]
+    Auto,
+    /// Disable the launch check and decline any update menu that still appears.
+    Skip,
+    /// Observe and page without sending keys or restarting the worker.
+    Operator,
+}
+
 /// One row in the `[adapters]` table — an Adapter's static inventory
 /// signature (ADR-097 / C6, ADR-079 §6).
 ///
@@ -1936,6 +1949,12 @@ pub struct AdapterEntry {
     /// different sandbox posture or model flag.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_args: Vec<String>,
+
+    /// How cosmon handles an interactive codex update menu for this galaxy.
+    /// `auto` checks for an update before launch and accepts a menu that
+    /// appears later; `skip` declines it; `operator` leaves it for a human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<CodexUpdatePolicy>,
 
     /// External-CLI launch mode. Today only the `codex` adapter reads this
     /// row.
@@ -2164,6 +2183,32 @@ impl AdaptersConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_update_policy_is_galaxy_scoped_and_defaults_to_auto() {
+        let absent: ProjectConfig = toml::from_str("[adapters.codex]\n").unwrap();
+        assert_eq!(
+            absent
+                .adapters
+                .as_ref()
+                .and_then(|a| a.entry("codex"))
+                .and_then(|e| e.update)
+                .unwrap_or_default(),
+            CodexUpdatePolicy::Auto,
+        );
+        for (raw, expected) in [
+            ("skip", CodexUpdatePolicy::Skip),
+            ("operator", CodexUpdatePolicy::Operator),
+            ("auto", CodexUpdatePolicy::Auto),
+        ] {
+            let config: ProjectConfig =
+                toml::from_str(&format!("[adapters.codex]\nupdate = \"{raw}\"\n")).unwrap();
+            assert_eq!(
+                config.adapters.unwrap().entry("codex").unwrap().update,
+                Some(expected)
+            );
+        }
+    }
 
     #[test]
     fn test_default_config() {

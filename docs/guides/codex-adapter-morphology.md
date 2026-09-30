@@ -79,11 +79,13 @@ write its own completion lock. Empty `writable_roots` (a bare CI checkout with
 no `.cosmon/` ancestor) emits no `--add-dir` and leaves the command
 byte-identical to the pre-fix shape.
 
-Startup update checks follow the operator's codex configuration. During an
-interactive `cs tackle` launch, a detected update, reasoning, or rate-limit
-menu is recorded and reported before the briefing is sent. The pane stays
-available for the operator. Every `cs patrol` run scans running panes for
-these menus by default and does not answer them automatically.
+`[adapters.codex].update` is a per-galaxy policy. The default `auto` checks
+for updates outside the pane under the operator-home cosmon lock and handles
+a verified update menu in the pane if one appears later. A successful
+in-pane update is followed by a forced re-tackle in the same worktree and
+session. `skip` disables the startup check for that launch and selects Skip
+if a menu appears. `operator` retains the earlier detect-and-page behavior.
+Reasoning and rate-limit menus remain operator decisions.
 
 - Struct field: `CodexSessionConfig::writable_roots`
   (`crates/cosmon-transport/src/codex.rs`).

@@ -115,6 +115,8 @@ pub enum InjectionOrigin {
     /// `cs patrol`'s opt-in dialogue auto-confirm: a bare Enter that accepts a
     /// TUI permission prompt's highlighted default.
     DialogueAutoConfirm,
+    /// Resolve a verified codex update menu under the galaxy's policy.
+    CodexUpdate,
     /// The graceful-exit path sending the adapter's quit command.
     GracefulExit,
     /// No caller declared itself: the injection arrived through the plain
@@ -138,6 +140,7 @@ impl InjectionOrigin {
             Self::Whisper => "whisper",
             Self::ReadinessProbe => "readiness_probe",
             Self::DialogueAutoConfirm => "dialogue_auto_confirm",
+            Self::CodexUpdate => "codex_update",
             Self::GracefulExit => "graceful_exit",
             Self::Unattributed => "unattributed",
         }

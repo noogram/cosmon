@@ -640,6 +640,15 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let state_dir = ctx.config.clone().unwrap_or_else(super::default_state_dir);
     let store = ctx.store_at(&state_dir);
+    let codex_update_policy =
+        cosmon_filestore::load_project_config(&cosmon_filestore::resolve_config_path(None))
+            .ok()
+            .and_then(|config| {
+                config
+                    .adapters
+                    .and_then(|adapters| adapters.entry("codex").and_then(|e| e.update))
+            })
+            .unwrap_or_default();
 
     let mut fleet = store.load_fleet()?;
     let molecules = store.list_molecules(&MoleculeFilter::default())?;
@@ -912,6 +921,17 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // a diagnostic surfaced to a human — never a blind mutation trigger
     // (ADR-137 §2). Money stakes are hard-refused in the classifier.
     let dialogue_report = if args.dialogue_scan {
+        if codex_update_policy != cosmon_core::config::CodexUpdatePolicy::Operator {
+            codex_update_sweep(
+                store.as_ref(),
+                &state_dir,
+                &molecules,
+                backend.as_ref().map(|b| b as &dyn TransportBackend),
+                codex_update_policy,
+                &super::codex_update::InstalledCodex,
+                |mol, wid| restart_codex_worker(ctx, mol, wid, &state_dir),
+            );
+        }
         dialogue_scan_sweep(
             store.as_ref(),
             &state_dir,
@@ -920,6 +940,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             &DialogueScanOpts {
                 lines: args.dialogue_lines,
                 auto_confirm_safe: args.auto_confirm_safe,
+                codex_update_policy,
                 blocked_after: args.dialogue_blocked_after,
             },
             Utc::now(),
@@ -3270,6 +3291,8 @@ pub(crate) struct DialogueScanOpts {
     pub lines: usize,
     /// Opt-in: fire the default-accept keystroke on safe permission prompts.
     pub auto_confirm_safe: bool,
+    /// Per-galaxy handling of codex update widgets.
+    pub codex_update_policy: cosmon_core::config::CodexUpdatePolicy,
     /// Blocked-duration (seconds) past which a still-blocked molecule escalates
     /// to a canary-RED page.
     pub blocked_after: u64,
@@ -3379,6 +3402,7 @@ pub(crate) fn decide_dialogue_action(
 /// Transport is a trait object so the sweep is testable with a `MockBackend`.
 /// Pane text is read only to surface findings (ADR-137 §2); the sole autonomous
 /// keystroke is the opt-in default-accept on a `Permission`-class prompt.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn dialogue_scan_sweep(
     store: &dyn StateStore,
     state_dir: &Path,
@@ -3415,6 +3439,19 @@ pub(crate) fn dialogue_scan_sweep(
             continue;
         };
         let codex_kind = classify_codex_dialog(&pane);
+        if mol.process.as_ref().and_then(|p| p.adapter_name.as_deref()) == Some("codex")
+            && opts.codex_update_policy != cosmon_core::config::CodexUpdatePolicy::Operator
+            && (codex_kind == Some(CodexDialogKind::RestartRequired)
+                || (codex_kind == Some(CodexDialogKind::UpdateAvailable)
+                    && cosmon_core::dialogue::codex_update_menu_move(
+                        &pane,
+                        opts.codex_update_policy == cosmon_core::config::CodexUpdatePolicy::Auto,
+                    )
+                    .is_some()))
+        {
+            // The dedicated update sweep owns these panes and their keys.
+            continue;
+        }
         if matches!(
             codex_kind,
             Some(CodexDialogKind::UpdateAvailable | CodexDialogKind::RestartRequired)
@@ -3494,6 +3531,232 @@ pub(crate) fn dialogue_scan_sweep(
         });
     }
     Ok(report)
+}
+
+/// Act on update widgets for codex workers only. The updater and restart
+/// boundary are injected so tests never launch an installer or real worker.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn codex_update_sweep(
+    store: &dyn StateStore,
+    state_dir: &Path,
+    molecules: &[MoleculeData],
+    backend: Option<&dyn TransportBackend>,
+    policy: cosmon_core::config::CodexUpdatePolicy,
+    updater: &dyn super::codex_update::CodexUpdater,
+    restart: impl Fn(&MoleculeData, &WorkerId) -> anyhow::Result<()>,
+) {
+    use cosmon_core::dialogue::{classify_codex_dialog, CodexDialogKind};
+    if policy == cosmon_core::config::CodexUpdatePolicy::Operator {
+        return;
+    }
+    let Some(backend) = backend else { return };
+    for mol in molecules
+        .iter()
+        .filter(|m| m.status == MoleculeStatus::Running)
+    {
+        if mol.process.as_ref().and_then(|p| p.adapter_name.as_deref()) != Some("codex") {
+            continue;
+        }
+        let Some(wid) = mol.assigned_worker.as_ref() else {
+            continue;
+        };
+        if !backend.is_alive(wid).unwrap_or(false) {
+            continue;
+        }
+        let Ok(pane) = backend.capture_output(wid, 40) else {
+            continue;
+        };
+        let mol_dir = store.molecule_dir(&mol.id);
+        match classify_codex_dialog(&pane) {
+            Some(CodexDialogKind::UpdateAvailable) => {
+                let pending = mol_dir.join("codex-update.pending");
+                let provenance = cosmon_cli::injection_provenance::codex_update(&mol.id, &mol_dir);
+                if policy == cosmon_core::config::CodexUpdatePolicy::Auto && pending.exists() {
+                    let elapsed = std::fs::metadata(&pending)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|modified| modified.elapsed().ok())
+                        .unwrap_or_default();
+                    if elapsed < std::time::Duration::from_secs(120) {
+                        continue;
+                    }
+                    let failure = super::codex_update::UpdateOutcome::Failed(
+                        "in-pane update did not reach restart notice within 120s".to_owned(),
+                    );
+                    let _ =
+                        super::codex_update::record_outcome(state_dir, &mol_dir, &mol.id, &failure);
+                    let _ = super::tackle::select_codex_update_menu(
+                        backend,
+                        wid,
+                        &pane,
+                        cosmon_core::config::CodexUpdatePolicy::Skip,
+                        &provenance,
+                    );
+                    let _ = std::fs::remove_file(&pending);
+                    continue;
+                }
+                if policy == cosmon_core::config::CodexUpdatePolicy::Auto {
+                    if let Ok(version) = updater.version() {
+                        let _ = std::fs::write(&pending, version);
+                    }
+                }
+                match super::tackle::select_codex_update_menu(
+                    backend,
+                    wid,
+                    &pane,
+                    policy,
+                    &provenance,
+                ) {
+                    Ok(true) => {
+                        let _ = record_update_observation(
+                            store,
+                            &mol.id,
+                            Some(CodexDialogKind::UpdateAvailable),
+                        );
+                        let _ = event_log::emit_one(
+                            state_dir.join("events.jsonl"),
+                            EventV2::BlockingDialogueDetected {
+                                molecule_id: mol.id.clone(),
+                                worker_id: Some(wid.clone()),
+                                class: "unknown".to_owned(),
+                                action: if policy == cosmon_core::config::CodexUpdatePolicy::Auto {
+                                    "update_selected"
+                                } else {
+                                    "update_skipped"
+                                }
+                                .to_owned(),
+                                blocked_seconds: Some(0),
+                            },
+                            None,
+                        );
+                        if policy == cosmon_core::config::CodexUpdatePolicy::Skip {
+                            let _ = clear_codex_update_block_tags(store, &mol.id);
+                        }
+                    }
+                    Ok(false) => {
+                        let _ = std::fs::remove_file(&pending);
+                    }
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&pending);
+                        let outcome = super::codex_update::UpdateOutcome::Failed(error.to_string());
+                        let _ = super::codex_update::record_outcome(
+                            state_dir, &mol_dir, &mol.id, &outcome,
+                        );
+                    }
+                }
+            }
+            Some(CodexDialogKind::RestartRequired)
+                if policy == cosmon_core::config::CodexUpdatePolicy::Auto =>
+            {
+                let _ = record_update_observation(
+                    store,
+                    &mol.id,
+                    Some(CodexDialogKind::RestartRequired),
+                );
+                match restart(mol, wid) {
+                    Ok(()) => {
+                        let from = std::fs::read_to_string(mol_dir.join("codex-update.pending"));
+                        let outcome = match (from, updater.version()) {
+                            (Ok(from), Ok(to)) if from != to => {
+                                super::codex_update::UpdateOutcome::Updated { from, to }
+                            }
+                            (Ok(_), Ok(_)) => super::codex_update::UpdateOutcome::Failed(
+                                "restart notice appeared without a version change".to_owned(),
+                            ),
+                            (Err(_), Ok(_)) => super::codex_update::UpdateOutcome::Failed(
+                                "restart succeeded but prior version was not recorded".to_owned(),
+                            ),
+                            (_, Err(error)) => {
+                                super::codex_update::UpdateOutcome::Failed(error.to_string())
+                            }
+                        };
+                        let _ = super::codex_update::record_outcome(
+                            state_dir, &mol_dir, &mol.id, &outcome,
+                        );
+                        let _ = std::fs::remove_file(mol_dir.join("codex-update.pending"));
+                        let _ = clear_codex_update_block_tags(store, &mol.id);
+                    }
+                    Err(error) => {
+                        let outcome = super::codex_update::UpdateOutcome::Failed(error.to_string());
+                        let _ = super::codex_update::record_outcome(
+                            state_dir, &mol_dir, &mol.id, &outcome,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Clear fulfilled update and dialogue blocks after a skip or restart.
+fn clear_codex_update_block_tags(
+    store: &dyn StateStore,
+    mol_id: &MoleculeId,
+) -> anyhow::Result<()> {
+    let _guard = store.lock_fleet()?;
+    let mut mol = store.load_molecule(mol_id)?;
+    let mut changed = false;
+    for name in ["dialogue-blocked", "worker-restart-requested"] {
+        changed |= mol.tags.remove(&Tag::new(name)?);
+    }
+    if changed {
+        store.save_molecule(mol_id, &mol)?;
+    }
+    Ok(())
+}
+
+/// Restart through the existing forced re-tackle path, preserving the tmux
+/// session name and worktree while re-delivering the current briefing.
+fn restart_codex_worker(
+    ctx: &Context,
+    mol: &MoleculeData,
+    wid: &WorkerId,
+    state_dir: &Path,
+) -> anyhow::Result<()> {
+    let bin = std::env::current_exe()?;
+    let mol_dir = state_dir
+        .join("fleets")
+        .join(mol.fleet_id.as_str())
+        .join("molecules")
+        .join(mol.id.as_str());
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(mol_dir.join("codex-update-restart.log"))?;
+    let mut command = std::process::Command::new(bin);
+    if let Some(config) = &ctx.config {
+        command.arg("--config").arg(config);
+    }
+    command.args([
+        "tackle",
+        mol.id.as_str(),
+        "--adapter",
+        "codex",
+        "--force",
+        "--name",
+        wid.as_str(),
+    ]);
+    let mut child = command
+        .stdout(std::process::Stdio::from(log.try_clone()?))
+        .stderr(std::process::Stdio::from(log))
+        .spawn()?;
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("in-place codex re-tackle exited {status}"))
+            };
+        }
+        if start.elapsed() >= std::time::Duration::from_secs(300) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow::anyhow!("in-place codex re-tackle exceeded 300s"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 /// Keep a durable, visible trace of the update text actually captured from a
@@ -6046,6 +6309,7 @@ mod tests {
         DialogueScanOpts {
             lines: 40,
             auto_confirm_safe,
+            codex_update_policy: cosmon_core::config::CodexUpdatePolicy::Operator,
             blocked_after: 900,
         }
     }
@@ -6087,6 +6351,94 @@ mod tests {
                 .iter()
                 .any(|call| matches!(call, cosmon_transport::mock::MockCall::SendInput { .. })));
         }
+    }
+
+    #[test]
+    fn auto_update_menu_then_restart_reuses_worker_and_delivers_brief() {
+        use cosmon_transport::mock::MockCall;
+        use std::sync::{Arc, Mutex};
+
+        struct FakeVersion(Arc<Mutex<String>>);
+        impl super::super::codex_update::CodexUpdater for FakeVersion {
+            fn version(&self) -> std::io::Result<String> {
+                Ok(self.0.lock().unwrap().clone())
+            }
+            fn update(&self) -> std::io::Result<()> {
+                panic!("pane handling must not invoke the out-of-pane installer")
+            }
+        }
+
+        let (tmp, store) = make_store();
+        let mut mol = make_molecule("task-20260930-1360", MoleculeStatus::Running, Some("w1"));
+        mol.adapter = Some("codex".to_owned());
+        mol.process = Some(
+            cosmon_core::process::MoleculeProcess::new(WorkerId::new("w1").unwrap(), "w1")
+                .with_adapter_name("codex"),
+        );
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let molecules = store.list_molecules(&MoleculeFilter::default()).unwrap();
+        let backend = mock_with_worker("w1", "Update available! 1 → 2\n› 1. Update\n  2. Skip");
+        let version = Arc::new(Mutex::new("codex-cli 1".to_owned()));
+        let updater = FakeVersion(Arc::clone(&version));
+        codex_update_sweep(
+            &store,
+            tmp.path(),
+            &molecules,
+            Some(&backend),
+            cosmon_core::config::CodexUpdatePolicy::Auto,
+            &updater,
+            |_, _| panic!("restart is only due after the success notice"),
+        );
+        assert!(backend.calls().iter().any(|call| matches!(call,
+            MockCall::SendInput { input, .. } if input.is_empty())));
+        *version.lock().unwrap() = "codex-cli 2".to_owned();
+        backend.set_canned_output("Update ran successfully! Please restart Codex");
+        codex_update_sweep(
+            &store,
+            tmp.path(),
+            &molecules,
+            Some(&backend),
+            cosmon_core::config::CodexUpdatePolicy::Auto,
+            &updater,
+            |_, wid| {
+                backend.terminate(wid)?;
+                let agent = cosmon_core::transport::AgentDefinition {
+                    id: cosmon_core::id::AgentId::new("w1")?,
+                    role: AgentRole::Implementation,
+                    command: "codex".to_owned(),
+                    args: Vec::new(),
+                    cwd: None,
+                };
+                let respawned =
+                    backend.spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())?;
+                assert_eq!(respawned.id, *wid);
+                backend.send_input(wid, "briefing.md")?;
+                Ok(())
+            },
+        );
+        let calls = backend.calls();
+        assert!(calls.iter().any(|call| matches!(call,
+            MockCall::Terminate { worker_id } if worker_id == "w1")));
+        assert!(calls.iter().any(|call| matches!(call,
+            MockCall::SendInput { input, .. } if input == "briefing.md")));
+        let update_record =
+            std::fs::read_to_string(store.molecule_dir(&mol.id).join("codex-updates.jsonl"))
+                .unwrap();
+        assert!(
+            update_record.contains("\"type\":\"codex_updated\""),
+            "{update_record}"
+        );
+        assert!(
+            update_record.contains("\"from\":\"codex-cli 1\""),
+            "{update_record}"
+        );
+        assert!(
+            update_record.contains("\"to\":\"codex-cli 2\""),
+            "{update_record}"
+        );
+        assert!(std::fs::read_to_string(tmp.path().join("events.jsonl"))
+            .unwrap()
+            .contains("codex_updated"));
     }
 
     #[test]

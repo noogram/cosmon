@@ -23,9 +23,30 @@ configuration surface without reading cosmon source code.
 | `[hooks]` | Lifecycle hook commands | no |
 | `[gates]` | Verification gate commands (language-agnostic) | no |
 | `[archive]` | Durable proof-of-work archive: on/off and retention | no |
+| `[adapters.codex]` | Codex launch and update policy for this galaxy | no |
 
 All sections except `[project]` are optional and default to sensible
 values. Missing sections never produce an error.
+
+## `[adapters.codex].update` — worker update policy
+
+```toml
+[adapters.codex]
+update = "auto" # default; alternatives: "skip", "operator"
+```
+
+`auto` checks for an update outside the worker pane before launch under
+`~/.cosmon/codex-update.lock`, shared by all galaxies on the machine. If a
+verified update menu still appears in a worker pane, `auto` selects Update.
+After the success notice, cosmon re-tackles the molecule in the same worktree
+and tmux session and re-delivers its briefing. Version changes are written to
+the molecule's `codex-updates.jsonl` and the galaxy `events.jsonl`. An updater
+failure is recorded and does not prevent launch on the installed version.
+
+`skip` passes `-c check_for_update_on_startup=false` only to that worker launch
+and selects Skip if the menu nevertheless appears. `operator` leaves the
+menu untouched and keeps the existing alert behavior. None of these settings
+writes the operator's codex configuration file.
 
 ### Retired sections
 
