@@ -3837,8 +3837,14 @@ fn adapter_cell(att: &cosmon_core::adapter_attribution::AdapterAttribution) -> L
             Style::default().fg(Color::DarkGray),
         ));
     };
-    let mut spans: Vec<Span<'static>> =
-        vec![Span::styled(adapter, Style::default().fg(Color::Cyan))];
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if att.evidence_needs_warning() {
+        spans.push(Span::styled(
+            "!",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.push(Span::styled(adapter, Style::default().fg(Color::Cyan)));
     if let Some(model) = att.model.clone() {
         spans.push(Span::styled(
             format!("/{model}"),
@@ -3870,6 +3876,17 @@ fn adapter_cell(att: &cosmon_core::adapter_attribution::AdapterAttribution) -> L
         spans.push(Span::styled(
             format!("@{effort}"),
             Style::default().fg(Color::Magenta),
+        ));
+    }
+    if let Some(glyph) = att.realized.compact_status() {
+        let color = if att.realized == cosmon_core::adapter_attribution::Realized::Unobservable {
+            Color::Red
+        } else {
+            Color::DarkGray
+        };
+        spans.push(Span::styled(
+            format!(" {glyph}"),
+            Style::default().fg(color),
         ));
     }
     Line::from(spans)
@@ -4009,9 +4026,11 @@ fn expanded_detail_lines(r: &RowView) -> Vec<Line<'static>> {
         let realized = format!(
             "{} ({})",
             r.adapter.realized.detail_fragment(),
-            r.adapter.realized.disposition(),
+            r.adapter.realized_disposition(),
         );
-        let realized_style = if r.adapter.realized.observed().is_some() {
+        let realized_style = if r.adapter.evidence_needs_warning() {
+            Style::default().fg(Color::Red)
+        } else if r.adapter.realized.observed().is_some() {
             Style::default().fg(Color::Yellow)
         } else if r.adapter.realized == cosmon_core::adapter_attribution::Realized::Unobservable {
             Style::default().fg(Color::Red)
@@ -7465,7 +7484,7 @@ mod tests {
     fn adapter_cell_renders_adapter_model_and_source() {
         let cell = adapter_cell(&claude_attribution());
         let text = line_text(&cell);
-        assert_eq!(text, "claude/claude-opus-4-8 [cli]");
+        assert_eq!(text, "claude/claude-opus-4-8 [cli] ?");
         // The adapter name is emphasised (cyan), the source tag dimmed.
         assert_eq!(cell.spans[0].style.fg, Some(Color::Cyan));
     }
@@ -7513,6 +7532,69 @@ mod tests {
         let cell = adapter_cell(&att);
         assert_eq!(line_text(&cell), "claude/claude-opus-4-8 [cli]");
         assert!(!line_text(&cell).contains("~>"));
+    }
+
+    #[test]
+    fn compact_terminal_states_keep_distinct_glyphs() {
+        for (realized, glyph) in [
+            (Realized::Unknown, "?"),
+            (Realized::Silent, "-"),
+            (Realized::Pending, "..."),
+            (Realized::Unobservable, "x"),
+        ] {
+            let mut att = claude_attribution();
+            att.realized = realized;
+            assert!(line_text(&adapter_cell(&att)).ends_with(glyph));
+        }
+    }
+
+    #[test]
+    fn degraded_agreement_keeps_warning_in_narrow_terminal_buffer() {
+        use cosmon_core::adapter_attribution::{ModelEvidenceReceipt, ModelEvidenceState};
+        use cosmon_core::event_v2::ModelEvidenceGeneration;
+        use cosmon_core::model_realization::{assess_claude_model_evidence, ModelEvidenceGrammar};
+
+        let mut att = claude_attribution();
+        att.realized = Realized::Observed(vec!["claude-opus-4-8".into()]);
+        att.evidence = ModelEvidenceState::Assessed(ModelEvidenceReceipt {
+            policy_version: 1,
+            observation_basis: ModelEvidenceGrammar::Claude,
+            generation: ModelEvidenceGeneration(1),
+            assessment: assess_claude_model_evidence(
+                concat!(
+                    "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+                    "{\"type\":\"assistant\",\"message\":{}}\n"
+                )
+                .as_bytes(),
+                true,
+            ),
+            captured_at: chrono::Utc::now(),
+        });
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(12, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new(adapter_cell(&att)),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+        let rendered = (0..12)
+            .map(|x| terminal.backend().buffer().cell((x, 0)).unwrap().symbol())
+            .collect::<String>();
+        assert!(rendered.starts_with("!claude/"), "{rendered}");
+
+        let mut row = row_with("running", HeartbeatTier::Active);
+        row.adapter = att;
+        let detail = expanded_detail_lines(&row)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            detail.contains("last observed; coverage degraded"),
+            "{detail}"
+        );
     }
 
     #[test]

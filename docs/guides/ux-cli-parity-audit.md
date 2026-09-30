@@ -2,6 +2,17 @@
 
 # CLI and UI parity audit
 
+## Model evidence coverage (issue #73, W5)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Qualify a pin that matches the last observed model when later coverage degraded | `cs peek` compact cell prefixes `!`; expanded peek and `cs observe` name `last observed; coverage degraded`. `cs --json observe` adds `realized`, `model_evidence` (receipt, reasons, counts and capture time) and `realized_disposition` | No rendered coverage warning audited | No corresponding remote JSON or web rendering audited |
+| Keep absence states distinct | Peek and observe preserve unknown, silent, pending and unavailable realization states; CLI observe JSON preserves the same variants and `not_assessed` for legacy evidence | No matching visual audit | No equivalent evidence projection audited |
+
+The warning describes the persisted assessment boundary. It does not measure
+observer liveness or prove that the reported model executed. Web and native
+renderers need a separate visual witness before parity can be claimed.
+
 `cs harvest-authority` is an operator terminal surface for remote harvest trust administration, status, challenge construction and signed-grant import (issue #120 W6). No native UI counterpart is shipped; the RPP exposes the corresponding tenant reads and imports and a disjoint host-sealed administration route. A native UI must use the same public-root and grant validation rules before parity can be claimed.
 
 ## Harvest diagnostics and tracked state (issue #123)
