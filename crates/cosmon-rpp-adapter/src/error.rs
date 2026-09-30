@@ -63,7 +63,7 @@ pub enum RppRejectReason {
     /// Token past its `exp`.
     #[error("expired")]
     Expired,
-    /// Token before its `nbf`.
+    /// Token before its `nbf` or `iat`, allowing a small clock skew.
     #[error("not yet valid")]
     NotYetValid,
     /// `aud` did not match the pinned audience for this RPP instance.

@@ -45,6 +45,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::{ArcSwap, Guard};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
@@ -54,13 +55,16 @@ use crate::error::RppRejectReason;
 use crate::jwks_fetch::TrustedIssuer;
 use crate::Posture;
 
-/// Maximum JWT `exp - iat` accepted in `Active` posture (15 min, per
-/// ADR-080 §6.5).
+/// Maximum JWT lifetime and remaining validity in `Active` posture (15 min,
+/// per ADR-080 §6.5).
 pub const ACTIVE_MAX_LIFETIME_SEC: u64 = 15 * 60;
 
-/// Maximum JWT `exp - iat` accepted in `Prepared` posture (24 h, with
-/// a warning logged on every laxity).
+/// Maximum JWT lifetime and remaining validity in `Prepared` posture (24 h,
+/// with a warning logged on every laxity).
 pub const PREPARED_MAX_LIFETIME_SEC: u64 = 24 * 60 * 60;
+
+/// Allowed issuer-to-adapter clock skew for `iat` and `nbf` (30 seconds).
+pub const TOKEN_CLOCK_LEEWAY_SEC: u64 = 30;
 
 /// JWT algorithm whitelist. Anything else (including `none`, `HS256`,
 /// `EdDSA`, `RS384`, `RS512`) is rejected at parse time.
@@ -694,6 +698,8 @@ struct RawClaims {
     iat: u64,
     exp: u64,
     #[serde(default)]
+    nbf: Option<u64>,
+    #[serde(default)]
     jti: Option<String>,
     /// Reject `delegate_for` in V0/V1 — turing red-line.
     #[serde(default)]
@@ -853,25 +859,7 @@ impl JwtVerifier {
         if !pinned_audiences.iter().any(|a| a == &aud) {
             return Err(RppRejectReason::AudienceMismatch);
         }
-        let lifetime_sec = claims.exp.saturating_sub(claims.iat);
-        let max = match posture {
-            Posture::Active => ACTIVE_MAX_LIFETIME_SEC,
-            Posture::Prepared => PREPARED_MAX_LIFETIME_SEC,
-        };
-        if lifetime_sec > max {
-            // In `Prepared` we emit a warning but still admit (the
-            // posture is dev-only). In `Active` we hard-reject.
-            match posture {
-                Posture::Active => return Err(RppRejectReason::Expired),
-                Posture::Prepared => {
-                    tracing::warn!(
-                        lifetime_sec,
-                        max,
-                        "jwt lifetime exceeds posture cap (prepared posture: warn-only)"
-                    );
-                }
-            }
-        }
+        let lifetime_sec = validate_token_time(&claims, posture)?;
         // `jti` is optional per RFC 7519 / OIDC 1.0 and most standard
         // IdPs (Forgejo, Google, Auth0) do not emit it on id_tokens.
         // ADR-080 §6.2 reserves replay defence to a future jti store —
@@ -901,6 +889,47 @@ impl JwtVerifier {
             scopes,
         })
     }
+}
+
+fn validate_token_time(claims: &RawClaims, posture: Posture) -> Result<u64, RppRejectReason> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| RppRejectReason::NotYetValid)?
+        .as_secs();
+    let latest_valid_start = now.saturating_add(TOKEN_CLOCK_LEEWAY_SEC);
+    if claims.iat > latest_valid_start || claims.nbf.is_some_and(|nbf| nbf > latest_valid_start) {
+        tracing::warn!("jwt not yet valid: issuance or start exceeds clock leeway");
+        return Err(RppRejectReason::NotYetValid);
+    }
+    let lifetime_sec = claims.exp.saturating_sub(claims.iat);
+    let remaining_sec = claims.exp.saturating_sub(now);
+    let max = match posture {
+        Posture::Active => ACTIVE_MAX_LIFETIME_SEC,
+        Posture::Prepared => PREPARED_MAX_LIFETIME_SEC,
+    };
+    if lifetime_sec > max || remaining_sec > max {
+        // Prepared is dev-only and retains its warning contract.
+        match posture {
+            Posture::Active => {
+                tracing::warn!(
+                    lifetime_sec,
+                    remaining_sec,
+                    max,
+                    "jwt exceeds active posture time cap"
+                );
+                return Err(RppRejectReason::Expired);
+            }
+            Posture::Prepared => {
+                tracing::warn!(
+                    lifetime_sec,
+                    remaining_sec,
+                    max,
+                    "jwt lifetime exceeds posture cap (prepared posture: warn-only)"
+                );
+            }
+        }
+    }
+    Ok(lifetime_sec)
 }
 
 fn peek_iss(token: &str) -> Option<String> {
