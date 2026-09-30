@@ -17,7 +17,15 @@ it on demand in every repository.
 ./install.sh
 ```
 
-Idempotent. Copies `SKILL.md` into `~/.claude/skills/cosmon/`.
+Idempotent. Copies `SKILL.md` into
+`${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/cosmon/`.
+
+Pass `--link` to install a symlink instead, so the installed skill follows
+this repository as it changes:
+
+```bash
+./install.sh --link
+```
 
 To scope it to a single project instead, copy or symlink `SKILL.md` into that
 project's `.claude/skills/cosmon/` directory.
