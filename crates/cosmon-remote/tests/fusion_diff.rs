@@ -163,10 +163,10 @@ fn commands_section(lines: &[String]) -> Vec<String> {
 /// since A3 (`after_long_help` attached — see module docs), so only
 /// the catalogue is compared line-by-line.
 #[test]
-fn root_commands_catalogue_gains_the_eight_blessed_verbs() {
+fn root_commands_catalogue_gains_the_blessed_verbs() {
     // Catalogue-scoped diff (the rest of the page is consciously
     // long-form since A3 \u{2014} `after_long_help` attached, see module
-    // docs). Eight blessed verb additions, all additive (\u{21d2} minor):
+    // docs). Nine blessed verb additions, all additive (\u{21d2} minor):
     // 1. `avatar`   \u{2014} A2 fusion (drained from cs-thin), CHANGELOG 0.2.0.
     // 2. `do`       \u{2014} B2 client-side composition (task-20260610-56c4).
     // 3. `doctor`   \u{2014} C1 onboarding checks (stitch 828e).
@@ -184,6 +184,7 @@ fn root_commands_catalogue_gains_the_eight_blessed_verbs() {
     //    decision: a blocking ROUTE would make the adapter hold a
     //    thread and a waiter-keyed piece of state per client
     //    (issue #51 follow-up, task-20260907-b25f).
+    // 9. `harvest`  \u{2014} operator-side grant and authority workflow (#120 W7).
     // Plus four in-place description edits: the diagnostic verbs
     // (healthz, quota, workers, noyaux) gained an explicit
     // `(diagnostic)` marker in the B2+C1 integration (stitch 828e) \u{2014}
@@ -216,8 +217,8 @@ fn root_commands_catalogue_gains_the_eight_blessed_verbs() {
     }
     assert_eq!(
         added.len(),
-        8 + inplace_subs.len(),
-        "root commands: blessed additions are avatar, do, doctor, converse, run, login, logout, wait \
+        9 + inplace_subs.len(),
+        "root commands: blessed additions are avatar, do, doctor, converse, run, login, logout, wait, harvest \
          + the in-place edits, got {added:?}"
     );
     for verb in [
@@ -229,6 +230,7 @@ fn root_commands_catalogue_gains_the_eight_blessed_verbs() {
         "  login  ",
         "  logout  ",
         "  wait  ",
+        "  harvest  ",
     ] {
         assert!(
             added.iter().any(|l| l.starts_with(verb)),

@@ -1,0 +1,18 @@
+Build, sign and install a grant, or split the workflow into offline steps
+
+Usage: cosmon-remote harvest grant [OPTIONS]
+
+Options:
+      --molecule <MOLECULE>      Issue for exactly this molecule
+      --profile <PROFILE>        Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --json                     Render machine-readable JSON instead of human text where applicable
+      --mission <MISSION>        Delegate to a mission rooted at this molecule
+      --expires-in <EXPIRES_IN>  Grant lifetime in minutes, hours or days (default: 1h)
+      --token <TOKEN>            Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+      --no-expiry                Keep the grant valid until the epoch changes
+      --export <EXPORT>          Write a checked challenge for offline signing
+      --sign <SIGN>              Sign a previously exported challenge on this device
+      --import <IMPORT>          Upload a previously signed grant without consuming it
+      --output <OUTPUT>          Output file for --sign (defaults to <challenge>.signed.json)
+      --key-file <KEY_FILE>      Select an operator-owned key, including one on a removable device
+  -h, --help                     Print help

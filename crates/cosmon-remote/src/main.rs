@@ -33,6 +33,7 @@ use cosmon_remote::oidc::BearerIdentity;
 use cosmon_remote::{doctor, hints, phone_home, pkce};
 use tracing_subscriber::EnvFilter;
 
+mod harvest;
 mod root_help;
 
 #[derive(Debug, Parser)]
@@ -221,6 +222,12 @@ enum Cmd {
     Config {
         #[command(subcommand)]
         sub: ConfigCmd,
+    },
+    /// Operator-side remote harvest authority and grants.
+    #[command(display_order = 6)]
+    Harvest {
+        #[command(subcommand)]
+        sub: harvest::HarvestCmd,
     },
     /// Onboarding checks, named and falsifiable: réseau, oidc-url,
     /// badge tenant, lunettes du worker. Vert/rouge par check, la
@@ -936,6 +943,16 @@ async fn run() -> Result<()> {
 async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
     match cli.cmd {
         Cmd::Config { sub } => run_config(store, sub, cli.json),
+        Cmd::Harvest { sub } => {
+            let (name, profile) = store.resolve(cli.profile.as_deref())?;
+            let client = match &sub {
+                harvest::HarvestCmd::Grant { sign: Some(_), .. } => {
+                    Client::new_unchecked(&profile, None)?
+                }
+                _ => client_for(&profile, cli.token).await?,
+            };
+            harvest::run(sub, &name, &profile, &client, cli.json).await
+        }
         Cmd::Do {
             topic,
             formula,

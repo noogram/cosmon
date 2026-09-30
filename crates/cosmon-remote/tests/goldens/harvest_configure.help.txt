@@ -1,0 +1,27 @@
+Compare and set the selected remote policy using the admin credential
+
+Usage: cosmon-remote harvest configure [OPTIONS] --policy <POLICY> --admin-token-file <ADMIN_TOKEN_FILE>
+
+Options:
+      --policy <POLICY>
+          New explicit policy for the tenant galaxy
+
+          Possible values:
+          - disabled: Refuse all remote harvest requests
+          - scoped:   Admit ordinary requests under the harvest scope
+          - sealed:   Require a current independently signed grant
+
+      --profile <PROFILE>
+          Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+
+      --admin-token-file <ADMIN_TOKEN_FILE>
+          File holding the independent host admin credential
+
+      --json
+          Render machine-readable JSON instead of human text where applicable
+
+      --token <TOKEN>
+          Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+
+  -h, --help
+          Print help (see a summary with '-h')

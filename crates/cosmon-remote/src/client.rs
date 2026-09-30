@@ -1053,6 +1053,45 @@ impl Client {
         decode_json(resp).await
     }
 
+    /// Read the tenant's effective remote harvest authority and optional grant state.
+    pub async fn harvest_status(&self, molecule: Option<&str>) -> Result<serde_json::Value> {
+        let mut rb = self.req_canon(canon::GET_V1_HARVEST_STATUS, &[]);
+        if let Some(molecule) = molecule {
+            rb = rb.query(&[("molecule", molecule)]);
+        }
+        decode_json(self.send(rb).await?).await
+    }
+
+    /// Compare and set public harvest authority with the host admin credential.
+    pub async fn harvest_configure(
+        &self,
+        noyau: &str,
+        admin_token: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let rb = self
+            .req_canon(canon::PUT_V1_ADMIN_NOYAUX_NOYAU_HARVEST_AUTHORITY, &[noyau])
+            .header("X-Cosmon-Admin-Token", admin_token)
+            .json(body);
+        decode_json(self.send(rb).await?).await
+    }
+
+    /// Request current canonical grant facts without issuing authority.
+    pub async fn harvest_challenge(&self, body: &serde_json::Value) -> Result<serde_json::Value> {
+        let rb = self
+            .req_canon(canon::POST_V1_HARVEST_CHALLENGE, &[])
+            .json(body);
+        decode_json(self.send(rb).await?).await
+    }
+
+    /// Import an independently signed grant. Success means installed, not merged.
+    pub async fn harvest_import(&self, body: &serde_json::Value) -> Result<serde_json::Value> {
+        let rb = self
+            .req_canon(canon::POST_V1_HARVEST_GRANTS, &[])
+            .json(body);
+        decode_json(self.send(rb).await?).await
+    }
+
     // ── OIDC mint (cs-oidc-mock style) ────────────────────────────────
 
     /// Mint a JWT against the deployment's OIDC issuer. Mirrors the

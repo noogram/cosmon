@@ -3,7 +3,7 @@
 
 The contract is ``docs/specs/remote-harvest-contract.md``; each case below
 names the clause it asserts. The cases are written against commands and
-fields that the contract **proposes** and that do not exist yet
+fields that the contract specifies
 (``cosmon-remote harvest ...``, the ``harvest_authorization`` refusal
 object, ``[harvest_authority] remote``). They are the specification the
 implementation units of #120 turn green, one clause at a time.
@@ -11,7 +11,8 @@ implementation units of #120 turn green, one clause at a time.
 Opt-in, by deselection
 ----------------------
 
-Every case carries the ``contract_pending`` marker, and ``conftest.py``
+The client-only operator surface runs by default. Remaining container cases
+carry the ``contract_pending`` marker, and ``conftest.py``
 deselects those unless ``RPP_E2E_CONTRACT_PENDING=1``. Deselection rather
 than skip, for the reason the rest of this suite gives: a case that has
 not run must never read as green. The nightly container job does not set
@@ -41,7 +42,7 @@ true``. The scoped and legacy classes rewrite that file on the host
 before any request, because ``required`` is the galaxy's own tracked
 local seal policy, which the local operator edits; it is not remote
 provisioning. The remote policy itself is only ever selected through the
-proposed ``harvest configure`` command, and the tests assert that no
+shipped ``harvest configure`` command, and the tests assert that no
 request writes ``remote`` behind the operator's back.
 """
 from __future__ import annotations
@@ -52,8 +53,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
-pytestmark = pytest.mark.contract_pending
 
 HARVEST_SCOPE = "cosmon:molecule:harvest"
 
@@ -198,6 +197,7 @@ class TestOperatorSurface:
 
 
 @pytest.mark.stack
+@pytest.mark.contract_pending
 class TestScopedConflict:
     """Contract R5 and §4: ``configure scoped`` on a ``required = true`` galaxy."""
 
@@ -221,6 +221,7 @@ class TestScopedConflict:
 
 
 @pytest.mark.stack
+@pytest.mark.contract_pending
 class TestScopedProfile:
     """Contract R4 and §5: harvest scope, no key, no grant."""
 
@@ -273,6 +274,7 @@ class TestScopedProfile:
 
 
 @pytest.mark.stack
+@pytest.mark.contract_pending
 class TestScopedWithoutHarvestScope:
     """Contract R4: ``cosmon:molecule:write`` is not sufficient."""
 
@@ -295,6 +297,7 @@ class TestScopedWithoutHarvestScope:
 
 
 @pytest.mark.stack
+@pytest.mark.contract_pending
 class TestSealedProfile:
     """Contract R6/R7, §8 and §12: production key init, then a grant."""
 
@@ -351,6 +354,7 @@ class TestSealedProfile:
 
 
 @pytest.mark.stack
+@pytest.mark.contract_pending
 class TestLegacyUpgrade:
     """Contract R1 and §4. R2 (legacy sealed) is ``test_tenant_journey.py``."""
 
@@ -373,6 +377,7 @@ class TestLegacyUpgrade:
 
 
 @pytest.mark.stack
+@pytest.mark.contract_pending
 class TestDisabledProfile:
     """Contract R3: an explicit ``disabled`` refuses even with a valid grant."""
 
