@@ -180,11 +180,16 @@ async fn idle_events_stream_rechecks_without_a_source_event() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, "[global]\nenabled = true\n").unwrap();
     });
+    let started = std::time::Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(5), to_bytes(response.into_body(), 1024))
         .await
         .expect("idle stream did not recheck policy on its own interval");
     write_policy.await.unwrap();
     result.expect("SSE body failed");
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "idle stream closed only after an external wake"
+    );
 }
 
 #[tokio::test]
