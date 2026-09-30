@@ -175,7 +175,7 @@ pub struct HandoffDoc {
     /// `nucleon_id` would collide on the same `oidc-identity.toml`; the
     /// convergence refuses that with a loud [`TrustBootstrapError::InvalidHandoff`].
     /// Additive + unknown-field-tolerant: a server that predates this
-    /// field simply ignores it and seals only the legacy `[binding]`
+    /// field simply ignores it and writes only the legacy `[binding]`
     /// (graceful, since the kernel ships server + provisioner together).
     #[serde(default)]
     pub bindings: Vec<HandoffBinding>,
@@ -295,13 +295,13 @@ pub struct ConvergeReport {
     /// The server uses this deployment-owned tuple as the default for
     /// `GET /install.sh`. Keeping it on the convergence receipt ties the
     /// rendered client profile to the same declaration that actually wrote
-    /// the sealed binding, rather than re-parsing an unrelated config copy.
+    /// the loaded binding, rather than re-parsing an unrelated config copy.
     pub primary_binding: Option<AppliedHandoffBinding>,
 }
 
 /// Secret-free deployment tuple projected from an applied handoff binding.
 ///
-/// This is the common source for both the sealed authorization binding and
+/// This is the common source for both the authorization binding and
 /// the default client profile rendered into `GET /install.sh`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppliedHandoffBinding {
@@ -1532,12 +1532,12 @@ mod tests {
     /// The load-bearing test of the two-OAuth-app provisioner: a single
     /// handoff that declares BOTH audiences (`aud=A` CLI + `aud=B` MCP)
     /// and BOTH bindings (`[binding]` for A, `[[bindings]]` for B) must
-    /// seal each into its own `oidc-identity.toml`, and the two must be
+    /// write each into its own `oidc-identity.toml`, and the two must be
     /// **audience-isolated** — a lookup on A's audience never returns B's
     /// binding and vice versa (the negative case CI's single-audience
     /// shape cannot generate by accident, kahneman-F5).
     #[test]
-    fn test_handoff_seals_two_bindings_with_audience_isolation() {
+    fn test_handoff_writes_two_bindings_with_audience_isolation() {
         use crate::nucleon_map::HabilitationMap;
         let td = TempDir::new().unwrap();
         let handoff_dir = td.path().join("handoff");
@@ -1566,7 +1566,7 @@ mod tests {
 
         let report = converge_with(&state, &section, None, false).unwrap();
         assert!(report.wrote_allowlist);
-        // Both bindings sealed — distinct directories, stable filenames.
+        // Both bindings written — distinct directories, stable filenames.
         assert_eq!(report.bindings_written.len(), 2);
         assert!(report
             .bindings_written
@@ -1595,9 +1595,7 @@ mod tests {
         assert_eq!(b.audience, "cid-b");
         // The negative assertion: A's audience never opens B's slot.
         assert_ne!(a.nucleon_id.as_str(), b.nucleon_id.as_str());
-        // Both seals intact after the honest write.
-        assert!(map.seal_intact_for_audience("http://ext/git", "3", "cid-a"));
-        assert!(map.seal_intact_for_audience("http://ext/git", "3", "cid-b"));
+        assert_eq!(map.binding_count(), 2);
 
         // Idempotent: a reboot with the same handoff rewrites nothing.
         let report2 = converge_with(&state, &section, None, false).unwrap();
@@ -1679,11 +1677,9 @@ mod tests {
     /// omitting `audience`, so both fall back to `issuer.audiences[0]`.
     ///
     /// The `nucleon_id` guard alone accepts this (the two directories
-    /// differ), each seals its own `oidc-identity.toml`, and then
-    /// [`HabilitationMap::load`] collapses them to ONE — last-writer-wins
-    /// over an unsorted `read_dir`, non-deterministic across reboots, both
-    /// seals green. The convergence must refuse it on the real isolation
-    /// key (the triple), which this test pins.
+    /// differ). The convergence must refuse it on the real isolation
+    /// key (the triple), which this test pins. The loader independently
+    /// refuses duplicate triples across all binding files.
     #[test]
     fn test_two_bindings_same_effective_triple_refused() {
         let td = TempDir::new().unwrap();

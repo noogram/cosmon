@@ -235,7 +235,7 @@ pub struct AppState {
     /// reboot, no dropped tmux worker. Handlers take a snapshot with
     /// `state.jwks.load()`; see [`crate::reload`].
     pub jwks: SharedJwksStore,
-    /// Sealed `sub → nucleon_id` map (clause (a)).
+    /// Operator-declared `(iss, sub, aud) → nucleon_id` map (clause (a)).
     ///
     /// Held behind a [`SharedHabilitationMap`] (an `arc-swap` handle) rather
     /// than a bare `Arc` so the bindings can be reloaded at runtime on

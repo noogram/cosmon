@@ -1759,7 +1759,7 @@ substitutions:
 
 | §8j clause | Matrix substrate | HTTPS+JWT substrate (Remote Pilot Port) |
 |------------|------------------|------------------------------------------|
-| (a) Identity mapping | Matrix MXID `@tenant_auditor:homeserver` → sealed `nucleon_id` via `matrix-identity.toml` | JWT `sub` claim → sealed `nucleon_id` via `oidc-identity.toml` |
+| (a) Identity mapping | Matrix MXID `@tenant_auditor:homeserver` → sealed `nucleon_id` via `matrix-identity.toml` | JWT `(iss, sub, aud)` claims → operator-declared `nucleon_id` via `oidc-identity.toml` |
 | (b) Causal closure | Materialise to `.cosmon/whispers/inbox/<room>/<event_id>.md` before any state write | Materialise to `.cosmon/whispers/inbox/api/<request_id>.json` before any `cs` invocation |
 | (c) Pre-admission rate limit | Per-Matrix-sender leaky bucket persisted to disk | Per-JWT-`claim.sub` leaky bucket persisted to disk; per-`noyau` budget overlay |
 | (d) One-way topology | No reflexive echo into a room cosmon-cognition reads from | Request → response only; no server-initiated callback into a worker-readable channel |

@@ -10,7 +10,7 @@
 //! 2. Validate JWT (clause a) → `ValidatedJwt`.
 //! 3. **No scope check.** A valid JWT is the whole gate — this is the
 //!    counterpart of `cs whoami`, not a state-mutating verb.
-//! 4. Resolve `(iss, sub) → noyau` via the sealed nucleon map. Absent
+//! 4. Resolve `(iss, sub) → noyau` via the loaded nucleon map. Absent
 //!    bindings surface as `"noyau": null` in the response; the route
 //!    does not 401, because the JWT is well-formed and the tenant is
 //!    asking "who do you see in this token?", not "let me do work".
@@ -19,12 +19,11 @@
 //! # `noyau` here is a *hint*, not a grant
 //!
 //! Step 4 uses the audience-blind
-//! [`crate::nucleon_map::HabilitationMap::resolve`] and does not verify
-//! the binding seal, because this route is `cs whoami`, not a gate. A
+//! [`crate::nucleon_map::HabilitationMap::resolve`]. A
 //! non-null `noyau` therefore means "this principal holds *some*
 //! binding", never "this token opens that noyau". The admission
 //! boundary re-resolves the full `(iss, sub, aud)` triple and
-//! re-checks the seal on every state-touching verb, so a token whose
+//! checks the full binding key on every state-touching verb, so a token whose
 //! audience pins another galaxy is still refused with
 //! `cross_tenant_pivot` after `/me` cheerfully printed a noyau name.
 //!

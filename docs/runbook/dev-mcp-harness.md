@@ -28,7 +28,7 @@ Claude Desktop ──HTTP+Bearer──▶ cosmon-rpp-adapter   (tailnet :8443)
 
 The script provisions the trust seam the two processes need — a
 `security/trusted-issuers.toml` allowlist (which JWKS to fetch) plus one
-sealed `nucleons/<noyau>/oidc-identity.toml` binding rendered by the
+operator-controlled `nucleons/<noyau>/oidc-identity.toml` binding rendered by the
 adapter's own audited `nucleon render` path — mints a JWT, curl-smokes the
 `/mcp initialize` handshake (anonymous → 401, authenticated → 200), then
 prints the Claude Desktop connector config.

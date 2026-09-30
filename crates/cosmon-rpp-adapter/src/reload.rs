@@ -5,7 +5,7 @@
 //!
 //! # The problem this closes
 //!
-//! The adapter loads the sealed `(iss, sub) → nucleon → noyau` bindings
+//! The adapter loads the `(iss, sub, aud) → nucleon → noyau` bindings
 //! exactly once, at boot ([`crate::HabilitationMap::load`]), into an
 //! immutable `Arc`. Staging a *new* binding — `cs nucleon bind …` writes
 //! a fresh `oidc-identity.toml` under `<state_dir>/nucleons/<id>/` — was
@@ -120,7 +120,7 @@ impl ReloadOutcome {
 /// Re-read the on-disk nucleon bindings, materialise the delta of new
 /// noyaux, and atomically publish the new map into `shared`.
 ///
-/// Best-effort and non-fatal: an unreadable `nucleons/` directory leaves
+/// Best-effort and non-fatal: an unreadable or ambiguous `nucleons/` directory leaves
 /// the live map in place and is reported via [`ReloadOutcome::error`].
 /// Pure orchestration — the actual materialization authority stays in
 /// [`ImageInit`] (which shells out to `cs init` / `git`), exactly as at

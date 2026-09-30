@@ -49,7 +49,7 @@ Proxies to `cs observe :id --json` under the resolved tenant galaxy.
 
 | Clause | Implementation |
 |--------|----------------|
-| (a) identity mapping | `nucleon_map.rs` — `oidc-identity.toml` BLAKE3-sealed |
+| (a) identity mapping | `nucleon_map.rs` — operator-controlled `oidc-identity*.toml`; duplicate identity triples refused |
 | (b) causal closure   | `audit.rs` — `<inbox>/api/<request_id>.json` written before any effect |
 | (c) rate limit       | `rate_limit.rs` — per-`sub` leaky bucket on disk |
 | (d) one-way topology | V0 forbids POST routes outright |

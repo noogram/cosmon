@@ -401,7 +401,7 @@ pub fn issue_badge(
 ///
 /// **This is not authorization.** The caller (the receiving instance)
 /// must take the returned [`VerifiedBadge`] and intersect it with its
-/// own host-side sealed pin (`HabilitationMap`, deny-by-default). A
+/// own host-side declared pin (`HabilitationMap`, deny-by-default). A
 /// verified badge whose `(iss, sub)` has no pin line resolves to *no
 /// access* — the signature succeeds and authorization still fails.
 ///

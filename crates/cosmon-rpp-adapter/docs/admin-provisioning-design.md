@@ -219,6 +219,11 @@ Conflict` (`cross_noyau_rebind_refused`) : un `(iss,sub)` binde un seul noyau
 (préserve `CrossTenantPivot` structurel). Changer le noyau d'une identité =
 DELETE puis POST (geste explicite, jamais silencieux).
 
+**État actuel du champ `seal`.** Il expose une somme BLAKE3 du fichier rendu
+dans la réponse de provisionnement. Cette somme n'est pas enregistrée comme
+référence indépendante et n'est vérifiée ni à l'admission ni au rechargement.
+Le contrôle d'intégrité des fichiers de binding relève de l'opérateur.
+
 ### 3.3 Codes d'erreur (mappés sur `ApiError`/`RppRejectReason`)
 
 | HTTP | label | Cause |

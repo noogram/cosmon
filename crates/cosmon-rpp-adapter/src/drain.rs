@@ -16,7 +16,7 @@
 //!
 //! Unchanged from ADR-124: the client DEMANDS, the server DECIDES. The
 //! request carries only the root molecule id; the B1 (depth) / B2
-//! (width) / B3 (budget) bounds come from the tenant's sealed binding
+//! (width) / B3 (budget) bounds come from the tenant's loaded binding
 //! and land here as [`cosmon_runtime::RunBounds`] plus the pre-loop
 //! depth check. The B3 budget is passed unconditionally — a tenant
 //! drain is NEVER unbounded (godel Q3).

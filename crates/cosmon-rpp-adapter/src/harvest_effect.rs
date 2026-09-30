@@ -536,13 +536,7 @@ impl RemoteAdmissionValidator for AdapterRemoteValidator {
         let resolved = map
             .resolve_for_audience(&admission.issuer, &admission.subject, &admission.audience)
             .ok_or_else(|| "harvest_scope_missing: binding removed".to_owned())?;
-        if resolved.noyau.as_str() != admission.tenant
-            || !map.seal_intact_for_audience(
-                &admission.issuer,
-                &admission.subject,
-                &admission.audience,
-            )
-        {
+        if resolved.noyau.as_str() != admission.tenant {
             return Err("harvest_scope_missing: binding changed".to_owned());
         }
         let scopes = map.allowed_scopes_for_audience(

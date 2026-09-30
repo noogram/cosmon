@@ -80,20 +80,16 @@ pub enum RppRejectReason {
     /// `iss` not in the boot-time pinned issuers.
     #[error("issuer not pinned")]
     IssuerNotPinned,
-    /// `sub` did not resolve to any sealed `nucleon_id`.
+    /// `sub` did not resolve to any loaded `nucleon_id`.
     #[error("unknown sub")]
     UnknownSub,
-    /// The `oidc-identity.toml` BLAKE3 seal diverged from the on-disk
-    /// content — retroactive edit detected.
-    #[error("seal broken")]
-    SealBroken,
     /// JWT `sub` resolved to a `nucleon_id` outside the request's
     /// tenant routing.
     #[error("cross-tenant pivot")]
     CrossTenantPivot {
         /// Expected `noyau` per the request routing.
         expected_noyau: Noyau,
-        /// Resolved `noyau` from the sealed mapping.
+        /// Resolved `noyau` from the loaded mapping.
         found_noyau: Noyau,
     },
 
@@ -170,7 +166,6 @@ impl RppRejectReason {
             Self::AmbiguousAudience => "ambiguous_audience",
             Self::IssuerNotPinned => "issuer_not_pinned",
             Self::UnknownSub => "unknown_sub",
-            Self::SealBroken => "seal_broken",
             Self::CrossTenantPivot { .. } => "cross_tenant_pivot",
             Self::RateLimited { .. } => "rate_limited",
             Self::NoyauBudgetExhausted(_) => "noyau_budget_exhausted",
@@ -205,7 +200,6 @@ impl RppRejectReason {
             | Self::AmbiguousAudience
             | Self::IssuerNotPinned
             | Self::UnknownSub
-            | Self::SealBroken
             | Self::CrossTenantPivot { .. }
             | Self::SubKilled
             | Self::JtiKilled => StatusCode::UNAUTHORIZED,

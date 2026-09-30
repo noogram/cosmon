@@ -71,7 +71,7 @@ pub struct QuotaResponse {
     /// moussage). Additive field — the symmetric
     /// READ face of the bounds the drain enforces: the client can ask
     /// "what is my depth/budget bound?" but no §8p route writes it
-    /// (operator gesture on the sealed binding only).
+    /// (operator gesture on the binding file only).
     pub drain_bounds: QuotaDrainBounds,
 }
 
@@ -164,7 +164,7 @@ pub async fn get_quota(
             request_id: Some(spark.request_id.clone()),
         })?;
 
-    // Effective drain bounds from the tenant's sealed binding — the
+    // Effective drain bounds from the tenant's loaded binding — the
     // same *triple* admission resolved against, so the read face can
     // never disagree with the enforcement face. The audience is
     // load-bearing here, not decorative: a principal federated on N

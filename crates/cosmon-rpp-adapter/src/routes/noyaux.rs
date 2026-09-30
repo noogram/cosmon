@@ -14,7 +14,7 @@
 //! 2. Validate JWT (clause a) → `ValidatedJwt`.
 //! 3. Apply the global and identity deny policy. No scope check is
 //!    needed for this discovery surface.
-//! 4. Filter the sealed nucleon map by the JWT's identity and audience. Empty
+//! 4. Filter the loaded nucleon map by the JWT's identity and audience. Empty
 //!    list when the principal is not yet bound — 200 OK with
 //!    `noyaux: []`, never 401.
 //! 5. Project to the wire shape.
@@ -92,7 +92,7 @@ pub async fn list_noyaux(
         return Err(ApiError::from_reject(&reason, None));
     }
 
-    // 4. Filter the sealed nucleon map by the exact issuer, subject and audience.
+    // 4. Filter the loaded nucleon map by the exact issuer, subject and audience.
     let rows = state
         .nucleon_map
         .load()
