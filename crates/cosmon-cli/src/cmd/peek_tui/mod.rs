@@ -269,6 +269,7 @@ pub(crate) struct RowView {
     /// total is rendered.
     pub(crate) usage: Vec<cosmon_core::usage::UsageRecord>,
     pub(crate) context_window: Option<u64>,
+    pub(crate) latest_turn_input_tokens: Option<u64>,
     pub(crate) session: Option<String>,
     pub(crate) socket: String,
     pub(crate) heartbeat: HeartbeatTier,
@@ -3365,7 +3366,7 @@ impl App {
                     r.energy_cached,
                     r.energy_out,
                     r.energy_reasoning,
-                    r.context_window,
+                    (r.context_window, r.latest_turn_input_tokens),
                     &r.energy_cost,
                     &r.usage,
                 );
@@ -4210,16 +4211,14 @@ fn format_energy(
     cached: u64,
     output: u64,
     reasoning: u64,
-    context_window: Option<u64>,
+    context: (Option<u64>, Option<u64>),
     cost: &cosmon_observability::EnergyCost,
     usage: &[cosmon_core::usage::UsageRecord],
 ) -> String {
     use cosmon_observability::EnergyCost;
 
-    let total = input.saturating_add(output);
-    let bar = match context_window {
-        Some(capacity) if capacity > 0 => {
-            let percent = (total as f64 / capacity as f64 * 100.0).clamp(0.0, 999.0);
+    let bar = match cosmon_observability::worker::context_percent(context.1, context.0) {
+        Some(percent) => {
             let glyph = if percent < 25.0 {
                 '▂'
             } else if percent < 50.0 {
@@ -4464,6 +4463,7 @@ pub(crate) fn snapshot_to_rows(snap: &FleetSnapshot) -> Vec<RowView> {
                 energy_cost: cosmon_observability::EnergyCost::Unknown,
                 usage: Vec::new(),
                 context_window: None,
+                latest_turn_input_tokens: None,
                 session: None,
                 socket: String::new(),
                 heartbeat,
@@ -4547,8 +4547,11 @@ fn merge_row(
                 cosmon_observability::EnergyCost::ReferenceUsd { usd }
             });
     }
-    if existing.context_window.is_none() {
+    // The gauge belongs to one process; never combine a capacity from one
+    // session with a turn count from another.
+    if existing.context_window.is_none() || matches!(worker_role, Some(OR::Cognition)) {
         existing.context_window = fresh.context_window;
+        existing.latest_turn_input_tokens = fresh.latest_turn_input_tokens;
     }
     // Prefer the freshest heartbeat / activity across roles.
     if fresh.heartbeat > existing.heartbeat {
@@ -4665,6 +4668,7 @@ fn row_view_from(
         energy_cost: energy.cost,
         usage: energy.usage.into_iter().collect(),
         context_window: energy.context_window,
+        latest_turn_input_tokens: energy.latest_turn_input_tokens,
         session: Some(s.name.clone()),
         socket: s.socket.clone(),
         heartbeat,
@@ -5146,6 +5150,7 @@ fn populate_snapshot(
                     subscription: e.subscription.clone(),
                     usage: e.usage.clone(),
                     context_window: e.context_window,
+                    latest_turn_input_tokens: e.latest_turn_input_tokens,
                 }
             })
             .unwrap_or_default();
@@ -5559,12 +5564,51 @@ mod tests {
             40_000,
             10_000,
             2_000,
-            Some(1_000_000),
+            (Some(1_000_000), None),
             &cosmon_observability::EnergyCost::ReferenceUsd { usd: 1.23 },
             &[],
         );
         assert!(s.contains("50.0K/40.0K/10.0K/2.0K"), "{s}");
         assert!(s.contains("API equiv. $1.23"), "{s}");
+    }
+
+    #[test]
+    fn context_gauge_uses_latest_turn_instead_of_session_total() {
+        let s = format_energy(
+            48_603_840,
+            40_000_000,
+            10_000,
+            2_000,
+            (Some(258_400), Some(133_809)),
+            &cosmon_observability::EnergyCost::Unknown,
+            &[],
+        );
+        assert!(
+            s.contains("52%"),
+            "latest turn has 133809 input tokens: {s}"
+        );
+        assert!(
+            !s.contains("999%"),
+            "cumulative tokens are not occupancy: {s}"
+        );
+    }
+
+    #[test]
+    fn context_gauge_is_absent_without_a_last_turn() {
+        let s = format_energy(
+            48_603_840,
+            40_000_000,
+            10_000,
+            2_000,
+            (Some(258_400), None),
+            &cosmon_observability::EnergyCost::Unknown,
+            &[],
+        );
+        assert!(
+            !s.contains('%'),
+            "unknown occupancy must not become a ratio: {s}"
+        );
+        assert!(s.contains('·'), "{s}");
     }
 
     /// Regression for issue #87: an absent Codex price is not evidence that
@@ -5577,7 +5621,7 @@ mod tests {
             3_515_520,
             9_813,
             1_903,
-            None,
+            (None, None),
             &cosmon_observability::EnergyCost::Unknown,
             &[],
         );
@@ -5592,7 +5636,7 @@ mod tests {
             3_515_520,
             9_813,
             1_903,
-            None,
+            (None, None),
             &cosmon_observability::EnergyCost::Subscription {
                 plan_type: Some("pro".to_owned()),
                 used_percent: 7.0,
@@ -5615,7 +5659,7 @@ mod tests {
             200,
             300,
             50,
-            None,
+            (None, None),
             &cosmon_observability::EnergyCost::Unknown,
             &[usage],
         );
@@ -5779,7 +5823,7 @@ mod tests {
             0,
             0,
             0,
-            Some(200_000),
+            (Some(200_000), None),
             &cosmon_observability::EnergyCost::Unknown,
             &[],
         );
@@ -5788,7 +5832,7 @@ mod tests {
             400_000,
             500_000,
             100_000,
-            Some(200_000),
+            (Some(200_000), None),
             &cosmon_observability::EnergyCost::ReferenceUsd { usd: 12.34 },
             &[],
         );
@@ -5797,7 +5841,7 @@ mod tests {
             1_000,
             10,
             5,
-            None,
+            (None, None),
             &cosmon_observability::EnergyCost::ReferenceUsd { usd: 0.01 },
             &[],
         );
@@ -6040,6 +6084,7 @@ mod tests {
             energy_cost: cosmon_observability::EnergyCost::Unknown,
             usage: Vec::new(),
             context_window: None,
+            latest_turn_input_tokens: None,
             session: None,
             socket: String::new(),
             heartbeat: hb,
@@ -6645,6 +6690,7 @@ mod tests {
                 subscription: None,
                 usage: None,
                 context_window: None,
+                latest_turn_input_tokens: None,
             },
             live: "working".into(),
             role: OR::Cognition,
@@ -6783,6 +6829,7 @@ mod tests {
                     subscription: None,
                     usage: None,
                     context_window: Some(1_000_000),
+                    latest_turn_input_tokens: None,
                 },
                 live: "working".into(),
                 role: OR::Runtime,
@@ -6801,6 +6848,7 @@ mod tests {
                     subscription: None,
                     usage: None,
                     context_window: Some(1_000_000),
+                    latest_turn_input_tokens: None,
                 },
                 live: "working".into(),
                 role: OR::Cognition,

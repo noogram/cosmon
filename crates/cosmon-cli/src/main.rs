@@ -335,6 +335,9 @@ enum Command {
     Diverge(cmd::diverge::Args),
 
     /// Peek — canonical fleet observation command (TUI default; `--no-tui` for plaintext stream)
+    ///
+    /// The context gauge uses the latest reported turn's input over the model
+    /// window. Unknown occupancy has no percentage; token columns stay cumulative.
     #[command(after_help = cmd::examples::PEEK)]
     Peek(cmd::peek::Args),
 

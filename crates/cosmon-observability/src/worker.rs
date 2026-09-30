@@ -93,6 +93,9 @@ pub struct EnergyBudget {
     pub usage: Option<UsageRecord>,
     /// Context window size, if known.
     pub context_window: Option<u64>,
+    /// Input tokens in the latest turn, including cached input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_turn_input_tokens: Option<u64>,
 }
 
 impl EnergyBudget {
@@ -100,6 +103,12 @@ impl EnergyBudget {
     #[must_use]
     pub fn total(&self) -> u64 {
         self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    /// Latest-turn context occupancy as a percentage, when both inputs exist.
+    #[must_use]
+    pub fn context_percent(&self) -> Option<f64> {
+        context_percent(self.latest_turn_input_tokens, self.context_window)
     }
 
     /// Build an [`EnergyBudget`] from a Claude Code session JSONL file.
@@ -139,8 +148,27 @@ impl EnergyBudget {
             subscription: None,
             usage: None,
             context_window: None,
+            latest_turn_input_tokens: log.turns.last().and_then(|turn| {
+                turn.input_tokens
+                    .get()
+                    .checked_add(turn.cache_creation_input_tokens.get())?
+                    .checked_add(turn.cache_read_input_tokens.get())
+            }),
         })
     }
+}
+
+/// Derive occupancy from a last-turn input count and a nonzero model window.
+/// A missing count never falls back to cumulative session totals.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn context_percent(
+    latest_turn_input_tokens: Option<u64>,
+    context_window: Option<u64>,
+) -> Option<f64> {
+    let capacity = context_window.filter(|capacity| *capacity > 0)?;
+    let input = latest_turn_input_tokens?;
+    Some((input as f64 / capacity as f64 * 100.0).clamp(0.0, 999.0))
 }
 
 fn claude_totals(session: &claudion::SessionLog) -> Option<(u64, u64, u64)> {
@@ -265,8 +293,20 @@ mod tests {
             subscription: None,
             usage: None,
             context_window: Some(200_000),
+            latest_turn_input_tokens: None,
         };
         assert_eq!(b.total(), 42);
+        assert_eq!(b.context_percent(), None);
+    }
+
+    #[test]
+    fn latest_assistant_record_counts_all_input_classes() {
+        let mut log = tempfile::NamedTempFile::new().unwrap();
+        writeln!(log, r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":1000000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":10}}}}}}"#).unwrap();
+        writeln!(log, r#"{{"type":"assistant","message":{{"usage":{{"input_tokens":3809,"cache_creation_input_tokens":10000,"cache_read_input_tokens":120000,"output_tokens":20}}}}}}"#).unwrap();
+        let energy = EnergyBudget::from_session_log(log.path()).unwrap();
+        assert_eq!(energy.input_tokens, 1_133_809);
+        assert_eq!(energy.latest_turn_input_tokens, Some(133_809));
     }
 
     #[test]

@@ -518,12 +518,16 @@ fn worker_row(w: &Worker) -> String {
 }
 
 fn worker_usage_lines(w: &Worker) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(percent) = w.energy.context_percent() {
+        lines.push(format!("    context {percent:.0}%"));
+    }
     if let Some(usage) = &w.energy.usage {
         let records = std::slice::from_ref(usage);
-        let mut lines = vec![format!(
+        lines.push(format!(
             "    {}",
             crate::usage_projection::format_api_equivalent(records)
-        )];
+        ));
         lines.extend(
             crate::usage_projection::distinct_plan_windows(records)
                 .into_iter()
@@ -541,7 +545,6 @@ fn worker_usage_lines(w: &Worker) -> Vec<String> {
         return lines;
     }
 
-    let mut lines = Vec::new();
     if let Some(api) = &w.energy.api_equivalent {
         let label = match api {
             cosmon_core::usage::ApiEquivalent::Estimated {
@@ -709,6 +712,25 @@ mod tests {
                 "line {i} has wrong width: {line:?}",
             );
         }
+    }
+
+    #[test]
+    fn snapshot_context_uses_last_turn_and_marks_unknown() {
+        let mut snapshot = canonical_snapshot();
+        let mut worker = snapshot.workers().next().unwrap().clone();
+        worker.energy.input_tokens = 48_603_840;
+        worker.energy.context_window = Some(258_400);
+        worker.energy.latest_turn_input_tokens = Some(133_809);
+        snapshot.insert_worker(worker.clone());
+        let out = render_canonical(&snapshot, &SnapshotConfig::default());
+        assert!(out.contains("context 52%"), "{out}");
+        assert!(!out.contains("context 999%"), "{out}");
+
+        worker.energy.latest_turn_input_tokens = None;
+        snapshot.insert_worker(worker);
+        let out = render_canonical(&snapshot, &SnapshotConfig::default());
+        assert!(!out.contains("context "), "{out}");
+        assert!(!out.contains("context 52%"), "{out}");
     }
 
     #[test]

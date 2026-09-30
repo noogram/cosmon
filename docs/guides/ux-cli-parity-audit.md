@@ -2,6 +2,15 @@
 
 # CLI and UI parity audit
 
+## Context occupancy (issue #127)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Show latest-turn context occupancy | `cs peek` TUI and `--snapshot` divide the last reported turn's input by the model window; unknown inputs show no percentage. `cs peek --json` has no context percentage and keeps its existing cumulative usage schema. IN/CACHED/OUT/RSN remain cumulative. | No matching gauge audited | No matching gauge audited |
+
+The snapshot and TUI renderers share the worker energy observation. A model
+window without a last-turn count is insufficient to infer occupancy.
+
 ## Model evidence coverage (issue #73, W5–W6)
 
 | Capability | CLI | Native UI | Remote service |

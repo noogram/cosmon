@@ -949,6 +949,11 @@ pub const PEEK: &str = "EXAMPLES:
                                   #   captures and expect zero bytes (see
                                   #   docs/guides/peek-snapshot.md)
 
+The context gauge uses the latest reported turn's input tokens over the
+model window. An unknown turn or window shows no percentage; IN/CACHED/OUT/RSN
+remain cumulative session counters. Snapshot follows the same rule. JSON keeps
+its existing cumulative usage schema and exposes no context percentage.
+
 The selected dependent's blocked-by detail names a collapsed or frozen
 blocker and the operator gesture that can release or replace the edge.
 

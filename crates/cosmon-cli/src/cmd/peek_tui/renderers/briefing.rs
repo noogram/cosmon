@@ -105,6 +105,7 @@ mod tests {
             energy_cost: cosmon_observability::EnergyCost::Unknown,
             usage: Vec::new(),
             context_window: None,
+            latest_turn_input_tokens: None,
             session: None,
             socket: String::new(),
             heartbeat: cosmon_observability::HeartbeatTier::Active,

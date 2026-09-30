@@ -104,6 +104,9 @@ pub struct CodexSubscriptionUsage {
 pub struct CodexEnergySnapshot {
     /// Cumulative token counters from the latest complete reading.
     pub usage: CodexTokenUsage,
+    /// Latest turn's input tokens, including the cached subset, for context occupancy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_turn_input_tokens: Option<u64>,
     /// Model context-window capacity reported beside the counters.
     pub model_context_window: Option<u64>,
     /// `ChatGPT` subscription allowance use, when present in the rollout.
@@ -211,15 +214,23 @@ struct CodexTokenCountEvent {
     rate_limits: Option<CodexRateLimits>,
 }
 
-/// The `info` object of a `token_count` event. Only the cumulative
-/// `total_token_usage` is read; the per-turn `last_token_usage` is v2
-/// material (per-turn cost split) and deliberately not modeled yet.
+/// The `info` object of a `token_count` event.
 #[derive(Debug, Deserialize)]
 struct CodexTokenCountInfo {
     #[serde(default)]
     total_token_usage: Option<CodexTokenUsage>,
     #[serde(default)]
+    last_token_usage: Option<TurnInput>,
+    #[serde(default)]
     model_context_window: Option<u64>,
+}
+
+/// The part of a turn reading needed for context occupancy. Other turn
+/// counters may change shape without invalidating the cumulative reading.
+#[derive(Debug, Deserialize)]
+struct TurnInput {
+    #[serde(default)]
+    input_tokens: Option<u64>,
 }
 
 /// Subscription metadata nested beside a Codex token reading.
@@ -263,6 +274,7 @@ pub fn codex_token_usage_from_session(content: &str) -> Option<CodexTokenUsage> 
 #[must_use]
 pub fn codex_energy_from_session(content: &str) -> Option<CodexEnergySnapshot> {
     let mut usage = None;
+    let mut latest_turn_input_tokens = None;
     let mut model_context_window = None;
     let mut subscription = None;
     let mut current_model = None;
@@ -293,6 +305,9 @@ pub fn codex_energy_from_session(content: &str) -> Option<CodexEnergySnapshot> {
         };
         if let Some(info) = event.info {
             if let Some(new_usage) = info.total_token_usage {
+                // A newer cumulative reading without a turn count makes the
+                // previous turn's occupancy stale, so preserve absence.
+                latest_turn_input_tokens = info.last_token_usage.and_then(|turn| turn.input_tokens);
                 match usage_delta(previous_usage, new_usage) {
                     Some(delta) if delta.total_tokens > 0 => {
                         if let Some(model) = current_model.as_deref() {
@@ -326,6 +341,7 @@ pub fn codex_energy_from_session(content: &str) -> Option<CodexEnergySnapshot> {
     model_segments_complete &= segments_match_usage(&model_segments, usage);
     Some(CodexEnergySnapshot {
         usage,
+        latest_turn_input_tokens,
         model_context_window,
         subscription,
         model_segments,
@@ -467,6 +483,7 @@ mod tests {
         assert_eq!(usage.output_tokens, 8_285);
         assert_eq!(usage.reasoning_output_tokens, 2_400);
         assert_eq!(usage.total_tokens, 2_225_697);
+        assert_eq!(snapshot.latest_turn_input_tokens, Some(77_145));
         assert_eq!(snapshot.model_context_window, Some(258_400));
         let subscription = snapshot.subscription.unwrap();
         assert_eq!(subscription.plan_type.as_deref(), Some("pro"));
@@ -494,6 +511,35 @@ mod tests {
         assert_eq!(usage.cached_input_tokens, 600);
         assert_eq!(usage.output_tokens, 80);
         assert_eq!(usage.total_tokens, 980);
+    }
+
+    #[test]
+    fn latest_turn_is_unknown_when_the_newest_total_omits_it() {
+        let jsonl = concat!(
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0,"total_tokens":110},"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":2,"reasoning_output_tokens":0,"total_tokens":52}}}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":220}}}}"#,
+        );
+        let snapshot = codex_energy_from_session(jsonl).unwrap();
+        assert_eq!(snapshot.usage.input_tokens, 200);
+        assert_eq!(snapshot.latest_turn_input_tokens, None);
+    }
+
+    #[test]
+    fn latest_turn_is_distinct_from_large_session_total() {
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":48603840,"cached_input_tokens":40000000,"output_tokens":10000,"reasoning_output_tokens":2000,"total_tokens":48613840},"last_token_usage":{"input_tokens":133809,"cached_input_tokens":120000,"output_tokens":100,"reasoning_output_tokens":50,"total_tokens":133909},"model_context_window":258400}}}"#;
+        let snapshot = codex_energy_from_session(line).unwrap();
+        assert_eq!(snapshot.usage.input_tokens, 48_603_840);
+        assert_eq!(snapshot.latest_turn_input_tokens, Some(133_809));
+        assert_eq!(snapshot.model_context_window, Some(258_400));
+    }
+
+    #[test]
+    fn partial_turn_reading_does_not_erase_cumulative_counters() {
+        let line = r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200,"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":0,"total_tokens":220},"last_token_usage":{"output_tokens":10},"model_context_window":1000}}}"#;
+        let snapshot = codex_energy_from_session(line).unwrap();
+        assert_eq!(snapshot.usage.input_tokens, 200);
+        assert_eq!(snapshot.latest_turn_input_tokens, None);
     }
 
     #[test]

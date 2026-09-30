@@ -83,6 +83,7 @@ pub fn canonical_snapshot() -> FleetSnapshot {
             subscription: None,
             usage: None,
             context_window: Some(1_000_000),
+            latest_turn_input_tokens: None,
         },
         live: "working".into(),
         role: crate::worker::WorkerRole::Cognition,
