@@ -171,6 +171,159 @@ async fn valid_jwt_returns_200_with_whoami_payload() {
 }
 
 #[tokio::test]
+async fn whoami_uses_the_presented_audience_for_its_binding() {
+    let tenants = TenantWorkspaces::new();
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned(), "cosmon-rpp-b".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = make_state(
+        &oidc,
+        &tenants,
+        vec![("principal", "nuc-b", "b", "cosmon-rpp-b")],
+        dir.path(),
+    );
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "principal",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &[],
+        lifetime_secs: Some(60),
+        jti: Some("jti-whoami-audience"),
+    });
+    let body = auth_me_body_with(state, &jwt).await;
+    assert!(body["noyau"].is_null());
+}
+
+#[tokio::test]
+async fn whoami_applies_current_deny_policy() {
+    let tenants = TenantWorkspaces::new();
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = make_state(
+        &oidc,
+        &tenants,
+        vec![("principal", "nuc-a", "a", "cosmon-rpp-a")],
+        dir.path(),
+    );
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "principal",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &[],
+        lifetime_secs: Some(60),
+        jti: Some("jti-whoami-policy"),
+    });
+    let policy_path = dir.path().join("security/oidc-policy.toml");
+    std::fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
+    for (policy, expected) in [
+        (
+            format!(
+                "[[deny.sub]]\nissuer = {:?}\nsub_hash = {:?}\n",
+                oidc.issuer(),
+                cosmon_rpp_adapter::rate_limit::hash_sub("principal")
+            ),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            format!(
+                "[[deny.jti]]\nissuer = {:?}\njti = \"jti-whoami-policy\"\n",
+                oidc.issuer()
+            ),
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            "[[deny.noyau]]\nnoyau = \"a\"\n".to_owned(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        std::fs::write(&policy_path, policy).unwrap();
+        let response = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/auth/me")
+                    .header("Authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+    std::fs::remove_file(&policy_path).unwrap();
+    std::fs::write(
+        dir.path().join("security/oidc-kill.toml"),
+        "[global]\nenabled = true\n",
+    )
+    .unwrap();
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v1/auth/me")
+                .header("Authorization", format!("Bearer {jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn passive_report_respects_deny_policy() {
+    let tenants = TenantWorkspaces::new();
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = make_state(
+        &oidc,
+        &tenants,
+        vec![("principal", "nuc-a", "a", "cosmon-rpp-a")],
+        dir.path(),
+    );
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "principal",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &[],
+        lifetime_secs: Some(60),
+        jti: Some("jti-passive-policy"),
+    });
+    let path = dir.path().join("security/oidc-policy.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        format!(
+            "[[deny.jti]]\nissuer = {:?}\njti = \"jti-passive-policy\"\n",
+            oidc.issuer()
+        ),
+    )
+    .unwrap();
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .header("Authorization", format!("Bearer {jwt}"))
+                .header("x-cosmon-phone-home", "req-passive:503_unavailable")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!dir
+        .path()
+        .join("whispers/inbox/phone-home/req-passive.json")
+        .exists());
+}
+
+#[tokio::test]
 async fn missing_authorization_header_returns_401() {
     let tenants = TenantWorkspaces::new();
     let oidc = OidcMock::start_with(OidcMockConfig {

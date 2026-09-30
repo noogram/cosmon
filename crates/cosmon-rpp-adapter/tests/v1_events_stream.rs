@@ -146,6 +146,50 @@ async fn open_events_stream_closes_when_credential_expires() {
 }
 
 #[tokio::test]
+async fn idle_events_stream_rechecks_without_a_source_event() {
+    let mut tenants = TenantWorkspaces::new();
+    let _ = tenants.add("a");
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = make_state(
+        &oidc,
+        &tenants,
+        vec![("sub-a", "nuc-a", "a", "cosmon-rpp-a")],
+        dir.path(),
+    );
+    let jwt = issue_sse_jwt(&oidc, "sub-a", "cosmon-rpp-a", "jti-idle");
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events")
+                .header("Authorization", format!("Bearer {jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let path = dir.path().join("security/oidc-kill.toml");
+    let write_policy = async move {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "[global]\nenabled = true\n").unwrap();
+    };
+    let read_body = to_bytes(response.into_body(), 1024);
+    let ((), result) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(write_policy, read_body)
+    })
+    .await
+    .expect("idle stream did not recheck policy on its own interval");
+    result.expect("SSE body failed");
+}
+
+#[tokio::test]
 async fn open_events_stream_closes_after_live_admission_changes() {
     let mut tenants = TenantWorkspaces::new();
     let _ = tenants.add("a");
