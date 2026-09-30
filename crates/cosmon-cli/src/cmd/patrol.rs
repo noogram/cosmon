@@ -6400,7 +6400,7 @@ mod tests {
             Some(&backend),
             cosmon_core::config::CodexUpdatePolicy::Auto,
             &updater,
-            |_, wid| {
+            |mol, wid| {
                 backend.terminate(wid)?;
                 let agent = cosmon_core::transport::AgentDefinition {
                     id: cosmon_core::id::AgentId::new("w1")?,
@@ -6412,7 +6412,11 @@ mod tests {
                 let respawned =
                     backend.spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())?;
                 assert_eq!(respawned.id, *wid);
-                backend.send_input(wid, "briefing.md")?;
+                let provenance = cosmon_cli::injection_provenance::codex_update(
+                    &mol.id,
+                    &store.molecule_dir(&mol.id),
+                );
+                backend.send_input_observed(wid, "briefing.md", &provenance)?;
                 Ok(())
             },
         );
