@@ -39,7 +39,7 @@ mod root_help;
 #[derive(Debug, Parser)]
 #[command(
     name = "cosmon-remote",
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("COSMON_REMOTE_BUILD_ID"), ")"),
     about = "Thin CLI for the cosmon-rpp v1 API",
     after_help = root_help::after_help("cosmon-remote"),
     after_long_help = root_help::after_long_help("cosmon-remote")
@@ -315,15 +315,18 @@ enum NoyauxCmd {
 
 #[derive(Debug, Subcommand)]
 enum ConfigCmd {
-    /// Initialise a new profile with just a host URL — the operator
-    /// then sets `sub`, `aud`, `oidc-url` (or `install.sh` does it
-    /// server-side via templating).
+    /// Initialise a profile with a host URL if absent. An existing profile,
+    /// including its login and operator settings, is preserved.
     Init {
         /// Profile name (e.g. `tenant-demo-aws`, `local`).
         name: String,
         /// Base URL — preserve scheme as-is (`http://…` for loopback,
         /// `https://…` for Tailscale-served deployments).
         host: String,
+        /// Print only `created` or `preserved` for an installer that applies
+        /// deployment defaults solely to a newly created profile.
+        #[arg(long, conflicts_with = "json")]
+        report_created: bool,
     },
     /// Set a single config key.
     Set {
@@ -875,7 +878,9 @@ fn build_cli() -> clap::Command {
 fn print_man_page() -> Result<()> {
     use std::io::Write as _;
 
-    let man = clap_mangen::Man::new(build_cli());
+    // The build commit changes with every release, while this checked-in
+    // reference documents the stable command surface.
+    let man = clap_mangen::Man::new(build_cli().version(env!("CARGO_PKG_VERSION")));
     let mut buf: Vec<u8> = Vec::new();
     man.render(&mut buf)
         .map_err(|e| Error::Config(format!("render man page: {e}")))?;
@@ -910,7 +915,18 @@ async fn run() -> Result<()> {
     let store = ProfileStore::default_location()?;
 
     let profile_flag = cli.profile.clone();
-    let result = dispatch(cli, &store).await;
+    let result = dispatch(cli, &store).await.map_err(|error| match error {
+        Error::MissingLogin {
+            expected_location,
+            missing_key_fields,
+        } => {
+            let name = store
+                .resolve_name(profile_flag.as_deref())
+                .unwrap_or_else(|_| "<unknown>".to_owned());
+            missing_login_error(&name, expected_location.as_deref(), missing_key_fields)
+        }
+        other => other,
+    });
 
     // Passive opt-out remontée (delib-20260610-9a0c C3): when the
     // failure predicts abandonment, queue `request_id + error code`
@@ -1334,17 +1350,40 @@ fn run_config(store: &ProfileStore, sub: ConfigCmd, json: bool) -> Result<()> {
     // `invoked_name()`, never hand-pinned).
     let bin = invoked_name();
     match sub {
-        ConfigCmd::Init { name, host } => {
-            let profile = Profile::from_host(host);
-            store.write_profile(&name, &profile)?;
+        ConfigCmd::Init {
+            name,
+            host,
+            report_created,
+        } => {
+            let path = store.profile_path(&name);
+            let existing = match std::fs::symlink_metadata(&path) {
+                Ok(_) => {
+                    // A reinstall must not erase the issuer/client ID that
+                    // address the saved login, or any operator-edited knob.
+                    store.read_profile(&name)?;
+                    true
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => return Err(e.into()),
+            };
+            if !existing {
+                store.write_profile(&name, &Profile::from_host(host))?;
+            }
             // First profile created → also become the default.
             let mut top = store.read_top()?;
             if top.default_profile.is_none() {
                 top.default_profile = Some(name.clone());
                 store.write_top(&top)?;
             }
-            if json {
+            if report_created {
+                println!("{}", if existing { "preserved" } else { "created" });
+            } else if json {
                 print_json(true, &serde_json::json!({"profile": name}));
+            } else if existing {
+                println!(
+                    "profile {name:?} already exists at {} — preserved",
+                    path.display()
+                );
             } else {
                 println!(
                     "profile {name:?} initialised → {}",
@@ -2317,11 +2356,31 @@ async fn client_for(profile: &Profile, flag_token: Option<String>) -> Result<Cli
         return Ok(Client::new(profile, Some(token))?.with_reauth(reauth));
     }
 
-    Err(Error::Config(format!(
-        "profile {:?} has not logged in — run `cosmon-remote login` \
-         (or pass --token / set $COSMON_REMOTE_TOKEN)",
-        profile.sub
-    )))
+    Err(Error::MissingLogin {
+        expected_location: None,
+        missing_key_fields: true,
+    })
+}
+
+fn missing_login_error(
+    name: &str,
+    expected_location: Option<&str>,
+    missing_key_fields: bool,
+) -> Error {
+    if missing_key_fields {
+        return Error::Config(format!(
+            "profile {name:?} has no recorded issuer or client ID, so its saved \
+             credential path cannot be derived — run `cosmon-remote login` to \
+             reconnect this profile"
+        ));
+    }
+    let location = expected_location.map_or_else(String::new, |value| {
+        format!("; expected credential at {value}")
+    });
+    Error::Config(format!(
+        "profile {name:?} has not logged in{location} — run `cosmon-remote login` \
+         (or pass --token / set $COSMON_REMOTE_TOKEN)"
+    ))
 }
 
 /// Read the persisted credential for a real-OIDC `profile`, refreshing silently
@@ -2371,10 +2430,10 @@ async fn ensure_persisted_token(profile: &Profile) -> Result<(String, ReactiveRe
     let bearer = match state {
         TokenState::Valid(token) => token.expose().to_owned(),
         TokenState::NeedsLogin => {
-            return Err(Error::Config(format!(
-                "no valid cosmon credential for profile {:?} — run `cosmon-remote login`",
-                profile.sub
-            )))
+            return Err(Error::MissingLogin {
+                expected_location: store.expected_location(&key),
+                missing_key_fields: false,
+            });
         }
     };
     // The store/key/http move into the reactive binding, which resolves the
@@ -2575,6 +2634,90 @@ fn run_logout(profile: &Profile, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reinstall_keeps_an_existing_login_and_every_profile_field() {
+        use cosmon_remote::credential::{CredentialStore, SecretToken, StoredCredential};
+        use cosmon_remote::oidc::{cached_access, CacheState};
+
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("config").join("cosmon-remote");
+        let profiles = ProfileStore::at(&root);
+        let mut original = Profile::from_host("https://example.invalid");
+        original.sub = "subject-1".into();
+        original.aud = "audience-1".into();
+        original.oidc_url = "https://example.invalid/oidc".into();
+        original.issuer = Some("https://issuer.invalid".into());
+        original.client_id = Some("client-1".into());
+        original.noyau = Some("my-noyau".into());
+        original.timeout_secs = 300;
+        original.phone_home = false;
+        original.artifacts_dir = Some(home.path().join("downloads"));
+        profiles.write_profile("my-profile", &original).unwrap();
+
+        let credentials = CredentialStore::file_at(&root);
+        let old_key = original.credential_key().unwrap();
+        let expires = chrono::Utc::now() + chrono::Duration::hours(1);
+        credentials
+            .store(
+                &old_key,
+                &StoredCredential::new(
+                    SecretToken::new("saved-access"),
+                    SecretToken::new("saved-refresh"),
+                    expires,
+                ),
+            )
+            .unwrap();
+
+        run_config(
+            &profiles,
+            ConfigCmd::Init {
+                name: "my-profile".into(),
+                host: "https://example.invalid".into(),
+                report_created: false,
+            },
+            false,
+        )
+        .unwrap();
+
+        let after = profiles.read_profile("my-profile").unwrap();
+        assert_eq!(after.timeout_secs, 300);
+        assert!(!after.phone_home);
+        assert_eq!(after.artifacts_dir, original.artifacts_dir);
+        assert_eq!(after.noyau, original.noyau);
+        assert_eq!(after.issuer, original.issuer);
+        assert_eq!(after.client_id, original.client_id);
+        let new_key = after.credential_key().unwrap();
+        assert_eq!(new_key.storage_id(), old_key.storage_id());
+        match cached_access(
+            &credentials,
+            &new_key,
+            chrono::Utc::now(),
+            chrono::Duration::minutes(15),
+        )
+        .unwrap()
+        {
+            CacheState::Fresh(token) => assert_eq!(token.expose(), "saved-access"),
+            _ => panic!("reinstall lost the saved login"),
+        }
+    }
+
+    #[test]
+    fn missing_login_names_the_profile_and_expected_file() {
+        let home = tempfile::tempdir().unwrap();
+        let credentials = cosmon_remote::CredentialStore::file_at(home.path());
+        let key =
+            cosmon_remote::CredentialKey::new("https://issuer.invalid", "subject-1", "client-1");
+        let location = credentials.expected_location(&key).unwrap();
+        let message = missing_login_error("work-profile", Some(&location), false).to_string();
+        assert!(message.contains("profile \"work-profile\""), "{message}");
+        assert!(
+            message.contains(&home.path().display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains(&key.storage_id()), "{message}");
+        assert!(!message.contains("profile \"subject-1\""), "{message}");
+    }
 
     fn view(json: serde_json::Value) -> cosmon_remote::client::MoleculeView {
         serde_json::from_value(json).unwrap()
