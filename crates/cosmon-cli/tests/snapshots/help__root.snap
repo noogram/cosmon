@@ -37,6 +37,8 @@ PILOT WORKFLOW — the full cycle is nucleate → tackle → wait → done:
 
 TASK BRIEFING. 'cs nucleate' writes the task topic and every bound variable into the molecule's durable briefing.md. 'cs tackle' points the worker there for the authoritative task and current step; the pane prompt does not repeat the task text when the briefing has a Task section.
 
+IN-PROCESS FAILURE. If an in-process worker has executed a tool and its agent loop then fails, 'cs tackle' collapses the molecule with reason kind agent_loop_failed. Its branch, worktree and partial synthesis remain for audit. A failure before work still rolls back the dispatch.
+
 A branch that changes the trusted shell surface needs an operator review after merging. Run 'cs done <id> --review-shell' to see the merged diff, grant trust over those on-disk files, and run the post-merge gate before teardown. Declining rolls the merge back.
 
 DECLARED WORK (ADR-182): a pilot records a finite seat roster with 'cs work declare <owner> --seat a=<molecule> --seat b=<molecule>'. Members use 'cs work send --to <seat> --text <evidence>', 'cs work inbox', and 'cs work ack <key> --considered|--deferred|--rejected'. 'cs work list <owner>' reconstructs each message stage from the owner's canonical evidence. Messages and receipts never advance a molecule or grant lifecycle authority.

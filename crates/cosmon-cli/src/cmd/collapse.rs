@@ -346,6 +346,20 @@ pub(crate) fn collapse_one(
     mol_id: &MoleculeId,
     reason: &str,
 ) -> anyhow::Result<MoleculeStatus> {
+    collapse_one_with_kind(store, ops_dir, mol_id, reason, None)
+}
+
+/// Collapse a synchronous worker with a recorded machine-readable cause.
+///
+/// # Errors
+/// Returns the same persistence and transition errors as [`collapse_one`].
+pub(crate) fn collapse_one_with_kind(
+    store: &FileStore,
+    ops_dir: &std::path::Path,
+    mol_id: &MoleculeId,
+    reason: &str,
+    kind: Option<CollapseReason>,
+) -> anyhow::Result<MoleculeStatus> {
     use cosmon_state::StateStore;
 
     let prev_status = {
@@ -363,6 +377,7 @@ pub(crate) fn collapse_one(
         let mut updated = mol_data;
         updated.status = MoleculeStatus::Collapsed;
         updated.collapse_reason = Some(reason.to_owned());
+        updated.collapse_reason_kind.clone_from(&kind);
         updated.collapsed_step = Some(updated.current_step);
         if updated.process.is_some() {
             updated.release_process();
@@ -417,7 +432,7 @@ pub(crate) fn collapse_one(
         EventV2::MoleculeCollapsed {
             molecule_id: mol_id.clone(),
             reason: reason.to_owned(),
-            kind: None,
+            kind,
         },
         status_seq,
     );

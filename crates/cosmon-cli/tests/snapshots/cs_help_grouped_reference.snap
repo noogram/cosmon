@@ -129,6 +129,7 @@ Pilot workflow — the full cycle is nucleate → tackle → wait → done:
 
   The task and bound variables live in the molecule's briefing.md.
   cs tackle points the worker there when it has a Task section.
+  An in-process loop error after tool work collapses the molecule and keeps its worktree.
 
   For a DAG of N≥1 nodes (one node = leaf, N nodes = orchestration):
   cs run <root> --poll-interval 5     # walks the DAG, dispatches each

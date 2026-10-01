@@ -3721,6 +3721,9 @@ pub enum CollapseReason {
     /// External resource exhaustion — token quota, rate limit, disk, RAM,
     /// time budget. Repair: wait, rotate credentials, raise the budget.
     ResourceExhausted,
+    /// A synchronous agent loop failed after executing a tool. Its branch and
+    /// worktree need inspection before any retry or removal.
+    AgentLoopFailed,
     /// Free-form reason that did not match any known variant. Carries the
     /// raw string so context is preserved across the typed/untyped boundary.
     Other(String),
@@ -3737,11 +3740,12 @@ impl CollapseReason {
             Self::BlockerStuck => "blocker_stuck",
             Self::ManualAbort => "manual_abort",
             Self::ResourceExhausted => "resource_exhausted",
+            Self::AgentLoopFailed => "agent_loop_failed",
             Self::Other(s) => s.as_str(),
         }
     }
 
-    /// `true` when this variant is one of the five named categories — i.e.
+    /// `true` when this variant is one of the named categories — i.e.
     /// the operator (or a derivation rule) classified the collapse rather
     /// than letting it fall through as free-form. Used by the IFBDD lens
     /// to compute the structured-coverage ratio.
@@ -3759,6 +3763,7 @@ impl From<String> for CollapseReason {
             "blocker_stuck" => Self::BlockerStuck,
             "manual_abort" => Self::ManualAbort,
             "resource_exhausted" => Self::ResourceExhausted,
+            "agent_loop_failed" => Self::AgentLoopFailed,
             _ => Self::Other(s),
         }
     }

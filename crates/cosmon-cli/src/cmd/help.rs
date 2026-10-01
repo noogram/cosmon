@@ -289,6 +289,9 @@ fn print_grouped_reference() {
     println!();
     println!("  The task and bound variables live in the molecule's briefing.md.");
     println!("  cs tackle points the worker there when it has a Task section.");
+    println!(
+        "  An in-process loop error after tool work collapses the molecule and keeps its worktree."
+    );
     println!();
     println!("  For a DAG of N≥1 nodes (one node = leaf, N nodes = orchestration):");
     println!("  cs run <root> --poll-interval 5     # walks the DAG, dispatches each");
