@@ -58,6 +58,11 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              points the worker there for the authoritative task and current \
              step; the pane prompt does not repeat the task text when the \
              briefing has a Task section.\n\n\
+             IN-PROCESS FAILURE. If an in-process worker has executed a tool \
+             and its agent loop then fails, 'cs tackle' collapses the molecule \
+             with reason kind agent_loop_failed. Its branch, worktree and partial \
+             synthesis remain for audit. A failure before work still rolls back \
+             the dispatch.\n\n\
              A branch that changes the trusted shell surface needs an operator \
              review after merging. Run 'cs done <id> --review-shell' to see the \
              merged diff, grant trust over those on-disk files, and run the \

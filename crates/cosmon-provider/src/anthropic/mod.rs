@@ -901,12 +901,33 @@ pub async fn run_agent_loop_counted(
     work_dir: &Path,
     telemetry: Option<&AdapterTelemetry>,
 ) -> Result<cosmon_agent_harness::WorkerOutcome, AnthropicError> {
+    let mut progress = cosmon_agent_harness::spine::LoopProgress::default();
+    run_agent_loop_counted_with_progress(provider, briefing, work_dir, telemetry, &mut progress)
+        .await
+}
+
+/// Run the counted loop while exposing completed tool work to the caller.
+///
+/// # Errors
+/// Returns the same typed errors as [`run_agent_loop_counted`].
+#[cfg(feature = "http")]
+pub async fn run_agent_loop_counted_with_progress(
+    provider: &AnthropicProvider,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+    progress: &mut cosmon_agent_harness::spine::LoopProgress,
+) -> Result<cosmon_agent_harness::WorkerOutcome, AnthropicError> {
     // Wire telemetry into the provider so `one_turn` can emit the realized-model
     // observation at the response seam (F-01) — the `Provider::one_turn(&self,
     // log)` trait is telemetry-free by design, so the adapter carries it as a
     // field. Cheap clone (a handful of IDs + a path). Mirrors openai.
     let provider = provider.clone().with_telemetry(telemetry.cloned());
-    match cosmon_agent_harness::run_loop_counted(&provider, briefing, work_dir, telemetry).await {
+    match cosmon_agent_harness::spine::run_loop_counted_with_progress(
+        &provider, briefing, work_dir, telemetry, progress,
+    )
+    .await
+    {
         Ok(outcome) => Ok(outcome),
         Err(harness_err) => {
             let err = harness_error_to_anthropic(harness_err);

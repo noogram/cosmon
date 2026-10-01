@@ -64,6 +64,8 @@ PILOT WORKFLOW — the full cycle is nucleate → tackle → wait → done:
 .PP
 TASK BRIEFING. \*(Aqcs nucleate\*(Aq writes the task topic and every bound variable into the molecule\*(Aqs durable briefing.md. \*(Aqcs tackle\*(Aq points the worker there for the authoritative task and current step; the pane prompt does not repeat the task text when the briefing has a Task section.
 .PP
+IN\-PROCESS FAILURE. If an in\-process worker has executed a tool and its agent loop then fails, \*(Aqcs tackle\*(Aq collapses the molecule with reason kind agent_loop_failed. Its branch, worktree and partial synthesis remain for audit. A failure before work still rolls back the dispatch.
+.PP
 A branch that changes the trusted shell surface needs an operator review after merging. Run \*(Aqcs done <id> \-\-review\-shell\*(Aq to see the merged diff, grant trust over those on\-disk files, and run the post\-merge gate before teardown. Declining rolls the merge back.
 .PP
 DECLARED WORK (ADR\-182): a pilot records a finite seat roster with \*(Aqcs work declare <owner> \-\-seat a=<molecule> \-\-seat b=<molecule>\*(Aq. Members use \*(Aqcs work send \-\-to <seat> \-\-text <evidence>\*(Aq, \*(Aqcs work inbox\*(Aq, and \*(Aqcs work ack <key> \-\-considered|\-\-deferred|\-\-rejected\*(Aq. \*(Aqcs work list <owner>\*(Aq reconstructs each message stage from the owner\*(Aqs canonical evidence. Messages and receipts never advance a molecule or grant lifecycle authority.

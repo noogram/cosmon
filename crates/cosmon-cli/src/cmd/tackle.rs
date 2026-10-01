@@ -1832,6 +1832,23 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     ) {
         Ok(outcome) => outcome,
         Err(e) => {
+            if let Some(failure) = e.downcast_ref::<InprocessLoopFailure>() {
+                if failure.progress.tools_executed > 0 {
+                    let reason = format!(
+                        "in-process {} agent loop failed after {} executed tool(s): {}. Partial work remains in the branch and worktree for audit.",
+                        adapter.as_str(), failure.progress.tools_executed, failure.message
+                    );
+                    persist_inprocess_partial(&mol_state_dir, adapter.as_str(), failure);
+                    super::collapse::collapse_one_with_kind(
+                        &store,
+                        &state_dir,
+                        &mol_id,
+                        &reason,
+                        Some(cosmon_core::event_v2::CollapseReason::AgentLoopFailed),
+                    )?;
+                    return Err(e);
+                }
+            }
             // The ex-ante harness receipt, on the path where the process did
             // NOT come up (ADR-177 Decision 5). Emitted *before* the rollback
             // so the log carries what was dispatched and that it failed to
@@ -4459,6 +4476,14 @@ pub(super) struct InprocessWork {
     /// Cumulative count of tool calls the loop dispatched. `0` means no
     /// observable work — no artefact, untouched worktree.
     pub tools_dispatched: u32,
+}
+
+/// A synchronous loop error that retains the work it actually performed.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct InprocessLoopFailure {
+    message: String,
+    progress: cosmon_agent_harness::spine::LoopProgress,
 }
 
 /// The PID identity of a freshly-forked detached local worker.
@@ -7155,6 +7180,8 @@ fn spawn_openai_session(
     } else {
         cosmon_provider::OpenAIProvider::new(api_key, model)
     };
+    let timeout_secs = resolve_local_timeout_secs(adapter_entry.and_then(|e| e.timeout_secs), None);
+    let provider = provider.with_timeout(std::time::Duration::from_secs(timeout_secs));
 
     // Emit WorkerSpawnAttempted before the loop so the cat-test sees the
     // intent even if the HTTP call never lands.
@@ -7190,26 +7217,41 @@ fn spawn_openai_session(
     std::env::set_var("COSMON_MOL_DIR", mol_state_dir);
     let turn_input = cosmon_cli::work_turn_input::WorkTurnInput::discover(mol_state_dir)
         .map_err(|e| anyhow::anyhow!("cs tackle: work turn input failed: {e}"))?;
+    let mut progress = cosmon_agent_harness::spine::LoopProgress::default();
     let outcome = if let Some(source) = turn_input.as_ref() {
-        rt.block_on(
-            cosmon_agent_harness::spine::run_loop_counted_with_turn_input(
+        run_local_future_with_timeout(
+            &rt,
+            std::time::Duration::from_secs(timeout_secs),
+            cosmon_agent_harness::spine::run_loop_counted_with_turn_input_and_progress(
                 &provider.clone().with_telemetry(Some(telemetry.clone())),
                 prompt,
                 worktree_path,
                 Some(&telemetry),
                 source,
+                &mut progress,
             ),
         )
-        .map_err(|e| anyhow::anyhow!("cs tackle: openai agent loop failed: {e}"))?
+        .map_err(|_| format!("wall-clock deadline ({timeout_secs}s) elapsed"))
+        .and_then(|result| result.map_err(|e| e.to_string()))
     } else {
-        rt.block_on(cosmon_provider::openai::run_agent_loop_counted(
-            &provider,
-            prompt,
-            worktree_path,
-            Some(&telemetry),
-        ))
-        .map_err(|e| anyhow::anyhow!("cs tackle: openai agent loop failed: {e}"))?
-    };
+        run_local_future_with_timeout(
+            &rt,
+            std::time::Duration::from_secs(timeout_secs),
+            cosmon_provider::openai::run_agent_loop_counted_with_progress(
+                &provider,
+                prompt,
+                worktree_path,
+                Some(&telemetry),
+                &mut progress,
+            ),
+        )
+        .map_err(|_| format!("wall-clock deadline ({timeout_secs}s) elapsed"))
+        .and_then(|result| result.map_err(|e| e.to_string()))
+    }
+    .map_err(|message| InprocessLoopFailure {
+        message: format!("cs tackle: openai agent loop failed: {message}"),
+        progress,
+    })?;
 
     // Persist the model's synthesis to the molecule state directory as durable
     // proof-of-work (parity with the local path). Best-effort: a write failure
@@ -7258,6 +7300,29 @@ fn persist_inprocess_synthesis(
             path = %path.display(),
             "failed to write synthesis.md"
         );
+    }
+}
+
+/// Preserve the observed portion of a failed loop in the molecule directory.
+fn persist_inprocess_partial(mol_state_dir: &Path, adapter: &str, failure: &InprocessLoopFailure) {
+    use std::fmt::Write as _;
+
+    use cosmon_agent_harness::message_log::TranscriptRole;
+
+    let mut body = format!(
+        "# {adapter} partial synthesis\n\nAgent loop failed after {} executed tool(s).\n\n{}\n\n## Partial transcript\n",
+        failure.progress.tools_executed, failure.message
+    );
+    for entry in &failure.progress.transcript {
+        let role = match entry.role {
+            TranscriptRole::Assistant => "assistant",
+            TranscriptRole::Tool => "tool",
+            _ => continue,
+        };
+        let _ = write!(body, "\n### {role}\n\n{}\n", entry.content);
+    }
+    if let Err(error) = fs::write(mol_state_dir.join("synthesis.md"), body) {
+        tracing::warn!(%error, "failed to persist partial in-process synthesis");
     }
 }
 
@@ -9202,6 +9267,8 @@ fn spawn_anthropic_session(
     } else {
         cosmon_provider::AnthropicProvider::new(api_key, model)
     };
+    let timeout_secs = resolve_local_timeout_secs(adapter_entry.and_then(|e| e.timeout_secs), None);
+    let provider = provider.with_timeout(std::time::Duration::from_secs(timeout_secs));
 
     // Emit WorkerSpawnAttempted before the loop so the cat-test sees the
     // intent even if the HTTP call never lands.
@@ -9232,14 +9299,24 @@ fn spawn_anthropic_session(
         .enable_all()
         .build()
         .map_err(|e| anyhow::anyhow!("cs tackle: tokio runtime build failed: {e}"))?;
-    let outcome = rt
-        .block_on(cosmon_provider::anthropic::run_agent_loop_counted(
+    let mut progress = cosmon_agent_harness::spine::LoopProgress::default();
+    let outcome = run_local_future_with_timeout(
+        &rt,
+        std::time::Duration::from_secs(timeout_secs),
+        cosmon_provider::anthropic::run_agent_loop_counted_with_progress(
             &provider,
             prompt,
             worktree_path,
             Some(&telemetry),
-        ))
-        .map_err(|e| anyhow::anyhow!("cs tackle: anthropic agent loop failed: {e}"))?;
+            &mut progress,
+        ),
+    )
+    .map_err(|_| format!("wall-clock deadline ({timeout_secs}s) elapsed"))
+    .and_then(|result| result.map_err(|e| e.to_string()))
+    .map_err(|message| InprocessLoopFailure {
+        message: format!("cs tackle: anthropic agent loop failed: {message}"),
+        progress,
+    })?;
 
     persist_inprocess_synthesis(mol_state_dir, "anthropic", &model_label, &outcome.synthesis);
 

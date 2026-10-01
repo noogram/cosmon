@@ -223,6 +223,12 @@ The loser receives a recorded model pin when one exists. If the winning
 adapter chose its own default, the exact model is unrecorded and the error
 says so.
 
+## In-process failure after work (issue #150)
+
+| Capability | CLI | Native UI | Other CLI views |
+|---|---|---|---|
+| Preserve work after an in-process loop error | `cs tackle` collapses with `agent_loop_failed`, retains the branch and worktree, and writes a partial synthesis; a pre-work failure rolls back | No equivalent recovery action audited | `cs status` and `cs peek` display the collapsed molecule; the branch needs an audit before removal |
+
 ## Blocked dependents (issue #118)
 
 | Capability | CLI | Native UI | Other CLI views |
