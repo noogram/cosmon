@@ -83,6 +83,9 @@ pub enum Turn<L: MessageLog> {
 /// ADR-102 §1 *Schema* concept lives entirely inside the impl of
 /// this trait — the wire envelope, the serde types, the
 /// `chat/completions` URL construction are all per-provider.
+// async_trait marks each generated method `#[must_use]` and returns a boxed
+// future, which is already `#[must_use]`; clippy >= 1.99 flags the pair.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Per-provider message log carrying I4 (well-formedness).

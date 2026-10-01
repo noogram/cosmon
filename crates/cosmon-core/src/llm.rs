@@ -224,6 +224,9 @@ pub enum LlmError {
 /// The hot-path entry. Takes a [`CompletionRequest`] plus a
 /// [`TenantContext`] (V1+ multi-tenant ready). Returns
 /// [`CompletionResponse`] or [`LlmError`].
+// async_trait marks each generated method `#[must_use]` and returns a boxed
+// future, which is already `#[must_use]`; clippy >= 1.99 flags the pair.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait LlmBackend: Send + Sync {
     /// Static capability advertisement — no I/O.
