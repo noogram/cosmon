@@ -119,3 +119,36 @@ paths = [
   '''crates/cosmon-thin-cli/tests/avatar_lifecycle\.rs$''',
   '''crates/cosmon-provider/src/llama\.rs$''',
 ]
+
+# ---------------------------------------------------------------------------
+# HISTORY FINDINGS FOR release-checklist.sh GATE 1 (task-20261001-6212)
+#
+# Eleven `private-key` findings remained in full history under this profile:
+# one test fixture and ten detector-shaped strings. None is key material.
+
+# Third RSA test keypair. Its two siblings are allowlisted above; this one was
+# missing. Generated for the RPP suite, trusted by no deployment, and already
+# waived for the publish gate by its `.publish-allow` sidecar. Path-scoped to
+# this single file, so a PEM anywhere else still reds.
+[[allowlists]]
+description = "RSA test fixture for the RPP suite (issuer B) — generated for tests, guards nothing."
+targetRules = ["private-key"]
+paths = [
+  '''crates/cosmon-rpp-adapter/tests/fixtures/issuer_b_private\.pem$''',
+]
+
+# The publish gate's credential detector names the PEM header it hunts for (its
+# pattern table and its must-hit canary), and its test writes that header
+# alone to a temp file to prove the gate fires. The match is the header line
+# only, never key material. `condition = "AND"` requires BOTH the path and the
+# header pattern, so a full PEM block pasted into either script, or a header in
+# any other file, is still reported.
+[[allowlists]]
+description = "publish gate: its detector pattern, canary and tests spell a PEM header line; no key body follows."
+condition = "AND"
+targetRules = ["private-key"]
+paths = [
+  '''scripts/publish\.sh$''',
+  '''scripts/publish\.test\.sh$''',
+]
+regexes = ['''-----BEGIN [A-Z ]*PRIVATE KEY-----''']
