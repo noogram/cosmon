@@ -141,8 +141,9 @@ paths = [
 # pattern table and its must-hit canary), and its test writes that header
 # alone to a temp file to prove the gate fires. The match is the header line
 # only, never key material. `condition = "AND"` requires BOTH the path and the
-# header pattern, so a full PEM block pasted into either script, or a header in
-# any other file, is still reported.
+# header pattern, so a header in any other file is still reported. Residual
+# width: a full PEM block pasted into one of these two scripts would also be
+# waived, because the rule matches on its header line.
 [[allowlists]]
 description = "publish gate: its detector pattern, canary and tests spell a PEM header line; no key body follows."
 condition = "AND"
