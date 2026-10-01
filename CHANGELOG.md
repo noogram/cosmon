@@ -4211,6 +4211,7 @@ release **is**, not how it was built.
   `#![deny(missing_docs)]` on the core, and CI gates on build, test, clippy,
   and fmt.
 
-[Unreleased]: https://github.com/noogram/cosmon/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/noogram/cosmon/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/noogram/cosmon/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/noogram/cosmon/releases/tag/v0.6.0
 [0.1.0]: https://github.com/noogram/cosmon/releases/tag/v0.1.0
