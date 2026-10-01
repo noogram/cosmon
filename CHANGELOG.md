@@ -25,6 +25,11 @@ this stage.
 
 Read this before upgrading. Each item names the action to take.
 
+- `cs spore validate` and `cs spore run` on a spore that declares
+  `[spore.admission]` (the shipped `cosmon-dev` recipe does) now require
+  `--admission <FILE>`. Supply a version 1 admission file for a defect, or use
+  a plan and scoped `task-work` molecules for other work; the recipe refuses
+  other work types before it allocates anything.
 - Scripts that relied on a collapsed or frozen blocker releasing its
   `blocked-by` dependents must complete the blocker, or re-point or drop the
   edge. Planner formulas that leave a frozen mission as a hand-off with
@@ -198,6 +203,17 @@ Read this before upgrading. Each item names the action to take.
   construct a cache whose key cannot panic on drop.
 
 ### Added
+
+- **Spore admission before allocation** (ADR-183, step 1). A spore can declare
+  `[spore.admission]`, a versioned work-type contract. When it does, `cs spore
+  validate` and `cs spore run` require `--admission <FILE>` and refuse
+  mismatched work before expansion or any state write. The record printed
+  before allocation names the chosen vehicle, the pinned baseline and target
+  base, paths, risk, gates, reviewer requirements, execution substrates and the
+  expected initial molecule count; an empty path list gets the conservative
+  security review floor. The `cosmon-dev` spore declares it for released
+  defects and refuses a new-feature request before creating any molecule.
+  `docs/cs-spore.md` lists which vehicle fits which work type.
 
 - **`cs run --resident --harness <KEY>=<VALUE>`** (GitHub issue #86, repeatable).
   A run-wide harness-settings directive, the harness twin of `--adapter` and
@@ -915,6 +931,17 @@ defect issue #51 first reported — is independent of all this and is unchanged.
   commit.
 
 ### Fixed
+
+- **A loop error after real work no longer deletes the worker's tree** (GitHub
+  issue #150). When an in-process worker fails after it has executed tools
+  (turn or tool budget, cycle detection, context overflow, a provider error
+  after retries), `cs tackle` used to treat it as a launch failure: it removed
+  the worktree and branch and returned the molecule to `pending`. It now
+  collapses the molecule with the typed cause `AgentLoopFailed`, keeps the
+  worktree and branch, and persists the partial output for audit. A failure
+  before any tool ran still rolls back as before. The in-process openai and
+  anthropic adapters also gain a wall-clock deadline and per-call timeout,
+  reusing the local adapter's `timeout_secs` setting.
 
 - **API-dispatched Claude workers no longer stop on the folder-trust dialog**
   (GitHub issue #81, point 4). `cs tackle`, `cs thaw` and the patrol respawn
