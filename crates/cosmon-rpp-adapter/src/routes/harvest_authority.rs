@@ -22,7 +22,7 @@ use cosmon_core::remote_harvest::{
     resolve_remote_policy, EffectiveRemotePolicy, PolicyProvenance, ResolvedRemotePolicy,
 };
 use cosmon_filestore::harvest_authority::{
-    authority_state, configure_harvest_authority, load_authorizations_with_diagnostics,
+    authority_state, configure_remote_harvest_authority, load_authorizations_with_diagnostics,
     store_verified_authorization, HarvestAuthorityUpdate,
 };
 use cosmon_filestore::FileStore;
@@ -145,6 +145,8 @@ pub struct ConfigureBody {
     pub public_key: Option<String>,
     /// New monotone epoch, required for a root rotation.
     pub epoch: Option<u64>,
+    /// Signature by the current root over the tenant-bound rotation statement.
+    pub rotation_signature: Option<String>,
 }
 
 /// `PUT /v1/admin/noyaux/{noyau}/harvest-authority` — host-sealed CAS.
@@ -186,7 +188,7 @@ pub async fn configure(
             None,
         ));
     }
-    let root = state.galaxies_root.join(noyau);
+    let root = state.galaxies_root.join(&noyau);
     if !root.is_dir() {
         return Err(api(StatusCode::NOT_FOUND, "not_found", None));
     }
@@ -198,10 +200,20 @@ pub async fn configure(
         public_key: request.public_key,
         epoch: request.epoch.map(GrantEpoch::from_u64),
     };
-    let result = configure_harvest_authority(&root, &update).map_err(|e| {
+    let result = configure_remote_harvest_authority(
+        &root,
+        &noyau,
+        &update,
+        request.rotation_signature.as_deref(),
+    )
+    .map_err(|e| {
         let message = e.to_string();
         let (status, label) = if message.contains("harvest_authority_changed") {
             (StatusCode::CONFLICT, "harvest_authority_changed")
+        } else if message.contains("harvest_rotation_signature_required") {
+            (StatusCode::FORBIDDEN, "rotation_signature_required")
+        } else if message.contains("harvest_rotation_signature_invalid") {
+            (StatusCode::FORBIDDEN, "rotation_signature_invalid")
         } else if message.contains("harvest_policy_conflict") {
             (StatusCode::CONFLICT, "harvest_policy_conflict")
         } else if message.contains("harvest_public_key_invalid")

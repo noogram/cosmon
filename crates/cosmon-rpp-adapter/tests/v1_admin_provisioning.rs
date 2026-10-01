@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use cosmon_core::harvest_authorization::{harvest_root_rotation_statement, GrantEpoch};
 use cosmon_minisign_testkit::Operator;
 use cosmon_rpp_adapter::admin_seal::AdminSeal;
 use cosmon_rpp_adapter::deny_list::DenyList;
@@ -167,16 +168,59 @@ async fn public_root_rotation_requires_prior_digest_and_epoch_bump() {
         first_key
     );
 
-    let rotated = app.clone().oneshot(send(rotation(Some(2)))).await.unwrap();
+    let unsigned = app.clone().oneshot(send(rotation(Some(2)))).await.unwrap();
+    assert_eq!(unsigned.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        read_json(unsigned).await["error"],
+        "rotation_signature_required"
+    );
+    assert_eq!(
+        std::fs::read_to_string(galaxy.join(".cosmon/harvest.pub")).unwrap(),
+        first_key
+    );
+    let statement =
+        harvest_root_rotation_statement("demo", digest, &second_key, GrantEpoch::from_u64(2))
+            .unwrap();
+    for signature in [
+        Operator::from_seed(42).sign(&statement),
+        Operator::from_seed(41).sign(
+            &harvest_root_rotation_statement("other", digest, &second_key, GrantEpoch::from_u64(2))
+                .unwrap(),
+        ),
+        Operator::from_seed(41).sign(
+            &harvest_root_rotation_statement("demo", digest, &second_key, GrantEpoch::from_u64(3))
+                .unwrap(),
+        ),
+        Operator::from_seed(41).sign(
+            &harvest_root_rotation_statement(
+                "demo",
+                digest,
+                &Operator::from_seed(43).public_key_file(),
+                GrantEpoch::from_u64(2),
+            )
+            .unwrap(),
+        ),
+    ] {
+        let mut invalid = rotation(Some(2));
+        invalid["rotation_signature"] = json!(signature);
+        let response = app.clone().oneshot(send(invalid)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response).await["error"],
+            "rotation_signature_invalid"
+        );
+    }
+    let mut valid = rotation(Some(2));
+    valid["rotation_signature"] = json!(Operator::from_seed(41).sign(&statement));
+    let rotated = app.clone().oneshot(send(valid.clone())).await.unwrap();
     assert_eq!(rotated.status(), StatusCode::OK);
-    let rotated = read_json(rotated).await;
-    assert_eq!(rotated["epoch"], 2);
+    assert_eq!(read_json(rotated).await["epoch"], 2);
     assert_eq!(
         std::fs::read_to_string(galaxy.join(".cosmon/harvest.pub")).unwrap(),
         second_key
     );
-    let stale = app.oneshot(send(rotation(Some(3)))).await.unwrap();
-    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let replay = app.oneshot(send(valid)).await.unwrap();
+    assert_eq!(replay.status(), StatusCode::CONFLICT);
 }
 
 #[cfg(unix)]

@@ -2,7 +2,7 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Select an explicit remote policy and optionally install a public root
+Select a policy or install a root; local replacement needs --local-reset
 
 Usage: cs harvest-authority configure [OPTIONS] --policy <POLICY>
 
@@ -19,5 +19,7 @@ Options:
           New monotone revocation epoch; required for rotation
       --json
           Output in JSON format
+      --local-reset
+          Recover a lost current signer by resetting its root on this host
   -h, --help
           Print help

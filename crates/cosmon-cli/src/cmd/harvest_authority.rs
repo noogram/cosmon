@@ -37,7 +37,7 @@ pub struct Args {
 /// Actions corresponding to the four remote authority routes.
 #[derive(clap::Subcommand)]
 pub enum Action {
-    /// Select an explicit remote policy and optionally install a public root.
+    /// Select a policy or install a root; local replacement needs --local-reset.
     Configure {
         /// Disabled, scoped or sealed.
         #[arg(long)]
@@ -48,6 +48,9 @@ pub enum Action {
         /// New monotone revocation epoch; required for rotation.
         #[arg(long)]
         epoch: Option<u64>,
+        /// Recover a lost current signer by resetting its root on this host.
+        #[arg(long)]
+        local_reset: bool,
     },
     /// Inspect effective policy, provenance, epoch and public root.
     Status {
@@ -124,6 +127,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             policy,
             public_key_file,
             epoch,
+            local_reset,
         } => {
             let policy = match policy.as_str() {
                 "disabled" => RemoteHarvestPolicy::Disabled,
@@ -137,6 +141,18 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 .map(std::fs::read_to_string)
                 .transpose()
                 .context("read public key")?;
+            let replacing_root = public_key.as_deref().is_some_and(|key| {
+                current
+                    .key_digest
+                    .as_deref()
+                    .is_some_and(|prior| prior != policy_digest(key.as_bytes()))
+            });
+            if replacing_root && !local_reset {
+                bail!("replacing a local harvest root requires --local-reset");
+            }
+            if *local_reset && !replacing_root {
+                bail!("--local-reset requires a different installed public root");
+            }
             let update = HarvestAuthorityUpdate {
                 expected_policy: current.policy,
                 expected_key_digest: current.key_digest,

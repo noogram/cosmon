@@ -302,7 +302,7 @@ enum Command {
     #[command(after_help = cmd::examples::HARVEST)]
     Harvest(cmd::harvest::Args),
 
-    /// Configure and inspect remote harvest authority; issue and import grants locally.
+    /// Configure and inspect remote harvest authority; reset a lost root only on the host.
     HarvestAuthority(cmd::harvest_authority::Args),
 
     /// Stitch — fleet-locked sequential merge of a mission DAG into base (Phase 1 Commit 2)

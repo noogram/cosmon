@@ -492,6 +492,27 @@ pub fn policy_digest(bytes: &[u8]) -> String {
     hex_digest(bytes)
 }
 
+/// Canonical bytes approved by the current root before an API root rotation.
+/// The new root is represented by a digest of its exact public file bytes.
+///
+/// # Errors
+/// Refuses empty or multiline tenant and prior digest fields.
+pub fn harvest_root_rotation_statement(
+    tenant: &str,
+    prior_digest: &str,
+    new_public_key: &str,
+    epoch: GrantEpoch,
+) -> Result<Vec<u8>, GrantError> {
+    let tenant = one_line("tenant", tenant.to_owned())?;
+    let prior = one_line("prior_digest", prior_digest.to_owned())?;
+    Ok(format!(
+        "cosmon-harvest-root-rotation-v1\ntenant={tenant}\nprior={prior}\nnew={}\nepoch={}\n",
+        policy_digest(new_public_key.as_bytes()),
+        epoch.as_u64()
+    )
+    .into_bytes())
+}
+
 /// Digest of a grant's signed bytes.
 ///
 /// Recorded in the consumption ledger so a replay is recognised without

@@ -2,12 +2,12 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Configure and inspect remote harvest authority; issue and import grants locally
+Configure and inspect remote harvest authority; reset a lost root only on the host
 
 Usage: cs harvest-authority [OPTIONS] <COMMAND>
 
 Commands:
-  configure  Select an explicit remote policy and optionally install a public root
+  configure  Select a policy or install a root; local replacement needs --local-reset
   status     Inspect effective policy, provenance, epoch and public root
   challenge  Print a canonical v1 grant and its exact bytes for an external signer
   import     Verify and atomically install an independently signed JSON grant

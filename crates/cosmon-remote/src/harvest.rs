@@ -10,7 +10,8 @@ use std::process::{Command, Stdio};
 use chrono::{Duration, Utc};
 use clap::{Subcommand, ValueEnum};
 use cosmon_core::harvest_authorization::{
-    policy_digest, DoneAuthorization, HarvestGrant, HarvestScope,
+    harvest_root_rotation_statement, policy_digest, DoneAuthorization, GrantEpoch, HarvestGrant,
+    HarvestScope,
 };
 use cosmon_core::id::MoleculeId;
 use cosmon_core::operator_attestation::{OperatorAttestation, OperatorKeyId};
@@ -55,7 +56,7 @@ pub enum HarvestCmd {
         #[arg(long)]
         admin_token_file: PathBuf,
     },
-    /// Generate an encrypted signer key and install only its public half.
+    /// Install a public root; rotation requires a signature from the current key.
     Init {
         /// File holding the independent host admin credential.
         #[arg(long)]
@@ -66,6 +67,9 @@ pub enum HarvestCmd {
         /// Store a key on a selected operator device instead of the default directory.
         #[arg(long)]
         key_file: Option<PathBuf>,
+        /// Select the current signer for rotation when it is on another device.
+        #[arg(long, requires = "rotate_from")]
+        current_key_file: Option<PathBuf>,
     },
     /// Build, sign and install a grant, or split the workflow into offline steps.
     Grant {
@@ -296,6 +300,65 @@ fn signer_key(dir: &Path, selected: Option<PathBuf>) -> Result<PathBuf> {
         0 => Err(fault("no operator harvest key; run harvest init")),
         _ => Err(fault("multiple harvest keys; select one with --key-file")),
     }
+}
+
+fn current_rotation_key(dir: &Path, selected: Option<PathBuf>, installed: &str) -> Result<PathBuf> {
+    if let Some(path) = selected {
+        check_key(&path)?;
+        let (text, _) = read_public(&path)?;
+        if policy_digest(text.as_bytes()) != installed {
+            return Err(fault("current key does not match installed public root"));
+        }
+        return Ok(path);
+    }
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|extension| extension == "key") {
+            check_key(&path)?;
+            let (text, _) = read_public(&path)?;
+            if policy_digest(text.as_bytes()) == installed {
+                matches.push(path);
+            }
+        }
+    }
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        _ => Err(fault(
+            "select the installed current key with --current-key-file",
+        )),
+    }
+}
+
+fn sign_rotation(statement: &[u8], key: &Path, scratch: &Path) -> Result<String> {
+    check_key(key)?;
+    let (_, public) = read_public(key)?;
+    let message = random_path(scratch, "rotation");
+    let signature = message.with_extension("minisig");
+    write_new(&message, statement)?;
+    let result = Command::new("minisign")
+        .args(["-S", "-s"])
+        .arg(key)
+        .arg("-m")
+        .arg(&message)
+        .arg("-x")
+        .arg(&signature)
+        .arg("-q")
+        .stdout(signer_stdout()?)
+        .status();
+    let signed = match result {
+        Ok(status) if status.success() => fs::read_to_string(&signature).map_err(Error::Io),
+        Ok(_) => Err(fault("minisign declined root rotation signing")),
+        Err(_) => Err(fault("minisign is required on the operator device")),
+    };
+    let _ = fs::remove_file(&message);
+    let _ = fs::remove_file(&signature);
+    let signed = signed?;
+    let parsed = MinisignSignature::parse(&signed)
+        .map_err(|_| fault("signer returned a malformed rotation signature"))?;
+    minisign::verify(&public, statement, &parsed)
+        .map_err(|_| fault("signer returned an invalid rotation signature"))?;
+    Ok(signed)
 }
 
 fn read_public(key: &Path) -> Result<(String, MinisignPublicKey)> {
@@ -580,6 +643,7 @@ pub async fn run(
             admin_token_file,
             rotate_from,
             key_file,
+            current_key_file,
         } => {
             guard_operator_device()?;
             let before = client.harvest_status(None).await?;
@@ -658,7 +722,22 @@ pub async fn run(
             } else {
                 None
             };
-            let body = cas_body(&before, "sealed", Some(&public_text), next_epoch)?;
+            let mut body = cas_body(&before, "sealed", Some(&public_text), next_epoch)?;
+            if let (Some(prior), Some(next)) = (installed, next_epoch) {
+                let current_key = current_rotation_key(&dir, current_key_file, prior)?;
+                let statement = harvest_root_rotation_statement(
+                    noyau(profile)?,
+                    prior,
+                    &public_text,
+                    GrantEpoch::from_u64(next),
+                )
+                .map_err(|_| fault("invalid rotation statement"))?;
+                eprintln!(
+                    "Review the exact root rotation before signing:\n{}",
+                    String::from_utf8_lossy(&statement)
+                );
+                body["rotation_signature"] = json!(sign_rotation(&statement, &current_key, &dir)?);
+            }
             let result = client
                 .harvest_configure(noyau(profile)?, &admin_token(&admin_token_file)?, &body)
                 .await?;

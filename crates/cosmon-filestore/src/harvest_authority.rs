@@ -53,8 +53,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cosmon_core::config::{ProjectConfig, RemoteHarvestPolicy};
 use cosmon_core::error::CosmonError;
 use cosmon_core::harvest_authorization::{
-    ConsumptionRecord, DoneAuthorization, GrantEpoch, HarvestConsumptionLedger, HarvestGrant,
-    HarvestJournalRecord, HarvestJournalStage, HarvestSealVerifier, PermitId,
+    harvest_root_rotation_statement, ConsumptionRecord, DoneAuthorization, GrantEpoch,
+    HarvestConsumptionLedger, HarvestGrant, HarvestJournalRecord, HarvestJournalStage,
+    HarvestSealVerifier, PermitId,
 };
 use cosmon_core::id::MoleculeId;
 use cosmon_core::operator_attestation::{AttestationError, OperatorAttestation, OperatorKeyId};
@@ -78,6 +79,9 @@ pub const HARVEST_EPOCH_REL: &str = ".cosmon/harvest.epoch";
 /// Authority reads refuse while it exists; a crash must never expose a
 /// partially changed key, epoch and policy as one coherent version.
 pub const HARVEST_AUTHORITY_PENDING_REL: &str = ".cosmon/harvest-authority.pending";
+
+/// Append-only local recovery record, outside worker runtime state.
+pub const HARVEST_ROOT_RESETS_REL: &str = ".cosmon/harvest-root-resets.log";
 
 /// Directory holding sealed grants, relative to a cosmon state root.
 ///
@@ -611,6 +615,93 @@ pub fn configure_harvest_authority(
     galaxy_root: &Path,
     update: &HarvestAuthorityUpdate,
 ) -> Result<HarvestAuthorityState, CosmonError> {
+    configure_authority(galaxy_root, update, None)
+}
+
+/// Apply an API update, requiring a signature from the installed root on rotation.
+/// The tenant name is the admitted route tenant, not a request body field.
+///
+/// # Errors
+/// Refuses missing, malformed or non-current signatures and all ordinary CAS errors.
+pub fn configure_remote_harvest_authority(
+    galaxy_root: &Path,
+    tenant: &str,
+    update: &HarvestAuthorityUpdate,
+    rotation_signature: Option<&str>,
+) -> Result<HarvestAuthorityState, CosmonError> {
+    configure_authority(galaxy_root, update, Some((tenant, rotation_signature)))
+}
+
+fn verify_root_rotation(
+    galaxy_root: &Path,
+    tenant: &str,
+    prior: &str,
+    key: &str,
+    epoch: GrantEpoch,
+    signature: Option<&str>,
+) -> Result<(), CosmonError> {
+    let signature =
+        signature.ok_or_else(|| authority_fault("harvest_rotation_signature_required"))?;
+    let statement = harvest_root_rotation_statement(tenant, prior, key, epoch)
+        .map_err(|_| authority_fault("harvest_rotation_signature_invalid"))?;
+    let verifier = MinisignHarvestVerifier::resolve(galaxy_root)?
+        .ok_or_else(|| authority_fault("harvest_facts_unavailable"))?;
+    if verifier.content_digest() != prior {
+        return Err(authority_fault("harvest_authority_changed"));
+    }
+    let parsed = MinisignSignature::parse(signature)
+        .map_err(|_| authority_fault("harvest_rotation_signature_invalid"))?;
+    minisign::verify(&verifier.key, &statement, &parsed)
+        .map_err(|_| authority_fault("harvest_rotation_signature_invalid"))
+}
+
+fn record_local_root_reset(
+    galaxy_root: &Path,
+    prior: &str,
+    new_digest: &str,
+    epoch: GrantEpoch,
+) -> Result<(), CosmonError> {
+    let path = galaxy_root.join(HARVEST_ROOT_RESETS_REL);
+    refuse_symlink(&path)?;
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|_| authority_fault("harvest_write_failed"))?;
+    log.write_all(
+        format!(
+            "harvest-root-reset-v1 prior={prior} new={new_digest} epoch={} intent=local\n",
+            epoch.as_u64()
+        )
+        .as_bytes(),
+    )
+    .and_then(|()| log.sync_all())
+    .map_err(|_| authority_fault("harvest_write_failed"))
+}
+
+fn configured_document(raw: &str, policy: RemoteHarvestPolicy) -> Result<String, CosmonError> {
+    let mut document = raw
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| authority_fault("harvest_facts_unavailable"))?;
+    if !document.contains_key("harvest_authority") {
+        document["harvest_authority"] = toml_edit::table();
+    }
+    let policy = match policy {
+        RemoteHarvestPolicy::Disabled => "disabled",
+        RemoteHarvestPolicy::Scoped => "scoped",
+        RemoteHarvestPolicy::Sealed => "sealed",
+    };
+    document["harvest_authority"]["remote"] = toml_edit::value(policy);
+    let result = document.to_string();
+    ProjectConfig::parse(&result).map_err(|_| authority_fault("harvest_policy_conflict"))?;
+    Ok(result)
+}
+
+fn configure_authority(
+    galaxy_root: &Path,
+    update: &HarvestAuthorityUpdate,
+    remote: Option<(&str, Option<&str>)>,
+) -> Result<HarvestAuthorityState, CosmonError> {
     let state_root = galaxy_root.join(".cosmon/state");
     let store = crate::FileStore::new(state_root);
     let _guard = store.lock_trunk("harvest authority configure")?;
@@ -657,21 +748,27 @@ pub fn configure_harvest_authority(
         {
             return Err(authority_fault("harvest_rotation_requires_epoch_bump"));
         }
+        if let Some(prior) = current
+            .key_digest
+            .as_deref()
+            .filter(|prior| *prior != digest)
+        {
+            if let Some((tenant, signature)) = remote {
+                verify_root_rotation(galaxy_root, tenant, prior, key, next_epoch, signature)?;
+            }
+        }
     }
-    let mut document = raw
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|_| authority_fault("harvest_facts_unavailable"))?;
-    if !document.contains_key("harvest_authority") {
-        document["harvest_authority"] = toml_edit::table();
+    let document = configured_document(&raw, update.policy)?;
+    if remote.is_none() {
+        if let (Some(prior), Some(key)) =
+            (current.key_digest.as_deref(), update.public_key.as_deref())
+        {
+            let new_digest = cosmon_core::harvest_authorization::policy_digest(key.as_bytes());
+            if prior != new_digest {
+                record_local_root_reset(galaxy_root, prior, &new_digest, next_epoch)?;
+            }
+        }
     }
-    let policy = match update.policy {
-        RemoteHarvestPolicy::Disabled => "disabled",
-        RemoteHarvestPolicy::Scoped => "scoped",
-        RemoteHarvestPolicy::Sealed => "sealed",
-    };
-    document["harvest_authority"]["remote"] = toml_edit::value(policy);
-    ProjectConfig::parse(&document.to_string())
-        .map_err(|_| authority_fault("harvest_policy_conflict"))?;
     // The marker is itself durable before the first replacement. A crash or
     // write failure leaves it in place, so every subsequent effect refuses
     // instead of combining old and new authority facts.
@@ -698,7 +795,7 @@ pub fn configure_harvest_authority(
             atomic_authority_write(&key_path, key.as_bytes())?;
         }
     }
-    atomic_authority_write(&config_path, document.to_string().as_bytes())?;
+    atomic_authority_write(&config_path, document.as_bytes())?;
     std::fs::remove_file(&pending_path).map_err(|_| authority_fault("harvest_write_failed"))?;
     std::fs::File::open(&authority_dir)
         .and_then(|dir| dir.sync_all())

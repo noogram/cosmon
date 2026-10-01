@@ -316,7 +316,7 @@ Commands:
   paths              Paths — project the write-path taxonomy (`--writes`), a pure derived view
   done               Done — terminal teardown for a molecule (merge + cleanup, human-callable)
   harvest            Harvest — close a completed-but-unmerged molecule by invoking `cs done`
-  harvest-authority  Configure and inspect remote harvest authority; issue and import grants locally
+  harvest-authority  Configure and inspect remote harvest authority; reset a lost root only on the host
   stuck              Stuck — freeze a molecule and record the blocker
   await-operator     Await-operator — the only sanctioned way to block on an operator decision at an irreversibility boundary (ADR-123). Routes on the molecule's `op-block:*` capability: block-and-emit, or surface-and-continue
   topology           Topology — structural maps of the workspace (wraps the `topon` CLI)

@@ -223,7 +223,7 @@ enum Cmd {
         #[command(subcommand)]
         sub: ConfigCmd,
     },
-    /// Operator-side remote harvest authority and grants.
+    /// Operator-side harvest authority, signed root rotation and grants.
     #[command(display_order = 6)]
     Harvest {
         #[command(subcommand)]
