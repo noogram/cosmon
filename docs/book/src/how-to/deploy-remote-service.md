@@ -53,8 +53,10 @@ mission. Neither profile is selected by an upgrade. See the
 [remote harvest contract](../../../specs/remote-harvest-contract.md) for the
 policy table and typed refusals.
 
-The service delegates work to `cs tackle`; it is not a second scheduler. On
-the host, `cs` resolves the selected worker adapter. For this setup it uses the
+The service dispatches work through the same tackle logic as `cs tackle`, in
+process, and it does not spawn a `cs` binary; it is not a second scheduler. On
+the host, the service resolves the selected worker adapter by the same chain as
+`cs tackle`. For this setup it uses the
 built-in `local` adapter: an in-process Ollama `/v1` client. No Node.js,
 Claude runtime, or tmux session is required for that worker leg.
 
@@ -263,13 +265,12 @@ ssh <remote> '
 ```
 
 The `rpp.toml` config declares the state directory, the tenant galaxies root, and
-the path to the `cs` binary — for example:
+the directory for tenant artifacts — for example:
 
 ```toml
 bind_addr = "127.0.0.1:8443"
 state_dir = "/opt/cosmon/state"
 galaxies_root = "/opt/cosmon/galaxies"
-cs_path = "/opt/cosmon/bin/cs"
 artifact_root = "/opt/cosmon/artifacts"
 ```
 
@@ -517,12 +518,15 @@ cosmon-remote artifact list <molecule-id>
 cosmon-remote artifact get <molecule-id> <artifact-token> --out ./result.md
 ```
 
-The `do` gesture performs nucleate then tackle; `tackle` returns a worker
-session promptly while the `local` Ollama worker runs detached on the remote
-host. The successful path is:
+The `do` gesture nucleates, tackles, follows the molecule to a terminal status,
+and then closes it with a harvest. The close is best-effort: a refused harvest
+leaves the deliverable where it was and reports the reason. Pass `--no-close`
+to skip it, or `--close-reason` to supply the harvest reason. `tackle` returns a
+worker session promptly while the `local` Ollama worker runs detached on the
+remote host. The successful path is:
 
 ```text
-thin client -> tunnel -> fente -> cs tackle -> local Ollama worker
+thin client -> tunnel -> fente -> in-process tackle -> local Ollama worker
              <- artifact get <- completed molecule <- detached worker
 ```
 
@@ -535,7 +539,7 @@ artifact without an interactive remote execution path.
 
 `artifact list` prints opaque artifact tokens such as `art_...`; use the token,
 not a server path, with `artifact get <molecule-id> <artifact-token>`. During
-`cs tackle`, the adapter creates `<artifact_root>/<noyau>/<molecule-id>/` and
+the tackle, the adapter creates `<artifact_root>/<noyau>/<molecule-id>/` and
 exports that directory as `$COSMON_ARTIFACT_DIR` to the worker. The client
 fetches bytes with `--out`; when omitted, it writes under
 `./cosmon-artifacts/<molecule-id>/<artifact-token>`.
@@ -544,9 +548,9 @@ fetches bytes with `--out`; when omitted, it writes under
 
 A `503 tackle_unavailable` arrives bare: the client prints the status, the
 label, and the `request_id`, and no probable cause. That is deliberate. The
-label is a catch-all — the adapter collapses every unrecognised `cs tackle`
-failure onto it (worker credential absent, local-adapter backend unreachable,
-`cs` binary missing, subprocess spawn failure), so a cause printed here would
+label is a catch-all — the adapter collapses every dispatch failure it has no
+named label for onto it (for example a local-adapter backend that is
+unreachable), so a cause printed here would
 be a guess, and a guess that names the wrong one sends the investigation the
 wrong way. Diagnose it instead with `cosmon-remote doctor`, which *checks* each
 of those and reports what it found. On a sovereign local-adapter host in

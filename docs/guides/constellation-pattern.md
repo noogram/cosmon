@@ -107,8 +107,8 @@ worker runs — they were emitted during `cs nucleate`. The worker verifies
 
 ## Reading constellations back
 
-- `cs ensemble --kind constellation` — list every constellation in the
-  fleet (the glyph 🌌 marks them in the default output).
+- `cs ensemble` — constellations appear among the molecules, marked with the
+  glyph 🌌; `cs ensemble --tag <glob>` narrows the list by tag.
 - `cs deps <constellation_id>` — direct citations.
 - `cs deps <constellation_id> --transitive` — walk the closure; a
   constellation that cites another constellation produces a chain.

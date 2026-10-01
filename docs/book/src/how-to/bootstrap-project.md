@@ -82,7 +82,14 @@ cs init --upgrade
 ```
 
 This adds any missing canonical formulas and a `project_id` if absent, and
-overwrites nothing you already have.
+overwrites nothing you already have. It also writes or refreshes the
+marker-bounded `## Cosmon` section in `CLAUDE.md` (or `AGENTS.md`) so an agent
+in the project knows how to drive `cs`; text outside the markers is never
+touched. Cosmon's rules in `.cosmon/.gitignore` live in a block delimited by
+`# cosmon:gitignore:start` / `# cosmon:gitignore:end`, which `--upgrade`
+rewrites in place. A customised file without those markers is left alone,
+unless git reports that it excludes the archive subtree; then the block is
+appended below your lines. `cs doctor gitignore` reports which state you are in.
 
 ## Next
 

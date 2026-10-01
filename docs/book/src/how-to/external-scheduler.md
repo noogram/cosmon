@@ -6,7 +6,7 @@ stateless CLI, so it composes with any scheduler the same way `git` does: you
 call one-shot commands on a clock you own.
 
 > Cosmon has two layers. The **Transactional Core** (`cs tackle`, `cs done`,
-> `cs reconcile`, …) is stateless and git-like: one decision per invocation,
+> `cs project`, …) is stateless and git-like: one decision per invocation,
 > files on disk are the truth. The **Resident Runtime** (`cs run`) is a
 > long-lived *client* of that core; it owns no private truth and holds no lock.
 > An external scheduler drives the core directly and never needs the runtime.
@@ -69,14 +69,14 @@ editing a patrol is a `patrols.toml` edit, validated with the command above.
 ## Keeping projected surfaces fresh
 
 Any batch of molecule changes can leave cosmon's projected surfaces
-(`STATUS.md`, `ISSUES.md`, …) stale. Have your scheduler reconcile after a batch:
+(`STATUS.md`, `ISSUES.md`, …) stale. Have your scheduler project after a batch:
 
 ```sh
-cs reconcile            # project current state onto all surfaces
-cs reconcile --check    # dry-run; exit 1 if surfaces are stale (a CI gate)
+cs project              # project current state onto all surfaces
+cs project --check      # dry-run; exit 1 if surfaces are stale (a CI gate)
 ```
 
-`cs reconcile` is strictly idempotent (running it twice is the same as once) so
+`cs project` is strictly idempotent (running it twice is the same as once) so
 it is safe to call on every tick. `--check` makes it a CI guard that fails the
 build when a surface has drifted.
 

@@ -11,8 +11,9 @@ harness you picked.
 
 When you `cs tackle` a molecule, cosmon creates the worktree, the tmux pane, and
 the fleet bookkeeping, and then it has to launch *something* inside that pane to
-be the agent. The adapter is that named choice: `claude`, `aider`, `openai`,
-`anthropic`, `llama-cpp`, `local`. The kernel stays agnostic about which one runs;
+be the agent. The adapter is that named choice: `claude`, `codex`, `aider`,
+`opencode`, `openai`, `anthropic`, `llama-cpp`, `ollama`, `local`. `cs config
+adapters` lists the ones your build registers. The kernel stays agnostic about which one runs;
 the adapter is the seam where a concrete system attaches.
 
 This is what makes cosmon **provider-agnostic**. Cosmon is not a competitor to

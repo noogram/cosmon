@@ -66,7 +66,7 @@ systems get their hardest bugs. Keeping them separate buys three concrete things
 - **It needs no broker.** There is no queue process to run, secure, scale, or
   lose messages in. One fewer moving part, one fewer failure mode.
 - **It makes reconciliation a pure projection.** Because the authoritative
-  content is all on disk, `cs reconcile` can rebuild every derived surface
+  content is all on disk, `cs project` can rebuild every derived surface
   (status files, issue lists, dashboards) as a deterministic function of the
   files. Run it twice, get the same result.
 

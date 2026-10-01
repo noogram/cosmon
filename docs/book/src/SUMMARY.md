@@ -21,6 +21,7 @@
 - [Curate the backlog with temperature tags](./how-to/temperature-tags.md)
 - [Bootstrap a new project with cs init](./how-to/bootstrap-project.md)
 - [Germinate a polymer from a spore](./how-to/germinate-from-spore.md)
+- [Protect reference inputs from a worker](./how-to/protect-reference-inputs.md)
 - [Monitor the fleet with cs peek](./how-to/monitor-with-peek.md)
 - [Pilot cosmon in natural language](./how-to/pilot-in-natural-language.md)
 - [Wire cosmon into an external scheduler](./how-to/external-scheduler.md)
