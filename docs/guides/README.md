@@ -28,6 +28,7 @@ One-line map of the how-to guides in `docs/guides/`. These are goal-oriented rec
 - [Deployment Scenarios — Noogram & cosmon postures](deployment-scenarios.md)
 - [Fail-closed injection — `G_inject` / `assert-hits`](fail-closed-injection.md)
 - [You are not a router. You are a gardener.](gardener-not-router.md)
+- [Reaching a hosted model through an API gateway (`openai` adapter)](gateway-worker.md)
 - [gitleaks × cosmon state journals — the shared scan baseline](gitleaks-state-journals.md)
 - [Handing the controls over — and taking them back](takeover-rollback.md)
 - [The harness, fractal — where the agent loop lives](harness-fractal.md)
