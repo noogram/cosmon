@@ -10,11 +10,12 @@ Arguments:
   <REF>  Path to a `spore.toml` manifest (or a directory containing one)
 
 Options:
-      --config <PATH>    Path to configuration file
-      --var <KEY=VALUE>  Bind a parameter (repeatable: `--var key=value`). Values are coerced into the declared `ParamSchema` type before expansion
-  -v, --verbose          Enable verbose output
-      --json             Output in JSON format
-  -h, --help             Print help
+      --config <PATH>     Path to configuration file
+      --var <KEY=VALUE>   Bind a parameter (repeatable: `--var key=value`). Values are coerced into the declared `ParamSchema` type before expansion
+      --admission <FILE>  TOML admission evidence for a spore that declares `[spore.admission]`
+  -v, --verbose           Enable verbose output
+      --json              Output in JSON format
+  -h, --help              Print help
 
 EXAMPLES:
   cs spore validate ./spore.toml --var subject="octopus cognition"

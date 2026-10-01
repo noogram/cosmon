@@ -427,6 +427,7 @@ SEE ALSO: cs spore run, cs spore export, ADR-140 D3.
 ###### **Options:**
 
 * `--var <KEY=VALUE>` — Bind a parameter (repeatable: `--var key=value`). Values are coerced into the declared `ParamSchema` type before expansion
+* `--admission <FILE>` — TOML admission evidence for a spore that declares `[spore.admission]`
 
 
 
@@ -461,6 +462,7 @@ SEE ALSO: cs spore validate (dry run), cs run (DAG of existing molecules).
 ###### **Options:**
 
 * `--var <KEY=VALUE>` — Bind a parameter (repeatable: `--var key=value`)
+* `--admission <FILE>` — TOML admission evidence, checked before any molecule is nucleated
 * `--allow-unchecked-seal` — Germinate a *sealed* spore even though its `.tla` proof was not verified this run (TLC unavailable). The status line stays honest: `seal: present, NOT verified` (ADR-140 D4). Without this flag a sealed spore fails closed
 * `--fleet <FLEET>` — Fleet to germinate the polymer into
 

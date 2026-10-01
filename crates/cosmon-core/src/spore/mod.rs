@@ -81,6 +81,8 @@ use serde::Deserialize;
 
 use crate::fleet::CrossProviderReview;
 
+/// Pure, versioned work-type admission before any spore allocation.
+pub mod admission;
 pub mod expand;
 pub mod install;
 pub mod output;
@@ -570,6 +572,8 @@ pub struct Spore {
     pub name: String,
     /// The schema version (`[spore].version`; defaults to 1).
     pub version: u32,
+    /// Optional admission contract; legacy bundles without one keep their old behavior.
+    pub admission: Option<admission::AdmissionSpec>,
     /// Human-readable description.
     pub description: Option<String>,
     /// The native verb (`"germinate"`).
@@ -616,6 +620,7 @@ impl Spore {
         Ok(Self {
             name: raw.name,
             version: raw.version.unwrap_or(1),
+            admission: raw.admission,
             description: raw.description,
             verb: raw.verb,
             seal: raw.seal.map(|s| Seal {
@@ -909,6 +914,7 @@ struct RawFile {
 struct RawSpore {
     name: String,
     version: Option<u32>,
+    admission: Option<admission::AdmissionSpec>,
     description: Option<String>,
     verb: Option<String>,
     seal: Option<RawSeal>,

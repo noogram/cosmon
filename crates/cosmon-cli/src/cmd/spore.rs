@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 
 use cosmon_core::id::{FleetId, MoleculeId};
 use cosmon_core::nucleate::NucleateResult;
+use cosmon_core::spore::admission::{preflight, AdmissionInput, AdmissionRecord};
 use cosmon_core::spore::{expand, NodeKind, NucleateCall, ParamType, Spore};
 use cosmon_core::tag::Tag;
 
@@ -88,6 +89,10 @@ pub struct ValidateArgs {
     /// into the declared `ParamSchema` type before expansion.
     #[arg(long = "var", value_name = "KEY=VALUE")]
     vars: Vec<String>,
+
+    /// TOML admission evidence for a spore that declares `[spore.admission]`.
+    #[arg(long, value_name = "FILE")]
+    admission: Option<PathBuf>,
 }
 
 /// `cs spore run <ref> --var k=v` arguments.
@@ -100,6 +105,10 @@ pub struct RunArgs {
     /// Bind a parameter (repeatable: `--var key=value`).
     #[arg(long = "var", value_name = "KEY=VALUE")]
     vars: Vec<String>,
+
+    /// TOML admission evidence, checked before any molecule is nucleated.
+    #[arg(long, value_name = "FILE")]
+    admission: Option<PathBuf>,
 
     /// Germinate a *sealed* spore even though its `.tla` proof was not
     /// verified this run (TLC unavailable). The status line stays honest:
@@ -201,13 +210,23 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 fn run_validate(ctx: &Context, args: &ValidateArgs) -> anyhow::Result<()> {
     let (spore, _dir) = load_spore(&args.reference)?;
     let params = coerce_vars(&spore, &args.vars)?;
+    let mut admission = admission_preflight(&spore, &params, args.admission.as_deref())?;
     let calls = expand(&spore, &params).map_err(|e| anyhow::anyhow!("expand failed: {e}"))?;
+    if let Some(record) = &mut admission {
+        record.expected_molecules = calls.len();
+    }
 
     if ctx.json {
+        if let Some(record) = &admission {
+            println!("{}", serde_json::json!({"admission": record}));
+        }
         for call in &calls {
             println!("{}", call_to_json(call));
         }
     } else {
+        if let Some(record) = &admission {
+            print_admission(record);
+        }
         println!(
             "spore: {} (v{}) - {} call(s)",
             spore.name,
@@ -230,7 +249,18 @@ fn run_validate(ctx: &Context, args: &ValidateArgs) -> anyhow::Result<()> {
 fn run_run(ctx: &Context, args: &RunArgs) -> anyhow::Result<()> {
     let (spore, manifest_dir) = load_spore(&args.reference)?;
     let params = coerce_vars(&spore, &args.vars)?;
+    let mut admission = admission_preflight(&spore, &params, args.admission.as_deref())?;
     let mut calls = expand(&spore, &params).map_err(|e| anyhow::anyhow!("expand failed: {e}"))?;
+    if let Some(record) = &mut admission {
+        record.expected_molecules = calls.len();
+    }
+    if let Some(record) = &admission {
+        if ctx.json {
+            println!("{}", serde_json::json!({"admission": record}));
+        } else {
+            print_admission(record);
+        }
+    }
 
     let store_dir = cosmon_filestore::resolve_state_dir(args.store_dir.as_deref());
 
@@ -958,6 +988,85 @@ fn placement_label(
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+/// Read a versioned admission file and decide work-type fit before expansion.
+/// Ref resolution stays in the shell; the actual admission decision is pure.
+fn admission_preflight(
+    spore: &Spore,
+    params: &BTreeMap<String, toml::Value>,
+    path: Option<&Path>,
+) -> anyhow::Result<Option<AdmissionRecord>> {
+    let Some(spec) = &spore.admission else {
+        if path.is_some() {
+            anyhow::bail!("this spore declares no admission contract");
+        }
+        return Ok(None);
+    };
+    let path = path.ok_or_else(|| {
+        anyhow::anyhow!(
+            "spore `{}` requires --admission <FILE> before validation or germination",
+            spore.name
+        )
+    })?;
+    let body = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("failed to read admission {}: {e}", path.display()))?;
+    let input: AdmissionInput = toml::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("invalid admission {}: {e}", path.display()))?;
+    // Decide work type and evidence before inspecting refs or the state store.
+    let mut record = preflight(
+        spec,
+        &input,
+        &spore.name,
+        input.baseline.clone(),
+        input.target_base.clone(),
+        0,
+    )?;
+    let baseline = resolve_commit(&input.baseline)?;
+    let target_base = resolve_commit(&input.target_base)?;
+    if let Some(affected) = params.get("affected_ref").and_then(toml::Value::as_str) {
+        let affected_commit = resolve_commit(affected)?;
+        if affected_commit != baseline {
+            anyhow::bail!("admission baseline does not match --var affected_ref");
+        }
+    }
+    record.baseline = baseline;
+    record.target_base = target_base;
+    Ok(Some(record))
+}
+
+/// Pin a local commitish to its exact commit OID for an admission record.
+fn resolve_commit(reference: &str) -> anyhow::Result<String> {
+    if reference.trim().is_empty() {
+        anyhow::bail!("admission baseline or target base is empty");
+    }
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--end-of-options"])
+        .arg(format!("{reference}^{{commit}}"))
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("admission ref `{reference}` does not resolve to a commit");
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+/// Show the complete admission record while no molecule has yet been created.
+fn print_admission(record: &AdmissionRecord) {
+    println!(
+        "admission v{}: {} ({})",
+        record.version, record.vehicle, record.work_type
+    );
+    println!("  baseline: {}", record.baseline);
+    println!("  target base: {}", record.target_base);
+    println!("  declared paths: {:?}", record.paths);
+    println!("  risk: {}", record.risk);
+    println!("  gates: {:?}", record.gates);
+    println!(
+        "  reviewer capabilities: {:?}",
+        record.reviewer_capabilities
+    );
+    println!("  execution substrates: {:?}", record.execution_substrates);
+    println!("  expected molecules: {}", record.expected_molecules);
+}
 
 /// Resolve a `<ref>` to a parsed [`Spore`] and its manifest directory (the
 /// base for relative formula and seal paths). `<ref>` may be a `spore.toml`
