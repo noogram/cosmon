@@ -353,6 +353,33 @@ where
     .await
 }
 
+/// Run a counted loop with turn input while retaining completed tool work on error.
+///
+/// # Errors
+/// Returns the normal harness errors or a turn input source failure.
+pub async fn run_loop_counted_with_turn_input_and_progress<P, S>(
+    provider: &P,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+    source: &S,
+    progress: &mut LoopProgress,
+) -> Result<WorkerOutcome, HarnessError<TurnInputProviderError<P::Error>>>
+where
+    P: Provider,
+    P::Log: Clone,
+    S: TurnInputSource,
+{
+    run_loop_counted_with_progress(
+        &TurnInputProvider { provider, source },
+        briefing,
+        work_dir,
+        telemetry,
+        progress,
+    )
+    .await
+}
+
 /// Drive a single worker session from briefing to synthesis.
 ///
 /// Behaviour-preserving extraction of the eight-turn loop body from
@@ -415,6 +442,18 @@ pub struct WorkerOutcome {
     pub tools_dispatched: u32,
 }
 
+/// Work observed before a synchronous loop returns or fails.
+///
+/// The count advances only after a tool body has run. The transcript is a
+/// display projection of completed turns, retained for a partial-work report.
+#[derive(Debug, Default)]
+pub struct LoopProgress {
+    /// Number of tool bodies that returned, including recoverable tool errors.
+    pub tools_executed: u32,
+    /// Most recent provider-neutral transcript after a tool result landed.
+    pub transcript: Vec<TranscriptEntry>,
+}
+
 /// [`run_loop`] variant that returns the full [`WorkerOutcome`] — synthesis
 /// plus the tool-dispatch count — instead of the bare synthesis string.
 ///
@@ -427,7 +466,37 @@ pub async fn run_loop_counted<P: Provider>(
     work_dir: &Path,
     telemetry: Option<&AdapterTelemetry>,
 ) -> Result<WorkerOutcome, HarnessError<P::Error>> {
-    run_loop_with_registry_impl(provider, briefing, work_dir, telemetry, default_registry()).await
+    run_loop_with_registry_impl(
+        provider,
+        briefing,
+        work_dir,
+        telemetry,
+        default_registry(),
+        None,
+    )
+    .await
+}
+
+/// Run a counted loop and expose tool progress even if it returns an error.
+///
+/// # Errors
+/// Returns the same harness errors as [`run_loop_counted`].
+pub async fn run_loop_counted_with_progress<P: Provider>(
+    provider: &P,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+    progress: &mut LoopProgress,
+) -> Result<WorkerOutcome, HarnessError<P::Error>> {
+    run_loop_with_registry_impl(
+        provider,
+        briefing,
+        work_dir,
+        telemetry,
+        default_registry(),
+        Some(progress),
+    )
+    .await
 }
 
 /// [`run_loop_with_registry`] variant that returns the full [`WorkerOutcome`].
@@ -442,7 +511,7 @@ pub async fn run_loop_with_registry_counted<P: Provider>(
     telemetry: Option<&AdapterTelemetry>,
     registry: ToolRegistry,
 ) -> Result<WorkerOutcome, HarnessError<P::Error>> {
-    run_loop_with_registry_impl(provider, briefing, work_dir, telemetry, registry).await
+    run_loop_with_registry_impl(provider, briefing, work_dir, telemetry, registry, None).await
 }
 
 /// Drive a worker session with a fixed capability registry.
@@ -461,7 +530,7 @@ pub async fn run_loop_with_registry<P: Provider>(
     telemetry: Option<&AdapterTelemetry>,
     registry: ToolRegistry,
 ) -> Result<String, HarnessError<P::Error>> {
-    run_loop_with_registry_impl(provider, briefing, work_dir, telemetry, registry)
+    run_loop_with_registry_impl(provider, briefing, work_dir, telemetry, registry, None)
         .await
         .map(|outcome| outcome.synthesis)
 }
@@ -524,6 +593,7 @@ async fn run_loop_with_registry_impl<P: Provider>(
     work_dir: &Path,
     _telemetry: Option<&AdapterTelemetry>,
     registry: ToolRegistry,
+    mut progress: Option<&mut LoopProgress>,
 ) -> Result<WorkerOutcome, HarnessError<P::Error>> {
     // Bootstrapping (knuth §7) — walk up from `work_dir` collecting
     // `AGENTS.md` / `CLAUDE.md`, prepend them to the briefing so the
@@ -659,6 +729,7 @@ async fn run_loop_with_registry_impl<P: Provider>(
                     calls,
                     &mut used_tools,
                     tool_limit,
+                    progress.as_deref_mut(),
                 )
                 .map_err(|DispatchHalt::ToolBudgetExhausted { limit }| {
                     HarnessError::ToolBudgetExhausted { limit }
@@ -711,6 +782,9 @@ enum DispatchHalt {
 ///    correct, not a fatal condition. The typed error is fed back as the
 ///    tool result; the turn/tool budgets still bound any loop on a broken
 ///    tool.
+// The progress witness is a separate output from the loop's budget counter:
+// it advances only once the tool body has actually returned.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_tool_calls<L: MessageLog>(
     log: &mut L,
     registry: &ToolRegistry,
@@ -719,6 +793,7 @@ fn dispatch_tool_calls<L: MessageLog>(
     calls: Vec<ToolCall>,
     used_tools: &mut u32,
     tool_limit: u32,
+    mut progress: Option<&mut LoopProgress>,
 ) -> Result<(), DispatchHalt> {
     log.append_assistant(assistant);
     for call in calls {
@@ -739,6 +814,10 @@ fn dispatch_tool_calls<L: MessageLog>(
             }
         };
         log.append_tool_result(&call.id, &call.name, &result);
+        if let Some(progress) = progress.as_deref_mut() {
+            progress.tools_executed = progress.tools_executed.saturating_add(1);
+            progress.transcript = log.transcript();
+        }
     }
     Ok(())
 }
@@ -1100,6 +1179,7 @@ impl<P: Provider> InteractiveSession<P> {
                     calls,
                     &mut self.used_tools,
                     self.tool_limit,
+                    None,
                 )
                 .map_err(|DispatchHalt::ToolBudgetExhausted { limit }| {
                     HarnessError::ToolBudgetExhausted { limit }

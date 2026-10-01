@@ -2,6 +2,15 @@
 
 # CLI and UI parity audit
 
+## Spore admission (ADR-183)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Inspect or run a work-type-constrained spore | `cs spore validate` and `cs spore run` take `--admission <FILE>` when the manifest declares admission. The preflight emits the work type, vehicle, pinned refs, paths, risk, gates, review resources and initial count; a refusal precedes allocation. | No spore admission control audited | No spore admission endpoint audited |
+
+The terminal remains the admission surface for this change. A UI or remote
+entry point must use the same versioned contract before it can allocate a DAG.
+
 ## Supervisor code-signing diagnosis
 
 | Capability | CLI | Native UI | Remote service |
@@ -222,6 +231,12 @@ callback. An absent sample remains unavailable on every surface.
 The loser receives a recorded model pin when one exists. If the winning
 adapter chose its own default, the exact model is unrecorded and the error
 says so.
+
+## In-process failure after work (issue #150)
+
+| Capability | CLI | Native UI | Other CLI views |
+|---|---|---|---|
+| Preserve work after an in-process loop error | `cs tackle` collapses with `agent_loop_failed`, retains the branch and worktree, and writes a partial synthesis; a pre-work failure rolls back | No equivalent recovery action audited | `cs status` and `cs peek` display the collapsed molecule; the branch needs an audit before removal |
 
 ## Blocked dependents (issue #118)
 

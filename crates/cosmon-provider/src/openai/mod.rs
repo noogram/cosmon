@@ -1828,6 +1828,23 @@ pub async fn run_agent_loop_counted(
     work_dir: &Path,
     telemetry: Option<&AdapterTelemetry>,
 ) -> Result<cosmon_agent_harness::WorkerOutcome, OpenAiError> {
+    let mut progress = cosmon_agent_harness::spine::LoopProgress::default();
+    run_agent_loop_counted_with_progress(provider, briefing, work_dir, telemetry, &mut progress)
+        .await
+}
+
+/// Run the counted loop while exposing completed tool work to the caller.
+///
+/// # Errors
+/// Returns the same typed errors as [`run_agent_loop_counted`].
+#[cfg(feature = "http")]
+pub async fn run_agent_loop_counted_with_progress(
+    provider: &OpenAIProvider,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+    progress: &mut cosmon_agent_harness::spine::LoopProgress,
+) -> Result<cosmon_agent_harness::WorkerOutcome, OpenAiError> {
     // Wire telemetry into the provider so `one_turn` can emit the typed
     // `AdapterLivenessProbed { Retried }` trail on each in-place transient
     // retry (delib-20260707-df9b ride-along). The `Provider` trait's
@@ -1836,7 +1853,11 @@ pub async fn run_agent_loop_counted(
     // field. The clone is cheap — a handful of IDs + a path — and leaves
     // the caller's `provider` untouched.
     let provider = provider.clone().with_telemetry(telemetry.cloned());
-    match cosmon_agent_harness::run_loop_counted(&provider, briefing, work_dir, telemetry).await {
+    match cosmon_agent_harness::spine::run_loop_counted_with_progress(
+        &provider, briefing, work_dir, telemetry, progress,
+    )
+    .await
+    {
         Ok(outcome) => Ok(outcome),
         Err(harness_err) => {
             let err = harness_error_to_openai(harness_err);

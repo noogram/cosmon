@@ -58,6 +58,11 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              points the worker there for the authoritative task and current \
              step; the pane prompt does not repeat the task text when the \
              briefing has a Task section.\n\n\
+             IN-PROCESS FAILURE. If an in-process worker has executed a tool \
+             and its agent loop then fails, 'cs tackle' collapses the molecule \
+             with reason kind agent_loop_failed. Its branch, worktree and partial \
+             synthesis remain for audit. A failure before work still rolls back \
+             the dispatch.\n\n\
              A branch that changes the trusted shell surface needs an operator \
              review after merging. Run 'cs done <id> --review-shell' to see the \
              merged diff, grant trust over those on-disk files, and run the \
@@ -130,10 +135,12 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
                it in this project, copying its\n                                  \
                recipes into .cosmon/formulas/ so\n                                  \
                their per-step pins reach dispatch.\n  \
-             cs spore validate <ref>         parse + expand as a dry run; prints\n                                  \
+             cs spore validate <ref>         admission (when declared), then\n                                  \
+               parse + expand as a dry run; prints\n                                  \
                the ordered nucleate call list,\n                                  \
                germinates nothing.\n  \
-             cs spore run <ref>              parse + expand + seal gate, then\n                                  \
+             cs spore run <ref>              admission (when declared), then\n                                  \
+               expand + seal gate, then\n                                  \
                germinate the polymer into the live\n                                  \
                state store (every node tagged\n                                  \
                temp:warm, wired to its blocked-by).\n  \
@@ -152,6 +159,12 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              and run emits NDJSON (agent-first invariant). A spore is a \
              declarative front end over the existing 'cs nucleate' verb, not a \
              new scheduler and not a new molecule type.\n\n\
+             SPORE ADMISSION (ADR-183): a manifest with [spore.admission] requires\n\
+             '--admission <FILE>' on validate and run. The versioned TOML record\n\
+             declares work type, baseline, target base, reporter evidence and\n\
+             available review/execution resources. A mismatched work type is\n\
+             refused before expansion or allocation; accepted admission emits\n\
+             pinned refs, paths, risk, gates, reviewer needs and molecule count.\n\n\
              SEAL GATE (ADR-140 D4), stated honestly: a spore with no \
              [spore.seal] germinates freely ('seal: none'). A sealed spore \
              cannot be proven on a machine without the TLC verifier wired in, \

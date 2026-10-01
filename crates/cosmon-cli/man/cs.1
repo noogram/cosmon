@@ -64,6 +64,8 @@ PILOT WORKFLOW — the full cycle is nucleate → tackle → wait → done:
 .PP
 TASK BRIEFING. \*(Aqcs nucleate\*(Aq writes the task topic and every bound variable into the molecule\*(Aqs durable briefing.md. \*(Aqcs tackle\*(Aq points the worker there for the authoritative task and current step; the pane prompt does not repeat the task text when the briefing has a Task section.
 .PP
+IN\-PROCESS FAILURE. If an in\-process worker has executed a tool and its agent loop then fails, \*(Aqcs tackle\*(Aq collapses the molecule with reason kind agent_loop_failed. Its branch, worktree and partial synthesis remain for audit. A failure before work still rolls back the dispatch.
+.PP
 A branch that changes the trusted shell surface needs an operator review after merging. Run \*(Aqcs done <id> \-\-review\-shell\*(Aq to see the merged diff, grant trust over those on\-disk files, and run the post\-merge gate before teardown. Declining rolls the merge back.
 .PP
 DECLARED WORK (ADR\-182): a pilot records a finite seat roster with \*(Aqcs work declare <owner> \-\-seat a=<molecule> \-\-seat b=<molecule>\*(Aq. Members use \*(Aqcs work send \-\-to <seat> \-\-text <evidence>\*(Aq, \*(Aqcs work inbox\*(Aq, and \*(Aqcs work ack <key> \-\-considered|\-\-deferred|\-\-rejected\*(Aq. \*(Aqcs work list <owner>\*(Aq reconstructs each message stage from the owner\*(Aqs canonical evidence. Messages and receipts never advance a molecule or grant lifecycle authority.
@@ -81,10 +83,12 @@ SPORE (ADR\-140) germinates a whole polymer from a shareable \*(Aqspore.toml\*(A
                                   it in this project, copying its
                                   recipes into .cosmon/formulas/ so
                                   their per\-step pins reach dispatch.
-  cs spore validate <ref>         parse + expand as a dry run; prints
+  cs spore validate <ref>         admission (when declared), then
+                                  parse + expand as a dry run; prints
                                   the ordered nucleate call list,
                                   germinates nothing.
-  cs spore run <ref>              parse + expand + seal gate, then
+  cs spore run <ref>              admission (when declared), then
+                                  expand + seal gate, then
                                   germinate the polymer into the live
                                   state store (every node tagged
                                   temp:warm, wired to its blocked\-by).
@@ -94,6 +98,13 @@ SPORE (ADR\-140) germinates a whole polymer from a shareable \*(Aqspore.toml\*(A
 \*(Aq<source>\*(Aq is a local path, \*(Aqgithub:owner/repo[/subdir][@ref]\*(Aq, a GitHub tree/blob URL, or any other git remote. Install refuses before writing anything: on an \*(Aq\-\-expect\-hash\*(Aq mismatch, a bundle missing a declared file, a symlink in the fetched tree, a non\-empty destination, or a registry recipe of the same name with different content (all overridable with \*(Aq\-\-force\*(Aq where that is meaningful). An identical recipe is a no\-op, so re\-installing is idempotent.
 .PP
 \*(Aq<ref>\*(Aq is a \*(Aqspore.toml\*(Aq file or a directory containing one. \*(Aq\-\-var k=v\*(Aq (repeatable) binds a parameter, coerced into its declared ParamSchema type before expansion. \*(Aq\-\-json\*(Aq on validate and run emits NDJSON (agent\-first invariant). A spore is a declarative front end over the existing \*(Aqcs nucleate\*(Aq verb, not a new scheduler and not a new molecule type.
+.PP
+SPORE ADMISSION (ADR\-183): a manifest with [spore.admission] requires
+\*(Aq\-\-admission <FILE>\*(Aq on validate and run. The versioned TOML record
+declares work type, baseline, target base, reporter evidence and
+available review/execution resources. A mismatched work type is
+refused before expansion or allocation; accepted admission emits
+pinned refs, paths, risk, gates, reviewer needs and molecule count.
 .PP
 SEAL GATE (ADR\-140 D4), stated honestly: a spore with no [spore.seal] germinates freely (\*(Aqseal: none\*(Aq). A sealed spore cannot be proven on a machine without the TLC verifier wired in, so \*(Aqcs spore run\*(Aq fails closed by default and refuses unless the operator opts into the risk with \*(Aq\-\-allow\-unchecked\-seal\*(Aq, in which case the status line reads \*(Aqseal: present, NOT verified\*(Aq. It never claims \*(Aqverified\*(Aq when TLC did not run. See docs/cs\-spore.md and docs/design/spore\-impl\-dag\-manifest.md.
 .PP

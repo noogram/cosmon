@@ -5,6 +5,26 @@ into a **deterministic red reproduction** (a validation gate), a **smallest fix*
 a **double clean-room review by two different provider families rendered as two
 immutable verdicts**, and a **release** — with **no agent pushing to any remote**.
 
+## Work-type catalog and resources
+
+| Work type | Supported vehicle | Admission and resources |
+|---|---|---|
+| Evidence-backed released defect needing the full release protocol | `cosmon-dev` (legacy) | Version 1 admission file, reporter symptom, environment and transcript, affected commit, intended target base, independent review capabilities, clean-room replay, packaged rehearsal and published install route. Initial allocation: 14 molecules. |
+| New feature or capability | Plan, then scoped `task-work` molecules | Agree the behavioral contract and non-goals before writing acceptance RED. `cosmon-dev` refuses this type before allocating molecules. |
+| Bounded local correction | One `task-work` | State its contract, checks and review need in the task brief. |
+| Read-only audit | Evidence-only formula | Record the measured surface and verdict. |
+
+For this recipe, both `cs spore validate` and `cs spore run` require
+`--admission <FILE>`. The file is TOML with `version = 1`,
+`work_type = "defect"`, `baseline` and `target_base` refs, the
+`reporter_symptom`, `reporter_environment`, and `reporter_transcript`, plus
+`paths`, `reviewer_capabilities`, and `execution_substrates` arrays. The
+`baseline` must resolve to the same commit as `--var affected_ref`. Required
+capabilities and substrates are named by `[spore.admission]` in `spore.toml`.
+The record printed before allocation contains pinned commit IDs, risk, gates,
+requirements and expected molecule count. An empty path list receives the
+conservative security review floor.
+
 It is **dogfooding**: unlike a shareable spore that travels to a stranger's machine
 (math-attack in the sporarium repo), `cosmon-dev` lives *inside* cosmon and
 composes the repo's own primitives by relative path.
