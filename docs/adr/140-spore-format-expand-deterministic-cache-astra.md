@@ -436,3 +436,13 @@ decided rather than rewritten.
 The general rule these three instantiate: a config field with no production
 reader is a defect, and `crates/cosmon-core/tests/config_knobs_have_readers.rs`
 now fails the build on the next one.
+
+## Amendment — 2026-10-01 ([ADR-183](183-work-type-admission-precedes-spore-allocation.md))
+
+The validation and seal contract is extended, not replaced: crediting a seal
+for a recipe requires manifest-to-model correspondence (role set, edges, named
+verdict states, bounds), and admission inputs are declared parameters rather
+than conventions. Before cache reuse is promised, this ADR must specify how a
+formula reference's `deterministic` flag reaches execution; today `germinate`
+loads the formula file without applying it. Staged admission is achieved by
+composition before `expand()`; pure expansion gains no dynamic conditional.

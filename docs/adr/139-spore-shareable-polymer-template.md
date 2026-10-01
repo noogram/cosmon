@@ -319,3 +319,12 @@ is agreed, the mechanism is the next ADR's job, not settled here.
   test), knuth (`spore`, the definition sentence + name≠proof hygiene), shannon
   (`spore`, lowest-collision / highest-density; the decisive counter to
   plasmid).
+
+## Amendment — 2026-10-01 ([ADR-183](183-work-type-admission-precedes-spore-allocation.md))
+
+The template-versus-instance ontology and the absence of a new scheduler stand.
+Clarified: the seal's termination and gate properties are claims over the
+supplied model under its stated assumptions; composing a spore does not by
+itself establish that a node's verdict is true at run time. A spore is chosen
+only after work-type admission (ADR-183 D1–D2), which happens before
+expansion, not inside it.

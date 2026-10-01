@@ -167,4 +167,5 @@
 | 180-tenant-vitals-are-molecule-keyed-observations | [180-tenant-vitals-are-molecule-keyed-observations.md](180-tenant-vitals-are-molecule-keyed-observations.md) |
 | 181-a-codex-worker-writes-its-settings-to-its-own-profile | [181-a-codex-worker-writes-its-settings-to-its-own-profile.md](181-a-codex-worker-writes-its-settings-to-its-own-profile.md) |
 | 182-declared-advisory-work-under-a-provider-neutral-contract | [182-declared-advisory-work-under-a-provider-neutral-contract.md](182-declared-advisory-work-under-a-provider-neutral-contract.md) |
+| 183-work-type-admission-precedes-spore-allocation | [183-work-type-admission-precedes-spore-allocation.md](183-work-type-admission-precedes-spore-allocation.md) |
 

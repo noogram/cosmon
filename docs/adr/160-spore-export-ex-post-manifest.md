@@ -421,3 +421,10 @@ Resulting card:
   `export` surface this ADR extends (`bundle_hash`, `build_astra`).
 - RO-Crate 1.1 and the Workflow Run RO-Crate profile
   (researchobject.org / WorkflowHub) — the community standard composed with.
+
+## Amendment — 2026-10-01 ([ADR-183](183-work-type-admission-precedes-spore-allocation.md))
+
+The candidate release manifest introduced by ADR-183 D3 is to be aligned with
+this export design. Until it is implemented, export capabilities described
+here and not yet shipped remain proposals; the current implementation is the
+seed-only export.
