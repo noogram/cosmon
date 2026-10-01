@@ -19,6 +19,92 @@ this stage.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-01
+
+### Breaking changes and operator actions on upgrade
+
+Read this before upgrading. Each item names the action to take.
+
+- `cs spore validate` and `cs spore run` on a spore that declares
+  `[spore.admission]` (the shipped `cosmon-dev` recipe does) now require
+  `--admission <FILE>`. Supply a version 1 admission file for a defect, or use
+  a plan and scoped `task-work` molecules for other work; the recipe refuses
+  other work types before it allocates anything.
+- Scripts that relied on a collapsed or frozen blocker releasing its
+  `blocked-by` dependents must complete the blocker, or re-point or drop the
+  edge. Planner formulas that leave a frozen mission as a hand-off with
+  `--blocked-by <mission>` on every child must be updated to the shipped
+  `mission-plan` formula.
+- Installations that deliberately bill a worker by API key must set
+  `pass_api_key = true` in that adapter's section of `.cosmon/config.toml`.
+- Galaxies that depend on a worker harness update prompt behaving as before
+  need no action (the default policy is `operator`); to run unattended, set
+  the update policy in `[adapters.<name>]`.
+- Anything that parsed the `cs status` "to merge" count as a total of all
+  unmerged refs now sees molecule branches only.
+- Remote harvest on an explicit profile (`scoped` or `sealed`) needs
+  `cosmon:molecule:harvest` in the operator's binding for the exact issuer,
+  subject and audience; a token scope does not substitute. Reloading a binding
+  does not add it to existing bindings. Galaxies without a `remote` key keep
+  the previous behavior.
+- Rotating a sealed signing key: run `cosmon-remote harvest init
+  --admin-token-file <f> --rotate-from <fingerprint>` on a device holding the
+  current key (`--current-key-file <old-key>` if it is outside the default
+  directory). If the key is lost, use the host command with `--local-reset`.
+- A galaxy that sets `[project] merge_subject` must align its own provenance
+  gate and subject hook with the template. The cosmon repository leaves it
+  unset.
+- A `cosmon-remote` profile that was reset by an earlier reinstall must be
+  reconnected with `cosmon-remote login`.
+- Daemon supervisor on the operator's machine: run
+  `scripts/bootstrap-supervisor-signing-cert.sh` once, install with `just
+  install`, check with `cs doctor supervision`, add the installed binary to
+  Full Disk Access, then restart the supervisor when convenient. Without the
+  certificate the install signs ad hoc and warns, and the access grant will
+  not survive a rebuild.
+- `stand-down.lock` now stops `cs patrol`, `cs ask --execute` and the curate
+  sweep as well. Remove it to resume them.
+- Workers can no longer run `cs done` on their own molecule; harvest it from
+  the pilot session.
+- duplicate `(issuer, subject, audience)` bindings stop adapter startup;
+  remove the duplicate and reload.
+- synchronize issuer and adapter clocks and mint RPP tokens within the
+  posture's lifetime (15 minutes active, 24 hours prepared).
+- add `issuer` to subject-only or token-only deny entries to narrow them; each
+  principal starts with a fresh rate-limit bucket after upgrade.
+- check the adapter log after editing `oidc-kill.toml` or `oidc-policy.toml`;
+  an invalid file closes tenant admission with HTTP 503.
+- RPP event and log streams close when admission ends; clients must reconnect
+  with a current credential.
+- a staged JWKS file for an issuer absent from `security/trusted-issuers.toml`
+  is refused, and an empty list denies all issuers.
+- `cs land` and `POST /v1/molecules/{id}/land` are withdrawn; use `cs done`
+  and `POST /v1/molecules/{id}/done`, which requires `reason`
+  (`missing_reason`, exit code 77).
+- the retired `COSMON_RPP_CS` variable and the `cs_path` and
+  `subprocess_timeout_sec` keys are ignored; `harvest_cs_binary` is kept for
+  one release.
+- the adapter's tackle route labels `subprocess_timeout`,
+  `subprocess_spawn_failed`, `worker_credential_missing` and
+  `adapter_backend_unreachable` are retired; clients must handle
+  `worker_spawn_failed`, `not_tackleable` and the two `501` labels.
+- a bind-mounted galaxy owned by another uid needs a git `safe.directory`
+  waiver or matching ownership for the adapter image.
+- the API reference must be regenerated with `cargo xtask gen-api-ref` after
+  the route-count change.
+- If you installed the skill from `skills/cosmon/`, reinstall it from
+  `tools/cosmon-skill/` with `tools/cosmon-skill/install.sh`; on a
+  multi-account setup, set the harness's configuration-directory variable first
+  so it lands in the directory your harness reads.
+- If you use the `cosmon-dev` spore's `risk = security` jury with the previous
+  third-family provider, either export `OPENROUTER_API_KEY` or restore that
+  provider's settings in the matching `[adapters.<name>]` section.
+- Maintainers publishing a release: add the repository secrets
+  `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` before pushing the next
+  `v*` tag, or the `publish-docs` job fails at its preflight.
+- Restart any `cs realized-watch` or `cs peek` process started before the
+  upgrade to get the bounded-memory behaviour.
+
 ### Security
 
 - **RPP live event and log streams now close when admission ends.** Open SSE
@@ -63,7 +149,71 @@ this stage.
   silently ignored. Operators should check the adapter log after editing
   either file.
 
+
+- **RPP subprocess envelope: the environment half is now an allow-list, not a
+  deny-list.** `cosmon-rpp-adapter` clears the inherited environment before
+  spawning `cs` and re-admits only the named process-hygiene variables
+  (`PATH`, `HOME`, locale, terminal, XDG bases, ssh-agent, proxy, the worker's
+  model credentials, `RUST_LOG`). No `COSMON_*` variable is inheritable; the ones the
+  child needs are set from adapter configuration after the clear. The deny-list
+  it replaces let `COSMON_SKIP_PRE_DONE_HOOK` — the human operator's
+  kill-switch for the blocking `pre_done` Definition-of-Done gate — cross the
+  perimeter into the `cs run` drain and into every `cs done` that drain
+  launched, disarming the gate for all subsequent harvests inside a container
+  where no operator exists to make the gesture. Reported as GitHub issue #51,
+  adjudicated in `delib-20260819-cda2` (C2), amendment §3.5.1 of
+  [ADR-080](docs/adr/080-remote-pilot-port-https-oidc.md).
+
+- **Replacing a remote harvest signing root requires the current key** (GitHub
+  issue #148). The admin credential may install the first public root. Replacing
+  an installed root also needs a signature by the current private key over the
+  tenant, old and new root digests and next epoch, so the admin credential
+  alone cannot mint grants under a new key. `cosmon-remote harvest init
+  --rotate-from <fingerprint>` signs with the old key (`--current-key-file`
+  selects it). A lost key is recovered only on the server host with `cs
+  harvest-authority configure --policy sealed --public-key-file <file> --epoch
+  <next> --local-reset`, which records an intent in
+  `.cosmon/harvest-root-resets.log`.
+
+- **A worker can no longer harvest its own molecule** (GitHub issue #109).
+  `cs done <id>` refuses when the worker environment given by `cs tackle` names
+  that molecule. Harvesting a different molecule from a worker session, as the
+  resident runtime does for its DAG, is unchanged.
+
+- **Protected-path checks cannot be bypassed by unusual filenames** (GitHub
+  issue #94). `cs done` reads changed paths NUL-delimited, so Unicode, quoted
+  or newline-containing names are matched. `cs nucleate --protect` is refused
+  together with `--from` instead of being discarded.
+
+- **Worker dispatch refuses a root caller before any git operation** (GitHub
+  issue #75). A dispatch executing as uid 0 is refused with a typed, terminal
+  error before any state write, worktree or hook runs, whether or not a launch
+  policy is installed. Workers started by thaw, patrol respawn and headless
+  briefing now use the same launch arguments as `cs tackle`.
+
+- **Admission policy is rechecked where it is used** (GitHub issue #45).
+  `GET /v1/auth/me`, the phone-home path and the harvest effect read the live
+  issuer, binding and deny state instead of a value captured at admission.
+
+- **Dependency advisories.** A TLS dependency update fixes RUSTSEC-2026-0285 (TLS 1.3
+  handshake messages accepted at the wrong encryption level) and an HTTP/2 dependency update
+  fixes RUSTSEC-2026-0258 (unbounded empty DATA frames); both are lockfile
+  updates only. A cipher dependency moved to a patched release because earlier releases were
+  yanked. RUSTSEC-2026-0253 is exempted as unreachable: the only consumers
+  construct a cache whose key cannot panic on drop.
+
 ### Added
+
+- **Spore admission before allocation** (ADR-183, step 1). A spore can declare
+  `[spore.admission]`, a versioned work-type contract. When it does, `cs spore
+  validate` and `cs spore run` require `--admission <FILE>` and refuse
+  mismatched work before expansion or any state write. The record printed
+  before allocation names the chosen vehicle, the pinned baseline and target
+  base, paths, risk, gates, reviewer requirements, execution substrates and the
+  expected initial molecule count; an empty path list gets the conservative
+  security review floor. The `cosmon-dev` spore declares it for released
+  defects and refuses a new-feature request before creating any molecule.
+  `docs/cs-spore.md` lists which vehicle fits which work type.
 
 - **`cs run --resident --harness <KEY>=<VALUE>`** (GitHub issue #86, repeatable).
   A run-wide harness-settings directive, the harness twin of `--adapter` and
@@ -77,88 +227,6 @@ this stage.
   route) grew the matching `DispatchPin::harness` field for embedders that
   hold a run-wide directive of their own.
 
-### Changed
-
-- **`cosmon-rpp-adapter` applies HTTP issuer edits on SIGHUP** (GitHub issue
-  #45). Audience changes, issuer additions, and `jwks_uri` changes in
-  `security/trusted-issuers.toml` now update the live trust configuration and
-  trigger an immediate HTTP key refresh. A removed audience stops validating
-  at reload; a new issuer or key location becomes usable after its fetch
-  succeeds. The adapter warns when configuration changes or a fetch cannot
-  complete.
-
-- **`cosmon-rpp-adapter` trusted issuer set is identical at boot and after
-  reload** (GitHub issue #45). When `security/trusted-issuers.toml` exists, only
-  issuers it lists can be loaded from staged JWKS files. A staged file for an
-  absent issuer is refused with a warning at startup and on every SIGHUP;
-  removing the issuer entry revokes its staged keys on reload. An existing
-  empty list denies all issuers. Without the file, the legacy file-stage
-  fallback still applies.
-
-- **Codex interactive dialogs are detected without overriding update policy**
-  (GitHub issue #85). `cs tackle` checks the launch pane before sending its
-  briefing and leaves a blocked menu for the operator. Every `cs patrol` run
-  scans live panes for update, reasoning, and rate-limit menus by default;
-  `cs whisper` refuses to paste into them. A
-  `model_reasoning_effort=...` harness pin is carried to Codex as `-c`, which
-  prevents the reasoning picker by selecting the requested level at launch.
-  Cosmon no longer forces `check_for_update_on_startup=false`: the setting is
-  the operator's choice, and an explicit harness value remains supported.
-
-- **The consent path speaks the same language as the rest of `cs`** (GitHub
-  issue #76). `cs opt-in-share` — and the once-per-user question `cs init`
-  fires on a fresh machine — printed four French strings on an otherwise
-  entirely English CLI: the prompt itself, and the acceptance, decline and
-  auto-decline result lines. They were a leftover from the onboarding brief
-  they were first written for, and the published-install-route walk found them
-  the hard way: a newcomer on an English substrate met French exactly once, at
-  the one moment `cs` asks them to decide something about their own data. They
-  are now English. The prompt asks `[y/N]` rather than `[o/N]`, and `o`/`oui`
-  are still accepted, so an answer somebody learned against the old prompt is
-  not silently turned into a decline.
-
-  One string is deliberately unchanged: `stdin non-tty`, the half of the
-  auto-decline reason that names a POSIX condition rather than reading as
-  prose, and the fragment operators grep container logs for. Its sibling
-  `sortie capturée` — the case ADR-163 added — is now `stdout captured`. The
-  ADR keeps its 2026-07-27 transcripts verbatim, because those are a
-  measurement record and not current output, and carries a postscript saying
-  so.
-
-- **A default cosmon project keeps its archive, and the ignore rule that
-  tracks it now works** (GitHub issue #60). `[archive] enabled` defaults to
-  `true`: `cs done` tears the worktree down, and until now every artifact a
-  molecule wrote outside the diff — deliberation syntheses, per-persona
-  responses, outcomes, briefings, reports — went with it, silently and
-  irreversibly. Retention still defaults to `keep_all`, so turning the
-  subsystem on deletes nothing later. Activation is **not retroactive**:
-  molecules that terminated while it was off left no data behind to archive.
-  An existing galaxy needs no command for the default itself — it is applied
-  when `config.toml` is parsed — and a galaxy that wrote `enabled = false`
-  explicitly keeps the archive off.
-
-  The `.cosmon/.gitignore` body shipped since 2026-04 announced that
-  `state/archive/` was re-included by negation and did not deliver it: git
-  does not descend into a directory excluded by `state/`, so
-  `!state/archive/` matched nothing. The bulk exclusion is now `state/*`,
-  which lets git descend, and the block opens with `!state/` so it binds
-  even when a broader rule precedes it. The behaviour is pinned against a
-  real `git check-ignore` in a real repository, not against the file's text
-  — asserting the text is what let the defect ship.
-
-- **`cs init --upgrade` can repair a customised `.cosmon/.gitignore`, and
-  `cs doctor gitignore` names the state where it cannot.** Cosmon's rules
-  now live in a block delimited by `# cosmon:gitignore:start` /
-  `# cosmon:gitignore:end`, which `--upgrade` owns and rewrites in place;
-  everything outside the markers is preserved byte for byte. A customised,
-  marker-less file is still left alone — a user's deliberate edits are not
-  cosmon's to overwrite — unless real git reports that it excludes the
-  archive subtree, in which case the managed block is *appended* below the
-  user's lines, adding cosmon's rules and removing none of theirs. This is
-  the reported case of a galaxy whose ignore file had been hand-rewritten
-  into a chain of rules that ignored and re-included each other.
-
-### Added
 
 - **Protected reference inputs** (GitHub issue #94). `cs nucleate --protect
   <path>` (repeatable; a file or a directory, relative to the repository root)
@@ -176,173 +244,6 @@ this stage.
   responsible when it does not. Warning-level: an un-versioned archive is a
   loss of provenance, not a broken build.
 
-### Changed
-
-- **`cs done` is exposed on the Remote Pilot Port with its full parameter
-  set; `cs land` and `POST /v1/molecules/{id}/land` are withdrawn** (GitHub
-  issue #51, reopened). `POST /v1/molecules/{id}/done` carries what `cs done`
-  carries — `strategy` (`merge` / `ff-only`), `force`, the teardown opt-outs,
-  the hook waivers — and the value arrives at the merge, asserted against the
-  options the effect receives rather than against a field that parsed. `land`
-  was a second name for the same operation, kept only because ADR-080 §5.1
-  classed `done` as an administration surface. It is not: closing a molecule
-  is the last step of its normal life, and whoever may nucleate it, build its
-  worker and run it may legitimately close it. **ADR-080 §5.4** retires the
-  row; **ADR-176 D4** is reversed, with the reasoning in the amendment rather
-  than in a pointer to a conversation, and with the condition under which it
-  returns stated (a requester who is not the operator — the multi-tenant
-  phase). ADR-176 D1, D2, D3, D5 and D7 stand; D6 does not travel with D4, so
-  auto-propel stays disarmed by default on this route and arming it requires
-  `cosmon:worker:spawn`.
-- **The harvest reason is carried through and never fabricated.** `land`
-  invented a generic one; the route requires `reason` and refuses
-  `missing_reason` (the eighth named refusal, exit code 77 — the seven
-  ADR-176 refusals keep 70–76 unchanged) rather than writing a sentence on
-  the caller's behalf. `cs done --reason` traces it trunk-side on the
-  molecule, on the conflicted path as well as the landed one; it stays
-  optional at the CLI, where the operator is the author of the history the
-  harvest writes.
-- **`cosmon-remote do` now closes the molecule it opened.** It nucleated,
-  tackled, followed to a terminal status and stopped — the pile-up issue #51
-  reports. The close is best-effort and named: a refused harvest leaves the
-  deliverable exactly where it was and reports the label. `--no-close` opts
-  out; `--close-reason` supplies the sentence.
-- **The append-only §8p surface canon can withdraw a route.** A line whose
-  exposure column reads `withdrawn` removes the route an earlier line
-  mounted; the mounting line is never edited, and
-  `cosmon_surface_canon::fold_live` subtracts the pair for every consumer
-  (router, help renders, client consts, the API-reference generator). A
-  withdrawal naming no live route fails the build.
-- **The harvest door's effect half is an operator-chosen port, and its
-  default is now a library.** The sealed harvest transaction — merge with
-  lineage trailers, the publish / identity / confidentiality gates, the
-  `pre_done` gate, the teardown — moved out of the `cs` binary into the new
-  `cosmon-harvest` crate. `POST /v1/molecules/{id}/done` **merges on a stock
-  deployment**: no `harvest_cs_binary`, no `cs` process, no `501`. One
-  implementation and two callers — `cs done` and the RPP route build the same
-  argument set and call the same function — so no gate, refusal or trailer
-  exists twice. `harvest_cs_binary` in `rpp.toml` is kept for one release as
-  the operator's escape hatch (run the harvest as a *specific* build of
-  `cs`); it still has no PATH discovery, and this does not restore the
-  general ADR-080 §3.5 clause (e) subprocess envelope issue #54 U6 retired.
-  The typed `501 harvest_effect_unavailable` survives for a port with no
-  implementation and is no longer reachable from any shipped configuration.
-  The adapter deliberately does **not** depend on `cosmon-cli`: a server does
-  not compile the whole CLI to close a molecule.
-
-The trunk-side non-integration reason projected to the remote client — the
-change that made a stranded merge visible instead of silent, and the actual
-defect issue #51 first reported — is independent of all this and is unchanged.
-
-### Fixed
-
-- **API-dispatched Claude workers no longer stop on the folder-trust dialog**
-  (GitHub issue #81, point 4). `cs tackle`, `cs thaw` and the patrol respawn
-  pre-grant Claude Code's onboarding, folder trust and bypass disclaimer before
-  every spawn; the in-process executor behind `POST /v1/molecules/{id}/tackle`
-  and the drain did not, so the first worker on a fresh deployment waited on
-  *"Is this a project you created or one you trust?"* with nobody attached.
-  All paths now call one routine, `claude_trust::pregrant_worker_consent`, and
-  the API path resolves the config files from the worker's enveloped
-  environment rather than the server's. A config that cannot be written
-  refuses the dispatch with `503 startup_consent_refused` before anything is
-  recorded or spawned.
-
-- **Detached patrols survive the tick that dispatched them.** The
-  `com.cosmon.scheduler` LaunchAgent template did not declare
-  `AbandonProcessGroup`, and launchd SIGKILLs a one-shot job's whole process
-  group the instant the job exits. Since `cosmon-scheduler tick` returns in
-  milliseconds, every patrol dispatched in `dispatch = "detached"` mode was
-  killed before producing anything — while the scheduler had already logged
-  `FIRE <patrol> (pid=… detached)`. Measured on one 60-second patrol over a
-  48-hour window: 7276 recorded fires, 114 starts reaching the patrol's own
-  log, a handful of complete runs; the index it feeds sat frozen ~18 h with
-  no log saying so. `nohup` and `trap '' HUP` do not help — the signal goes
-  to the group. The template now carries the key,
-  `scripts/install-scheduler.sh` refuses to install a rendered plist without
-  it and reports the drift on `status`, and
-  `scripts/check-abandon-process-group.sh` enumerates other one-shot agents
-  missing it. `com.cosmon.daemon-supervisor` is deliberately left without the
-  key: it is a long-running supervisor that owns its children by pid, so
-  group-kill is its correct teardown. Write-up in
-  `docs/diagnostic/2026-08-19-launchd-group-kill-silences-detached-patrols.md`.
-
-- **`cs tackle --model X --adapter opencode` now tells opencode** (GitHub
-  issue #72). The pin was resolved and recorded as `ModelSelected`, then
-  `opencode run` was spawned with no model, so the audit trail claimed a pin
-  the process never received. The opencode arm now emits `--model <pin>`
-  verbatim (opencode expects `provider/model`; cosmon adds no prefix), and
-  no pin still emits no flag. The in-process executor behind the RPP tackle
-  route has no channel for the flag, so a pinned opencode dispatch there is
-  refused before any effect (`501 tackle_unsupported_model`) instead of
-  spawned with the pin dropped.
-
-- **A harvest that no operator grant covers is refused by name.** The ADR-172
-  effect boundary answered an anonymous error for every outcome, so an armed
-  galaxy with no grant yet — the state every galaxy passes through the moment
-  it arms `[harvest_authority]` — reached `cs done` as a generic exit 1 and
-  the harvest route as `500 harvest_failed`. It is now `not_authorized`, exit
-  code 71, from both callers, carrying the same operator-facing message and
-  the same ADR-172 §D5 claim bound. A genuine I/O fault at that boundary is
-  still a fault, not a refusal.
-- **The harvest writes its merge events to the galaxy it is harvesting.**
-  `EventV2::MergeDispatched` resolved its `events.jsonl` by walking up from
-  the process's working directory instead of using the state directory the
-  invocation had already resolved. Invisible for `cs done`, which stands in
-  its own galaxy; wrong for the library caller, which found the events log of
-  whatever galaxy the server was installed in and then tried to commit that
-  foreign path into the tenant's repository.
-- **A tenant drain whose ready molecule sits on an uncovered step kind
-  terminates with the named `unsupported_step` token instead of busy-looping
-  to `timeout`** (PR #57 review, findings 1–5). The permanent
-  `UnsupportedStep` refusal now maps to the non-retryable
-  `RuntimeError::DispatchRefused`; the runtime loop stops on the tick that
-  observes it (`ShutdownReason::DispatchRefused`, `cs run` exit `94`), and
-  `drain.terminated` names the refused molecule and step kind in its
-  `detail`. Companion fixes from the same review: the library dispatch path
-  now stamps the PID witness on the ledger from the spawn handle's
-  witnessed pane PID (`SpawnHandle::pid`), restoring `orphan_scan`'s PID
-  liveness axis for adapter-dispatched molecules; every post-worktree error
-  path in the library executor rolls the worktree and branch back (the
-  identifier and ledger error paths used to leak them); the executor's one
-  spawn seam now takes the `DispatchRecorded` token by reference, making the
-  documented spawn-before-record claim true on the library path; the worker
-  envelope re-states `PWD` from the worker's own worktree (or drops it)
-  instead of leaking the adapter's; and the drain resolves the tenant
-  state/formulas directories through the same deterministic helper as the
-  envelope's `COSMON_STATE_DIR` pin.
-
-### Changed
-
-- **The Remote Pilot Port no longer spawns the `cs` binary — the ADR-080
-  §3.5 clause (e) subprocess envelope is retired** (issue #54 U6,
-  [ADR-080 §3.5.3](docs/adr/080-remote-pilot-port-https-oidc.md)). `POST
-  /v1/molecules/{id}/tackle` dispatches **in-process** through the library
-  tackle executor over the tmux transport port; `POST /v1/molecules/{id}/run`
-  drains through the same in-process DAG loop `cs run <root>` executes, with
-  the identical named termination tokens; the `land` route's decision half is
-  unchanged and its sealed effect answers the typed
-  `501 land_effect_unavailable` until the harvest transaction is
-  library-callable ([ADR-176 §12](docs/adr/176-remote-harvest-authority-is-a-sealed-capability.md)).
-  A formula step kind the library executor does not cover yet answers the
-  typed `501 tackle_unsupported_step` with the step kind named — never a
-  silent subprocess fallback. The env-hygiene allow-list survives at the new
-  boundary: every worker spawn is clamped to the §3.5 allow-list plus the
-  set-half (`COSMON_STATE_DIR` tenant pin, `COSMON_ARTIFACT_DIR`, the
-  Anthropic key/model, and `COSMON_EGRESS_EXPOSED=1` — the ADR-155 exposed
-  posture, re-homed off the retired `COSMON_API_REQUEST` marker). Wire
-  changes: `subprocess_timeout` / `subprocess_spawn_failed` /
-  `worker_credential_missing` / `adapter_backend_unreachable` labels are
-  retired on the tackle route (`worker_spawn_failed`, `not_tackleable` and
-  the two 501 labels replace them; `tackle_unavailable` remains the stable
-  fallback); the drain's `teardown_failed` token is not emitted by the
-  library drain (harvest is not attempted — the enumerated follow-up). The
-  `COSMON_RPP_CS` env knob and the `cs_path` / `subprocess_timeout_sec`
-  config keys are retired (the latter is still parsed and ignored). The
-  container image now carries `git` and `tmux` (the dispatch substrate) and
-  its "no `cs` binary" header is a statement of fact.
-
-### Added
 
 - **The container smoke now dispatches a real worker — the `tackle` leg that
   proves the shipped image is library-direct** (issue #54 U7). Until U6 the
@@ -427,7 +328,390 @@ defect issue #51 first reported — is independent of all this and is unchanged.
   `COSMON_RPP_NAME_SUFFIX`), each defaulting to its previous literal so the
   rendered configuration of the reference deployment is unchanged.
 
+- **Declared work messaging: `cs work`** (GitHub issue #115). Molecules that
+  belong to one declared work can exchange messages and intermediate evidence
+  while they run, whichever adapter each one uses. Each message is stored
+  durably with receipts for admission, delivery and consumption, and it never
+  changes a molecule's lifecycle or grants integration. Workers receive pending
+  messages at tool boundaries (or at turn boundaries for a worker harness that
+  has no tool hook) and report whether they considered, deferred or rejected
+  them. Hook wiring is scoped to the work's current roster members.
+
+- **Usage shows API-equivalent USD and subscription usage as two independent
+  fields** (GitHub issues #111, #87). Every worker now carries an estimated
+  USD value under a documented price manifest keyed by model, and, where the
+  worker harness reports it, plan utilisation with its window, freshness and
+  scope. Neither replaces the other. Fleet totals no longer drop a worker whose
+  price is unknown and no longer record it as zero; the cell reads as
+  unavailable and the qualifier travels with the figure. Usage for
+  some workers refreshes live from the session log instead of lagging, and an
+  unpriced model no longer shows `$0.00`. The same record feeds `cs peek`,
+  `cs ensemble` and their JSON output.
+
+- **Realized-model evidence is scoped and labelled** (GitHub issues #73, #126).
+  `cs peek` and the JSON surfaces now say how much of a worker's session the
+  realized model was observed over, and distinguish a model observed in the
+  session log from one inferred from the pin, from a missing bootstrap record
+  and from a placeholder. Evidence receipts are kept per scope. The final
+  observation is flushed before a completion is accepted, so a `cs done`
+  issued right after completion no longer loses the realized model.
+
+- **`cs nucleate --var-file <FILE>`.** Variable bindings can be read from a
+  file instead of repeating `--var key=value`, which avoids shell quoting for
+  long or multi-line values.
+
+- **`cs nucleate --base <BRANCH>` and `cs run --resident --base <BRANCH>`**
+  (GitHub issue #69). The integration base of a molecule can now be set at
+  creation. The command refuses a branch that does not exist, and a per-molecule
+  base takes precedence over the run-wide one. `cs done --dry-run` reports the
+  merge target.
+
+- **`cs tackle --harness <KEY>=<VALUE>` and `[steps.harness]`** (GitHub issues
+  #65, #83). A formula step or a single dispatch can pass harness settings,
+  such as a reasoning effort or a service tier, verbatim to the adapter's own
+  override channel. Flag values override step values key by key. An adapter
+  with no carrier for a setting refuses at launch and names itself; a setting is
+  never dropped silently.
+
+- **Per-galaxy worker update policy** (GitHub issue #136). A galaxy can state
+  in `[adapters.<name>]` whether a worker harness update prompt is left to the
+  operator, skipped for that launch only, or handled outside the worker pane.
+  The operator's own configuration file is never rewritten. An update menu that
+  appears after launch is detected and reported.
+
+- **`cs status` carries staleness signals.** It reports the age of the oldest
+  pending molecule and how many are over 48 hours, how long ago surfaces were
+  last reconciled (or that they never were), and growth of unmerged work. A
+  pilot-lease mission no longer counts as backlog. `cs status --json` adds
+  `molecules.alive_excluding_leases`, `molecules.leases`, `backlog`, `unmerged`
+  and the reconcile age; existing fields keep their meaning.
+
+- **`cs status` names unresolved branch residue** (GitHub issue #97). The "to
+  merge" count covers `feat/<molecule-id>` branches only, galaxy rows whose
+  path no longer exists are dropped, and each actionable branch or zombie
+  session is listed by name. An unmerged branch left by a collapsed molecule
+  still needs an audit verdict before deletion.
+
+- **`cs ensemble --cluster` reports host pressure.** It adds one host snapshot
+  (memory pressure and related counters) and machine-wide counts, including a
+  `cs done` that is running its post-merge gates while its worker is gone. An
+  unreadable counter shows `unavailable` and serialises as `null`, never `0`.
+  Observations only; nothing is refused or coloured on this basis.
+
+- **`cs purge --sessions` reclaims tmux sessions of terminal molecules.**
+  Sessions of completed or collapsed molecules, which otherwise keep holding
+  memory, are captured to the molecule directory and then removed. It reports
+  by default, `--allow-unharvested` executes, and `--dry-run` overrides. A
+  session that no molecule claims is left alone.
+
+- **Reclaim of rebuildable worktree contents.** `cs tackle --reclaim-derived`
+  frees derived directories (default `target`, configurable under
+  `[worktree_reclaim].evict`) before creating a new worktree, and `cs doctor
+  worktrees` lists candidates with the reason each one is withheld. `--dry-run`
+  prints `unknown` for a tree it could not observe. No worktree is removed
+  automatically.
+
+- **`just gates-bg` runs the full gate bundle detached** (GitHub issue #112).
+  It returns at once and writes `gates.log`, `gates.pid` and `gates.exit` under
+  the molecule directory. A project can declare `background_runner_command`, in
+  which case the generated worker brief tells the worker to use it and never to
+  bound the gates with its own timeout. A slow run is reported as incomplete
+  and retryable, never as a failed gate.
+
+- **`just quick` runs the offline CI checks.** About twenty checks that
+  previously ran only in CI (docs gate, book links, workflow YAML, provenance
+  and session-identifier gates, install script self-test and others) now run
+  locally, so a push that is green under `just gates` no longer fails them in
+  CI.
+
+- **Authenticated local model endpoints are supported.** An adapter
+  pointed at a local endpoint can send its configured credential.
+
+- **Remote harvest profiles on `POST /v1/molecules/{id}/done`** (GitHub issue
+  #120). A tenant galaxy now selects `[harvest_authority] remote` as
+  `disabled`, `scoped` or `sealed`. `scoped` lets a credential holding the new
+  `cosmon:molecule:harvest` scope close and merge ordinary work; `sealed` also
+  requires an operator-signed grant. The scope is honoured only when the
+  binding for the exact issuer, subject and audience grants it, and it is
+  checked again at the effect, so a bearer token claiming it is not enough.
+  Explicit profiles refuse `force`, `skip_pre_done_hook` and
+  `deploy_off_trunk`. A galaxy with no `remote` key keeps the previous
+  behavior. Refusals carry a typed cause that `cosmon-remote` prints with a
+  hint, an expired, revoked or rebound credential is reported as such rather
+  than as a missing scope, and an unreadable harvest journal is a fault, not
+  `already_landed`.
+
+- **Operator commands to provision remote harvest** (GitHub issue #120).
+  `cosmon-remote harvest init|configure|grant|status` creates the signer key
+  on the operator device, installs only the public half, selects the profile,
+  and issues a time-limited grant for a completed molecule. On the server host,
+  `cs harvest-authority configure|status|challenge|import` provides the same
+  steps locally. The tenant routes `GET /v1/harvest/status`,
+  `POST /v1/harvest/challenge` and `POST /v1/harvest/grants` are new, and the
+  host-sealed administration route
+  `PUT /v1/admin/noyaux/{noyau}/harvest-authority` needs a separate admin token
+  file. The how-to page "Run cosmon as a remote service" describes the
+  sequence.
+
+- **Per-galaxy merge subject for `cs done`** (GitHub issue #140). A galaxy can
+  set `[project] merge_subject` in `.cosmon/config.toml`, for example
+  `"chore(merge): {mol_id} {title}"`, so repositories whose push hooks reject
+  `Merge branch 'feat/<id>'` need no manual rework. The template must contain
+  `{mol_id}`; `{title}` is optional; configuration loading rejects a template
+  without `{mol_id}`. The setting applies to merge commits made by `cs done` and
+  by the remote harvest, including an automatically resolved conflict, and
+  not to `ff-only`. Unset keeps the current subject.
+
+- **`cs status` states whether a finished mission left residue** (GitHub
+  issues #95 and #97). It adds a `hygiene` block (`--json`) and a `clean` token
+  or `Hygiene:` line covering a leftover worker session, an un-harvested
+  molecule and an unmerged branch. A `Harvest:` line and `harvestable` field
+  list molecules waiting for `cs done`, each with its branch, worker checkout
+  and a concrete `cs done` command. "To merge" now counts only `feat/<molecule
+  id>` branches, a retained branch with an audit is told apart from
+  unresolved residue, and galaxy registrations whose directory no longer
+  exists are not counted. It also reports the oldest pending molecule, the age
+  of the last reconcile, and no longer counts a pilot lease as backlog.
+  `cs complete` and `cs collapse` print the same locations.
+
+- **`GET /v1/vitals`** (GitHub issue #78). A tenant reads a live fleet view
+  keyed by molecule, so a dashboard can tell a running worker from a recorded
+  but orphaned one. It requires the existing read scope and returns only the
+  caller's own molecules.
+
+- **`GET /v1/molecules/{id}/session`** (GitHub issue #51). A remote client
+  reads, read-only, the message thread of a worker's session, including a
+  worker waiting on an unanswered prompt. Unlike `/logs`, it has history from
+  before the connection and works after the session ends.
+
+- **`GET /v1/molecules/{id}/status`, and `cosmon-remote molecule wait` and
+  `molecule status`** (GitHub issue #51). The status route returns the
+  molecule's status and three companion fields without the coupling and token
+  scans of the full read, so repeated polling stays cheap. `wait` is a client
+  verb that polls it with a deadline; `do` and `run` follow a molecule the same
+  way.
+
+- **`cs doctor supervision`**. It reads the installed daemon supervisor's
+  signing identifier and requirement and warns when the signature is ad hoc or
+  derived from the binary's content, which makes the operating system's Full
+  Disk Access consent lapse after each rebuild. The warning is also part of
+  `cs doctor security`. The probe is read-only.
+
+- **Provenance gate accepts integration-branch merges.** `check-provenance.sh`
+  accepts a pull-request merge or local merge of `feat/issue-<N>` (or
+  `feat/issue-<N>-<slug>`) into the trunk, including stacked branches, when every
+  merge on its second parent is itself clean. The branch name supplies the
+  issue number; the pull-request number is no longer compared with it.
+
+- **Session identifiers are refused in the public record.** A new gate rejects
+  agent-harness session or thread identifiers in commit messages, trailers,
+  pull-request text and, through `publish.sh --check` rule G, tracked files.
+  Provenance is the molecule id and merge shape instead. A line can be waived
+  with `publish: allow — <reason>`.
+
+- **`cs nucleate --var-file <key>=<path>`.** Binds a molecule variable to the
+  contents of a file, so a long task statement no longer has to be quoted on
+  the command line. The first-contact text, `cs help` and the pilot guide use
+  it in their examples.
+
+- **`cs ensemble --cluster` reports host pressure.** The cross-galaxy view now
+  prints one snapshot of the machine (the kernel's own pressure level, passed
+  through unchanged) and machine-wide counts derived from the galaxies it
+  already scans. A counter that cannot be read prints `unavailable` and is
+  `null` in JSON, never `0`. The count includes a `cs done` post-merge gate
+  sweep in progress, when the worker is gone and the molecule is `completed`.
+  A failed probe leaves the galaxy view intact and prints the reason on stderr.
+
+- **A "who does what" page in the book** (GitHub issue #96). It states what
+  the pilot agent does on its own, what only the human decides, when the human
+  is expected to look, and how to stop safely. It is linked from `cs help` and
+  from the orchestration text written into the project's agent instruction
+  file and the skill.
+
+- **The docs site is published when a release tag is pushed.** `release.yml`
+  gains a `publish-docs` job that builds the book, deploys it, then fetches the
+  live origin and fails the run if the origin does not serve the tagged
+  version. It runs after the release is cut and never edits or removes the
+  release. Maintainers must set the repository secrets `CLOUDFLARE_API_TOKEN`
+  and `CLOUDFLARE_ACCOUNT_ID`; the job fails at its preflight without them.
+
+- **Local-adapter guide covers three server types.** The guide now documents
+  three kinds of OpenAI-compatible server as backends for the `local`
+  adapter, with the tool-calling flags each needs and the `api_key_env` setting
+  for an authenticated server. It states that a remote `base_url` is reachable
+  but the egress posture stays strictly local.
+
+- **Formula cookbook documents harness settings** (GitHub issue #86). The
+  cookbook explains `[steps.harness]` pins and how they combine with
+  `cs run --harness`.
+
 ### Changed
+
+- **`cosmon-rpp-adapter` applies HTTP issuer edits on SIGHUP** (GitHub issue
+  #45). Audience changes, issuer additions, and `jwks_uri` changes in
+  `security/trusted-issuers.toml` now update the live trust configuration and
+  trigger an immediate HTTP key refresh. A removed audience stops validating
+  at reload; a new issuer or key location becomes usable after its fetch
+  succeeds. The adapter warns when configuration changes or a fetch cannot
+  complete.
+
+- **`cosmon-rpp-adapter` trusted issuer set is identical at boot and after
+  reload** (GitHub issue #45). When `security/trusted-issuers.toml` exists, only
+  issuers it lists can be loaded from staged JWKS files. A staged file for an
+  absent issuer is refused with a warning at startup and on every SIGHUP;
+  removing the issuer entry revokes its staged keys on reload. An existing
+  empty list denies all issuers. Without the file, the legacy file-stage
+  fallback still applies.
+
+- **Codex interactive dialogs are detected without overriding update policy**
+  (GitHub issue #85). `cs tackle` checks the launch pane before sending its
+  briefing and leaves a blocked menu for the operator. Every `cs patrol` run
+  scans live panes for update, reasoning, and rate-limit menus by default;
+  `cs whisper` refuses to paste into them. A
+  `model_reasoning_effort=...` harness pin is carried to Codex as `-c`, which
+  prevents the reasoning picker by selecting the requested level at launch.
+  Cosmon no longer forces `check_for_update_on_startup=false`: the setting is
+  the operator's choice, and an explicit harness value remains supported.
+
+- **The consent path speaks the same language as the rest of `cs`** (GitHub
+  issue #76). `cs opt-in-share` — and the once-per-user question `cs init`
+  fires on a fresh machine — printed four French strings on an otherwise
+  entirely English CLI: the prompt itself, and the acceptance, decline and
+  auto-decline result lines. They were a leftover from the onboarding brief
+  they were first written for, and the published-install-route walk found them
+  the hard way: a newcomer on an English substrate met French exactly once, at
+  the one moment `cs` asks them to decide something about their own data. They
+  are now English. The prompt asks `[y/N]` rather than `[o/N]`, and `o`/`oui`
+  are still accepted, so an answer somebody learned against the old prompt is
+  not silently turned into a decline.
+
+  One string is deliberately unchanged: `stdin non-tty`, the half of the
+  auto-decline reason that names a POSIX condition rather than reading as
+  prose, and the fragment operators grep container logs for. Its sibling
+  `sortie capturée` — the case ADR-163 added — is now `stdout captured`. The
+  ADR keeps its 2026-07-27 transcripts verbatim, because those are a
+  measurement record and not current output, and carries a postscript saying
+  so.
+
+- **A default cosmon project keeps its archive, and the ignore rule that
+  tracks it now works** (GitHub issue #60). `[archive] enabled` defaults to
+  `true`: `cs done` tears the worktree down, and until now every artifact a
+  molecule wrote outside the diff — deliberation syntheses, per-persona
+  responses, outcomes, briefings, reports — went with it, silently and
+  irreversibly. Retention still defaults to `keep_all`, so turning the
+  subsystem on deletes nothing later. Activation is **not retroactive**:
+  molecules that terminated while it was off left no data behind to archive.
+  An existing galaxy needs no command for the default itself — it is applied
+  when `config.toml` is parsed — and a galaxy that wrote `enabled = false`
+  explicitly keeps the archive off.
+
+  The `.cosmon/.gitignore` body shipped since 2026-04 announced that
+  `state/archive/` was re-included by negation and did not deliver it: git
+  does not descend into a directory excluded by `state/`, so
+  `!state/archive/` matched nothing. The bulk exclusion is now `state/*`,
+  which lets git descend, and the block opens with `!state/` so it binds
+  even when a broader rule precedes it. The behaviour is pinned against a
+  real `git check-ignore` in a real repository, not against the file's text
+  — asserting the text is what let the defect ship.
+
+- **`cs init --upgrade` can repair a customised `.cosmon/.gitignore`, and
+  `cs doctor gitignore` names the state where it cannot.** Cosmon's rules
+  now live in a block delimited by `# cosmon:gitignore:start` /
+  `# cosmon:gitignore:end`, which `--upgrade` owns and rewrites in place;
+  everything outside the markers is preserved byte for byte. A customised,
+  marker-less file is still left alone — a user's deliberate edits are not
+  cosmon's to overwrite — unless real git reports that it excludes the
+  archive subtree, in which case the managed block is *appended* below the
+  user's lines, adding cosmon's rules and removing none of theirs. This is
+  the reported case of a galaxy whose ignore file had been hand-rewritten
+  into a chain of rules that ignored and re-included each other.
+
+
+- **`cs done` is exposed on the Remote Pilot Port with its full parameter
+  set; `cs land` and `POST /v1/molecules/{id}/land` are withdrawn** (GitHub
+  issue #51, reopened). `POST /v1/molecules/{id}/done` carries what `cs done`
+  carries — `strategy` (`merge` / `ff-only`), `force`, the teardown opt-outs,
+  the hook waivers — and the value arrives at the merge, asserted against the
+  options the effect receives rather than against a field that parsed. `land`
+  was a second name for the same operation, kept only because ADR-080 §5.1
+  classed `done` as an administration surface. It is not: closing a molecule
+  is the last step of its normal life, and whoever may nucleate it, build its
+  worker and run it may legitimately close it. **ADR-080 §5.4** retires the
+  row; **ADR-176 D4** is reversed, with the reasoning in the amendment rather
+  than in a pointer to a conversation, and with the condition under which it
+  returns stated (a requester who is not the operator — the multi-tenant
+  phase). ADR-176 D1, D2, D3, D5 and D7 stand; D6 does not travel with D4, so
+  auto-propel stays disarmed by default on this route and arming it requires
+  `cosmon:worker:spawn`.
+- **The harvest reason is carried through and never fabricated.** `land`
+  invented a generic one; the route requires `reason` and refuses
+  `missing_reason` (the eighth named refusal, exit code 77 — the seven
+  ADR-176 refusals keep 70–76 unchanged) rather than writing a sentence on
+  the caller's behalf. `cs done --reason` traces it trunk-side on the
+  molecule, on the conflicted path as well as the landed one; it stays
+  optional at the CLI, where the operator is the author of the history the
+  harvest writes.
+- **`cosmon-remote do` now closes the molecule it opened.** It nucleated,
+  tackled, followed to a terminal status and stopped — the pile-up issue #51
+  reports. The close is best-effort and named: a refused harvest leaves the
+  deliverable exactly where it was and reports the label. `--no-close` opts
+  out; `--close-reason` supplies the sentence.
+- **The append-only §8p surface canon can withdraw a route.** A line whose
+  exposure column reads `withdrawn` removes the route an earlier line
+  mounted; the mounting line is never edited, and
+  `cosmon_surface_canon::fold_live` subtracts the pair for every consumer
+  (router, help renders, client consts, the API-reference generator). A
+  withdrawal naming no live route fails the build.
+- **The harvest door's effect half is an operator-chosen port, and its
+  default is now a library.** The sealed harvest transaction — merge with
+  lineage trailers, the publish / identity / confidentiality gates, the
+  `pre_done` gate, the teardown — moved out of the `cs` binary into the new
+  `cosmon-harvest` crate. `POST /v1/molecules/{id}/done` **merges on a stock
+  deployment**: no `harvest_cs_binary`, no `cs` process, no `501`. One
+  implementation and two callers — `cs done` and the RPP route build the same
+  argument set and call the same function — so no gate, refusal or trailer
+  exists twice. `harvest_cs_binary` in `rpp.toml` is kept for one release as
+  the operator's escape hatch (run the harvest as a *specific* build of
+  `cs`); it still has no PATH discovery, and this does not restore the
+  general ADR-080 §3.5 clause (e) subprocess envelope issue #54 U6 retired.
+  The typed `501 harvest_effect_unavailable` survives for a port with no
+  implementation and is no longer reachable from any shipped configuration.
+  The adapter deliberately does **not** depend on `cosmon-cli`: a server does
+  not compile the whole CLI to close a molecule.
+
+The trunk-side non-integration reason projected to the remote client — the
+change that made a stranded merge visible instead of silent, and the actual
+defect issue #51 first reported — is independent of all this and is unchanged.
+
+
+- **The Remote Pilot Port no longer spawns the `cs` binary — the ADR-080
+  §3.5 clause (e) subprocess envelope is retired** (issue #54 U6,
+  [ADR-080 §3.5.3](docs/adr/080-remote-pilot-port-https-oidc.md)). `POST
+  /v1/molecules/{id}/tackle` dispatches **in-process** through the library
+  tackle executor over the tmux transport port; `POST /v1/molecules/{id}/run`
+  drains through the same in-process DAG loop `cs run <root>` executes, with
+  the identical named termination tokens; the `land` route's decision half is
+  unchanged and its sealed effect answers the typed
+  `501 land_effect_unavailable` until the harvest transaction is
+  library-callable ([ADR-176 §12](docs/adr/176-remote-harvest-authority-is-a-sealed-capability.md)).
+  A formula step kind the library executor does not cover yet answers the
+  typed `501 tackle_unsupported_step` with the step kind named — never a
+  silent subprocess fallback. The env-hygiene allow-list survives at the new
+  boundary: every worker spawn is clamped to the §3.5 allow-list plus the
+  set-half (`COSMON_STATE_DIR` tenant pin, `COSMON_ARTIFACT_DIR`, the
+  Anthropic key/model, and `COSMON_EGRESS_EXPOSED=1` — the ADR-155 exposed
+  posture, re-homed off the retired `COSMON_API_REQUEST` marker). Wire
+  changes: `subprocess_timeout` / `subprocess_spawn_failed` /
+  `worker_credential_missing` / `adapter_backend_unreachable` labels are
+  retired on the tackle route (`worker_spawn_failed`, `not_tackleable` and
+  the two 501 labels replace them; `tackle_unavailable` remains the stable
+  fallback); the drain's `teardown_failed` token is not emitted by the
+  library drain (harvest is not attempted — the enumerated follow-up). The
+  `COSMON_RPP_CS` env knob and the `cs_path` / `subprocess_timeout_sec`
+  config keys are retired (the latter is still parsed and ignored). The
+  container image now carries `git` and `tmux` (the dispatch substrate) and
+  its "no `cs` binary" header is a statement of fact.
+
 
 - **The container-level e2e moved from a shell script to a `pytest` suite under
   `tests/e2e/`.** Answering the review of PR #56: a shell script was the fastest
@@ -457,7 +741,284 @@ defect issue #51 first reported — is independent of all this and is unchanged.
   session-scoped: it is minutes of `cargo build --release`, and paying it per
   test would make the suite unusable.
 
+- **`cs wait` after `cs whisper` waits for the worker's answer.** A whisper
+  records the molecule status and branch head it found. If `cs wait` then
+  reaches the same status, it holds until the branch has moved and the pane is
+  idle, ends early if the branch is gone, and fails if the pane died without
+  progress. A whisper to a running worker holds nothing, so
+  `cs tackle M && cs wait M && cs done M` is unchanged.
+
+- **`blocked-by` is released only by a completed blocker** (GitHub issues #118,
+  #88). A collapsed or frozen blocker keeps its dependents blocked, in both
+  `cs tackle` admission and the resident runtime, so a freeze pauses the
+  dependency graph. Planner hand-off through a frozen mission now goes through
+  lineage instead of a blocking edge (GitHub issue #138). When the frozen
+  blocker needs to be finished, the refusal names the valid completion gesture.
+
+- **The resident runtime reloads `.cosmon/config.toml` instead of halting**
+  (GitHub issue #91). A run now halts on a configuration change only when the
+  `[adapters]` dispatch surface changed while a molecule is running under the
+  old one. Resident configuration is compared per dispatched adapter, and
+  harness settings are carried into the runtime.
+
+- **The default worker model is a newer model** (GitHub issue
+  #141). The default chain and the price manifest are updated. Earlier
+  sessions that ran the previous default are still recognised in realized-model
+  and attribution output.
+
+- **The model selected at dispatch reaches the worker** (GitHub issue #139). A
+  planned per-child model is carried into dispatch, and the selected model is
+  passed on the worker's command line instead of being overridden by an
+  inherited environment setting. An expensive tier is no longer the implicit
+  floor of the default chain; it needs a separate pin.
+
+- **`cs tackle` refuses a formula pin the adapter cannot run** (GitHub issue
+  #89). A re-tackle resolves adapter and model the way the first tackle did,
+  and a model the resolved adapter cannot run is refused before spawning
+  instead of leaving an idle worker.
+
+- **The worker brief carries the task** (GitHub issues #124, #125). The topic
+  and every formula variable are written to `briefing.md`, and the pasted
+  prompt refers to that file. A spawn whose brief is never confirmed delivered
+  is reported with a typed event. `cs patrol --nudge` no longer freezes
+  molecules unless auto-freeze or auto-collapse was requested.
+
+- **`cs peek` context gauge shows the latest turn.** It now divides the most
+  recent turn's context size by the model's context window (GitHub issue
+  #127), so long-running workers no longer read `999%`. Cumulative counters
+  stay in the IN, CACHED, OUT and RSN columns. Cells are truncated by display
+  width.
+
+- **A worker harness's interactive settings stay in the worker.** A setting
+  changed inside a worker's own interface, such as a reasoning level, is
+  written to a per-worker profile overlay and no longer becomes the default of
+  every later worker on the machine.
+
+- **Worker environments drop stale API keys by default.** `cs tackle` strips
+  the model provider's API-key variables from a worker's
+  environment so a stale exported key cannot divert a login session to key
+  authentication. It warns once per stripped variable, by name. Set
+  `pass_api_key = true` under the adapter's section to pass them through.
+
+- **One global kill switch stops every autonomous path.** The stand-down lock
+  now also stops `cs patrol`, `cs ask --execute` and the curate sweep.
+  `health.off`, `autopilot.off` and `ask.off` act as scoped overrides, and
+  every switch halts at least one component.
+
+- **`cs done` reviews the merged shell surface on every verification path**
+  (GitHub issue #74). A change to the trusted shell surface (scripts,
+  `justfile`, `.cosmon/config.toml`, formulas) was refused only when a
+  delegated gate command happened to consult trust. It is now checked after
+  every merge and rolled back unless the surface is trusted. When the merge
+  itself made the grant stale, the rollback report lists the changed paths and
+  gives the sequence that lands the branch: review, hand merge under the
+  molecule subject, verify, `cs trust`, then `cs done`. A branch merged by hand
+  is reported as `already_merged` rather than `empty_branch`.
+
+- **One kill-switch catalogue stops every autonomous path** (GitHub issue
+  #108). `~/.cosmon/stand-down.lock` now also halts `cs patrol` (heal,
+  API-stall propulsion, expire, respawn, nudge, harvest), the curate sweep and
+  autopilot formula steps, and makes `cs ask --execute` refuse. `ask.off` is now
+  read, and `health.off` and `autopilot.off` act as scoped overrides. `cs status`
+  lists the active switches (`kill_switches` in `--json`). The switches are
+  described in `docs/guides/kill-switches.md`.
+
+- **The published OpenAPI document is partitioned and checked against the
+  router.** `crates/cosmon-rpp-adapter/openapi/v1.yaml` now describes the
+  mounted routes, with deliberate omissions listed in `exclusions.json`; a
+  test fails when a route is neither documented nor excluded.
+
+- **Newly provisioned bindings include `cosmon:events:subscribe`** (GitHub
+  issue #103). A tenant provisioned from a handoff without explicit `scopes`
+  can now watch the lifecycle of the workers it dispatches, without editing its
+  binding. Existing bindings are not changed.
+
+- **`cosmon-remote doctor` works against a real OIDC profile** (GitHub issue
+  #92 and the login follow-up). It reads the cached credential, presents it to
+  `/v1/auth/me` when fresh, and probes discovery when it is stale or absent. It
+  no longer mints, refreshes or rotates a token, so the `oidc-mint` check no
+  longer fails on a healthy deployment. Mock-issuer profiles are unchanged.
+
+- **First contact starts with the same text everywhere** (GitHub issues #98,
+  #96). `cs -h`, `cs help`, `man cs`, the agent instruction file section and
+  the skill now render one source, which opens with a "Start here" block
+  (nucleate, tackle, peek, whisper/done) before the grouped command list.
+  It also covers stopping early, where un-harvested work lives and keeping
+  `cs status` clean. `cs help` adds a COLLABORATE block that says when to use
+  `cs sessions` and when to use `cs work`, and `cs work --help` now explains the
+  implementer-plus-reviewer pattern.
+
+- **`cs init` points to `cs init --upgrade`** to write the agent instruction section,
+  instead of `cs init --soft`. When a supported worker harness is on `PATH` and
+  no default is set, it prints the `[adapters] default = ...` line to add,
+  without writing it.
+
+- **`cs init` no longer prints a shell command to undo itself.** The success
+  path prints no undo line, and the nested-galaxy refusal names the ancestor
+  `.cosmon/` directory and says to remove it or pick another path. The old line
+  interpolated the path unquoted, so a path containing a space would have
+  deleted a different directory if pasted. `--help` now says "delete the
+  `.cosmon/` directory".
+
+- **The cosmon skill lives in `tools/cosmon-skill/` and installs from there**
+  (GitHub issue #137). The `skills/cosmon/` directory is gone; install with
+  `tools/cosmon-skill/install.sh`. The installer writes to
+  the harness's configured skills directory, prints the resolved
+  path, and accepts `--link` to symlink `SKILL.md` instead of copying it.
+  Previously it always wrote to a fixed home-directory path, which a harness
+  started with a custom configuration directory never reads.
+
+- **Local-adapter preflight no longer steers an agent to start a second
+  server** (GitHub issue #93). When the backend is unreachable or does not
+  serve the model, the message first says to point `[adapters.local].base_url`
+  (or `COSMON_LOCAL_BASE_URL`) at an OpenAI-compatible server that is already
+  running, then names the model and `api_key_env` settings and the local-model
+  guide. Starting a server or pulling a model is presented as something to ask
+  the user first, because it can load a second copy of the weights. The
+  `cosmon-remote` hint for the same refusal changed the same way.
+
+- **The `local` adapter works against authenticated and `/v1` endpoints.** The
+  credential named by `api_key_env` on the adapter row is sent to the server
+  (a server that needs no credential ignores it), and a `base_url` ending in `/v1` is normalised so
+  the preflight no longer probes `/v1/v1/models`. A server that rejects the
+  credential is reported as an authentication error, separate from a
+  connectivity error.
+
+- **The security jury's third provider family can come from OpenRouter**
+  (GitHub issue #99). In the `cosmon-dev` spore, `[adapters.openai]` now
+  defaults to OpenRouter (`OPENROUTER_API_KEY`) instead of a vendor that
+  required its own key; the previous provider remains a documented alternative.
+  Routed model ids of the form `<vendor>/<model>` count toward the vendor's
+  family, so a routed seat running a model from an already-used family no
+  longer counts as a new one. A missing `api_key_env` credential is refused by
+  naming that variable.
+
+- **`cs wait` after `cs whisper` waits for the worker's answer.** When a
+  whisper reached a molecule that was already `completed`, `cs wait` used to
+  return immediately while the worker was still acting. It now holds until
+  `feat/<id>` has moved past the HEAD recorded by the whisper and the pane is
+  idle; it ends early if the branch is gone and fails if the pane died with the
+  branch unmoved. A whisper to a running worker holds nothing, so
+  `cs tackle M && cs wait M && cs done M` is unchanged. The `cs wait` help
+  example now uses `--for` instead of the nonexistent `--status`.
+
+- **`cs freeze` frees the worker's session name** so `cs thaw` can respawn it.
+  Freeze now kills the session after the adapter exits, and fails before
+  recording `Paused` if the name cannot be freed. Before, `cs thaw` failed with
+  `duplicate session: <worker>` because the dead pane kept the name.
+
+- **`cs nucleate` inside another galaxy no longer implies a parent link.** When
+  `COSMON_PARENT_MOL_ID` names a molecule that does not exist in the target
+  galaxy, `cs nucleate` prints a one-line notice and creates the child without
+  an implicit `DecayedFrom` link. Explicit `--blocked-by` and `--decayed-from`
+  still refuse unknown molecules. The notice no longer contains a stray
+  backslash.
+
+- **`cs tackle` names the cause of a worker login failure** (GitHub issue
+  #92). When the model probe reports that the worker harness is not logged in,
+  the error says whether a custom configuration directory is set, which configuration home was
+  used and where credentials were looked for. The "no model in the fallback
+  chain is available" message is kept for the case where credentials exist and
+  no model is usable.
+
+- **The `cosmon-dev` spore keeps measuring nodes read-only.** A new
+  `gate-evidence` formula is used by the nodes that measure or judge the tree
+  (trace, route, intake, contract, falsify, green, ci-gate, rehearsal,
+  release) and checks that the worktree carries no product-code change. The
+  `ci-gate` test timeout is now 1800 s and a timeout is reported as incomplete
+  and retryable instead of collapsing the molecule. The coding-agent brief only
+  asks for a commit when the worktree is dirty and forbids an empty marker
+  commit.
+
 ### Fixed
+
+- **A loop error after real work no longer deletes the worker's tree** (GitHub
+  issue #150). When an in-process worker fails after it has executed tools
+  (turn or tool budget, cycle detection, context overflow, a provider error
+  after retries), `cs tackle` used to treat it as a launch failure: it removed
+  the worktree and branch and returned the molecule to `pending`. It now
+  collapses the molecule with the typed cause `AgentLoopFailed`, keeps the
+  worktree and branch, and persists the partial output for audit. A failure
+  before any tool ran still rolls back as before. The in-process openai and
+  anthropic adapters also gain a wall-clock deadline and per-call timeout,
+  reusing the local adapter's `timeout_secs` setting.
+
+- **API-dispatched Claude workers no longer stop on the folder-trust dialog**
+  (GitHub issue #81, point 4). `cs tackle`, `cs thaw` and the patrol respawn
+  pre-grant Claude Code's onboarding, folder trust and bypass disclaimer before
+  every spawn; the in-process executor behind `POST /v1/molecules/{id}/tackle`
+  and the drain did not, so the first worker on a fresh deployment waited on
+  *"Is this a project you created or one you trust?"* with nobody attached.
+  All paths now call one routine, `claude_trust::pregrant_worker_consent`, and
+  the API path resolves the config files from the worker's enveloped
+  environment rather than the server's. A config that cannot be written
+  refuses the dispatch with `503 startup_consent_refused` before anything is
+  recorded or spawned.
+
+- **Detached patrols survive the tick that dispatched them.** The
+  `com.cosmon.scheduler` LaunchAgent template did not declare
+  `AbandonProcessGroup`, and launchd SIGKILLs a one-shot job's whole process
+  group the instant the job exits. Since `cosmon-scheduler tick` returns in
+  milliseconds, every patrol dispatched in `dispatch = "detached"` mode was
+  killed before producing anything — while the scheduler had already logged
+  `FIRE <patrol> (pid=… detached)`. Measured on one 60-second patrol over a
+  48-hour window: 7276 recorded fires, 114 starts reaching the patrol's own
+  log, a handful of complete runs; the index it feeds sat frozen ~18 h with
+  no log saying so. `nohup` and `trap '' HUP` do not help — the signal goes
+  to the group. The template now carries the key,
+  `scripts/install-scheduler.sh` refuses to install a rendered plist without
+  it and reports the drift on `status`, and
+  `scripts/check-abandon-process-group.sh` enumerates other one-shot agents
+  missing it. `com.cosmon.daemon-supervisor` is deliberately left without the
+  key: it is a long-running supervisor that owns its children by pid, so
+  group-kill is its correct teardown. Write-up in
+  `docs/diagnostic/2026-08-19-launchd-group-kill-silences-detached-patrols.md`.
+
+- **`cs tackle --model X --adapter opencode` now tells opencode** (GitHub
+  issue #72). The pin was resolved and recorded as `ModelSelected`, then
+  `opencode run` was spawned with no model, so the audit trail claimed a pin
+  the process never received. The opencode arm now emits `--model <pin>`
+  verbatim (opencode expects `provider/model`; cosmon adds no prefix), and
+  no pin still emits no flag. The in-process executor behind the RPP tackle
+  route has no channel for the flag, so a pinned opencode dispatch there is
+  refused before any effect (`501 tackle_unsupported_model`) instead of
+  spawned with the pin dropped.
+
+- **A harvest that no operator grant covers is refused by name.** The ADR-172
+  effect boundary answered an anonymous error for every outcome, so an armed
+  galaxy with no grant yet — the state every galaxy passes through the moment
+  it arms `[harvest_authority]` — reached `cs done` as a generic exit 1 and
+  the harvest route as `500 harvest_failed`. It is now `not_authorized`, exit
+  code 71, from both callers, carrying the same operator-facing message and
+  the same ADR-172 §D5 claim bound. A genuine I/O fault at that boundary is
+  still a fault, not a refusal.
+- **The harvest writes its merge events to the galaxy it is harvesting.**
+  `EventV2::MergeDispatched` resolved its `events.jsonl` by walking up from
+  the process's working directory instead of using the state directory the
+  invocation had already resolved. Invisible for `cs done`, which stands in
+  its own galaxy; wrong for the library caller, which found the events log of
+  whatever galaxy the server was installed in and then tried to commit that
+  foreign path into the tenant's repository.
+- **A tenant drain whose ready molecule sits on an uncovered step kind
+  terminates with the named `unsupported_step` token instead of busy-looping
+  to `timeout`** (PR #57 review, findings 1–5). The permanent
+  `UnsupportedStep` refusal now maps to the non-retryable
+  `RuntimeError::DispatchRefused`; the runtime loop stops on the tick that
+  observes it (`ShutdownReason::DispatchRefused`, `cs run` exit `94`), and
+  `drain.terminated` names the refused molecule and step kind in its
+  `detail`. Companion fixes from the same review: the library dispatch path
+  now stamps the PID witness on the ledger from the spawn handle's
+  witnessed pane PID (`SpawnHandle::pid`), restoring `orphan_scan`'s PID
+  liveness axis for adapter-dispatched molecules; every post-worktree error
+  path in the library executor rolls the worktree and branch back (the
+  identifier and ledger error paths used to leak them); the executor's one
+  spawn seam now takes the `DispatchRecorded` token by reference, making the
+  documented spawn-before-record claim true on the library path; the worker
+  envelope re-states `PWD` from the worker's own worktree (or drops it)
+  instead of leaking the adapter's; and the drain resolves the tenant
+  state/formulas directories through the same deterministic helper as the
+  envelope's `COSMON_STATE_DIR` pin.
+
 
 - **No worker could ever start in the adapter image: tmux ran every pane
   command through `/usr/sbin/nologin`.** The service account's login shell is
@@ -607,22 +1168,170 @@ defect issue #51 first reported — is independent of all this and is unchanged.
   `docs/specs/cosmon-rpp-api-reference.md` needs regenerating (`cargo xtask
   gen-api-ref`) — the route count moved 39 → 40.
 
-### Security
+- **`cs whisper` no longer refuses on ordinary pane output** (GitHub issues
+  #121, #130). Only a recognised dialogue (menu or confirm widget) blocks
+  delivery. An idle pane whose scrollback holds an old question no longer
+  blocks, a `[y/n]` prompt anywhere on the last lines is classified as a
+  confirmation, and update, reasoning-picker and rate-limit menus still block.
+  A live launch menu takes precedence over a stale prompt, and ambiguous menus
+  fail closed.
 
-- **RPP subprocess envelope: the environment half is now an allow-list, not a
-  deny-list.** `cosmon-rpp-adapter` clears the inherited environment before
-  spawning `cs` and re-admits only the named process-hygiene variables
-  (`PATH`, `HOME`, locale, terminal, XDG bases, ssh-agent, proxy, Anthropic
-  credentials, `RUST_LOG`). No `COSMON_*` variable is inheritable; the ones the
-  child needs are set from adapter configuration after the clear. The deny-list
-  it replaces let `COSMON_SKIP_PRE_DONE_HOOK` — the human operator's
-  kill-switch for the blocking `pre_done` Definition-of-Done gate — cross the
-  perimeter into the `cs run` drain and into every `cs done` that drain
-  launched, disarming the gate for all subsequent harvests inside a container
-  where no operator exists to make the gesture. Reported as GitHub issue #51,
-  adjudicated in `delib-20260819-cda2` (C2), amendment §3.5.1 of
-  [ADR-080](docs/adr/080-remote-pilot-port-https-oidc.md).
+- **Patrol interactive-dialog handling is more accurate** (GitHub issues #85,
+  #136). `cs patrol` detects blocking dialogs in live panes, refuses to
+  whisper into them, and no longer collapses a freshly spawned worker as dead
+  (GitHub issue #117): new workers get a grace period, and `cs health` and
+  `cs patrol --nudge` share the same boot-stall threshold (GitHub issue #107).
+  A forced `cs tackle --force` no longer races the orphan sweep.
 
+- **Reclaiming a dead worker no longer collapses its molecule** (GitHub issue
+  #122). `cs purge` of a worker whose pane was lost, for example to a harness
+  self-update, leaves a running molecule re-tackleable in its existing
+  worktree with `cs tackle <mol> --force`.
+
+- **A manual `cs tackle` no longer races the resident runtime** (GitHub issue
+  #119). The molecule is claimed before model selection, and a tackle that
+  loses the claim exits non-zero and names the winning worker, its adapter and
+  its model. A pinned model is not silently replaced.
+
+- **A dispatch no longer erases a concurrent collapse, freeze or tag** (GitHub
+  issue #129). Commit and rollback of a dispatch apply to the current state and
+  refuse when status or tags changed since the claim.
+
+- **`cs freeze` frees the worker's session name so `cs thaw` can respawn
+  it.** Previously `cs thaw` failed with `duplicate session`. Freeze ends the
+  session, thaw creates a new one, and the molecule directory and worktree are
+  kept.
+
+- **A resident run reports a blocker that cannot be found** (GitHub issue
+  #133). A dependent of a deleted, archived or legacy blocker is reported with
+  the blocker id and the gesture to re-point or drop the edge, and legacy
+  blockers without a project identifier resolve. Tag queries in `cs ensemble`
+  keep their exact scope.
+
+- **`cs run` stale auto-propel and dispatch claims are refused** (GitHub issues
+  #45, #129). A merge retry after the state changed is refused, and a claim
+  whose reservation was taken by another tackler is rechecked.
+
+- **Running molecules survive worker reclamation and purge.** `cs purge`
+  preserves purged work and serialises update observations, and a committed
+  molecule result is kept when the artifact copy is skipped (GitHub issue
+  #142).
+
+- **`cs realized-watch` and `cs peek` no longer grow with the journal.** Both
+  read the event journal and session logs incrementally. On a large journal a
+  watcher previously reached several gigabytes resident; it now stays flat at
+  tens of megabytes.
+
+- **Missing adapter credentials are named as such** (GitHub issue #92). When
+  the adapter cannot find its configuration home or credentials, the error
+  names the missing variable or path instead of reporting that no model in the
+  fallback chain is available. On some platforms the message names the configuration
+  home, not a credentials file the platform does not use.
+
+- **Worker briefings are held to a delivery postcondition** (GitHub issue
+  #40). The submit is re-issued until the composer is observed clear, a spawn
+  fails if delivery cannot be confirmed, and each attempt is recorded as a
+  `BriefingDelivery` event.
+
+- **`cs done` refuses a worker harvesting its own molecule.** It also checks
+  the merged tree for shell-surface changes on every gate path, not only when a
+  delegated gate command consults trust.
+
+- **`cs done` names the landing path when a merge invalidates trust** (GitHub
+  issue #74), and protected reference paths are parsed without ambiguity.
+
+- **`COSMON_STATE_DIR` warns when it shadows a galaxy.** When the variable
+  points elsewhere than the galaxy found from the working directory, `cs` now
+  prints both paths on stderr. The variable still wins.
+
+- **Reinstalling `cosmon-remote` from the service's `/install.sh` no longer
+  loses the login or resets profile values** (GitHub issue #149). The installer
+  asks the binary whether it created the profile (`config init
+  --report-created`) and applies server defaults only to a new one, so
+  `timeout_secs` and other edits survive. `cosmon-remote --version` shows the
+  source commit, and a missing-login error names the profile and expected
+  credential location. A profile that was already reset must be reconnected
+  with `cosmon-remote login`.
+
+- **The adapter image trusts its issuer handoff and templates the installer
+  from it** (GitHub issues #100 and #101). The image now ships an `rpp.toml`
+  that reads the handoff volume it creates, and `GET /install.sh` derives its
+  profile values from the handoff instead of leaving them empty. A binding that
+  already exists is no longer rewritten from the handoff at boot, so scopes
+  added later survive a restart (GitHub issue #105).
+
+- **A SIGHUP reload keeps issuer keys already fetched over HTTP** (GitHub
+  issue #104). Requests signed by such an issuer no longer fail with
+  `issuer_not_pinned` until the hourly refresh, and an issuer removed from the
+  configuration is revoked at reload.
+
+- **A failed `cs done` merge says why, and harvest state is committed safely**
+  (GitHub issues #123 and #132). The failure report names the merge error and
+  the dirty checkout paths. After a successful harvest, tracked archive, event
+  and frontier files are committed while holding the trunk lock, so the next
+  sibling `cs done` no longer fails with an unexplained `MERGE FAILED`;
+  ignored molecule directories are skipped. Completion through the MCP surface
+  now records the realized model before marking the molecule `Completed`, as
+  `cs complete` does.
+
+- **A remote auto-propel merge is not retried after a conflict** (GitHub issue
+  #45). The retry is refused so that a fresh admission and gate pass cover the
+  repaired head.
+
+- **`GET /v1/auth/me` reports whether worker credentials are usable**
+  (GitHub issue #48). `claude_credentials_present` is `true` only when the
+  stored credential would let a worker start (an expired credential with a
+  refresh token still counts), and the additive `claude_credentials_status`
+  names the precondition that failed. The in-process tackle route again
+  refuses with a stable `503` label when a precondition is missing, instead of
+  starting a worker that waits at a login prompt.
+
+- **`cs peek` no longer panics on accented titles.** Cells were truncated by
+  byte offset, which failed with "not a char boundary" on a title such as
+  one containing `é` and clipped such titles early. Truncation now measures
+  display columns, so wide characters (CJK, emoji) no longer shift the columns
+  to their right. The same fix covers `cs verify`, `cs ensemble`, `cs tackle`
+  query previews and `cs apps` probe details.
+
+- **`cs peek` context gauge shows occupancy, not cumulative tokens** (GitHub
+  issue #127). The gauge divided the session's cumulative token count by the
+  model's context window and clamped to `999%` for any long-running worker. It
+  now uses the latest turn's context size. The IN, CACHED, OUT and RSN columns
+  keep the cumulative counters, and the `cs peek` JSON schema is unchanged.
+
+- **`cs realized-watch` and `cs peek` no longer grow without bound while idle**
+  (GitHub issue #116). Both re-parsed the whole `events.jsonl` on every tick or
+  refresh; on a 170 MB journal one watcher reached 4.4 GB resident. They now
+  read the journal and the session logs from a byte offset. On the same
+  fixture a watcher stays at 20-28 MB and `cs peek` at 71-75 MB, with CPU use
+  near zero when idle. Existing long-running watchers keep the old behaviour
+  until restarted.
+
+- **`cs` warns when `COSMON_STATE_DIR` overrides the galaxy you are in**
+  (GitHub issue #106). The variable still wins, but when it points away from
+  the galaxy found from the current directory, `cs` prints a warning on stderr
+  naming both paths. Before, `cs peek` silently showed the other galaxy's
+  fleet. The warning also applies to the MCP server. An override used outside
+  any galaxy stays silent.
+
+### Documentation
+
+- **Install and newcomer pages match the released binary** (GitHub issue #76).
+  The recommended install block prints the `PATH` export before
+  `cs --version`. The pages name both installed binaries (`cs` and
+  `cosmon-remote`) and show the real `cs nucleate` output. The prerequisites
+  list apt, dnf, brew and port, and the Ollama step includes `ollama pull`.
+  `install.md` states that no man page ships, and `setup.md` lists the three
+  files that live outside `.cosmon/` (`.gitleaks.toml`, `consent.toml`, the
+  neurion auto-register log) with what removes each, so deleting `.cosmon/` is
+  not an uninstall.
+
+- **Ten-minutes guide forks on the harness.** Step 0 separates "I have Claude
+  Code" from "I want a local model", and step 4 notes `--adapter claude` for
+  the first path.
+
+- **The pilot guide covers the reread, whisper, done loop,** `--var-file` for
+  long statements, `cs tackle` versus `cs run`, and the skill install path.
 
 ## [0.6.0] — 2026-08-10
 
@@ -3529,6 +4238,7 @@ release **is**, not how it was built.
   `#![deny(missing_docs)]` on the core, and CI gates on build, test, clippy,
   and fmt.
 
-[Unreleased]: https://github.com/noogram/cosmon/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/noogram/cosmon/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/noogram/cosmon/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/noogram/cosmon/releases/tag/v0.6.0
 [0.1.0]: https://github.com/noogram/cosmon/releases/tag/v0.1.0
