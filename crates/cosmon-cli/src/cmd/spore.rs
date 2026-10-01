@@ -1580,6 +1580,7 @@ acceptance = "any evidence"
         let args = RunArgs {
             reference: dir.path().join("spore.toml"),
             vars: vec![],
+            admission: None,
             allow_unchecked_seal: false,
             fleet: "default".to_string(),
             store_dir: Some(state.path().to_path_buf()),
