@@ -2170,6 +2170,44 @@ fn run_with_remote_before_lock(
             } else {
                 Vec::new()
             };
+            // Issue #153 — a Completed, merged row written before the
+            // `archived` field is still counted as awaiting harvest. Write
+            // the missing archive entry and set the flag, exactly as plain
+            // `cs done` does. No merge, branch action or post-merge hook.
+            let mut actions: Vec<String> = Vec::new();
+            let mut archive_warnings: Vec<String> = Vec::new();
+            if already_merged && !mol.archived {
+                let config_path = resolve_config_from_context(ctx);
+                let archive_enabled = cosmon_filestore::load_project_config(&config_path)
+                    .unwrap_or_else(|_| ProjectConfig::default())
+                    .archive
+                    .enabled;
+                if archive_enabled {
+                    let mol_dir = cosmon_state::archive::resolve_molecule_dir(&state_dir, &mol_id)
+                        .unwrap_or_else(|| store.molecule_dir(&mol_id));
+                    if cosmon_state::archive::write_non_fatal_with_warnings(
+                        &state_dir,
+                        &mol_dir,
+                        &mol,
+                        cosmon_state::archive::Trigger::Done,
+                        chrono::Utc::now(),
+                        &[],
+                    )
+                    .is_some()
+                    {
+                        let mut latest = mol.clone();
+                        latest.archived = true;
+                        match store.save_molecule(&mol_id, &latest) {
+                            Ok(()) => actions.push("archived".to_owned()),
+                            Err(e) => {
+                                archive_warnings.push(format!("stamp archived=true failed: {e}"));
+                            }
+                        }
+                    } else {
+                        archive_warnings.push("archive write failed (non-fatal)".to_owned());
+                    }
+                }
+            }
             if ctx.json {
                 let payload = serde_json::json!({
                     "command": "done",
@@ -2178,6 +2216,8 @@ fn run_with_remote_before_lock(
                     "outcome": outcome,
                     "purged_stale_worker": purged_stale,
                     "reclaimed": reclaimed,
+                    "actions": actions,
+                    "warnings": archive_warnings,
                 });
                 println!("{}", serde_json::to_string(&payload)?);
             } else {
@@ -2187,6 +2227,12 @@ fn run_with_remote_before_lock(
                 }
                 for action in &reclaimed {
                     println!("  • {action}");
+                }
+                for action in &actions {
+                    println!("  • {action}");
+                }
+                for w in &archive_warnings {
+                    eprintln!("  ⚠ {w}");
                 }
             }
             return Ok(());

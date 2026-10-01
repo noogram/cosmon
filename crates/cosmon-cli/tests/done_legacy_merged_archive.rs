@@ -243,3 +243,97 @@ fn cs_done_clears_a_legacy_merged_molecule_from_harvestable() {
         .unwrap();
     assert!(again.status.success());
 }
+
+/// `cs done <id> --if-completed` is the sweep form of the same harvest. On a
+/// legacy merged row it must write the missing archive entry and set
+/// `archived`, not stop at `already_merged`; it must stay a no-op for a
+/// `Completed` row that was never merged, and be idempotent.
+#[test]
+fn cs_done_if_completed_archives_a_legacy_merged_molecule() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo(repo);
+    let state_dir = repo.join(".cosmon/state");
+
+    let merged = nucleate_completed_no_branch(repo);
+    let unmerged = nucleate_completed_no_branch(repo);
+    make_legacy_merged(&state_dir, &merged, true);
+    make_legacy_merged(&state_dir, &unmerged, false);
+
+    let before = harvestable(repo).join("\n");
+    assert!(
+        before.contains(&merged),
+        "precondition: legacy row is counted:\n{before}"
+    );
+    assert!(
+        !archive_entry_exists(&state_dir, &merged),
+        "precondition: no archive entry yet"
+    );
+
+    let done = cs_isolated(repo)
+        .args([
+            "--json",
+            "done",
+            &merged,
+            "--if-completed",
+            "--no-auto-propel",
+        ])
+        .output()
+        .expect("cs done --if-completed");
+    let stdout = String::from_utf8_lossy(&done.stdout);
+    assert!(
+        done.status.success(),
+        "cs done --if-completed failed: {stdout}{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim().lines().last().unwrap_or("")).unwrap();
+    assert_eq!(v["outcome"], "already_merged", "outcome label: {v}");
+    assert!(
+        v["actions"].to_string().contains("archived"),
+        "--if-completed must report archival: {v}"
+    );
+
+    assert!(
+        archive_entry_exists(&state_dir, &merged),
+        "archive entry must be written"
+    );
+    let after = harvestable(repo).join("\n");
+    assert!(
+        !after.contains(&merged),
+        "merged row must leave harvestable:\n{after}"
+    );
+    assert!(
+        after.contains(&unmerged),
+        "unmerged row must stay harvestable:\n{after}"
+    );
+    assert!(
+        !archive_entry_exists(&state_dir, &unmerged),
+        "unmerged row must not be archived"
+    );
+
+    // Idempotent: a second run succeeds and reports nothing new.
+    let again = cs_isolated(repo)
+        .args([
+            "--json",
+            "done",
+            &merged,
+            "--if-completed",
+            "--no-auto-propel",
+        ])
+        .output()
+        .unwrap();
+    assert!(again.status.success());
+    let v2: serde_json::Value = serde_json::from_str(
+        String::from_utf8_lossy(&again.stdout)
+            .trim()
+            .lines()
+            .last()
+            .unwrap_or(""),
+    )
+    .unwrap();
+    assert!(
+        !v2["actions"].to_string().contains("\"archived\""),
+        "second run must not archive again: {v2}"
+    );
+}
