@@ -50,7 +50,7 @@ current state remains `state.json`. This split is why an interrupted command or
 restarted worker can resume from disk instead of depending on an agent's lost
 context.
 
-The entire `.cosmon/state/` tree is gitignored. It is the live source of truth
+The `.cosmon/state/` tree is gitignored, except `state/archive/` (section 5). It is the live source of truth
 on that machine, not a Git mirror. Do not infer from the ignore rule that it is
 disposable: it is where Cosmon reads and writes the running molecule.
 
@@ -158,8 +158,16 @@ archived only after the snapshot succeeds. Its write is best-effort so an
 archive I/O failure is surfaced as a warning rather than rewriting history or
 pretending the terminal transition did not happen.
 
+The archive is on by default (`[archive] enabled = true` in `.cosmon/config.toml`;
+retention defaults to `keep_all`, so nothing is deleted later). Turning it on is
+not retroactive: molecules that ended while it was off left no snapshot. A galaxy
+that wrote `enabled = false` keeps it off. `.cosmon/.gitignore` tracks
+`state/archive/` while ignoring the rest of `state/`; `cs doctor gitignore`
+checks with real git that this still holds, and `cs init --upgrade` repairs the
+managed block of that file.
+
 This archive is what survives the loss of the worktree and the feature branch.
-It is a durable on-disk record beneath the gitignored state tree; its purpose is
+It is a durable on-disk record, tracked by git unlike the rest of the state tree; its purpose is
 to preserve the molecule's causal and narrative trace, not to claim that the
 temporary worktree was permanent. The append-only event logs are especially
 important: later readers can distinguish a `Completed` transition from the

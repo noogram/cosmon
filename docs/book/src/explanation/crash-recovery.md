@@ -75,7 +75,7 @@ molecule is flagged `Error` for a human, rather than looping on a broken task.
 ## Reconcile is a pure projection
 
 Because all the authoritative content lives on disk, rebuilding every *derived*
-view is a deterministic function of the files. `cs reconcile` takes the state and
+view is a deterministic function of the files. `cs project` takes the state and
 re-projects it onto the surfaces humans and other tools read (status files,
 issue lists, dashboards) and it is **idempotent by construction**: run it once
 or run it ten times, you get the same result. This is enforced by tests. A

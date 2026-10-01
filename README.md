@@ -183,7 +183,7 @@ shapes:
 - **A local model — the default.** With no adapter configured, `cs tackle` drives
   the agent loop itself against a local OpenAI-compatible endpoint, for example
   [Ollama](https://ollama.com) on `localhost:11434`. Start that endpoint (run
-  `ollama serve`, or set `[adapters.default]` in `.cosmon/config.toml`) **before
+  `ollama serve`, or set `default` under `[adapters]` in `.cosmon/config.toml`) **before
   the first dispatch**. If nothing is listening, the worker has nothing to talk
   to and will stall.
 - **An external coding-agent CLI.** Pass `--adapter claude` (Claude Code),
@@ -217,7 +217,7 @@ that isn't listening will stall, so start it first.
 Cosmon never auto-installs and **never spends on a hosted model on its own**: the
 default adapter is the local `local` loop, and a paid backend runs *only* when
 you explicitly opt in — `--adapter claude`/`openai`, `$COSMON_DEFAULT_ADAPTER`,
-or an `[adapters.default]` in your config. See
+or `default = "…"` under `[adapters]` in your config. See
 [docs/cs-demo-design.md](docs/cs-demo-design.md) for the design.
 
 ## The lifecycle verbs

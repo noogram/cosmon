@@ -41,7 +41,7 @@ split into two registers:
   `collapse`, `decay`, `freeze`, `thaw`, `merge`. These act *on* a molecule's
   state and follow the physics model above.
 - **Operator verbs (vernacular register)**: `tackle`, `done`, `wait`, `peek`,
-  `patrol`, `run`, `reconcile`. These are the human's toolkit for steering the
+  `patrol`, `run`, `project`. These are the human's toolkit for steering the
   fleet. They are plain CLI words on purpose: `peek` is your window into the
   system, not a physics act on a molecule.
 

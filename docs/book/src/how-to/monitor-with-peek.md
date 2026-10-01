@@ -56,8 +56,10 @@ worker.
 cs peek --all
 ```
 
-`--all` aggregates every tmux session and every `.cosmon/` on disk, so you get
-the multi-project view from any directory.
+`--all` is shorthand for `--all-galaxies --phase all`: every project under the
+cluster root and every phase, finished work and the archive included. For the
+daily multi-project view without the archive, use `cs peek --all-galaxies`; to
+see only finished work still owed a `cs done`, use `--phase harvestable`.
 
 ## One-shot snapshots (for scripts and quick checks)
 

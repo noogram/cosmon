@@ -35,6 +35,25 @@ commands. Errors under `--json` are emitted to `stderr` as
 | `15` | Guard refusal: governance tier does not descend (ordinal stratification: a child may not out-rank its parent). |
 | `16` | Guard refusal: briefless dispatch (`cs tackle` on a molecule whose formula's required, default-free variables are missing or blank — a worker would spawn with no Mission). |
 | `17` | Guard refusal: the formula requires worker capabilities the resolved adapter lacks (`requires_capabilities = ["shell", …]` on a chat-only local adapter). Re-run with a coding-agent `--adapter`, or set `COSMON_SKIP_CAPABILITY_GATE=1`. |
+| `70` | Harvest refusal `not_completed`: `cs done` on a molecule that is not `Completed`. |
+| `71` | Harvest refusal `not_authorized`: the galaxy armed `[harvest_authority]` and no operator grant covers this molecule. |
+| `72` | Harvest refusal `reservation_requires_seal`: the molecule carries a reservation only a human can lift (`hold:human`, `needs-review`, `security`, `no-auto-harvest`, `harvest_to:*`). |
+| `73` | Harvest refusal `backlog_full`: the sealed threshold of closed-but-not-integrated molecules is reached. |
+| `74` | Harvest refusal `merge_conflict`: nothing was merged or torn down; the branch and worktree stand. |
+| `75` | Harvest refusal `base_not_fast_forward`: the base cannot accept the configured merge policy (operator configuration). |
+| `76` | Harvest refusal `pre_done_refused`: the blocking `[hooks] pre_done` gate refused. |
+| `77` | Harvest refusal `missing_reason`: the request carried no reason (the Remote Pilot Port requires one; `cs done --reason` is optional). |
+| `78` | Harvest refusal `protected_path_modified`: the branch changed a path declared with `cs nucleate --protect`. `cs done --allow-protected-change` overrides it at the terminal. |
+| `90` | `cs run` stopped: action budget (`--max-actions`) exhausted. |
+| `91` | `cs run` refused or stopped: more than `--max-molecules` molecules in the fleet. |
+| `92` | `cs run` refused the plan: deeper than `--max-depth` (nothing was started). |
+| `93` | `cs run` finished with a failed teardown: a molecule's branch is not integrated and its worktree still stands. |
+| `94` | `cs run` stopped on a permanent dispatch refusal (for example an unsupported step kind). |
+| `124` | `cs run --timeout` reached its deadline. |
+
+Codes `70` to `78` are the nine **harvest door refusals** of `cs done`, with the
+same labels on the wire (`POST /v1/molecules/{id}/done`). Codes `90` to `94`
+and `124` are the named stops of `cs run`.
 
 Codes `10` to `17` are the **typed CLI guard refusals**: a script can branch
 on the specific invariant that fired rather than treating every non-zero
