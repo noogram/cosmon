@@ -12,10 +12,11 @@ Arguments:
 Options:
       --config <PATH>         Path to configuration file
       --var <KEY=VALUE>       Bind a parameter (repeatable: `--var key=value`)
-      --allow-unchecked-seal  Germinate a *sealed* spore even though its `.tla` proof was not verified this run (TLC unavailable). The status line stays honest: `seal: present, NOT verified` (ADR-140 D4). Without this flag a sealed spore fails closed
+      --admission <FILE>      TOML admission evidence, checked before any molecule is nucleated
   -v, --verbose               Enable verbose output
-      --fleet <FLEET>         Fleet to germinate the polymer into [default: default]
+      --allow-unchecked-seal  Germinate a *sealed* spore even though its `.tla` proof was not verified this run (TLC unavailable). The status line stays honest: `seal: present, NOT verified` (ADR-140 D4). Without this flag a sealed spore fails closed
       --json                  Output in JSON format
+      --fleet <FLEET>         Fleet to germinate the polymer into [default: default]
       --store-dir <DIR>       State store root (default: walk-up `.cosmon`)
   -h, --help                  Print help
 

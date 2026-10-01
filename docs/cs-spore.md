@@ -24,6 +24,11 @@ Spore = Fleet (crew) + [Formula] (per-node recipes) + ParamSchema
 ```
 
 - `[spore]`: name, version, description.
+- `[spore.admission]`: optional versioned work-type contract. When present,
+  `validate` and `run` require `--admission <FILE>` and refuse mismatched work
+  before expansion or state writes. The emitted record names the chosen vehicle,
+  pinned baseline and target base, paths, risk, gates, reviewer requirements,
+  substrates and expected initial molecule count.
 - `[spore.params.*]`: the `ParamSchema`. Each param has a `type`
   (`string`, `int`, `bool`, `enum`, `list<string>`), a `required` flag,
   and an optional `default`.
@@ -85,8 +90,8 @@ resolves.
 | Verb | Role |
 |------|------|
 | `cs spore install <source>` | Fetch a bundle (git remote or local path) and **place** it into this project, registering its recipes in `.cosmon/formulas/`. |
-| `cs spore validate <ref>` | Parse (N2) + expand (N3) as a **dry run**. Prints the ordered `cs nucleate ... --blocked-by ...` call list. Germinates nothing. |
-| `cs spore run <ref>` | Parse + expand + **seal gate** (N4), then germinate the polymer into the live state store. |
+| `cs spore validate <ref>` | Admission when declared, then parse (N2) + expand (N3) as a **dry run**. Prints the ordered `cs nucleate ... --blocked-by ...` call list. Germinates nothing. |
+| `cs spore run <ref>` | Admission when declared, then expand + **seal gate** (N4), then germinate the polymer into the live state store. |
 | `cs spore export <ref>` | Emit a content-addressed bundle hash plus an ASTRA descriptive layer (D6) for sharing the spore. |
 
 `<ref>` is a `spore.toml` file or a directory containing one.

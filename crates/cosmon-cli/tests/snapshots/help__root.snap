@@ -54,10 +54,12 @@ SPORE (ADR-140) germinates a whole polymer from a shareable 'spore.toml' templat
                                   it in this project, copying its
                                   recipes into .cosmon/formulas/ so
                                   their per-step pins reach dispatch.
-  cs spore validate <ref>         parse + expand as a dry run; prints
+  cs spore validate <ref>         admission (when declared), then
+                                  parse + expand as a dry run; prints
                                   the ordered nucleate call list,
                                   germinates nothing.
-  cs spore run <ref>              parse + expand + seal gate, then
+  cs spore run <ref>              admission (when declared), then
+                                  expand + seal gate, then
                                   germinate the polymer into the live
                                   state store (every node tagged
                                   temp:warm, wired to its blocked-by).
@@ -67,6 +69,13 @@ SPORE (ADR-140) germinates a whole polymer from a shareable 'spore.toml' templat
 '<source>' is a local path, 'github:owner/repo[/subdir][@ref]', a GitHub tree/blob URL, or any other git remote. Install refuses before writing anything: on an '--expect-hash' mismatch, a bundle missing a declared file, a symlink in the fetched tree, a non-empty destination, or a registry recipe of the same name with different content (all overridable with '--force' where that is meaningful). An identical recipe is a no-op, so re-installing is idempotent.
 
 '<ref>' is a 'spore.toml' file or a directory containing one. '--var k=v' (repeatable) binds a parameter, coerced into its declared ParamSchema type before expansion. '--json' on validate and run emits NDJSON (agent-first invariant). A spore is a declarative front end over the existing 'cs nucleate' verb, not a new scheduler and not a new molecule type.
+
+SPORE ADMISSION (ADR-183): a manifest with [spore.admission] requires
+'--admission <FILE>' on validate and run. The versioned TOML record
+declares work type, baseline, target base, reporter evidence and
+available review/execution resources. A mismatched work type is
+refused before expansion or allocation; accepted admission emits
+pinned refs, paths, risk, gates, reviewer needs and molecule count.
 
 SEAL GATE (ADR-140 D4), stated honestly: a spore with no [spore.seal] germinates freely ('seal: none'). A sealed spore cannot be proven on a machine without the TLC verifier wired in, so 'cs spore run' fails closed by default and refuses unless the operator opts into the risk with '--allow-unchecked-seal', in which case the status line reads 'seal: present, NOT verified'. It never claims 'verified' when TLC did not run. See docs/cs-spore.md and docs/design/spore-impl-dag-manifest.md.
 

@@ -254,6 +254,14 @@ pushes to any remote. When an external reproduction contradicts an internal proo
 becomes the bug.
 """
 
+[spore.admission]
+version = 1
+work_types = ["defect"]
+inputs = ["baseline", "target_base", "reporter_symptom", "reporter_environment", "reporter_transcript"]
+gates = ["just gates-bg", "scripts/publish.sh --check", "packaged rehearsal"]
+reviewer_capabilities = ["independent refuter", "distinct provider family"]
+execution_substrates = ["clean-room replay", "packaged rehearsal", "published install route"]
+
 # --------------------------------------------------------------------------
 # Seal — a TLC proof over spore.tla + spore.cfg (THREE properties). Paths are
 # RELATIVE to this manifest (portability invariant). Seal-verification contract
