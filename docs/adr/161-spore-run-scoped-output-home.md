@@ -130,3 +130,10 @@ run home.
   home** — which already removes the *cause* of the improvisation — and leaves
   the active refusal as a bounded next molecule, since threading the
   spore-definition-dir and repo-root into the `evolve` seam is a separate change.
+
+## Amendment — 2026-10-01 ([ADR-183](183-work-type-admission-precedes-spore-allocation.md))
+
+Run-scoped output homes and non-collision stand. With development and release
+split into separate runs (ADR-183 D3), a release run records explicit links to
+the development runs whose candidate it validates; results are not moved into
+source trees to create that link.

@@ -283,3 +283,13 @@ closed.
   implements tier a), **C2** (`cross-provider-reading-committee-formula`,
   consumes the invariant), **C5** (`per-provider-calibration-probe-seed-corpus`,
   polices the S-3 residual).
+
+## Amendment — 2026-10-01 ([ADR-183](183-work-type-admission-precedes-spore-allocation.md))
+
+The resolved diversity floor, the independent posture, observed-identity
+recording and the external-attestation ceiling stand unchanged. Clarified: the
+reviewer capability that meets this floor is checked at admission, before any
+molecule is allocated, for both ordinary and security stakes in the
+`cosmon-defect` and `cosmon-feature` recipes. An unavailable family stops the
+run or routes to an explicitly authorized lower-stakes workflow chosen before
+dispatch; it never lowers the floor. No assurance downgrade is made.
