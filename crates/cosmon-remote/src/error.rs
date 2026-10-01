@@ -87,6 +87,18 @@ pub enum Error {
     #[error("config error: {0}")]
     Config(String),
 
+    /// Authentication needs a login; the CLI attaches the selected profile
+    /// name when rendering this error after command dispatch.
+    #[error("login required")]
+    MissingLogin {
+        /// Expected file path or keyring slot, if the profile has a saved
+        /// issuer and therefore a determinate credential key.
+        expected_location: Option<String>,
+        /// The profile lacks issuer or client ID, so no credential filename
+        /// can be derived even if a saved file still exists.
+        missing_key_fields: bool,
+    },
+
     #[error("auth flow error: {0}")]
     Auth(String),
 

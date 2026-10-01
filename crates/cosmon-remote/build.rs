@@ -20,6 +20,7 @@ use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 use cosmon_surface_canon::{fold_live, parse_canon, CanonEvent};
 
@@ -29,8 +30,38 @@ const GENERATED_FILE: &str = "canon_surface_generated.rs";
 fn main() {
     println!("cargo:rerun-if-changed={DATA_FILE}");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=Cargo.toml");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.join("../..").canonicalize().ok();
+    let repository_root = git_stdout(&manifest_dir, &["rev-parse", "--show-toplevel"])
+        .and_then(|path| PathBuf::from(path).canonicalize().ok());
+    let owns_source = workspace_root.is_some() && workspace_root == repository_root;
+    let commit = if owns_source {
+        git_stdout(&manifest_dir, &["rev-parse", "HEAD"])
+            .filter(|sha| !sha.is_empty())
+            .unwrap_or_else(|| "unknown".to_owned())
+    } else {
+        "unknown".to_owned()
+    };
+    let dirty = owns_source
+        && git_stdout(&manifest_dir, &["status", "--porcelain"])
+            .is_some_and(|lines| !lines.is_empty());
+    let build_id = if dirty && commit != "unknown" {
+        format!("{commit}-dirty")
+    } else {
+        commit
+    };
+    println!("cargo:rustc-env=COSMON_REMOTE_BUILD_ID={build_id}");
+    if owns_source {
+        // Rebuild when this worktree advances to a different commit.
+        for logical in ["HEAD", "logs/HEAD", "index"] {
+            if let Some(path) = git_stdout(&manifest_dir, &["rev-parse", "--git-path", logical]) {
+                println!("cargo:rerun-if-changed={path}");
+            }
+        }
+    }
     let data_path = manifest_dir.join(DATA_FILE);
     let raw = fs::read_to_string(&data_path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", data_path.display()));
@@ -44,6 +75,17 @@ fn main() {
     let out_path = out_dir.join(GENERATED_FILE);
     fs::write(&out_path, render(&events))
         .unwrap_or_else(|err| panic!("failed to write {}: {err}", out_path.display()));
+}
+
+fn git_stdout(dir: &std::path::Path, args: &[&str]) -> Option<String> {
+    Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().to_owned())
 }
 
 /// Mechanical const name for one canon row: `METHOD` + path with every

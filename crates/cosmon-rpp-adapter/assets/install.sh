@@ -333,19 +333,26 @@ if [ -z "$PROFILE" ]; then
 fi
 say "profile: $PROFILE"
 
-"$BIN_PATH" config init "$PROFILE" "$COSMON_HOST" \
+# Ask the binary whether it created this profile. A repeated install may
+# replace the binary, but its profile (login identity and user-set values)
+# belongs to the operator. The binary owns the config path and the answer.
+init_result="$("$BIN_PATH" config init "$PROFILE" "$COSMON_HOST" --report-created)" \
     || die "cosmon-remote config init failed"
-
-# Server-templated block of `config set` commands. One line per
-# non-empty deployment field; empty when nothing is configured.
+case "$init_result" in
+    created)
+        # Server-templated defaults apply only on the first installation.
 __COSMON_CONFIG_SET_BLOCK__
+        ;;
+    preserved) say "profil existant préservé: $PROFILE" ;;
+    *) die "réponse inattendue de config init: $init_result" ;;
+esac
 
 # ── 4. Doctor — named green/red checks, run BY the installer ────────
 # Each red line names its repair command; the install itself never
 # fails on a red check (the binary and profile are in place, the
 # remaining steps are the user's — doctor just tells them which).
 ok "cosmon-remote installé → $BIN_PATH"
-ok "profil persisté → ~/.config/cosmon-remote/profiles/$PROFILE.toml"
+ok "profil prêt → $PROFILE"
 say "vérification de l'installation (doctor) :"
 "$BIN_PATH" --profile "$PROFILE" doctor \
     || warn "des checks sont rouges — chaque ligne ✗ ci-dessus nomme sa commande de réparation"

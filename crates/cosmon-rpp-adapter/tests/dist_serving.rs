@@ -265,7 +265,7 @@ async fn install_sh_runs_end_to_end_without_override() {
         "#!/bin/sh\n\
          while [ $# -gt 0 ]; do\n\
            case \"$1\" in\n\
-             -o) shift; printf '#!/bin/sh\\nexit 0\\n' > \"$1\"; shift ;;\n\
+             -o) shift; printf '#!/bin/sh\\ncase \"$*\" in *\"config init\"*) printf \"created\\n\";; esac\\nexit 0\\n' > \"$1\"; shift ;;\n\
              *) shift ;;\n\
            esac\n\
          done\n\
@@ -320,6 +320,83 @@ async fn install_sh_runs_end_to_end_without_override() {
     assert!(
         configured,
         "install.sh must write the PATH export line into a shell rc itself"
+    );
+}
+
+/// Reinstalling a binary must leave an edited profile untouched, including
+/// its login identity and all operator-selected settings.
+#[tokio::test]
+async fn install_sh_preserves_an_existing_profile() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (status, _, body) = get("/install.sh", "cosmon.example.invalid", Some("https")).await;
+    assert_eq!(status, StatusCode::OK);
+    let home = tempfile::tempdir().unwrap();
+    let script = home.path().join("install.sh");
+    std::fs::write(&script, body).unwrap();
+    let config_base = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support")
+    } else {
+        home.path().join("xdg")
+    };
+    let profile = config_base.join("cosmon-remote/profiles/cosmon-example-invalid.toml");
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    let original = b"host = 'https://cosmon.example.invalid'\nsub = 'subject-1'\naud = 'audience-1'\nissuer = 'https://issuer.invalid'\nclient_id = 'client-1'\ntimeout_secs = 300\nphone_home = false\n";
+    std::fs::write(&profile, original).unwrap();
+
+    let stub_bin = home.path().join("stub-bin");
+    std::fs::create_dir(&stub_bin).unwrap();
+    std::fs::write(
+        stub_bin.join("curl"),
+        r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-o" ]; then
+        shift
+        cat > "$1" <<'BIN'
+#!/bin/sh
+printf '%s\n' "$*" >> "$COSMON_TEST_CALLS"
+case "$*" in *"config init"*) printf 'preserved\n';; esac
+exit 0
+BIN
+        exit 0
+    fi
+    shift
+done
+exit 1
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        stub_bin.join("curl"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let calls = home.path().join("calls");
+    let output = std::process::Command::new("sh")
+        .arg(&script)
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join("xdg"))
+        .env("COSMON_BIN_DIR", home.path().join("bin"))
+        .env("COSMON_MAN_DIR", home.path().join("man"))
+        .env("COSMON_SKIP_PILOT_PACK", "1")
+        .env("COSMON_TEST_CALLS", &calls)
+        .env("PATH", format!("{}:/bin:/usr/bin", stub_bin.display()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&profile).unwrap(), original);
+    let invoked = std::fs::read_to_string(&calls).unwrap();
+    assert!(
+        invoked.lines().any(|line| line.contains("config init")),
+        "{invoked}"
+    );
+    assert!(
+        !invoked.lines().any(|line| line.contains("config set")),
+        "{invoked}"
     );
 }
 

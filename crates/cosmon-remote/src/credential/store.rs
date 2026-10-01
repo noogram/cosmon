@@ -218,6 +218,17 @@ impl CredentialStore {
         }
     }
 
+    /// Name the slot a login would read without opening it or exposing a
+    /// bearer. The CLI uses this to give a missing-login error a repairable
+    /// file path (or the exact keyring slot on a desktop backend).
+    pub fn expected_location(&self, key: &CredentialKey) -> Option<String> {
+        match self.backend {
+            Backend::File => Some(format!("file {}", self.file_path(key).display())),
+            Backend::Keyring => Some(format!("keyring slot {}", key.storage_id())),
+            Backend::Env => None,
+        }
+    }
+
     /// Load the credential for `key`, or `Ok(None)` if none is stored
     /// (**cold-read**: absence is not an error — parse, don't validate).
     ///

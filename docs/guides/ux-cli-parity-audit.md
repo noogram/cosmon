@@ -2,6 +2,19 @@
 
 # CLI and UI parity audit
 
+## Remote client upgrades (issue #149)
+
+| Capability | Operator terminal | Native UI | Remote service |
+|---|---|---|---|
+| Reinstall without losing a login or profile edits | `install.sh` uses `cosmon-remote config init --report-created` and applies server defaults only to a newly created profile. `cosmon-remote --version` shows the source commit, and a missing-login error names the selected profile and expected credential location when derivable. | No equivalent installer or credential view audited | Serves the installer and binary; credential files remain on the client machine |
+
+The credential key serialization is unchanged across the available source
+history. The upgrade loss came from replacing the profile that carries the
+issuer and client ID needed to address that key. No credential migration is
+needed for this failure. An already reset profile lacks those inputs and must
+be reconnected with `cosmon-remote login`; its credential filename cannot be
+reconstructed from the one-way digest alone.
+
 ## Planned child model routing (issue #139)
 
 | Capability | CLI | Native UI | Remote service |

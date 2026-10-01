@@ -3,7 +3,7 @@ Profile and deployment config
 Usage: cosmon-remote config [OPTIONS] <COMMAND>
 
 Commands:
-  init  Initialise a new profile with just a host URL — the operator then sets `sub`, `aud`, `oidc-url` (or `install.sh` does it server-side via templating)
+  init  Initialise a profile with a host URL if absent. An existing profile, including its login and operator settings, is preserved
   set   Set a single config key
   show  Show the resolved profile (the values used for API calls)
   use   Switch the default profile
