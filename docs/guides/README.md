@@ -24,6 +24,7 @@ One-line map of the how-to guides in `docs/guides/`. These are goal-oriented rec
 - [cs-thin test coverage rapport](cs-thin-test-coverage.md)
 - [Curate-patrol ledger — append+flush+BLAKE3-seal discipline](curate-ledger.md)
 - [Curate-patrol — operator-surface channel](curate-surface-channel.md)
+- [Sign the macOS daemon supervisor](daemon-supervisor-signing.md)
 - [Deployment Scenarios — Noogram & cosmon postures](deployment-scenarios.md)
 - [Fail-closed injection — `G_inject` / `assert-hits`](fail-closed-injection.md)
 - [You are not a router. You are a gardener.](gardener-not-router.md)

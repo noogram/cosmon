@@ -21,6 +21,11 @@
   install script (scripts/install-daemon-supervisor.sh) substitutes them
   at load time so this template stays portable across machines.
 
+  The binary must carry identifier com.cosmon.daemon-supervisor under a
+  persistent signing certificate for Full Disk Access consent to survive
+  rebuilds. See docs/guides/daemon-supervisor-signing.md. Installing this
+  plist does not grant TCC access.
+
   KeepAlive = true: if the supervisor itself crashes, launchd respawns
   it. The 5s throttle window keeps a crash loop from hammering launchd.
 

@@ -25,7 +25,7 @@ install:
     install target/release/cs ~/.local/bin/cs
     install target/release/cs-api ~/.local/bin/cs-api
     install target/release/cosmon-remote ~/.local/bin/cosmon-remote
-    install target/release/cosmon-daemon-supervisor ~/.local/bin/cosmon-daemon-supervisor
+    scripts/install-daemon-supervisor.sh install-binary target/release/cosmon-daemon-supervisor
     mkdir -p ~/.local/share/man/man1
     install -m 644 crates/cosmon-cli/man/cs.1 ~/.local/share/man/man1/cs.1
     @just install-hooks
@@ -251,6 +251,7 @@ quick:
     ./scripts/no-pilot-env.sh ./scripts/source-provenance.test.sh
     ./scripts/no-pilot-env.sh ./scripts/curate-all-galaxies.test.sh
     ./scripts/no-pilot-env.sh ./scripts/install-hooks.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/install-daemon-supervisor.test.sh
     ./scripts/no-pilot-env.sh ./tools/cosmon-skill/install.test.sh
     ./scripts/no-pilot-env.sh ./scripts/check-fixture-independence.sh
     ./scripts/no-pilot-env.sh ./scripts/check-fixture-independence.test.sh

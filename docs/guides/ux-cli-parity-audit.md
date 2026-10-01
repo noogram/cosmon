@@ -2,6 +2,17 @@
 
 # CLI and UI parity audit
 
+## Supervisor code-signing diagnosis
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Detect supervisor signatures that lose macOS TCC consent after rebuilds | `cs doctor supervision` reads the installed binary's identifier and designated requirement; its warning is also included in `cs doctor security` | No native diagnostic audited | No remote diagnostic audited |
+
+The install script pins `com.cosmon.daemon-supervisor`. A persistent local
+certificate is also required because ad-hoc signatures remain tied to the
+binary's content hash. The doctor probe is read-only and does not grant Full
+Disk Access or restart the LaunchAgent.
+
 ## Planned child model routing (issue #139)
 
 | Capability | CLI | Native UI | Remote service |
