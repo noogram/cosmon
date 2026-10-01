@@ -319,3 +319,14 @@ establishes the outcome. The lock excludes cooperating writers only.
 Claims in the implementation status section about facts, epoch monotonicity
 and replay are corrected by the units that implement them, when they have
 evidence, and not before.
+
+## Amendment (2026-10-01, issue #148) — current-key consent for root rotation
+
+The admin credential may install the first public signing root. Replacing an
+installed root over the API also requires a signature by its current private
+key over the tenant, prior root digest, new root digest and next epoch. The
+signature is checked while applying the compare-and-set under the trunk lock.
+Thus possession of the admin credential alone cannot replace the root and
+mint grants under a new key. A lost current key is recovered only by a local
+server-host reset, with a durable intent record. The unattended service still
+has no private signing key.

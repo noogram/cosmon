@@ -1134,6 +1134,7 @@ dependencies = [
  "chrono",
  "cosmon-core",
  "cosmon-hash",
+ "cosmon-minisign-testkit",
  "cosmon-notary",
  "cosmon-state",
  "fs2",

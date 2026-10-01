@@ -433,9 +433,20 @@ harvest immediately, but restoring the old root and epoch could make an
 unexpired grant usable again, so bump the epoch before re-enabling it. To
 rotate the public root, read the current
 `key_fingerprint` from status and run `harvest init --rotate-from <fingerprint>`;
-the compare-and-set increments the epoch and invalidates older grants. A
+the operator device signs the tenant, old and new root digests, and next epoch
+with the current private key before uploading the new public root. If that key
+is outside the default directory, pass `--current-key-file <old-key>`;
+`--key-file <new-key>` selects the replacement. The compare-and-set increments
+the epoch and invalidates older grants. A
 second `init` with the same key is idempotent. Protect the old private key
 according to your retention policy; never copy it into the service.
+
+If the current private key is lost, API rotation cannot proceed. On the server
+host, run `cs harvest-authority configure --policy sealed --public-key-file
+<new-public-key> --epoch <current-epoch-plus-one> --local-reset`. Local recovery
+writes an append-only intent to `.cosmon/harvest-root-resets.log` before
+replacing authority files. Review that record and the resulting root and epoch;
+the HTTP admin route has no local reset option.
 
 An explicitly configured `cs` binary executor cannot perform an explicit
 remote harvest: `done` returns `harvest_effect_unsupported`. Remove that

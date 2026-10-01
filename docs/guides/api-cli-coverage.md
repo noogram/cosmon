@@ -101,7 +101,7 @@ advance → terminate → infrastructure → introspection.
 | `cs migrate` | NO | — | Schema/state migration; operator-only. |
 | `cs harvest` | NO | — | Scheduler-only (cron-driven); not a remote act. |
 | `cs harvest-authority` | NO | — | Local parent command; configure, status, challenge and import have separate classifications and routes below. |
-| `cs harvest-authority configure` | ADMIN | `PUT /v1/admin/noyaux/{noyau}/harvest-authority` | Host-sealed compare-and-set of public root, epoch and explicit remote policy; no tenant scope can administer trust. |
+| `cs harvest-authority configure` | ADMIN | `PUT /v1/admin/noyaux/{noyau}/harvest-authority` | Local root recovery uses `--local-reset` and leaves a durable record; API rotation needs the current-key signature in addition to the host admin credential. No tenant scope can administer trust. |
 | `cs harvest-authority status` | V1 | `GET /v1/harvest/status` | Tenant status requires read or harvest scope and reports effective policy and provenance. |
 | `cs harvest-authority challenge` | V1 | `POST /v1/harvest/challenge` | Builds current canonical grant bytes, without signing or installation. |
 | `cs harvest-authority import` | V1 | `POST /v1/harvest/grants` | Verifies an external signature against current locked facts and installs without spending. |

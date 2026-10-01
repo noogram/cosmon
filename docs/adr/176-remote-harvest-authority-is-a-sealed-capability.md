@@ -932,3 +932,14 @@ loses an option it uses today.
 **§8 falsifier 6 (arming-time `base_not_fast_forward`)** stays recorded as
 unmet until the grant challenge route exists; that route is where an
 arming-time check can live, and the unit adding it owns the decision.
+
+## 14 · Amendment (2026-10-01, issue #148) — signed root succession
+
+The sealed profile's admin route may install its first public root with the
+admin credential. A later replacement requires a current-key signature over
+the canonical tenant, prior root digest, new root digest and new epoch. A
+missing or invalid signature is a typed refusal, and stale compare-and-set
+expectations refuse replay. The operator-side client invokes the external
+signer with the old private key; it sends only the signature and the new
+public key. Loss of the old key requires a server-host-only local reset with
+an append-only intent record. No HTTP request can select that path.

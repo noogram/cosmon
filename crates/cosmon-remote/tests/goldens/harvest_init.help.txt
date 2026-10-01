@@ -1,4 +1,4 @@
-Generate an encrypted signer key and install only its public half
+Install a public root; rotation requires a signature from the current key
 
 Usage: cosmon-remote harvest init [OPTIONS] --admin-token-file <ADMIN_TOKEN_FILE>
 
@@ -15,5 +15,7 @@ Options:
           Store a key on a selected operator device instead of the default directory
       --token <TOKEN>
           Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+      --current-key-file <CURRENT_KEY_FILE>
+          Select the current signer for rotation when it is on another device
   -h, --help
           Print help

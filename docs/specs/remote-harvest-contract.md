@@ -261,7 +261,7 @@ hints are never executable strings supplied by the server.
 
 | Route | Authorization |
 |---|---|
-| `PUT /v1/admin/noyaux/{noyau}/harvest-authority` | admin credential only; compare-and-set of policy, public root and epoch; no private-key field, no signing |
+| `PUT /v1/admin/noyaux/{noyau}/harvest-authority` | admin credential; compare-and-set of policy, public root and epoch; replacing an installed root also requires `rotation_signature` from the current key over the tenant, old and new root digests, and next epoch; no private-key field |
 | `GET /v1/harvest/status` | tenant admission plus `read` or harvest scope (legacy `write` implies `read`) |
 | `POST /v1/harvest/challenge` | tenant admission plus harvest scope, or legacy R2 `write`; returns facts and canonical bytes, creates no authority |
 | `POST /v1/harvest/grants` | same as challenge; verifies before atomic installation; does not consume |
@@ -277,7 +277,7 @@ deprecated alias for `done --if-completed` and has callers.
 | Command | Effect |
 |---|---|
 | `harvest configure --policy scoped\|sealed\|disabled --admin-token-file <f>` | selects the policy through the admin route (compare-and-set) |
-| `harvest init --admin-token-file <f>` | generates a fresh key through the external signer, installs only the public half, selects `sealed`; idempotent for an identical setup; a different existing key needs an explicit rotation naming the old fingerprint |
+| `harvest init --admin-token-file <f>` | generates a fresh key through the external signer, installs only the public half, selects `sealed`; idempotent for an identical setup; rotation names the old fingerprint and signs the canonical rotation statement with the current key |
 | `harvest grant --molecule <id> \| --mission <id> [--expires-in 1h \| --no-expiry]` | fetches the challenge, rebuilds the canonical bytes locally and compares, shows them, signs, uploads; reports an installation receipt, never a merge |
 | `harvest grant --export <file> \| --sign <file> \| --import <file>` | offline issuance; the three modes are mutually exclusive |
 | `harvest status [--molecule <id>]` | effective policy and provenance (JSON fields `policy` and `provenance`, values as in §2), required scopes, executor support, key fingerprint, epoch, grant validity; writes nothing |

@@ -29,6 +29,7 @@ thiserror.workspace = true
 toml_edit.workspace = true
 
 [dev-dependencies]
+cosmon-minisign-testkit.workspace = true
 tempfile.workspace = true
 
 [lints]
