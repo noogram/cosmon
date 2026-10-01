@@ -61,6 +61,7 @@ use super::findings::{Finding, ProbeReport, Severity};
 use super::Context;
 
 const PROBE: &str = "supervision";
+const SUPERVISOR_IDENTIFIER: &str = "com.cosmon.daemon-supervisor";
 
 /// The macOS LaunchAgent label prefix this house uses.
 const LABEL_PREFIX: &str = "com.you.";
@@ -326,6 +327,84 @@ fn scan_agents(dirs: &[PathBuf]) -> Vec<InstalledAgent> {
     agents
 }
 
+/// Warn when the installed supervisor cannot keep a stable TCC designated
+/// requirement across rebuilds. A pinned identifier alone is insufficient
+/// for an ad-hoc signature: its requirement still contains a cdhash.
+fn supervisor_signature_findings(binary: &Path, details: &str, requirement: &str) -> Vec<Finding> {
+    let identifier = details
+        .lines()
+        .find_map(|line| line.strip_prefix("Identifier="));
+    let content_derived = identifier.is_some_and(|id| {
+        id.starts_with("cosmon_daemon_supervisor-")
+            && id.rsplit_once('-').is_some_and(|(_, suffix)| {
+                suffix.len() >= 8 && suffix.chars().all(|c| c.is_ascii_hexdigit())
+            })
+    });
+    let mut findings = Vec::new();
+    if identifier != Some(SUPERVISOR_IDENTIFIER) {
+        let reason = if content_derived {
+            "content-derived code-signing identifier"
+        } else {
+            "unexpected or missing code-signing identifier"
+        };
+        findings.push(Finding::new(PROBE, Severity::Warning, format!("supervisor has a {reason}"))
+            .with_path(binary)
+            .with_remediation("Reinstall with `just install` after configuring the Cosmon Local Signing identity; then grant Full Disk Access to the installed supervisor once."));
+    }
+    if requirement.contains("cdhash") {
+        findings.push(Finding::new(PROBE, Severity::Warning,
+            "supervisor's ad-hoc signature binds TCC consent to its content hash")
+            .with_path(binary)
+            .with_remediation("Configure a persistent Cosmon Local Signing certificate and reinstall with `just install` before granting Full Disk Access."));
+    }
+    findings
+}
+
+/// Inspect the installed macOS supervisor without changing its signature or
+/// its launchd state. Missing installations on development machines are not
+/// findings; an installed binary whose signature cannot be read is.
+fn scan_supervisor_signature() -> (usize, Vec<Finding>) {
+    if !cfg!(target_os = "macos") {
+        return (0, Vec::new());
+    }
+    let binary =
+        PathBuf::from(shellexpand_home("~/.local/bin/cosmon-daemon-supervisor").into_owned());
+    scan_supervisor_signature_at(&binary)
+}
+
+fn scan_supervisor_signature_at(binary: &Path) -> (usize, Vec<Finding>) {
+    if !binary.exists() {
+        return (0, Vec::new());
+    }
+    let inspect = |args: &[&str]| Command::new("codesign").args(args).arg(binary).output();
+    let details = inspect(&["-dv"]);
+    let requirement = inspect(&["-dr", "-"]);
+    match (details, requirement) {
+        (Ok(details), Ok(requirement))
+            if details.status.success() && requirement.status.success() =>
+        {
+            let details = String::from_utf8_lossy(&details.stderr);
+            let requirement = String::from_utf8_lossy(&requirement.stderr);
+            (
+                1,
+                supervisor_signature_findings(binary, &details, &requirement),
+            )
+        }
+        _ => (
+            1,
+            vec![Finding::new(
+                PROBE,
+                Severity::Warning,
+                "could not inspect the installed supervisor's code signature",
+            )
+            .with_path(binary)
+            .with_remediation(
+                "Reinstall with `just install` and run `cs doctor supervision` again.",
+            )],
+        ),
+    }
+}
+
 /// Run the supervision probe with the given (possibly overridden) inputs.
 ///
 /// # Errors
@@ -346,9 +425,20 @@ pub fn scan(args: &Args) -> anyhow::Result<ProbeReport> {
 
     let mut report = ProbeReport::new(PROBE);
     report.scanned = agents.len();
+    // Fixture path overrides scope this probe to the supplied roster and
+    // LaunchAgents. The default operator scan also inspects the installed
+    // supervisor binary.
+    let (signature_scanned, mut signature_findings) =
+        if args.patrols.is_none() && args.daemons.is_none() && args.launch_agents_dir.is_none() {
+            scan_supervisor_signature()
+        } else {
+            (0, Vec::new())
+        };
+    report.scanned += signature_scanned;
     report
         .findings
         .append(&mut detect_conflicts(&roster, &agents));
+    report.findings.append(&mut signature_findings);
     report.findings.append(&mut warnings);
     Ok(report)
 }
@@ -365,6 +455,66 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warns_for_content_derived_linker_signature() {
+        let findings = supervisor_signature_findings(
+            Path::new("/tmp/cosmon-daemon-supervisor"),
+            "Executable=/tmp/cosmon-daemon-supervisor\nIdentifier=cosmon_daemon_supervisor-61172453d68c7450\nflags=0x20002(adhoc,linker-signed)\n",
+            "designated => cdhash H\"1234\"",
+        );
+        assert_eq!(findings.len(), 2);
+        assert!(findings[0].title.contains("content-derived"));
+        assert!(findings[1].title.contains("content hash"));
+    }
+
+    #[test]
+    fn pinned_ad_hoc_identifier_still_warns() {
+        let findings = supervisor_signature_findings(
+            Path::new("/tmp/cosmon-daemon-supervisor"),
+            "Identifier=com.cosmon.daemon-supervisor\nflags=0x2(adhoc)\n",
+            "designated => cdhash H\"1234\"",
+        );
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].title.contains("content hash"));
+    }
+
+    #[test]
+    fn stable_certificate_requirement_is_clear() {
+        let findings = supervisor_signature_findings(
+            Path::new("/tmp/cosmon-daemon-supervisor"),
+            "Identifier=com.cosmon.daemon-supervisor\n",
+            "designated => identifier \"com.cosmon.daemon-supervisor\" and certificate leaf = H\"1234\"",
+        );
+        assert!(findings.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn linker_signed_fixture_warns_without_touching_installed_supervisor() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("fixture.rs");
+        // Cargo links into target/debug/deps/<crate>-<hash> before copying
+        // the binary to its install name. Reproduce that linker-signed shape.
+        let linked = dir.path().join("cosmon_daemon_supervisor-61172453d68c7450");
+        let binary = dir.path().join("cosmon-daemon-supervisor");
+        std::fs::write(&source, "fn main() {}\n").unwrap();
+        let status = Command::new("rustc")
+            .args(["--crate-name", "cosmon_daemon_supervisor"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&linked)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::copy(&linked, &binary).unwrap();
+        let (scanned, findings) = scan_supervisor_signature_at(&binary);
+        assert_eq!(scanned, 1);
+        assert!(
+            findings.iter().any(|f| f.title.contains("content-derived")),
+            "{findings:?}"
+        );
+    }
 
     fn patrol(name: &str, binary: &str, enabled: bool) -> SupervisedBinary {
         SupervisedBinary {

@@ -2,6 +2,8 @@
 #
 # Copy to ~/.config/cosmon/daemons.toml, then install the LaunchAgent with:
 #   scripts/install-daemon-supervisor.sh install
+# Before granting Full Disk Access to the supervisor on macOS, follow
+# docs/guides/daemon-supervisor-signing.md to provision its signing identity.
 #
 # The supervisor hot-reloads on edits via `notify` (debounce ≈ 200 ms), so
 # you never need to unload/reload the agent to change this file — just

@@ -22,6 +22,7 @@
 #   scripts/install-daemon-supervisor.sh reload       — unload (if loaded) then install
 #   scripts/install-daemon-supervisor.sh status       — show launchctl state
 #   scripts/install-daemon-supervisor.sh print        — print rendered plist to stdout
+#   scripts/install-daemon-supervisor.sh install-binary <source> — copy and sign binary; never restart
 #
 # Exit codes:
 #   0 — success
@@ -31,6 +32,9 @@
 set -euo pipefail
 
 LABEL="com.cosmon.daemon-supervisor"
+SIGNING_IDENTITY="${COSMON_SUPERVISOR_SIGNING_IDENTITY:-Cosmon Local Signing}"
+BIN_DIR="${COSMON_SUPERVISOR_BIN_DIR:-${HOME}/.local/bin}"
+BIN="${BIN_DIR}/cosmon-daemon-supervisor"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="${SCRIPT_DIR}/launchd/${LABEL}.plist"
 TARGET_DIR="${HOME}/Library/LaunchAgents"
@@ -62,11 +66,45 @@ loaded() {
     launchctl list 2>/dev/null | awk -v lbl="$LABEL" '$3 == lbl { found=1 } END { exit !found }'
 }
 
+sign_binary() {
+    local path="${1:-$BIN}"
+    [[ -f "$path" ]] || die "binary not found: $path"
+    if [[ "$(uname -s)" != Darwin ]]; then
+        echo "install-daemon-supervisor: installed $path (code signing applies only on macOS)"
+        return 0
+    fi
+    command -v codesign >/dev/null || die "codesign is required to install the supervisor"
+    if security find-identity -p codesigning 2>/dev/null | grep -qF "\"${SIGNING_IDENTITY}\""; then
+        codesign --force --sign "$SIGNING_IDENTITY" --identifier "$LABEL" "$path" || return 1
+        echo "install-daemon-supervisor: signed $path with $SIGNING_IDENTITY ($LABEL)"
+    else
+        codesign --force --sign - --identifier "$LABEL" "$path" || return 1
+        echo "install-daemon-supervisor: WARNING: $SIGNING_IDENTITY is unavailable; ad-hoc signing uses a content-hash requirement, so TCC grants will not survive rebuilds" >&2
+    fi
+    local signature
+    signature="$(codesign -dv "$path" 2>&1)" || die "could not inspect signature: $path"
+    grep -Fqx "Identifier=$LABEL" <<< "$signature" || die "installed binary has the wrong code-signing identifier"
+}
+
+cmd_install_binary() {
+    [[ $# -eq 1 ]] || die "install-binary requires one source path"
+    [[ -f "$1" ]] || die "binary not found: $1"
+    mkdir -p "$BIN_DIR"
+    local staged
+    staged="$(mktemp "${BIN_DIR}/.cosmon-daemon-supervisor.XXXXXX")"
+    if ! install "$1" "$staged" || ! sign_binary "$staged" || ! mv -f "$staged" "$BIN"; then
+        rm -f "$staged"
+        die "could not install signed supervisor binary"
+    fi
+}
+
 cmd_install() {
     mkdir -p "$TARGET_DIR" "$LOG_DIR"
 
+    cmd_install_binary "$BIN"
+
     if loaded; then
-        echo "install-daemon-supervisor: $LABEL already loaded — use 'reload' to replace it"
+        echo "install-daemon-supervisor: $LABEL already loaded; on-disk signature is ready, but the running process was not restarted"
         return 0
     fi
 
@@ -131,6 +169,7 @@ main() {
         reload)    shift; cmd_reload "$@" ;;
         status)    shift; cmd_status "$@" ;;
         print)     shift; cmd_print "$@" ;;
+        install-binary) shift; cmd_install_binary "$@" ;;
         -h|--help|help) usage 0 ;;
         "")        usage 1 ;;
         *)         echo "install-daemon-supervisor: unknown command: $1" >&2; usage 1 ;;
