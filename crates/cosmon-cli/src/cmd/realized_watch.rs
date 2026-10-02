@@ -319,6 +319,7 @@ fn park_dead_dispatch(
     let Some(worker) = mol.worker().cloned() else {
         return false;
     };
+    let session = mol.teardown_session();
 
     // Mark the worker dead first. `auto_freeze_orphans` reads its verdict off
     // the fleet (`desired == Stopped`), so this write is not cosmetic — it is
@@ -335,9 +336,10 @@ fn park_dead_dispatch(
     }
     let _ = cosmon_state::event_log::emit_one(
         cosmon_state::event_log::resolve_events_log_path(state_dir),
-        cosmon_core::event_v2::EventV2::WorkerKilled {
+        cosmon_core::event_v2::EventV2::WorkerSessionMissing {
             worker_id: worker,
-            reason: "session gone — parked by the dispatch watcher".to_owned(),
+            session,
+            observed_by: "dispatch_watcher".to_owned(),
         },
         None,
     );
@@ -723,6 +725,36 @@ mod tests {
             store.load_fleet().unwrap().workers[&worker].desired,
             cosmon_core::worker::DesiredState::Running,
             "and the corpse must stop reading `active` to `cs peek`"
+        );
+
+        // Issue #155 — the event states what was observed (the session is
+        // missing), not an action. Nothing was killed here: a renamed session
+        // looks identical to this one from the outside.
+        let events = cosmon_state::event_log::read_all(
+            &cosmon_state::event_log::resolve_events_log_path(&state_dir),
+        )
+        .unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.event, EventV2::WorkerKilled { .. })),
+            "parking a molecule whose session is missing must not claim a kill"
+        );
+        let missing: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                EventV2::WorkerSessionMissing {
+                    worker_id,
+                    session,
+                    observed_by,
+                } => Some((worker_id.clone(), session.clone(), observed_by.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            missing,
+            vec![(worker, "worker-1".to_owned(), "dispatch_watcher".to_owned())],
+            "exactly one observation, naming the session that was not found"
         );
     }
 

@@ -62,6 +62,11 @@ pub enum WhisperError {
         observed: String,
         allowed: Vec<String>,
     },
+    /// No tmux session of the recorded name exists on the project socket.
+    /// Distinct from [`Self::SessionMismatch`]: nothing was observed in a
+    /// pane, because there is no pane to observe (the session was never
+    /// created, has been killed, or was renamed). Exit 6.
+    SessionNotFound { session: String, socket: String },
     /// Too soon after the previous whisper. Exit 4.
     RateLimited {
         last_ts: DateTime<Utc>,
@@ -94,6 +99,11 @@ impl std::fmt::Display for WhisperError {
             } => write!(
                 f,
                 "session {session} has pane_current_command={observed}; expected one of {allowed:?}",
+            ),
+            Self::SessionNotFound { session, socket } => write!(
+                f,
+                "session not found: no tmux session named {session} on socket {socket} \
+                 (it may have been killed or renamed; check `tmux -L {socket} ls`)"
             ),
             Self::RateLimited {
                 last_ts,
@@ -138,6 +148,7 @@ impl WhisperError {
             Self::SessionMismatch { .. } => 3,
             Self::RateLimited { .. } => 4,
             Self::DialogueBlocked { .. } => 5,
+            Self::SessionNotFound { .. } => 6,
         }
     }
 }
@@ -381,6 +392,7 @@ fn fail(ctx: &Context, err: &WhisperError) -> anyhow::Result<()> {
     let kind = match &err {
         WhisperError::MessageTooLarge { .. } => "message_too_large",
         WhisperError::SessionMismatch { .. } => "session_mismatch",
+        WhisperError::SessionNotFound { .. } => "session_not_found",
         WhisperError::RateLimited { .. } => "rate_limited",
         WhisperError::DialogueBlocked { .. } => "dialogue_blocked",
     };
@@ -448,6 +460,18 @@ fn check_pane_signature(
     socket: &str,
     session_name: &str,
 ) -> Result<(), WhisperError> {
+    // A missing session is its own refusal: without this check an absent
+    // session surfaced as `pane_current_command=<missing>`, which reads as a
+    // pane that exists and runs something unexpected (issue #155).
+    if !cosmon_transport::TmuxBackend::new(socket)
+        .session_exists(session_name)
+        .unwrap_or(false)
+    {
+        return Err(WhisperError::SessionNotFound {
+            session: session_name.to_owned(),
+            socket: socket.to_owned(),
+        });
+    }
     let config_path = super::resolve_config_from_context(ctx);
     let registry = default_registry();
     // Whisper steers a *live interactive* worker — the two tmux-pane adapters

@@ -1016,6 +1016,23 @@ impl MoleculeData {
             .or(self.session_name.as_deref())
     }
 
+    /// The tmux session name teardown must address for this molecule.
+    ///
+    /// [`Self::tmux_session`] while a live process is recorded. After a
+    /// terminal transition ([`Self::release_process`], e.g. `cs collapse`)
+    /// that record and `session_name` are gone, but `assigned_worker` is kept
+    /// as a historical trace and equals the session name `cs tackle` chose
+    /// (the worker id *is* the session name). Falling back to it lets
+    /// `cs done` still find and kill a session left running after a collapse;
+    /// only a molecule that never had a worker falls back to its own id.
+    #[must_use]
+    pub fn teardown_session(&self) -> String {
+        self.tmux_session()
+            .map(str::to_owned)
+            .or_else(|| self.assigned_worker.as_ref().map(ToString::to_string))
+            .unwrap_or_else(|| self.id.to_string())
+    }
+
     /// Bind a fresh `MoleculeProcess` to this molecule and mirror
     /// the relevant fields on the legacy trio for backwards
     /// compatibility.
