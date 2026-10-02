@@ -188,9 +188,7 @@ fn report_missing_session_log_root(
     claude_projects_root: Option<&Path>,
 ) -> bool {
     let adapter = capture.last_adapter();
-    let Some(root) =
-        crate::energy_probe::session_log_root_for_adapter(adapter.as_deref(), claude_projects_root)
-    else {
+    let Some(root) = capture.session_log_root(adapter.as_deref(), claude_projects_root) else {
         // An adapter with no on-disk session log: nothing to miss.
         return false;
     };
