@@ -16,13 +16,14 @@ use clap::{Args as ClapArgs, Subcommand};
 use cosmon_core::advisory_attempt::AdvisorySeatId;
 use cosmon_core::id::MoleculeId;
 use cosmon_core::work_message::{
-    accept_consumption, deliverable, render_for_context, Admission, Confidentiality, Consumption,
-    ContextObservation, DeliveryAdapter, DeliveryOutcome, Disposition, MessageBudget, MessageKey,
-    ObserverId, Receipt, SeatDecl, SenderEvidence, Stage, Submission, WorkMessageStore,
-    WorkProjection, WorkScope, WORK_MESSAGE_SCHEMA_VERSION,
+    render_for_context, Admission, AdmittedWorkCaller, Confidentiality, ContextObservation,
+    DeliveryAdapter, Disposition, MessageBudget, MessageKey, SeatDecl, SenderEvidence,
+    WorkMessageStore, WorkProjection, WorkScope, WORK_MESSAGE_SCHEMA_VERSION,
 };
-use cosmon_hash::Hash;
 use cosmon_state::work_message::FileWorkMessageStore;
+use cosmon_state::work_ops::{
+    AcknowledgeOutcome, AcknowledgeRequest, PullRequest, SendRequest, WorkOperations,
+};
 use serde::{Deserialize, Serialize};
 
 use super::Context;
@@ -181,8 +182,9 @@ struct WorkRef {
 }
 
 struct Member {
-    seat: AdvisorySeatId,
+    caller: AdmittedWorkCaller,
     store: FileWorkMessageStore,
+    operations: WorkOperations,
     scope: WorkScope,
 }
 
@@ -348,13 +350,6 @@ fn write_private_ref(path: &Path, reference: &WorkRef) -> Result<()> {
     result
 }
 
-fn lock_work(ctx: &Context, owner: &MoleculeId) -> Result<fs::File> {
-    let path = molecule_dir(ctx, owner).join("work/work.lock");
-    let file = OpenOptions::new().read(true).write(true).open(path)?;
-    fs2::FileExt::lock_exclusive(&file)?;
-    Ok(file)
-}
-
 fn caller_member(ctx: &Context) -> Result<Member> {
     let supplied = std::env::var_os("COSMON_MOL_DIR")
         .map(PathBuf::from)
@@ -374,7 +369,8 @@ fn caller_member(ctx: &Context) -> Result<Member> {
         &fs::read(expected.join("work-ref.json"))
             .map_err(|_| refuse("caller has no declared work-ref.json"))?,
     )?;
-    let store = FileWorkMessageStore::new(existing_molecule_dir(ctx, &reference.owner_molecule)?);
+    let owner_dir = existing_molecule_dir(ctx, &reference.owner_molecule)?;
+    let store = FileWorkMessageStore::new(owner_dir.clone());
     let scope = store
         .load_scope()?
         .ok_or_else(|| refuse("work scope is not declared"))?;
@@ -385,8 +381,13 @@ fn caller_member(ctx: &Context) -> Result<Member> {
         ));
     }
     Ok(Member {
-        seat: reference.seat,
+        caller: AdmittedWorkCaller::new(
+            reference.owner_molecule,
+            reference.seat,
+            SenderEvidence::CallerEnvSameUid,
+        ),
         store,
+        operations: WorkOperations::new(owner_dir),
         scope,
     })
 }
@@ -401,26 +402,22 @@ fn send(ctx: &Context, args: &SendArgs) -> Result<()> {
         _ => return Err(refuse("choose exactly one of --file or --text")),
     };
     let now = Utc::now();
-    let submission = Submission {
+    let request = SendRequest {
         scope_revision: member
             .scope
             .revision()
             .map_err(|error| refuse(error.to_string()))?,
-        sender: member.seat,
         recipient: parse_seat(&args.to)?,
         key: args.key.as_deref().map(parse_key).transpose()?,
-        payload_digest: Hash::of_bytes(&bytes),
-        payload_bytes: bytes.len() as u64,
         sender_time: now,
         reply_to: args.reply_to.as_deref().map(parse_key).transpose()?,
         phase: args.phase.clone(),
         confidentiality: Confidentiality::Internal,
         ttl_secs: args.ttl,
-        sender_evidence: SenderEvidence::CallerEnvSameUid,
     };
     let result = member
-        .store
-        .submit(submission, &bytes, now)
+        .operations
+        .send(&member.caller, request, &bytes, now)
         .map_err(|error| refuse(error.to_string()))?;
     let (kind, envelope) = match result {
         Admission::Admit(envelope) => ("admitted", envelope),
@@ -452,47 +449,30 @@ fn projection(member: &Member) -> Result<WorkProjection> {
 
 fn inbox(ctx: &Context, args: &InboxArgs) -> Result<()> {
     let member = caller_member(ctx)?;
-    let _lock = (!args.peek)
-        .then(|| lock_work(ctx, &member.scope.owner))
-        .transpose()?;
     let now = Utc::now();
-    let projection = projection(&member)?;
-    let envelopes = deliverable(&projection, &member.seat, DeliveryAdapter::Pull, now);
-    let mut rendered = Vec::new();
-    for envelope in envelopes {
-        let payload = member.store.read_payload(envelope)?;
-        let block = render_for_context(envelope, &payload)?;
-        rendered.push((envelope, block));
-    }
-    if !args.peek {
-        for (envelope, _) in &rendered {
-            member.store.append_receipt(&Receipt::for_envelope(
-                envelope,
-                ObserverId::Adapter {
-                    adapter: DeliveryAdapter::Pull,
-                },
-                now,
-                Stage::DeliveryAttempted {
-                    adapter: DeliveryAdapter::Pull,
-                    mechanism: "cs work inbox".to_owned(),
-                    outcome: DeliveryOutcome::Submitted,
-                },
-            ))?;
-            member.store.append_receipt(&Receipt::for_envelope(
-                envelope,
-                ObserverId::Adapter {
-                    adapter: DeliveryAdapter::Pull,
-                },
-                now,
-                Stage::ContextDelivered {
-                    adapter: DeliveryAdapter::Pull,
-                    observation: ContextObservation::Unknown {
-                        reason: "tool stdout; model input not observable".to_owned(),
-                    },
-                },
-            ))?;
-        }
-    }
+    let messages = member.operations.pull(
+        &member.caller,
+        &PullRequest {
+            scope_revision: member
+                .scope
+                .revision()
+                .map_err(|error| refuse(error.to_string()))?,
+            adapter: DeliveryAdapter::Pull,
+            mechanism: "cs work inbox".to_owned(),
+            peek: args.peek,
+            context_observation: Some(ContextObservation::Unknown {
+                reason: "tool stdout; model input not observable".to_owned(),
+            }),
+        },
+        now,
+    )?;
+    let rendered = messages
+        .iter()
+        .map(|message| {
+            render_for_context(&message.envelope, &message.payload)
+                .map(|block| (&message.envelope, block))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     if ctx.json {
         let items: Vec<_> = rendered
             .iter()
@@ -511,14 +491,6 @@ fn inbox(ctx: &Context, args: &InboxArgs) -> Result<()> {
 
 fn ack(ctx: &Context, args: &AckArgs) -> Result<()> {
     let member = caller_member(ctx)?;
-    let _lock = lock_work(ctx, &member.scope.owner)?;
-    if args
-        .note
-        .as_ref()
-        .is_some_and(|note| note.len() as u64 > member.scope.budget.max_payload_bytes)
-    {
-        return Err(refuse("consumption note exceeds the work payload limit"));
-    }
     let key = parse_key(&args.key)?;
     let reply = args.reply.as_deref().map(parse_key).transpose()?;
     let disposition = if args.considered {
@@ -528,57 +500,36 @@ fn ack(ctx: &Context, args: &AckArgs) -> Result<()> {
     } else {
         Disposition::Rejected
     };
-    let note_digest = args
-        .note
-        .as_ref()
-        .map(|note| Hash::of_bytes(note.as_bytes()));
-    let outcome = accept_consumption(
-        &projection(&member)?,
-        &member.seat,
-        &key,
-        disposition,
-        reply,
-        note_digest,
-        Utc::now(),
-    )
-    .map_err(|error| refuse(error.to_string()))?;
+    let projected = projection(&member)?;
+    let payload_digest = projected
+        .envelopes
+        .get(&key)
+        .ok_or_else(|| refuse(format!("no envelope with key {key}")))?
+        .envelope
+        .payload_digest;
+    let outcome = member
+        .operations
+        .acknowledge(
+            &member.caller,
+            AcknowledgeRequest {
+                scope_revision: member
+                    .scope
+                    .revision()
+                    .map_err(|error| refuse(error.to_string()))?,
+                key: key.clone(),
+                payload_digest,
+                disposition,
+                reply,
+                note: args.note.as_ref().map(|note| note.as_bytes().to_vec()),
+            },
+            Utc::now(),
+        )
+        .map_err(|error| refuse(error.to_string()))?;
     match outcome {
-        Consumption::Record(receipt) => {
-            if let (Some(note), Some(digest)) = (&args.note, note_digest) {
-                save_note(&member.scope.owner, ctx, &digest, note)?;
-            }
-            member.store.append_receipt(&receipt)?;
+        AcknowledgeOutcome::Recorded(_) => {
             println!("{key} consumed: {disposition:?}");
         }
-        Consumption::Duplicate(_) => println!("{key} already consumed"),
-    }
-    Ok(())
-}
-
-fn save_note(owner: &MoleculeId, ctx: &Context, digest: &Hash, note: &str) -> Result<()> {
-    let dir = molecule_dir(ctx, owner).join("work/notes");
-    fs::create_dir_all(&dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-    }
-    let path = dir.join(digest.to_hex());
-    if path.exists() {
-        if Hash::of_bytes(&fs::read(path)?) != *digest {
-            return Err(refuse("existing consumption note differs from its digest"));
-        }
-    } else {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(path)?;
-        file.write_all(note.as_bytes())?;
-        file.sync_all()?;
+        AcknowledgeOutcome::Duplicate => println!("{key} already consumed"),
     }
     Ok(())
 }

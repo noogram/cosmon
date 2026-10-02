@@ -263,6 +263,7 @@ mod tests {
         store
             .submit(
                 Submission {
+                    scope_owner: scope.owner.clone(),
                     scope_revision: scope.revision().expect("revision"),
                     sender: sender_seat,
                     recipient: recipient_seat,
