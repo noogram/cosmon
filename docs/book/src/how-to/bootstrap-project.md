@@ -70,7 +70,7 @@ cs init --soft --template rust    # cargo-based conventions
 
 `--soft` writes a single small file any agent can read, and creates **no**
 `.cosmon/`: no runtime, no state. Use it when you want an agent to follow the
-house style but do not need cosmon to track molecules there yet.
+house style without asking cosmon to track molecules there yet.
 
 ## Upgrading an existing project
 

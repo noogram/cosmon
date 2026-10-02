@@ -1,6 +1,6 @@
 # Update and roll back cosmon
 
-> **One line.** Updating and rolling back are the same gesture: run the
+> Updating and rolling back use the same command: run the
 > installer (or `brew`) again, naming the release you want, then check which
 > binaries your shell now finds. Binaries and project state are separate things;
 > this page covers the binaries and says where the state boundary lies.
@@ -21,8 +21,8 @@ Note both paths, both versions, and the route that put them there (script,
 Homebrew, or a source build). Two installations can coexist, and a shell may
 cache an old path: if a version is not the one you just installed, run
 `hash -r` (or open a new terminal) and compare `command -v` with the install
-directory. A missing `cosmon-remote` is a finding, not a sign that the
-installation is current.
+directory. A missing `cosmon-remote` indicates an incomplete installation and
+does not establish that the installation is current.
 
 ## 2. Prepare
 

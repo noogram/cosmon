@@ -14,7 +14,7 @@ tool for this is a small set of **temperature tags** you attach to pending work.
 | Tag | Meaning |
 |-----|---------|
 | `temp:hot` 🔥 | Actionable now: tackle soon; often unblocks other work. |
-| `temp:warm` 🌡️ | Valid, not urgent: fine to park on the shelf. |
+| `temp:warm` 🌡️ | Valid and non-urgent: fine to park on the shelf. |
 | `temp:cold` ❄️ | Interesting but deprioritised: revisit in a later cycle. |
 | `temp:frozen` 🧊 | Blocked on an external decision or a missing prerequisite. |
 
@@ -42,7 +42,7 @@ Add `--json` to feed the actionable set into a script.
 
 - **Every pending molecule older than ~48h should carry a `temp:*` tag.** If it
   has none, either tag it or `cs collapse` it with a reason. An untagged, aging
-  pending is a bug in your backlog, not a neutral state.
+  pending is a backlog bug and requires a decision.
 - **Drop the tag when you tackle it.** A hot molecule you have started is no
   longer on the shelf; it is in motion. If it bounces back to pending (a
   revision), re-tag it.
@@ -50,7 +50,8 @@ Add `--json` to feed the actionable set into a script.
   lands, re-tag it `temp:hot` or `temp:warm` and consider tackling it.
 - **Decomposition auto-tags its children.** Any workflow that nucleates child
   molecules should immediately tag each child `temp:warm`, so no child is ever
-  born invisible. The periodic sweep is a safety net, not the primary mechanism.
+  born invisible. The periodic sweep is only a safety net; decomposition should
+  apply the tag directly.
 
 ## Periodic hygiene
 

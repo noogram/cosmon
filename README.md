@@ -1,11 +1,11 @@
 # cosmon
 
 > **Noogram is an open, federated system for running long AI-agent missions
-> inside your own perimeter — every step kept as plain files you own.** Its
+> inside your own perimeter, with every step kept as plain files you own.** Its
 > kernel, **cosmon**, is a stateless CLI that gives each agent an identity, a
 > lifecycle, and crash-recovery.
 
-[**noogram.org**](https://noogram.org) — home · [**docs.noogram.org**](https://docs.noogram.org) — documentation
+[**noogram.org**](https://noogram.org) (home) · [**docs.noogram.org**](https://docs.noogram.org) (documentation)
 
 Cosmon is the open-source kernel distributed with Noogram. Its command-line
 tool, `cs`, runs multi-step work across several agents and models while keeping
@@ -14,7 +14,7 @@ on its own to run several agents on one codebase.
 
 ## What it looks like
 
-`cs peek` is the observation portal — a full-screen view of the fleet where
+`cs peek` is the observation portal: a full-screen view of the fleet where
 `j/k` moves between workers, `p` drops into a worker's live terminal, and
 `b/l/e/s` show its briefing, log, events, and result. Its non-interactive
 sibling, `cs ensemble`, prints the same state as plain text:
@@ -40,16 +40,16 @@ Ensemble: 4 workers, 6 molecules (1 pending, 0 queued, 3 running)
 
 **Crash recovery, concretely.** A worker dies, or you reboot the machine
 mid-run. Its state is already on disk, so `cs tackle` puts a fresh worker back on
-the same molecule and it resumes from the last recorded step — nothing re-run
+the same molecule and it resumes from the last recorded step. Nothing is re-run
 from scratch, no lost thread. That is the one behaviour to keep in mind while
 reading the rest.
 
 Cosmon is one command-line tool, `cs`. Each command runs, writes to files on
 disk, and exits. The local workflow has no database server or scheduler to
 operate. (`cs init` does create a local `.cosmon/registry.sqlite`: it is a
-gitignored, derived index rebuilt from the JSON files on demand — a cache, not
-the source of truth for molecule state and history, which stay in `.cosmon/`
-JSON and git.) That lets a small team — three to ten agents — add it to an existing
+gitignored, derived index rebuilt from the JSON files on demand. It is a cache;
+the source of truth for molecule state and history remains in `.cosmon/` JSON
+and git.) That lets a small team of three to ten agents add it to an existing
 repository without standing up new infrastructure. By default `cs` drives a
 local model over an OpenAI-compatible endpoint such as
 [Ollama](https://ollama.com); it can also hand a task to Claude Code, Codex,
@@ -81,14 +81,14 @@ Rust and installs as a single binary.
   *advisory-only* on macOS unless you set `COSMON_EGRESS_REQUIRE_NETNS=1`
   (enforced via a network namespace, Linux only), and the filesystem is never
   confined. Cosmon does not sandbox what an adapter can read or send.
-- **Every claim points to its source — and you can refuse it.** Outputs retain
+- **Every claim points to its source, and you can refuse it.** Outputs retain
   their source links, mark unknowns, and require human sign-off before adoption:
-  they are drafts to verify, not verdicts to trust. Each recorded step is
+  they are drafts that require verification before they can be trusted. Each recorded step is
   BLAKE3-sealed on disk as a **tamper-evident** trace; `cs verify` flags silent
-  edits. This catches a careless edit, not a determined forger: anyone who can
-  rewrite both the files and their fingerprints can make them match again.
+  edits. It detects accidental changes. Anyone who can rewrite both the files
+  and their fingerprints can make them match again.
 - **Crash-recovery by construction.** State and history live in `.cosmon/` JSON
-  files and git, not in a worker process. Kill a worker, reboot the machine, or
+  files and git. Worker processes hold no authoritative state. Kill a worker, reboot the machine, or
   return later: a fresh worker resumes from the last recorded step.
 - **Drives the agents and models you already run.** Claude Code, Codex, Aider;
   hosted APIs from Anthropic, OpenAI, Google Gemini, Mistral AI, Qwen, DeepSeek,
@@ -99,15 +99,15 @@ Rust and installs as a single binary.
 
 Cosmon is early-stage but functional: the core types, the `cs` CLI, state
 persistence, tmux transport, and the DAG engine all ship today. The backlog is
-tracked as [GitHub Issues](https://github.com/noogram/cosmon/issues) — and
-issues filed there are read by people, not only by machines.
+tracked as [GitHub Issues](https://github.com/noogram/cosmon/issues), and
+people read the issues filed there.
 
 ## Install
 
 Cosmon is a single command, `cs`. Three routes, in order of preference. The
-first two also place `cosmon-remote` — the connector for driving a remote cosmon
-service — beside it; `cs` is the whole product, the second file is inert until
-you point it at a remote.
+first two also place `cosmon-remote`, the connector for driving a remote cosmon
+service, beside it. The `cs` binary is the whole product; the second file is
+inert until you point it at a remote.
 
 ### Native install script (recommended)
 
@@ -138,9 +138,9 @@ brew install noogram/tap/cosmon
 
 Building locally needs the Rust toolchain (MSRV **1.88**). On **Linux (glibc)**
 the build links the Secret Service keyring backend through `libdbus`, so install
-the system headers first (macOS and Windows need nothing extra — and the
+the system headers first. macOS and Windows need nothing extra, and the
 prebuilt Linux binaries above are static musl, so this applies only when you
-compile):
+compile:
 
 ```bash
 sudo apt-get install -y libdbus-1-dev pkg-config   # Debian/Ubuntu
@@ -180,7 +180,7 @@ from the cloned tree.
 To dispatch a worker you also need a **model backend**, and cosmon supports two
 shapes:
 
-- **A local model — the default.** With no adapter configured, `cs tackle` drives
+- **A local model (the default).** With no adapter configured, `cs tackle` drives
   the agent loop itself against a local OpenAI-compatible endpoint, for example
   [Ollama](https://ollama.com) on `localhost:11434`. Start that endpoint (run
   `ollama serve`, or set `default` under `[adapters]` in `.cosmon/config.toml`) **before
@@ -207,8 +207,8 @@ cs demo             # needs a running model endpoint (default: local Ollama, `ol
 
 `cs demo` asks for a prompt, picks a formula, runs the whole
 nucleate → tackle → wait → done cycle, prints the result in your terminal, then
-tears down. It dispatches a **real** worker, not a canned reply — which is the
-point, and also why it inherits your backend's prerequisites. With the default
+tears down. It dispatches a **real** worker and does not return a canned reply,
+so it inherits your backend's prerequisites. With the default
 local adapter it needs a reachable local model endpoint; with
 `cs demo --adapter claude` it needs an authenticated Claude Code on your `PATH`
 plus `tmux`. A missing tool fails fast with one actionable line; a model endpoint
@@ -216,7 +216,7 @@ that isn't listening will stall, so start it first.
 
 Cosmon never auto-installs and **never spends on a hosted model on its own**: the
 default adapter is the local `local` loop, and a paid backend runs *only* when
-you explicitly opt in — `--adapter claude`/`openai`, `$COSMON_DEFAULT_ADAPTER`,
+you explicitly opt in through `--adapter claude`/`openai`, `$COSMON_DEFAULT_ADAPTER`,
 or `default = "…"` under `[adapters]` in your config. See
 [docs/cs-demo-design.md](docs/cs-demo-design.md) for the design.
 
@@ -252,7 +252,7 @@ flowchart TD
 
 Read the diagram as three facts. Cosmon starts workers and moves their state
 around, but the thinking is done by the model, never by the framework. The state
-lives in files, not in memory, which is why a crashed worker can be picked back
+is persisted in files instead of process memory, which is why a crashed worker can be picked back
 up. The dotted arrow carries one thing only: whether an earlier step has
 finished, so the next one can start.
 
@@ -285,7 +285,7 @@ cs done <mol-id>                                              # merge to main + 
 For a fleet, one script fans several workers out in parallel. The Wikipedia
 example turns a folder of PDFs into a cited, reviewed article: five agents write
 in parallel, gated by one promotion step. It needs a reachable model backend
-(default: local Ollama on `localhost:11434`) — see
+(default: local Ollama on `localhost:11434`). See
 [Prerequisites](#prerequisites-a-model-backend); the script warns you at
 preflight if nothing is listening, since a missing backend otherwise stalls
 silently at `cs tackle`.
@@ -301,8 +301,8 @@ cs done cs-<mission-id>     # once peek shows completed, merge and tear down
 ```
 
 `cs wait` blocks by design, which is why it is backgrounded with `&`. Do not poll
-with `watch cs observe` — you burn CPU and miss transitions. And `cs peek` is a
-viewer, not a teardown; you still call `cs done` to merge the branch. The
+with `watch cs observe`; you burn CPU and miss transitions. `cs peek` only
+views state. You still call `cs done` to merge the branch. The
 templates, roles, and gates live in
 [`templates/wikipedia-production/`](templates/wikipedia-production/).
 
@@ -347,14 +347,14 @@ few terms you meet early:
 | **Worker** | A running agent bound to a molecule and a session. |
 | **Ensemble** | The fleet: all active workers and their aggregate statistics. |
 | **Dispatch** | Assigning a molecule to a worker (`cs tackle`). |
-| **Decoherence** | Context loss at a session boundary — the enemy of agent continuity. |
+| **Decoherence** | Context loss at a session boundary; the enemy of agent continuity. |
 | **Prime** | Context compiled and injected at session start, to fight decoherence. |
 | **Patrol** | A health-monitoring cycle: mechanical checks plus optional cognitive analysis. |
 
-The full vocabulary — Polymer, Spore, Temperature, Entropy, and the rest — is
+The full vocabulary, including Polymer, Spore, Temperature, and Entropy, is
 explained in [`docs/book/src/explanation/physics-vocabulary.md`](docs/book/src/explanation/physics-vocabulary.md),
 the concise canonical page. [THESIS.md](THESIS.md) is an optional deep-dive with
-the reasoning underneath — you do not need it to use cosmon.
+the reasoning underneath. You do not need it to use cosmon.
 
 <!-- TODO launch: link the vocabulary to docs.noogram.org/explanation once that site
      returns a public 200; today the canonical copy is in-repo (path above). -->
@@ -380,7 +380,7 @@ All dependency arrows point inward toward `cosmon-core`: pure center, adapters a
 the edge (hexagonal architecture). The full crate map lives in
 `docs/book/src/explanation/architecture.md`.
 
-### Cosmon is a kernel, not a bundle
+### Cosmon is a kernel
 
 The `cs` binary is the whole product. It includes three small vendored crates,
 named after particles, as internal components rather than separate installs:
@@ -397,16 +397,16 @@ You do not `install` or `cargo add` these as products; they ship inside `cs`.
 
 The API is still moving, so expect breaking changes before 1.0. Start with
 **[CONTRIBUTING.md](CONTRIBUTING.md)** (front door) and
-**[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** (full guide). In short:
+**[docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)** (full guide):
 
 1. Pick available work from the
    [GitHub Issues](https://github.com/noogram/cosmon/issues), where cosmon
-   tracks its backlog — look for a "good first issue" label to start.
+   tracks its backlog. Look for a "good first issue" label to start.
 2. Follow the existing conventions: newtypes, typestate, pure core.
 3. All four gates must pass: `cargo check`, `cargo test`,
    `cargo clippy --workspace -- -D warnings`, and `cargo fmt --all -- --check`.
 
-For the deep design rationale, read [THESIS.md](THESIS.md) — a long essay on the
+For the deep design rationale, read [THESIS.md](THESIS.md), a long essay on the
 physics behind cosmon. To get started you do not need it; come to it when you want
 the full reasoning.
 
@@ -423,12 +423,12 @@ binary?
 - **The network SDK is Apache-2.0.** The small crates that communicate with a
   cosmon instance only over the wire are permissive: `cosmon-client`, the
   internal `cosmon-thin-cli` route/verb engine used by `cosmon-remote`, and
-  `cosmon-thin-macro`. They are libraries, not alternative tenant-facing CLI
-  products, and can be used in closed-source software. Vendored third-party code
+  `cosmon-thin-macro`. They are libraries and cannot serve as alternative
+  tenant-facing CLI products. They can be used in closed-source software. Vendored third-party code
   keeps its own upstream license.
 
 The rule that decides a crate's license: it may stay Apache-2.0 only if nothing
-in its dependencies is AGPL — that is, it reaches the core over the network
+in its dependencies is AGPL. In other words, it reaches the core over the network
 (HTTP or IPC), never by code-linking. A permissive crate that code-links the
 AGPL core would be a contradiction and flips to AGPL.
 

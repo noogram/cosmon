@@ -55,6 +55,6 @@
 - [Dynamic workflows or cosmon fleets?](./explanation/workflows-vs-fleets.md)
 - [Control plane vs data plane](./explanation/control-vs-data-plane.md)
 - [The three regimes: Inert / Propelled / Autonomous](./explanation/regimes.md)
-- [Crash recovery: state on disk, not in RAM](./explanation/crash-recovery.md)
+- [Crash recovery through state on disk](./explanation/crash-recovery.md)
 - [Architecture: the two layers](./explanation/architecture.md)
 - [Versioning policy](./explanation/versioning.md)

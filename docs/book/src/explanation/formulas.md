@@ -21,8 +21,8 @@ polymer is the same relation one scale up.
 
 ## Why formulas are the only extension point
 
-You extend cosmon by writing a formula, not by adding a command, a daemon, a
-plugin interface, or a new state store. Everything cosmon tracks is a molecule,
+You extend cosmon by writing a formula. New commands, daemons, plugin
+interfaces, and state stores are outside this extension surface. Everything cosmon tracks is a molecule,
 and every workflow is a formula over molecules. A bug report, a design decision, a
 multi-perspective deliberation, a backlog sweep: each is a molecule running some
 formula. This is the composability principle: one concept, and the extension
@@ -31,8 +31,8 @@ surface is the formulas you write on top of it.
 The discipline that follows: before reaching for new machinery, ask whether the
 thing can be a formula over existing molecules. It almost always can. A formula
 whose steps exist only to satisfy the system (a single trivial step wrapping one
-command) is the signal that the abstraction is being over-applied, not that
-cosmon needs a new primitive.
+command) signals that the abstraction is being over-applied. It does not by
+itself justify a new cosmon primitive.
 
 ## Anatomy at a glance
 

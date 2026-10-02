@@ -1,6 +1,6 @@
 # The life of a molecule: from intent to harvesting
 
-A molecule is a durable unit of work, not merely a prompt sent to an agent.
+A molecule is a durable unit of work with more state than a prompt sent to an agent.
 It has an identity, a live record on disk, a worker when it is being tackled,
 and a final harvesting pass that removes the temporary machinery without
 discarding the evidence. This page explains that journey; the [lifecycle
@@ -45,13 +45,13 @@ the same contract. Formula-specific work can add `frame.md`, `synthesis.md`,
 `responses/`, and `log.md` in this same molecule directory.
 
 The accompanying event stream records transitions as an append-only history.
-Events are evidence of what happened, not a second mutable status store: the
-current state remains `state.json`. This split is why an interrupted command or
+Events provide evidence of what happened. The current state remains in
+`state.json`; the event stream is not a second mutable status store. This split is why an interrupted command or
 restarted worker can resume from disk instead of depending on an agent's lost
 context.
 
 The `.cosmon/state/` tree is gitignored, except `state/archive/` (section 5). It is the live source of truth
-on that machine, not a Git mirror. Do not infer from the ignore rule that it is
+on that machine. It does not mirror Git. Do not infer from the ignore rule that it is
 disposable: it is where Cosmon reads and writes the running molecule.
 
 ## 2. Tackling creates temporary execution machinery
@@ -66,9 +66,9 @@ a dispatched worker. In the normal same-galaxy case it creates:
 
 The adapter is the harness that actually performs the work; Cosmon supplies the
 identity, worktree, prompt, and lifecycle around it. The worker reads its
-briefing and writes its cognitive artifacts—such as `synthesis.md`, `frame.md`,
-and `log.md`—to the molecule directory in `.cosmon/state`, not to the
-worktree. That separation matters: `.worktrees/<id>` is temporary and will be
+briefing and writes its cognitive artifacts, such as `synthesis.md`, `frame.md`,
+and `log.md`, to the molecule directory in `.cosmon/state`. These artifacts do
+not go in the worktree. That separation matters: `.worktrees/<id>` is temporary and will be
 removed by harvesting.
 
 For ordinary code work in this galaxy, the **worker** makes the code commits on
@@ -77,10 +77,11 @@ the worker's code changes.
 
 ### The cross-galaxy case: an intentionally empty feature branch
 
-Some assignments change another galaxy—for example, a Cosmon worker editing a
+Some assignments change another galaxy. For example, a Cosmon worker might edit a
 `knowledge/` repository. The worker commits directly in that target galaxy.
 The local Cosmon `feat/<id>` branch therefore has no commits ahead of its base.
-This is expected, not a failed task and not a missing commit.
+This is the expected result for this case; it does not indicate a failed task or
+a missing commit.
 
 The distinction is decisive at harvesting time:
 
@@ -93,15 +94,15 @@ The distinction is decisive at harvesting time:
 the worker's commit in the target galaxy and the Cosmon molecule's artifacts;
 the local feature branch is merely an empty execution shell.
 
-## 3. Evolution records progress; completion is terminal but not merged
+## 3. Evolution records progress; completion precedes merging
 
 As the worker satisfies formula steps, `cs evolve` advances the molecule and
 updates the briefing seals and event trail. Formula artifacts accumulate in the
 molecule directory. A successful worker then uses `cs complete`, which marks
 the molecule `Completed`.
 
-`Completed` is a terminal status, but it does **not** mean “merged into the
-base branch” and it does not destroy anything. At this point the temporary
+`Completed` is a terminal status. It does **not** mean “merged into the base
+branch” and does not destroy anything. At this point the temporary
 tmux session, fleet registration, worktree, and `feat/<id>` may still be
 present. This explicit gap is intentional: the worker may declare the work
 complete, while only the human/operator-side harvesting boundary is allowed to
@@ -118,8 +119,8 @@ and inspects the feature branch against the base branch.
    it integrates them with `git merge --no-ff` (the default strategy). A merge
    conflict is a loud failure: the branch remains the copy of the work and is
    not deleted.
-2. If the branch has no commits ahead of the base—typical for a cross-galaxy
-   assignment—Cosmon reports **`skip merge (empty branch — no commits ahead of
+2. If the branch has no commits ahead of the base, as is typical for a cross-galaxy
+   assignment, Cosmon reports **`skip merge (empty branch — no commits ahead of
    base)`**. It does not commit or merge the target galaxy's work.
 3. After a successful merge, or after the valid empty-branch path, Cosmon kills
    the tmux session, purges the worker from the fleet record, removes
@@ -127,9 +128,9 @@ and inspects the feature branch against the base branch.
    reachable from the base. Guards preserve a branch whose committed work did
    not land.
 4. Cosmon then makes a best-effort auto-commit of molecule artifacts when
-   there are eligible changes. This is an evidence convenience, not a substitute
-   for the worker's code commit—and it does not turn a cross-galaxy empty branch
-   into a commit.
+   there are eligible changes. This evidence convenience does not substitute
+   for the worker's code commit, and it does not turn a cross-galaxy empty
+   branch into a commit.
 
 The ordering prevents both common misconceptions: a worker's same-galaxy code
 is committed before harvesting, and a cross-galaxy worker's code has already
@@ -167,9 +168,9 @@ checks with real git that this still holds, and `cs init --upgrade` repairs the
 managed block of that file.
 
 This archive is what survives the loss of the worktree and the feature branch.
-It is a durable on-disk record, tracked by git unlike the rest of the state tree; its purpose is
-to preserve the molecule's causal and narrative trace, not to claim that the
-temporary worktree was permanent. The append-only event logs are especially
+It is a durable on-disk record, tracked by git unlike the rest of the state tree.
+Its purpose is to preserve the molecule's causal and narrative trace. It does
+not make the temporary worktree permanent. The append-only event logs are especially
 important: later readers can distinguish a `Completed` transition from the
 separate `Done` harvesting transition instead of collapsing them into one
 fictional instant.
@@ -187,7 +188,7 @@ but edits and commits documentation in a separate `knowledge` galaxy. Its local
 `feat/edit-20260715-beta` has no commits ahead. Once completed, `cs done` logs
 the empty-branch merge skip, tears down the local worker shell, and archives the
 molecule. The documentation commit remains where the worker made it: in
-`knowledge`, not in Cosmon's base branch.
+`knowledge`; Cosmon's base branch remains unchanged.
 
 ## Sources and related reading
 
@@ -197,5 +198,5 @@ molecule. The documentation commit remains where the worker made it: in
   completion and harvesting boundary.
 - [Agent adapters: a harness over harnesses](./adapter.md) explains what is
   launched inside the tmux worker session.
-- [Crash recovery: state on disk, not in RAM](./crash-recovery.md) explains why
+- [Crash recovery through state on disk](./crash-recovery.md) explains why
   the live state directory is authoritative during a run.

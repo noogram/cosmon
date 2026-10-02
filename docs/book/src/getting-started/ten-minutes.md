@@ -5,8 +5,8 @@ agent did, finished, and merged into your `main`. Every block below is meant to
 be copied and run in order.
 
 If you want the same journey with the *why* behind each verb, take the
-[tutorials](../tutorials/setup.md) instead — this page is the ramp, they are the
-lesson.
+[tutorials](../tutorials/setup.md) instead. This page is the short route; the
+tutorials provide the explanation.
 
 ## 0. What you need
 
@@ -20,8 +20,8 @@ tmux -V               # each worker lives in a tmux session
 
 Then it forks on what runs the worker:
 
-**You have Claude Code.** One line of config and you are done — no backend to
-stand up:
+**You have Claude Code.** One line of config completes setup. There is no backend
+to stand up:
 
 ```sh
 claude --version       # confirm it is on PATH
@@ -42,12 +42,12 @@ ollama pull qwen3:8b  # …serving a model. `serve` alone serves nothing
 `ollama serve` with nothing pulled is the first sharp edge people hit: the
 daemon answers, so everything looks healthy, and the dispatch dies seconds
 after it starts. Cosmon now checks before spawning and refuses with a named
-repair — but pulling the model first skips the detour entirely.
+repair. Pulling the model first avoids that detour.
 
 **Pull `qwen3:8b` specifically**, which is also cosmon's built-in default.
 The local loop needs a model that emits structured `tool_calls` on
 `/v1/chat/completions`; `qwen3:8b` was measured to do that. A model that
-merely *looks* more capable is often the wrong choice —
+merely *looks* more capable is often the wrong choice. For example,
 `qwen2.5-coder:7b`, for instance, pastes its tool call into the message
 text as raw JSON, which lands in your output verbatim instead of creating
 a file. vLLM and llama-server work the same way, at their own endpoint; both,
@@ -55,7 +55,7 @@ other models, and how to switch, are in `docs/guides/local-model-selection.md`
 (the OpenAI-compatible servers guide).
 
 Missing `git` or `tmux`? Neither is installed by cosmon, and on a machine with
-no package manager yet there is a step before the install step — see
+no package manager yet, there is a prerequisite before installation. See
 [Set up cosmon](../tutorials/setup.md), which spells out how to get `git`,
 `tmux` and Ollama from nothing on macOS and Linux.
 
@@ -86,7 +86,7 @@ That creates `.cosmon/`, the directory holding all of cosmon's **project** state
 your units of work, their event logs, and the canonical recipes. Later commands
 walk up to find it, the way `git` finds `.git/`. Running it twice is safe.
 
-`cs init` also writes three files outside `.cosmon/` — a `.gitleaks.toml` at the
+`cs init` also writes three files outside `.cosmon/`: a `.gitleaks.toml` at the
 repository root and two per-user files in your home directory. They are listed,
 with what removes them, in
 [Set up cosmon → what `cs init` writes](../tutorials/setup.md#what-cs-init-writes-and-where).
@@ -98,7 +98,7 @@ cs nucleate task-work --var topic="Add a --version flag to the CLI"
 ```
 
 A **formula** (`task-work`) is the recipe: a small TOML file of ordered steps. A
-**molecule** is one run of that recipe — cosmon's unit of tracked work, with a
+**molecule** is one run of that recipe: cosmon's unit of tracked work, with a
 state, a current step, and a durable trace on disk.
 
 **Nucleate** creates the molecule. Nothing executes yet. The command prints an
@@ -122,7 +122,7 @@ the flag if you already set `default = "claude"` in `.cosmon/config.toml`).
 
 **Tackle** creates a git worktree and branch for this molecule, opens a tmux
 session, and launches your agent inside it with the briefing injected. It returns
-immediately — the worker runs in the background while your shell stays free.
+immediately. The worker runs in the background while your shell stays free.
 
 ## 5. Watch it work
 
@@ -132,7 +132,7 @@ cs peek
 
 `cs peek` is the fleet portal: workers on the left, the selection followed on the
 right. Press `p` to drop into the live pane of the selected worker, `q` to come
-back up. Never `tmux attach` — it breaks the agent's rendering.
+back up. Never use `tmux attach`; it breaks the agent's rendering.
 
 To block until the work is finished instead of watching it:
 
@@ -148,7 +148,7 @@ cs done task-20260711-a1b2
 
 **Done** merges the worker's branch into `main`, kills the tmux session, and
 removes the worktree. It is the *only* verb that merges: a worker can finish its
-own steps, but it cannot merge itself — that call stays yours.
+own steps, but it cannot merge itself. That call stays yours.
 
 Confirm:
 
@@ -173,10 +173,10 @@ work.
 
 ## Where to go next
 
-- **Understand what you just ran** — [Your first molecule](../tutorials/first-molecule.md)
+- **Understand what you just ran:** [Your first molecule](../tutorials/first-molecule.md)
   walks the same four verbs slowly, with the vocabulary explained.
-- **Run several at once** — [Running a fleet of agents](../tutorials/first-fleet.md).
-- **Chain work into a graph** — [Composing a DAG](../tutorials/first-dag.md).
-- **Look up a command** — the [CLI reference](../reference/overview.md), generated
+- **Run several at once:** [Running a fleet of agents](../tutorials/first-fleet.md).
+- **Chain work into a graph:** [Composing a DAG](../tutorials/first-dag.md).
+- **Look up a command:** the [CLI reference](../reference/overview.md), generated
   from the tool itself.
-- **Drive it in plain English** — [Pilot cosmon in natural language](../how-to/pilot-in-natural-language.md).
+- **Drive it in plain English:** [Pilot cosmon in natural language](../how-to/pilot-in-natural-language.md).

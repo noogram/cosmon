@@ -18,8 +18,8 @@ lingers. There is:
 - **No daemon**: no background process that has to be alive for the system to
   work.
 - **No database server**: the local registry is embedded SQLite, a *library*
-  linked into `cs`, not a server you start. (JSON files on disk remain the
-  source of truth.)
+  linked into `cs`. You do not start a separate database server. (JSON files on
+  disk remain the source of truth.)
 - **No scheduler process**: cosmon does not own a clock. A human at a terminal,
   a cron job, or a shell loop drives it.
 
@@ -34,7 +34,7 @@ Temporal, Airflow, and Prefect orchestrate **functions**: deterministic code
 that runs, returns, and is forgotten. Cosmon orchestrates **entities with
 identity and state**: AI agents that crash, lose their context window, and need
 to resume as *the same worker on the same task*. That difference is why the
-stateless design is the point, not a limitation.
+stateless design provides the required recovery boundary.
 
 - **It survives crashes by construction.** If state lived in a running process's
   RAM, a crash would lose it. Because state is on disk after every command, a
@@ -65,8 +65,8 @@ architecture reserves room for one, as a strictly optional second layer:
    run now. Files on disk are the truth. **Never a daemon.**
 2. **Resident Runtime (optional, additive).** One long-lived process (`cs run`)
    that polls the on-disk state and dispatches ready work through the *same*
-   commands a human would type. It is a **client** of the core, not a
-   replacement. It owns no private state; kill it and restart it and it rebuilds
+   commands a human would type. It is a **client** of the core and does not
+   replace it. It owns no private state; kill it and restart it and it rebuilds
    everything from disk.
 
 The inviolable rule is that Layer B never becomes the *only* path to anything.

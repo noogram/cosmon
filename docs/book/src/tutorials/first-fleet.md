@@ -58,8 +58,8 @@ cs peek
 
 `cs peek` is cosmon's fleet observation command: a TUI (terminal UI) that shows
 every worker in the ensemble on the left and a detail view on the right. It is
-the *one* tool you reach for to watch a fleet; it is a plain window, not an action
-on your molecules, so it can never disturb them.
+the *one* tool you reach for to watch a fleet. It is a read-only window on your
+molecules, so it cannot disturb them.
 
 Keys inside `cs peek`:
 

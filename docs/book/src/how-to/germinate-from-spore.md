@@ -1,7 +1,7 @@
 # Germinate a polymer from a spore
 
 **Goal:** you have a mission shape (a whole DAG of molecules) that you want to
-reuse or share, not re-wire by hand every time. A **spore** packages that shape
+reuse or share without rewiring it by hand every time. A **spore** packages that shape
 as one parameterizable template; germinating it stamps out the whole running
 graph in one command.
 
@@ -13,8 +13,8 @@ graph in one command.
 > *nucleates* one molecule, a spore *germinates* the whole set. It is the same
 > generative relation, one scale up.
 
-`cs spore` is a declarative front end over `cs nucleate`, not a new scheduler and
-not a new molecule type. It replays the same nucleate-and-wire calls you would
+`cs spore` is a declarative front end over `cs nucleate`. It does not add a
+scheduler or a molecule type. It replays the same nucleate-and-wire calls you would
 otherwise type by hand.
 
 ## What a spore declares
@@ -40,7 +40,7 @@ node references.
 ## Step 0: Install someone else's spore
 
 If the spore is yours, it is already on disk and you can skip to step 1. If
-someone shared one — a repository, a GitHub URL, a directory — install it:
+someone shared one as a repository, a GitHub URL, or a directory, install it:
 
 ```sh
 cs spore install github:noogram/cosmon/spores/cosmon-dev
@@ -51,8 +51,8 @@ cs spore install ../shared/bundle --dest spores/shared
 This does two things, and the second is the one that is easy to forget by hand:
 it copies the bundle into `<project>/spores/<name>/`, **and** it registers each
 of the bundle's recipes in `.cosmon/formulas/`. A germinated molecule stores its
-formula by *id*, and `cs tackle` looks that id up in your project's registry —
-so a bundle whose recipes were never installed germinates fine and then runs
+formula by *id*, and `cs tackle` looks that id up in your project's registry.
+A bundle whose recipes were never installed germinates fine and then runs
 every node on the adapter default, with the per-step `adapter`/`model` pins the
 author wrote silently inert.
 

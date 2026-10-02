@@ -49,8 +49,8 @@ Nucleated molecule task-20260711-a1b2 from formula task-work
   Steps: 2
 ```
 
-`Steps: 2` is the formula's shape — `task-work` has an implement step and a
-verify step — not progress; nothing has run yet. Copy the id; you will use it in
+`Steps: 2` describes the formula's shape: `task-work` has an implement step and a
+verify step. It does not report progress; nothing has run yet. Copy the id; you will use it in
 the next three steps. (Your id will differ; substitute it everywhere you see
 `task-20260711-a1b2` below.)
 
@@ -96,7 +96,8 @@ formula: implementing, then verifying, committing its work to the molecule's
 branch at each step.
 
 When `cs wait` returns, the molecule has finished its steps and marked itself
-**completed**, but its work is still on its own branch, not yet in your `main`.
+**completed**, but its work remains on its own branch and has not reached your
+`main` yet.
 
 > **Tip.** In real use you background the wait (`cs wait <id> &`) so you can do
 > other things while the worker runs, and get notified on completion. For this
@@ -118,7 +119,7 @@ main branch and nothing is left running.
 
 `cs done` is the *only* verb that merges and tears down; a worker can finish its
 own steps, but it cannot merge itself. That is a human's call, which is why you
-run `cs done`, not the worker.
+run `cs done`; the worker cannot make that decision.
 
 Confirm the loop is closed:
 

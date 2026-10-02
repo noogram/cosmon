@@ -2,12 +2,13 @@
 
 **Goal:** watch what your agents are doing (across one project or many) without
 attaching to terminals or tailing raw log files. Cosmon's observability is a
-**fractal portal, not a dashboard**: one tool, recursive, from a fleet overview
+**fractal portal**: a recursive, read-only tool rather than a fixed dashboard,
+from a fleet overview
 down to a single worker's live pane.
 
 > Reach for these tools *before* `tmux`, `tail`, or `cat`. If `cs peek` cannot
-> show you something, that is a gap to report, not a reason to go back to shell
-> archaeology.
+> show you something, report the observability gap. Returning to shell
+> archaeology does not close it.
 
 ## The one tool: `cs peek`
 
@@ -29,11 +30,11 @@ descends one level:
 | `s` | Synthesis (for molecules that produce one) |
 | `r` | Responses |
 | `q` | Quit |
-| `?` | Help overlay — keybindings. Press `Tab` there for the **glyph legend** |
+| `?` | Help overlay with keybindings. Press `Tab` there for the **glyph legend** |
 
 The table is dense with symbols: a lifecycle pastille (`♥` `💤` `·` `🧊` `👻`),
 a whisper bubble, a temperature, a trust bar, an energy bar. You are not
-expected to memorise them — press `?` then `Tab` and the legend sits beside the
+expected to memorise them. Press `?` then `Tab`, and the legend sits beside the
 table it explains, saying what each glyph means *and what to do about it*. The
 same legend is mirrored in `man cs` and in the
 [handbook](https://github.com/noogram/cosmon/blob/main/docs/handbook.md#peek-glyph-legend)

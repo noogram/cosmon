@@ -6,8 +6,8 @@ place, a project that cosmon can track, and everything the next tutorial,
 you skip this page, the `nucleate → tackle → wait → done` cycle in that tutorial
 will stall on a missing tool, so do it here, once.
 
-> **Just want `cs` on your machine?** Installing the binary is its own page —
-> [Install cosmon](../getting-started/install.md) — and a condensed run through
+> **Just want `cs` on your machine?** Installing the binary has its own page,
+> [Install cosmon](../getting-started/install.md), and a condensed run through
 > the whole cycle is [Ten minutes to cosmon](../getting-started/ten-minutes.md).
 > This tutorial covers what a *worker* needs around the binary (git, tmux, a
 > model backend) and does not repeat the install routes.
@@ -57,14 +57,14 @@ canonical instructions at [brew.sh](https://brew.sh), then run the `brew` line
 above. (`git` alone is an exception: `git --version` on macOS offers to install
 the Command Line Tools, which include it. That route does not provide `tmux`.)
 
-Neither tool is installed by cosmon, and neither is optional — cosmon is a
-pilot, and these are the vehicle.
+Neither tool is installed by cosmon, and both are required. Cosmon is the pilot;
+these tools provide the vehicle.
 
 ## Step 2: Confirm a model backend
 
 Cosmon does not do the coding itself; it *pilots* a model that does. With no
 adapter configured the **default is the built-in `local` adapter**: cosmon drives
-the agent loop itself against a local OpenAI-compatible endpoint — for example
+the agent loop itself against a local OpenAI-compatible endpoint, for example
 [Ollama](https://ollama.com) on `localhost:11434`. Start that endpoint before the
 first dispatch:
 
@@ -74,8 +74,8 @@ ollama serve        # or any OpenAI-compatible endpoint on localhost:11434
 
 Ollama is not installed by cosmon either, and on a clean machine `ollama serve`
 exits 127. Install it first, from its own canonical instructions at
-[ollama.com/download](https://ollama.com/download) — a `.dmg` on macOS, a
-one-line script on Linux — then pull the model cosmon defaults to before the
+[ollama.com/download](https://ollama.com/download). It provides a `.dmg` on macOS
+and a one-line script on Linux. Then pull the model cosmon defaults to before the
 first dispatch:
 
 ```sh
@@ -95,7 +95,7 @@ you, you never call it directly. The full resolution chain (flag →
 
 ## Step 3: Install the `cs` binary
 
-If you have not installed it yet, do it now — the routes (install script,
+If you have not installed it yet, do it now. The routes (install script,
 Homebrew, from source), version pinning, and what the one-liner actually does
 line by line all live on one page:
 
@@ -108,7 +108,7 @@ curl -fsSL https://noogram.org/cosmon/install.sh | sh
 ```
 
 The installer writes to `~/.local/bin`, which is not on the default `PATH` on a
-fresh account. When it is not, the installer prints the line to add — add it
+fresh account. When it is not, the installer prints the line to add. Add it
 before you confirm, or `cs --version` exits 127:
 
 ```sh
@@ -120,7 +120,7 @@ cs --help
 You should see the command groups (lifecycle, fleet, execution, …). Put the same
 `export` line in your shell profile so the next terminal finds `cs` too.
 
-Two files land, not one: the tarball also carries `cosmon-remote`, the connector
+Two files land: the tarball also carries `cosmon-remote`, the connector
 for driving a remote cosmon service, and the installer places it beside `cs`. It
 is inert until you point it at a remote. No manual page is installed, so
 `man cs` will report *No manual entry*; the equivalent reference is `cs help`,
@@ -154,15 +154,15 @@ them up front is what makes cosmon removable:
 |------|-----------|-----------|
 | `<project>/.cosmon/` | all project state: molecules, event logs, formulas, config | `rm -rf .cosmon` |
 | `<project>/.gitleaks.toml` | the secret-scan baseline `cs done` uses before it merges; scaffolded only if you do not already have one, and never overwritten | `rm .gitleaks.toml` |
-| `<config>/cosmon/consent.toml` | your answer to the one-time telemetry-sharing question — deliberately kept *out* of the project so a sharing toggle never shows up in `git log`. Deny-by-default: when the question cannot be asked (no terminal), a decline is recorded without asking. Revisit it with `cs opt-in-share --status`. | `rm` that file |
+| `<config>/cosmon/consent.toml` | your answer to the one-time telemetry-sharing question. It is deliberately kept *out* of the project so a sharing toggle never shows up in `git log`. Deny-by-default: when the question cannot be asked (no terminal), a decline is recorded without asking. Revisit it with `cs opt-in-share --status`. | `rm` that file |
 | `<data>/neurion/auto-register.jsonl` | an append-only hint file for [neurion](https://github.com/noogram/neurion), if you use it; harmless and unread otherwise | `rm` that file |
 
 `<config>` and `<data>` are your platform's standard directories:
 `~/Library/Application Support` for both on macOS; `~/.config` and
 `~/.local/share` on Linux.
 
-So `rm -rf .cosmon` removes the project's work, which is what you usually want —
-but it is not a full uninstall. A full uninstall is that `rm -rf`, plus the three
+So `rm -rf .cosmon` removes the project's work, which is what you usually want.
+It does not perform a full uninstall. A full uninstall is that `rm -rf`, plus the three
 rows above, plus deleting `cs` and `cosmon-remote` from wherever you installed
 them (`~/.local/bin` by default).
 
@@ -197,7 +197,7 @@ tracked work end to end.
 
 > **You do not have to type `cs` by hand.** If you already work inside an
 > agentic coding CLI (Claude Code, Codex, gemini-cli, opencode, aider, …), one
-> line in its context file lets you drive the same cycle in plain English —
+> line in its context file lets you drive the same cycle in plain English:
 > *"nucleate a task to … , then tackle it and wait"*. See
 > [Pilot cosmon in natural language](../how-to/pilot-in-natural-language.md).
 > Learn the commands here first: it is what lets you tell whether the agent is
