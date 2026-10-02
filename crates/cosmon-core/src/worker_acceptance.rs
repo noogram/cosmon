@@ -145,6 +145,22 @@ mod tests {
     }
 
     #[test]
+    fn non_normal_termination_never_advances_even_with_complete_evidence() {
+        // An output-limited or refused response must not be accepted, even when
+        // the step's declared deliverable looks present (issue #151, ADR-184).
+        assert_eq!(
+            decide(
+                TerminationEvidence::NonNormal,
+                Some("result.md"),
+                "partial answer",
+                DeclaredArtifactEvidence::Satisfied,
+                WorktreeEvidence::Changed,
+            ),
+            Err(AcceptanceError::NonNormalTermination)
+        );
+    }
+
+    #[test]
     fn failed_or_read_only_legacy_turn_does_not_advance() {
         assert_eq!(
             decide(
