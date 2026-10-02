@@ -842,7 +842,22 @@ impl ModelEvidenceAccumulator {
                 Some("turn_duration" | "compact_boundary" | "stop_hook_summary") => {}
                 _ => self.unclassified(),
             },
-            Some("user" | "result" | "progress" | "file-history-snapshot" | "queue-operation") => {}
+            // Records that carry no model field: neutral for coverage. Any
+            // type not listed here stays counted as unclassified.
+            Some(
+                "user"
+                | "result"
+                | "progress"
+                | "file-history-snapshot"
+                | "file-history-delta"
+                | "queue-operation"
+                | "attachment"
+                | "last-prompt"
+                | "mode"
+                | "permission-mode"
+                | "atis-latch"
+                | "ai-title",
+            ) => {}
             _ => self.unclassified(),
         }
     }

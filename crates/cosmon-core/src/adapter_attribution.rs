@@ -1120,6 +1120,31 @@ mod tests {
         }
     }
 
+    /// Issue #157: a worker whose transcript holds only model-bearing and
+    /// model-neutral records must not raise the degraded-evidence warning.
+    #[test]
+    fn neutral_transcript_records_raise_no_evidence_warning() {
+        let records = include_str!("../tests/fixtures/claude_transcript/neutral_records.jsonl");
+        let events = [
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-one"),
+            model_observed_for("claude", "model-a", Some("worker-one")),
+            evidence_assessed("worker-one", records),
+        ];
+        let attribution = AdapterAttribution::fold(&events);
+        assert!(matches!(
+            attribution.evidence,
+            ModelEvidenceState::Assessed(_)
+        ));
+        assert!(!attribution.evidence_needs_warning());
+        assert!(!attribution.compact_cell().starts_with('!'));
+    }
+
     #[test]
     fn old_model_event_decodes_without_assessment_or_worker_scope() {
         let old = model_observed("model-a");

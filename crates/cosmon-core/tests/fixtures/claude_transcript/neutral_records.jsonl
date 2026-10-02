@@ -1,0 +1,12 @@
+{"type":"mode","mode":"","sessionId":""}
+{"type":"permission-mode","permissionMode":"","sessionId":""}
+{"type":"atis-latch","atis":"","sessionId":""}
+{"type":"file-history-snapshot","messageId":"","snapshot":{"messageId":"","trackedFileBackups":{},"timestamp":""},"isSnapshotUpdate":false}
+{"type":"queue-operation","operation":"","timestamp":"","sessionId":"","content":""}
+{"type":"attachment","parentUuid":null,"isSidechain":false,"attachment":{"type":"","hookName":"","toolUseID":"","hookEvent":"","content":"","stdout":"","stderr":"","exitCode":0,"command":"","durationMs":0},"uuid":"","timestamp":""}
+{"type":"user","message":{"role":"user","content":""}}
+{"type":"assistant","message":{"role":"assistant","model":"model-a","usage":{}}}
+{"type":"file-history-delta","messageId":"","snapshotMessageId":"","trackingPath":"","backup":{"backupFileName":null,"version":1,"backupTime":"","realParentDir":""},"timestamp":""}
+{"type":"ai-title","aiTitle":"","sessionId":""}
+{"type":"last-prompt","lastPrompt":"","leafUuid":"","sessionId":""}
+{"type":"assistant","message":{"role":"assistant","model":"model-a","usage":{}}}
