@@ -60,6 +60,7 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::tool::{sanitize_join, ParametersSchema, Tool, ToolDeclaration, ToolError};
+use crate::tools::path_authority::{self, entry_allowed};
 
 /// Hard cap on matches returned by a single `grep` call. Mirrors the
 /// truncation discipline of `read_file` / `exec_command`.
@@ -235,6 +236,7 @@ fn grep(work_dir: &Path, params: &GrepParams) -> Result<GrepResult, ToolError> {
             params.path
         )));
     }
+    path_authority::resolve_existing(work_dir, &params.path)?;
 
     let pattern = if params.fixed_string {
         regex::escape(&params.pattern)
@@ -310,10 +312,8 @@ fn grep(work_dir: &Path, params: &GrepParams) -> Result<GrepResult, ToolError> {
 
         // Defense in depth: refuse to even open a file whose canonical
         // path escapes the canonical work_dir.
-        if let Ok(canonical) = std::fs::canonicalize(path) {
-            if !canonical.starts_with(&canonical_work_dir) {
-                continue;
-            }
+        if !entry_allowed(&canonical_work_dir, path) {
+            continue;
         }
 
         let Ok(file) = std::fs::File::open(path) else {

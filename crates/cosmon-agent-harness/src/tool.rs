@@ -552,7 +552,7 @@ impl Tool for ReadFile {
                 tool: "read_file".to_owned(),
                 message: e.to_string(),
             })?;
-        let target = sanitize_join(work_dir, &params.path)?;
+        let target = crate::tools::path_authority::resolve_existing(work_dir, &params.path)?;
         let raw = std::fs::read_to_string(&target).map_err(|e| ToolError::Io(e.to_string()))?;
         let content = cap_read_output(raw);
         let result = ReadResult { content };

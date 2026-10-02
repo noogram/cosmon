@@ -124,11 +124,11 @@ impl Tool for WriteFile {
 
 fn write(work_dir: &Path, params: &WriteParams) -> Result<WriteResult, ToolError> {
     let target = sanitize_join(work_dir, &params.path)?;
-    ensure_inside_work_dir(work_dir, &target)?;
+    crate::tools::path_authority::ensure_write_target_inside(work_dir, &target)?;
 
     // Create-only: refuse if the target already exists. `symlink_metadata`
     // does NOT follow links, so a symlink at `target` is reported as
-    // existing (the ensure_inside_work_dir call above already refused it
+    // existing (the path_authority check above already refused it
     // when the link points outside, but we still refuse to clobber an
     // intra-worktree symlink for the same panel-verdict reason).
     if std::fs::symlink_metadata(&target).is_ok() {
@@ -183,48 +183,6 @@ fn write_via_rename(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
         Err(e) => {
             let _ = std::fs::remove_file(&tmp_path);
             Err(e)
-        }
-    }
-}
-
-/// Reject targets whose canonical path (or any existing ancestor's
-/// canonical path) escapes the canonical `work_dir`. Mirrors the
-/// `edit_file` defense — see that module for the ssh-key clobber
-/// scenario.
-fn ensure_inside_work_dir(work_dir: &Path, target: &Path) -> Result<(), ToolError> {
-    let canonical_work_dir = std::fs::canonicalize(work_dir)
-        .map_err(|e| ToolError::Io(format!("canonicalize work_dir: {e}")))?;
-
-    if let Ok(meta) = std::fs::symlink_metadata(target) {
-        if meta.file_type().is_symlink() {
-            return Err(ToolError::PathEscape(format!(
-                "symlink target refused: {}",
-                target.display()
-            )));
-        }
-    }
-
-    let mut probe = target.to_path_buf();
-    loop {
-        if probe.exists() {
-            let canonical = std::fs::canonicalize(&probe)
-                .map_err(|e| ToolError::Io(format!("canonicalize {}: {}", probe.display(), e)))?;
-            if !canonical.starts_with(&canonical_work_dir) {
-                return Err(ToolError::PathEscape(format!(
-                    "path escapes work_dir via symlink: {}",
-                    target.display()
-                )));
-            }
-            return Ok(());
-        }
-        match probe.parent() {
-            Some(p) if !p.as_os_str().is_empty() => probe = p.to_path_buf(),
-            _ => {
-                return Err(ToolError::PathEscape(format!(
-                    "cannot resolve any ancestor of {}",
-                    target.display()
-                )));
-            }
         }
     }
 }

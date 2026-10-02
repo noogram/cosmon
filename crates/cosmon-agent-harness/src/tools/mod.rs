@@ -12,6 +12,8 @@
 //! - [`list_dir`] — gitignore-aware directory listing.
 //! - [`grep`] — in-process regex search across the worktree.
 //! - [`find_file`] — gitignore-style glob over file names.
+//! - [`path_authority`] — the single path-authority policy every file
+//!   tool above applies before opening or enumerating anything.
 //! - [`write_file`] — create-only file writer; refuses to overwrite
 //!   (the no-wholesale-rewrite rule is honoured by construction).
 //!
@@ -28,5 +30,6 @@ pub mod exec_command;
 pub mod find_file;
 pub mod grep;
 pub mod list_dir;
+pub mod path_authority;
 pub mod shell_environment;
 pub mod write_file;
