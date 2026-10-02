@@ -19,6 +19,22 @@ this stage.
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-10-02
+
+### Fixed
+
+- `cs whisper` no longer refuses every Claude worker on hosts whose tmux shell
+  is bash. The worker was launched as `claude … 2> worker.stderr`; with that
+  redirect bash stayed the pane's foreground process, so the whisper allowlist
+  saw `bash` (exit code 3). The worker program is now started with `exec`, so
+  the pane reports the harness under bash and zsh alike. `cs whisper --help`
+  now lists the built-in allowlist instead of `["claude"]`. (#154)
+- `cs tackle` without `--adapter` now honours the adapter pinned at
+  `cs nucleate --adapter`. The pin used to lose to the configured default.
+  Resolution order: explicit `--adapter`, molecule pin, formula-step pin,
+  environment and configuration defaults, built-in floor. The selection event
+  records `molecule_pin` when the pin wins. (#156)
+
 ## [0.7.0] — 2026-10-02
 
 ### Breaking changes and operator actions on upgrade
@@ -4238,7 +4254,8 @@ release **is**, not how it was built.
   `#![deny(missing_docs)]` on the core, and CI gates on build, test, clippy,
   and fmt.
 
-[Unreleased]: https://github.com/noogram/cosmon/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/noogram/cosmon/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/noogram/cosmon/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/noogram/cosmon/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/noogram/cosmon/releases/tag/v0.6.0
 [0.1.0]: https://github.com/noogram/cosmon/releases/tag/v0.1.0
