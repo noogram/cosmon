@@ -9,8 +9,8 @@
 
 use cosmon_rpp_adapter::auth::scopes::{
     ALL, ARTIFACT_READ, ARTIFACT_WRITE, EVENTS_SUBSCRIBE, LOGS_SUBSCRIBE, MOLECULE_HARVEST,
-    MOLECULE_READ, MOLECULE_WRITE, PILOTE_CONVERSE, WORKER_READ, WORKER_SPAWN, WORKER_TERMINATE,
-    WORLD_OBSERVE,
+    MOLECULE_READ, MOLECULE_WRITE, PILOTE_CONVERSE, SESSIONS_READ, SESSIONS_WRITE, WORKER_READ,
+    WORKER_SPAWN, WORKER_TERMINATE, WORK_READ, WORK_WRITE, WORLD_OBSERVE,
 };
 
 #[test]
@@ -30,12 +30,16 @@ fn scope_catalog_is_pinned() {
             LOGS_SUBSCRIBE,
             PILOTE_CONVERSE,
             WORLD_OBSERVE,
+            WORK_READ,
+            WORK_WRITE,
+            SESSIONS_READ,
+            SESSIONS_WRITE,
         ],
         "scope catalog must remain stable — adding a scope is additive \
          (minor bump) and requires updating this pin, ADR-080 §6.5, and \
          the OpenAPI docs in the same PR. Last addition: \
-         cosmon:pilote:converse + cosmon:world:observe \
-         (task-20260524-270a, D-AVATAR canaux b+d + task-20260525-738e lifecycle)."
+         cosmon:work:read, :work:write, :sessions:read, :sessions:write \
+         (cross-machine collaboration contract §3, issue #147 W2)."
     );
 }
 
@@ -79,4 +83,8 @@ fn scope_literals_match_published_strings() {
     assert_eq!(ARTIFACT_WRITE, "cosmon:artifact:write");
     assert_eq!(EVENTS_SUBSCRIBE, "cosmon:events:subscribe");
     assert_eq!(LOGS_SUBSCRIBE, "cosmon:logs:subscribe");
+    assert_eq!(WORK_READ, "cosmon:work:read");
+    assert_eq!(WORK_WRITE, "cosmon:work:write");
+    assert_eq!(SESSIONS_READ, "cosmon:sessions:read");
+    assert_eq!(SESSIONS_WRITE, "cosmon:sessions:write");
 }

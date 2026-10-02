@@ -20,6 +20,11 @@ work send
 work inbox
 work ack
 work list
+collaboration
+collaboration bind
+collaboration list
+collaboration show
+collaboration revoke
 spark
 drop
 listen

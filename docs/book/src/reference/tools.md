@@ -1024,6 +1024,98 @@ Rebuild the owner's message stages from canonical evidence
 
 
 
+## `cs collaboration`
+
+Provision, inspect and revoke collaboration bindings on the authoritative host.
+
+A binding lets one exact identity (issuer, subject, audience, tenant) act as one
+seat of a declared work, or as one pilot attachment of a mission, from another
+machine. Each binding has its own attachment ID and a private proof. The proof
+is written once to the file named by --proof-out and never stored on the host;
+hand it to the client, which keeps it in its credential store.
+
+Bindings grant only the collaboration scopes named with --scope. They confer no
+spawn, harvest, lease or operator right, and a request can never change its
+own binding. Revocation takes effect at the next admission and at the commit of
+any write already admitted. No network route uses these bindings yet.
+
+**Usage:** `cs collaboration <COMMAND>`
+
+EXAMPLES:
+  cs collaboration bind --issuer https://idp.example --subject pilot-b \
+      --audience cosmon-rpp-demo --tenant demo \
+      --work-owner <owner> --seat review --scope cosmon:work:write \
+      --proof-out ./review.proof                  # proof written once, 0600
+  cs collaboration list                           # every binding, no proofs
+  cs collaboration show <binding-id>
+  cs collaboration revoke <binding-id>            # refuses the next admission and commit
+
+The proof file is the client's secret: move it to the client machine, store
+it in its credential store, then delete the file. The host keeps only a
+verifier.
+
+###### **Subcommands:**
+
+* `bind` — Provision a binding and write its attachment proof to a new private file
+* `list` — List every binding, active and revoked, without verifiers or proofs
+* `show` — Show one binding
+* `revoke` — Revoke one binding; earlier admissions fail at their commit
+
+
+
+## `cs collaboration bind`
+
+Provision a binding and write its attachment proof to a new private file
+
+**Usage:** `cs collaboration bind [OPTIONS] --issuer <ISSUER> --subject <SUBJECT> --audience <AUDIENCE> --tenant <TENANT> --scope <SCOPES> --proof-out <PROOF_OUT>`
+
+###### **Options:**
+
+* `--issuer <ISSUER>` — Exact token issuer
+* `--subject <SUBJECT>` — Exact token subject
+* `--audience <AUDIENCE>` — Exact token audience
+* `--tenant <TENANT>` — Tenant the identity is bound to
+* `--work-owner <WORK_OWNER>` — Owning molecule of the declared work (requires --seat)
+* `--seat <SEAT>` — Work seat the attachment acts as
+* `--mission <MISSION>` — Mission whose pilot surface the attachment joins
+* `--scope <SCOPES>` — Granted scope; repeat for several (cosmon:work:read, cosmon:work:write, cosmon:sessions:read, cosmon:sessions:write)
+* `--proof-out <PROOF_OUT>` — New file that receives the attachment proof (created 0600, never overwritten)
+* `--label <LABEL>` — Display label for the client machine; never used for admission
+
+
+
+## `cs collaboration list`
+
+List every binding, active and revoked, without verifiers or proofs
+
+**Usage:** `cs collaboration list`
+
+
+
+## `cs collaboration show`
+
+Show one binding
+
+**Usage:** `cs collaboration show <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Binding ID (cb-…)
+
+
+
+## `cs collaboration revoke`
+
+Revoke one binding; earlier admissions fail at their commit
+
+**Usage:** `cs collaboration revoke <ID>`
+
+###### **Arguments:**
+
+* `<ID>` — Binding ID (cb-…)
+
+
+
 ## `cs panel`
 
 Panel — convene a hash-pinned supermajority panel to gate a constitutional amendment

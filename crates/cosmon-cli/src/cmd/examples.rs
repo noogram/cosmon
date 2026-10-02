@@ -1427,6 +1427,19 @@ EXIT CODES (decide): 0 approve, 2 refuse, 1 error.
 
 SEE ALSO: cs notarize (operator Ed25519 attestation), cs witness (quorum seal).";
 
+pub const COLLABORATION: &str = "EXAMPLES:
+  cs collaboration bind --issuer https://idp.example --subject pilot-b \\
+      --audience cosmon-rpp-demo --tenant demo \\
+      --work-owner <owner> --seat review --scope cosmon:work:write \\
+      --proof-out ./review.proof                  # proof written once, 0600
+  cs collaboration list                           # every binding, no proofs
+  cs collaboration show <binding-id>
+  cs collaboration revoke <binding-id>            # refuses the next admission and commit
+
+The proof file is the client's secret: move it to the client machine, store
+it in its credential store, then delete the file. The host keeps only a
+verifier.";
+
 pub const WORK: &str = "EXAMPLES:
   cs nucleate task-work --var topic='review task-2026...-0001'  # reviewer molecule
   cs tackle <reviewer> --adapter codex --model gpt-5.6-sol    # on another provider

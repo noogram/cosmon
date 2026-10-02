@@ -14,6 +14,7 @@
 //! | `tackle`                                      | [`MOLECULE_WRITE`] **+** [`WORKER_SPAWN`] (AND) | $$$ Anthropic | **nouveau v1.0.0-rc** |
 //! | `cancel` / `kill` (futur)                     | [`WORKER_TERMINATE`]                            | irréversible   | **réservé** (additif v2) |
 //! | `observe`, `ensemble`, `vitals`               | [`MOLECULE_READ`] (ou `:write` qui implique)    | gratuit        | **existe**          |
+//! | collaboration work / sessions (no route yet)  | [`WORK_READ`] … [`SESSIONS_WRITE`] **+** exact collaboration binding | gratuit | **déclaré (W2)** |
 //!
 //! # Invariant
 //!
@@ -142,6 +143,25 @@ pub const PILOTE_CONVERSE: &str = "cosmon:pilote:converse";
 /// canal (d) is world→avatar afference, not molecule lifecycle.
 pub const WORLD_OBSERVE: &str = "cosmon:world:observe";
 
+/// Read a declared work's roster and pull or peek at the caller's own work
+/// inbox (cross-machine collaboration contract §3). Like every collaboration
+/// scope it confers nothing without an exact collaboration binding, and it
+/// never implies a molecule, worker, harvest or lease right.
+pub const WORK_READ: &str = "cosmon:work:read";
+
+/// Send a work message and acknowledge one addressed to the caller's bound
+/// seat. Implies [`WORK_READ`] through the binding decision, never through a
+/// molecule scope.
+pub const WORK_WRITE: &str = "cosmon:work:write";
+
+/// Read pilot-session peers, messages, checkpoints and takeover requests of
+/// a bound mission. Grants no lease.
+pub const SESSIONS_READ: &str = "cosmon:sessions:read";
+
+/// Attach to, send to and publish checkpoints for a bound mission. Implies
+/// [`SESSIONS_READ`]; grants no lease and no lifecycle verb.
+pub const SESSIONS_WRITE: &str = "cosmon:sessions:write";
+
 /// All declared scopes — for `cs auth scopes --list` (planned),
 /// `tests/scope_catalog.rs` exhaustiveness check, and documentation
 /// generation. Order MUST be stable (tested).
@@ -158,6 +178,10 @@ pub const ALL: &[&str] = &[
     LOGS_SUBSCRIBE,
     PILOTE_CONVERSE,
     WORLD_OBSERVE,
+    WORK_READ,
+    WORK_WRITE,
+    SESSIONS_READ,
+    SESSIONS_WRITE,
 ];
 
 #[cfg(test)]
@@ -181,7 +205,20 @@ mod tests {
                 LOGS_SUBSCRIBE,
                 PILOTE_CONVERSE,
                 WORLD_OBSERVE,
+                WORK_READ,
+                WORK_WRITE,
+                SESSIONS_READ,
+                SESSIONS_WRITE,
             ],
+        );
+    }
+
+    #[test]
+    fn collaboration_scopes_match_the_pure_catalog() {
+        use cosmon_core::collaboration::CollaborationScope;
+        assert_eq!(
+            [WORK_READ, WORK_WRITE, SESSIONS_READ, SESSIONS_WRITE],
+            CollaborationScope::ALL.map(CollaborationScope::as_str),
         );
     }
 

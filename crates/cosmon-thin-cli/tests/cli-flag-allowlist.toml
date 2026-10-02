@@ -334,6 +334,11 @@ class = "out_of_scope"
 reason = "local harvest trust administration and grant workflow; the host-sealed admin route and tenant harvest routes are separate RPP surfaces, not cs-thin command forwarding."
 
 [[verb_absent_from_thin]]
+verb = "collaboration"
+class = "out_of_scope"
+reason = "host-local provisioning and revocation of collaboration bindings (issue #147 W2); a request must never create, widen or revoke its own binding, so no RPP route forwards it."
+
+[[verb_absent_from_thin]]
 verb = "heartbeat"
 class = "out_of_scope"
 reason = "worker liveness signal — worker-internal."

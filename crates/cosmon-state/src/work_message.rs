@@ -427,7 +427,7 @@ impl WorkMessageStore for FileWorkMessageStore {
     }
 }
 
-fn private_dir(path: &Path) -> io::Result<()> {
+pub(crate) fn private_dir(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
     reject_symlink(path)?;
     #[cfg(unix)]
@@ -438,7 +438,7 @@ fn private_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn private_options() -> OpenOptions {
+pub(crate) fn private_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     #[cfg(unix)]
     {
@@ -486,7 +486,7 @@ fn write_create_only(path: &Path, bytes: &[u8]) -> io::Result<bool> {
     result
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("path has no parent"))?;
@@ -567,7 +567,7 @@ fn json_paths(dir: &Path, extension: Option<&str>) -> io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn reject_symlink(path: &Path) -> io::Result<()> {
+pub(crate) fn reject_symlink(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => {
             Err(io::Error::other("work record is a symlink"))

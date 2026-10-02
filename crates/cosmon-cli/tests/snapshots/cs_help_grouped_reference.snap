@@ -109,6 +109,7 @@ Tools:
   sessions             Sessions — two agent sessions on one mission: one drives, the other watches and advises; only a human signs the relay
   inbox                Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
   work                 Work — separate molecules (e.g. an implementer and a reviewer, same or another provider) exchange findings, recorded and bounded (ADR-182)
+  collaboration        Collaboration — bind a remote identity to one work seat or mission attachment on this host; inspect and revoke
   panel                Panel — convene a hash-pinned supermajority panel to gate a constitutional amendment
   notify               Notify — push a one-line message to every configured operator channel
   opt-in-share         Opt-in-share — first-run consent prompt for encrypted developer bundles

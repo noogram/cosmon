@@ -122,6 +122,10 @@ enum Command {
     #[command(long_about = cmd::work::LONG_ABOUT, after_help = cmd::examples::WORK)]
     Work(cmd::work::Args),
 
+    /// Collaboration — bind a remote identity to one work seat or mission attachment on this host; inspect and revoke
+    #[command(long_about = cmd::collaboration::LONG_ABOUT, after_help = cmd::examples::COLLABORATION)]
+    Collaboration(cmd::collaboration::Args),
+
     /// Spark — capture a one-line operator intent into the Inbox (ADR-061)
     #[command(after_help = cmd::examples::SPARK)]
     Spark(cmd::spark::Args),
@@ -709,6 +713,7 @@ fn main() {
 
     let result = match cli.command {
         Command::Work(args) => cmd::work::run(&ctx, &args),
+        Command::Collaboration(args) => cmd::collaboration::run(&ctx, &args),
         Command::Ensemble(args) => cmd::ensemble::run(&ctx, &args),
         Command::Nucleate(args) => cmd::nucleate::run(&ctx, &args),
         Command::Observe(args) => cmd::observe::run(&ctx, &args),

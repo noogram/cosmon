@@ -54,7 +54,7 @@ pub const ENV_CRED_BACKEND: &str = "COSMON_REMOTE_CRED_BACKEND";
 
 /// The keyring "service" namespace. All slots share one service; the per-key
 /// [`CredentialKey::storage_id`] is the keyring "account".
-const KEYRING_SERVICE: &str = "cosmon-remote";
+pub(super) const KEYRING_SERVICE: &str = "cosmon-remote";
 
 /// Wire schema version for the persisted blob. Bumped only on an incompatible
 /// layout change; [`parse_blob`] fails **closed** on a newer version.
@@ -62,7 +62,7 @@ const CRED_SCHEMA: u32 = 1;
 
 /// Process-local counter making concurrent temp-file names unique even within
 /// one process (the pid alone is not enough for two threads).
-static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+pub(super) static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Which backend a [`CredentialStore`] resolved to — a diagnostic surfaced by
 /// [`CredentialStore::backend_kind`] (used by `doctor` / `--json`).
@@ -119,7 +119,7 @@ pub enum StoreOutcome {
 }
 
 /// The active backend. **Private** — the closed set is the seam (C5).
-enum Backend {
+pub(super) enum Backend {
     Keyring,
     File,
     Env,
@@ -133,8 +133,8 @@ enum Backend {
 /// sidecar lockfiles — the lock lives on the filesystem regardless of backend,
 /// because the keyring has no file to lock.
 pub struct CredentialStore {
-    backend: Backend,
-    root: PathBuf,
+    pub(super) backend: Backend,
+    pub(super) root: PathBuf,
 }
 
 impl CredentialStore {
@@ -520,7 +520,7 @@ fn keyring_delete(key: &CredentialKey) -> Result<()> {
     }
 }
 
-fn backend_err(e: keyring::Error) -> CredentialStoreError {
+pub(super) fn backend_err(e: keyring::Error) -> CredentialStoreError {
     CredentialStoreError::Backend {
         source: Box::new(e),
     }
@@ -760,7 +760,7 @@ where
 // --- filesystem primitives (0600, O_NOFOLLOW, fstat) ---------------------
 
 /// Write `bytes` to a freshly created 0600 temp file and fsync it to disk.
-fn write_tmp(tmp: &Path, bytes: &[u8]) -> Result<()> {
+pub(super) fn write_tmp(tmp: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = open_new_0600(tmp)?;
     file.write_all(bytes)?;
     file.sync_all()?;
@@ -774,13 +774,13 @@ fn write_tmp(tmp: &Path, bytes: &[u8]) -> Result<()> {
 /// non-unix, where opening a directory as a `File` is not portable and platform
 /// stores own their own durability.
 #[cfg(unix)]
-fn fsync_dir(dir: &Path) -> Result<()> {
+pub(super) fn fsync_dir(dir: &Path) -> Result<()> {
     File::open(dir)?.sync_all()?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn fsync_dir(_dir: &Path) -> Result<()> {
+pub(super) fn fsync_dir(_dir: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -806,7 +806,7 @@ fn open_new_0600(path: &Path) -> Result<File> {
 }
 
 #[cfg(unix)]
-fn open_read(path: &Path) -> Result<File> {
+pub(super) fn open_read(path: &Path) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     OpenOptions::new()
         .read(true)
@@ -816,7 +816,7 @@ fn open_read(path: &Path) -> Result<File> {
 }
 
 #[cfg(not(unix))]
-fn open_read(path: &Path) -> Result<File> {
+pub(super) fn open_read(path: &Path) -> Result<File> {
     OpenOptions::new().read(true).open(path).map_err(Error::Io)
 }
 
@@ -901,7 +901,7 @@ fn open_lock(path: &Path) -> Result<File> {
 /// file grants no group/other permission bits. On non-unix this is a no-op
 /// (Windows relies on the native Cred Manager / NTFS ACLs).
 #[cfg(unix)]
-fn check_permissions(file: &File, path: &Path) -> Result<()> {
+pub(super) fn check_permissions(file: &File, path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = file.metadata()?.permissions().mode();
     if mode & 0o077 != 0 {
@@ -914,13 +914,13 @@ fn check_permissions(file: &File, path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn check_permissions(_file: &File, _path: &Path) -> Result<()> {
+pub(super) fn check_permissions(_file: &File, _path: &Path) -> Result<()> {
     Ok(())
 }
 
 /// Tighten the `credentials/` directory to 0700 on unix (best-effort).
 #[cfg(unix)]
-fn harden_dir(dir: &Path) -> Result<()> {
+pub(super) fn harden_dir(dir: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = fs::metadata(dir)?.permissions();
     if perms.mode() & 0o077 != 0 {
@@ -931,6 +931,6 @@ fn harden_dir(dir: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn harden_dir(_dir: &Path) -> Result<()> {
+pub(super) fn harden_dir(_dir: &Path) -> Result<()> {
     Ok(())
 }
