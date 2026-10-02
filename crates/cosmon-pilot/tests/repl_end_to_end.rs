@@ -20,7 +20,8 @@ use async_trait::async_trait;
 
 use cosmon_agent_harness::spine::{Provider, Turn};
 use cosmon_agent_harness::{
-    MessageLog, ToolCall, ToolDeclaration, TranscriptEntry, TranscriptRole,
+    MessageLog, TerminalDisposition, TerminalResponse, ToolCall, ToolDeclaration, TranscriptEntry,
+    TranscriptRole,
 };
 use cosmon_pilot::repl::{run_repl, ReplConfig};
 use cosmon_pilot::transcript::Transcript;
@@ -86,6 +87,8 @@ enum ScriptTurn {
     Observe(String),
     /// Emit a final text response.
     Stop(String),
+    /// Emit partial text terminated by the output limit.
+    Limited(String),
 }
 
 #[derive(Debug)]
@@ -120,6 +123,10 @@ impl Provider for ScriptProvider {
                 )],
             }),
             Some(ScriptTurn::Stop(text)) => Ok(Turn::Stop(text)),
+            Some(ScriptTurn::Limited(text)) => Ok(Turn::Terminal(TerminalResponse::new(
+                text,
+                TerminalDisposition::OutputLimit,
+            ))),
             None => Ok(Turn::Stop("(script exhausted)".to_owned())),
         }
     }
@@ -289,4 +296,41 @@ async fn quit_directive_never_calls_the_model() {
 
     let rendered = String::from_utf8(output).unwrap();
     assert!(rendered.contains("leaving the pilot"));
+}
+
+#[tokio::test]
+async fn typed_terminal_reason_is_visible_to_the_operator() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = ScriptProvider {
+        turns: Mutex::new(VecDeque::from(vec![ScriptTurn::Limited(
+            "partial result".to_owned(),
+        )])),
+    };
+    let transcript_path = dir.path().join("typed-terminal.md");
+    let mut transcript = Transcript::create(&transcript_path).unwrap();
+    let input = Cursor::new(b"continue\n/quit\n".to_vec());
+    let mut output = Vec::new();
+    let config = ReplConfig {
+        briefing: "test pilot briefing",
+        work_dir: dir.path(),
+        observe: &cosmon_ops_tools::ObserveTool,
+    };
+
+    run_repl(
+        provider,
+        cosmon_ops_tools::read_only_registry(),
+        config,
+        &mut transcript,
+        input,
+        &mut output,
+    )
+    .await
+    .expect("repl renders the typed terminal response");
+
+    let rendered = String::from_utf8(output).expect("utf8 output");
+    assert!(rendered.contains("partial result"), "{rendered}");
+    assert!(
+        rendered.contains("response ended: output limit"),
+        "{rendered}"
+    );
 }

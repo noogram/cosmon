@@ -68,6 +68,49 @@ pub struct ToolCall {
     pub arguments_json: String,
 }
 
+/// Provider-neutral classification of a completed tool dispatch.
+///
+/// This is telemetry, not lifecycle evidence. In particular, a successful
+/// read or shell command does not prove that a requested deliverable exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolOutcome {
+    /// The tool reported that its operation completed successfully.
+    Succeeded,
+    /// The tool reported a definite failure.
+    Failed,
+    /// The tool may have produced effects, but its completion is not known.
+    Uncertain,
+}
+
+/// Counts of classified tool results observed during one loop run.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ToolOutcomeCounts {
+    /// Tool operations that reported success.
+    pub succeeded: u32,
+    /// Tool operations that reported definite failure.
+    pub failed: u32,
+    /// Tool operations whose effects or completion are uncertain.
+    pub uncertain: u32,
+    /// Successful mutations performed by the path-checked file tools.
+    ///
+    /// Shell success is deliberately excluded: an arbitrary command exiting
+    /// zero is not proof that it produced the formula's deliverable.
+    pub successful_effects: u32,
+}
+
+impl ToolOutcomeCounts {
+    pub(crate) fn record(&mut self, outcome: ToolOutcome, successful_effect: bool) {
+        match outcome {
+            ToolOutcome::Succeeded => self.succeeded = self.succeeded.saturating_add(1),
+            ToolOutcome::Failed => self.failed = self.failed.saturating_add(1),
+            ToolOutcome::Uncertain => self.uncertain = self.uncertain.saturating_add(1),
+        }
+        if successful_effect {
+            self.successful_effects = self.successful_effects.saturating_add(1);
+        }
+    }
+}
+
 impl ToolCall {
     /// Construct a [`ToolCall`] from the three identifier fields.
     ///
@@ -278,6 +321,32 @@ impl ToolRegistry {
             .get(call.name.as_str())
             .ok_or_else(|| ToolError::NotWhitelisted(call.name.clone()))?;
         tool.execute(&call.arguments_json, work_dir)
+    }
+
+    /// Classify a completed dispatch without promoting it to lifecycle proof.
+    ///
+    /// Structured shell results use their exit and timeout fields. A timeout
+    /// is uncertain because the command may have produced effects before it
+    /// was killed. Path-checked file mutations are the only operations counted
+    /// as successful effects.
+    #[must_use]
+    pub fn classify_result(
+        call: &ToolCall,
+        result: &Result<String, ToolError>,
+    ) -> (ToolOutcome, bool) {
+        let Ok(output) = result else {
+            return (ToolOutcome::Failed, false);
+        };
+        if call.name == "exec_command" {
+            return match serde_json::from_str::<crate::tools::exec_command::ExecResult>(output) {
+                Ok(exec) if exec.timed_out => (ToolOutcome::Uncertain, false),
+                Ok(exec) if exec.exit_code == 0 => (ToolOutcome::Succeeded, false),
+                Ok(_) => (ToolOutcome::Failed, false),
+                Err(_) => (ToolOutcome::Uncertain, false),
+            };
+        }
+        let successful_effect = matches!(call.name.as_str(), "edit_file" | "write_file");
+        (ToolOutcome::Succeeded, successful_effect)
     }
 
     /// Snapshot of all registered tool declarations, in stable

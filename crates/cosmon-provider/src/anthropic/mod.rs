@@ -108,7 +108,10 @@ use cosmon_transport::spawn::{AdapterTelemetry, SpawnConfig, SpawnError, WorkerH
 
 #[cfg(feature = "http")]
 use cosmon_agent_harness::spine::Provider;
-use cosmon_agent_harness::{HarnessError, ToolCall as HarnessToolCall, ToolDeclaration, Turn};
+use cosmon_agent_harness::{
+    HarnessError, TerminalDisposition, TerminalResponse, ToolCall as HarnessToolCall,
+    ToolDeclaration, Turn,
+};
 
 use crate::secret::Secret;
 
@@ -687,6 +690,17 @@ struct MessagesResponse {
     model: Option<String>,
 }
 
+#[cfg(feature = "http")]
+fn map_messages_stop_reason(reason: Option<&str>) -> TerminalDisposition {
+    match reason {
+        Some("end_turn" | "stop_sequence" | "tool_use") => TerminalDisposition::Normal,
+        Some("max_tokens" | "model_context_window_exceeded") => TerminalDisposition::OutputLimit,
+        Some("refusal" | "safety") => TerminalDisposition::Refused,
+        Some(other) => TerminalDisposition::Unknown(other.to_owned()),
+        None => TerminalDisposition::Incomplete,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Provider impl — one_turn = one POST /v1/messages
 // ---------------------------------------------------------------------------
@@ -785,7 +799,9 @@ impl Provider for AnthropicProvider {
             })
             .collect();
 
-        if !calls.is_empty() {
+        let disposition = map_messages_stop_reason(parsed.stop_reason.as_deref());
+
+        if disposition == TerminalDisposition::Normal && !calls.is_empty() {
             return Ok(Turn::ToolCalls {
                 assistant: ApiMessage {
                     role: "assistant".into(),
@@ -811,8 +827,7 @@ impl Provider for AnthropicProvider {
         // is still a loud loop terminator — the operator sees the
         // partial reply rather than a silent retry. We log it via
         // tracing for the IFBDD trail but do not gate the return on it.
-        let _ = parsed.stop_reason;
-        Ok(Turn::Stop(text))
+        Ok(Turn::Terminal(TerminalResponse::new(text, disposition)))
     }
 
     fn tool_schema(&self) -> Vec<ToolDeclaration> {
@@ -1324,5 +1339,30 @@ mod tests {
             }
             other => panic!("expected QuotaExceeded round-trip, got {other:?}"),
         }
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn terminal_reasons_cover_every_disposition() {
+        assert_eq!(
+            map_messages_stop_reason(Some("end_turn")),
+            TerminalDisposition::Normal
+        );
+        assert_eq!(
+            map_messages_stop_reason(Some("max_tokens")),
+            TerminalDisposition::OutputLimit
+        );
+        assert_eq!(
+            map_messages_stop_reason(Some("refusal")),
+            TerminalDisposition::Refused
+        );
+        assert_eq!(
+            map_messages_stop_reason(None),
+            TerminalDisposition::Incomplete
+        );
+        assert_eq!(
+            map_messages_stop_reason(Some("future_reason")),
+            TerminalDisposition::Unknown("future_reason".to_owned())
+        );
     }
 }

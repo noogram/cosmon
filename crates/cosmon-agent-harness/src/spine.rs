@@ -37,8 +37,47 @@ use crate::compaction::{CompactionError, CompactionPolicy, CompactionReport};
 use crate::error::HarnessError;
 use crate::message_log::{MessageLog, TranscriptEntry};
 use crate::tool::{
-    default_registry, default_registry_with_operator_block, ToolCall, ToolDeclaration, ToolRegistry,
+    default_registry, default_registry_with_operator_block, ToolCall, ToolDeclaration,
+    ToolOutcomeCounts, ToolRegistry,
 };
+
+/// Provider-reported reason that a turn terminated.
+///
+/// The reason is carried independently from partial assistant text so output
+/// limits and refusals cannot be mistaken for normal completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalDisposition {
+    /// The provider reported an ordinary completed response.
+    Normal,
+    /// The provider stopped because an output limit was reached.
+    OutputLimit,
+    /// The provider filtered or refused the response.
+    Refused,
+    /// The response ended without a valid structural terminator.
+    Incomplete,
+    /// The provider supplied a termination reason cosmon does not recognize.
+    Unknown(String),
+}
+
+/// Text and provider termination truth for one terminal turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalResponse {
+    /// Assistant text accumulated before termination, possibly partial.
+    pub text: String,
+    /// Provider-reported terminal disposition.
+    pub disposition: TerminalDisposition,
+}
+
+impl TerminalResponse {
+    /// Construct a terminal response from its text and disposition.
+    #[must_use]
+    pub fn new(text: impl Into<String>, disposition: TerminalDisposition) -> Self {
+        Self {
+            text: text.into(),
+            disposition,
+        }
+    }
+}
 
 /// One round-trip outcome from [`Provider::one_turn`].
 ///
@@ -71,6 +110,8 @@ pub enum Turn<L: MessageLog> {
     /// loud terminator — translate to `Stop` rather than retrying
     /// silently.
     Stop(String),
+    /// A provider-native terminal response whose reason has been preserved.
+    Terminal(TerminalResponse),
 }
 
 /// What the spine asks every provider to do — two methods.
@@ -443,6 +484,10 @@ pub struct WorkerOutcome {
     /// the model stopped without writing a file or running a command — no
     /// observable work.
     pub tools_dispatched: u32,
+    /// Classification of tool results; telemetry only, never completion proof.
+    pub tool_outcomes: ToolOutcomeCounts,
+    /// Provider-reported reason the final turn ended.
+    pub terminal_disposition: TerminalDisposition,
 }
 
 /// Work observed before a synchronous loop returns or fails.
@@ -630,6 +675,7 @@ async fn run_loop_with_registry_impl<P: Provider>(
     // requires both axes bound; without `used_tools` the worst-case
     // is 30×64=1920 dispatches before `TurnBudgetExhausted`.
     let mut used_tools: u32 = 0;
+    let mut tool_outcomes = ToolOutcomeCounts::default();
 
     // C4 mechanism 5 (delib-20260705-7288) — tool-call cycle detection.
     // A weak local oracle can loop *across turns* (turn: `read A`; turn:
@@ -694,7 +740,7 @@ async fn run_loop_with_registry_impl<P: Provider>(
             .await
             .map_err(HarnessError::Provider)?;
 
-        match turn {
+        let terminal = match turn {
             Turn::ToolCalls { assistant, calls } => {
                 // C4 mechanism 5 — collapse this turn's calls into one
                 // fingerprint *before* they are moved into dispatch, then
@@ -731,20 +777,24 @@ async fn run_loop_with_registry_impl<P: Provider>(
                     assistant,
                     calls,
                     &mut used_tools,
+                    &mut tool_outcomes,
                     tool_limit,
                     progress.as_deref_mut(),
                 )
                 .map_err(|DispatchHalt::ToolBudgetExhausted { limit }| {
                     HarnessError::ToolBudgetExhausted { limit }
                 })?;
+                continue;
             }
-            Turn::Stop(text) => {
-                return Ok(WorkerOutcome {
-                    synthesis: text,
-                    tools_dispatched: used_tools,
-                })
-            }
-        }
+            Turn::Stop(text) => TerminalResponse::new(text, TerminalDisposition::Normal),
+            Turn::Terminal(terminal) => terminal,
+        };
+        return Ok(WorkerOutcome {
+            synthesis: terminal.text,
+            tools_dispatched: used_tools,
+            tool_outcomes,
+            terminal_disposition: terminal.disposition,
+        });
     }
 
     Err(HarnessError::TurnBudgetExhausted { limit: max_turns })
@@ -795,6 +845,7 @@ fn dispatch_tool_calls<L: MessageLog>(
     assistant: L::AssistantMsg,
     calls: Vec<ToolCall>,
     used_tools: &mut u32,
+    tool_outcomes: &mut ToolOutcomeCounts,
     tool_limit: u32,
     mut progress: Option<&mut LoopProgress>,
 ) -> Result<(), DispatchHalt> {
@@ -804,7 +855,10 @@ fn dispatch_tool_calls<L: MessageLog>(
         if *used_tools > tool_limit {
             return Err(DispatchHalt::ToolBudgetExhausted { limit: tool_limit });
         }
-        let result = match registry.execute(&call, work_dir) {
+        let execution = registry.execute(&call, work_dir);
+        let (outcome, successful_effect) = ToolRegistry::classify_result(&call, &execution);
+        tool_outcomes.record(outcome, successful_effect);
+        let result = match execution {
             Ok(output) => output,
             Err(tool_err) => {
                 tracing::debug!(
@@ -904,6 +958,8 @@ pub enum StepOutcome {
     /// this text and await the next [`InteractiveSession::submit`]. The
     /// session is **not** terminated.
     Yielded(String),
+    /// The provider yielded with a non-legacy typed terminal disposition.
+    YieldedTerminal(TerminalResponse),
     /// The per-operator-turn round-trip budget
     /// ([`TurnBudget::max_turns`]) was spent and the model still wanted
     /// to continue (FSM `BudgetExhausted → yield`, interactive arm).
@@ -983,6 +1039,7 @@ pub struct InteractiveSession<P: Provider> {
     /// `turn_count` this is **not** reset per operator turn — a runaway
     /// fan-out is fatal regardless of how it is spread across turns.
     used_tools: u32,
+    tool_outcomes: ToolOutcomeCounts,
     /// Per-turn round-trip cap (FSM `MaxTurns`).
     max_turns: u32,
     /// Cumulative tool-dispatch cap (I2).
@@ -1075,6 +1132,7 @@ impl<P: Provider> InteractiveSession<P> {
             awaiting_operator: true,
             turn_count: 0,
             used_tools: 0,
+            tool_outcomes: ToolOutcomeCounts::default(),
             max_turns: TurnBudget::DEFAULT.max_turns,
             tool_limit: ToolBudget::DEFAULT.max_tool_calls,
             context_limit,
@@ -1181,6 +1239,7 @@ impl<P: Provider> InteractiveSession<P> {
                     assistant,
                     calls,
                     &mut self.used_tools,
+                    &mut self.tool_outcomes,
                     self.tool_limit,
                     None,
                 )
@@ -1194,6 +1253,10 @@ impl<P: Provider> InteractiveSession<P> {
             Turn::Stop(text) => {
                 self.awaiting_operator = true;
                 Ok(StepOutcome::Yielded(text))
+            }
+            Turn::Terminal(terminal) => {
+                self.awaiting_operator = true;
+                Ok(StepOutcome::YieldedTerminal(terminal))
             }
         }
     }
@@ -1754,6 +1817,33 @@ mod tests {
             outcome.tools_dispatched, 1,
             "one tool call was dispatched — observable work"
         );
+        assert_eq!(outcome.tool_outcomes.succeeded, 1);
+        assert_eq!(outcome.tool_outcomes.successful_effects, 0);
+    }
+
+    #[tokio::test]
+    async fn nonzero_shell_exit_is_failed_not_a_successful_effect() {
+        let dir = tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![
+            Turn::ToolCalls {
+                assistant: "running a command".to_owned(),
+                calls: vec![ToolCall::new(
+                    "call-fail",
+                    "exec_command",
+                    serde_json::json!({ "command": "exit 7" }).to_string(),
+                )],
+            },
+            Turn::Stop("done".to_owned()),
+        ]);
+
+        let outcome = run_loop_counted(&provider, "run the command", dir.path(), None)
+            .await
+            .expect("the model may recover after a command failure");
+
+        assert_eq!(outcome.tools_dispatched, 1);
+        assert_eq!(outcome.tool_outcomes.failed, 1);
+        assert_eq!(outcome.tool_outcomes.succeeded, 0);
+        assert_eq!(outcome.tool_outcomes.successful_effects, 0);
     }
 
     /// A tool-execution failure must NOT abort the loop — the typed

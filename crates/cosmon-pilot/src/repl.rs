@@ -28,7 +28,9 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use cosmon_agent_harness::spine::Provider;
-use cosmon_agent_harness::{InteractiveSession, StepOutcome, Tool, ToolRegistry};
+use cosmon_agent_harness::{
+    InteractiveSession, StepOutcome, TerminalDisposition, Tool, ToolRegistry,
+};
 
 use crate::directives::PilotDirective;
 use crate::error::PilotError;
@@ -142,6 +144,17 @@ where
                     writeln!(output, "{text}")?;
                     break;
                 }
+                StepOutcome::YieldedTerminal(terminal) => {
+                    writeln!(output, "{}", terminal.text)?;
+                    if terminal.disposition != TerminalDisposition::Normal {
+                        writeln!(
+                            output,
+                            "(response ended: {})",
+                            terminal_disposition_label(&terminal.disposition)
+                        )?;
+                    }
+                    break;
+                }
                 StepOutcome::BudgetExhausted { limit } => {
                     writeln!(
                         output,
@@ -163,6 +176,16 @@ where
     // after a model turn whose entries were already flushed — cheap no-op).
     transcript.append_new(&session.transcript())?;
     Ok(())
+}
+
+fn terminal_disposition_label(disposition: &TerminalDisposition) -> &str {
+    match disposition {
+        TerminalDisposition::Normal => "normal",
+        TerminalDisposition::OutputLimit => "output limit",
+        TerminalDisposition::Refused => "refused",
+        TerminalDisposition::Incomplete => "incomplete response",
+        TerminalDisposition::Unknown(_) => "unknown provider reason",
+    }
 }
 
 /// Dispatch one [`PilotDirective`]. Returns `Ok(true)` when the directive

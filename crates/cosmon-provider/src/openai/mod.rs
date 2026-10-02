@@ -88,7 +88,10 @@ use cosmon_transport::spawn::{AdapterTelemetry, SpawnConfig, SpawnError, WorkerH
 
 #[cfg(feature = "http")]
 use cosmon_agent_harness::spine::Provider;
-use cosmon_agent_harness::{HarnessError, ToolCall as HarnessToolCall, ToolDeclaration, Turn};
+use cosmon_agent_harness::{
+    HarnessError, TerminalDisposition, TerminalResponse, ToolCall as HarnessToolCall,
+    ToolDeclaration, Turn,
+};
 
 use crate::secret::Secret;
 
@@ -1108,11 +1111,8 @@ struct ChatResponse {
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: ChatMessage,
-    // `finish_reason` is intentionally omitted: tool calls are detected from
-    // the emitted `tool_calls` field, never from `finish_reason`. The OpenAI
-    // chat/completions API documents `finish_reason:"tool_calls"`, but ollama
-    // returns "stop" even when `tool_calls` is populated, so the field is not a
-    // trustworthy signal. serde ignores the field on the wire.
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1305,6 +1305,7 @@ impl Provider for OpenAIProvider {
             content,
             wire_calls,
             realized_model,
+            disposition,
         } = consume_chat_completion(resp).await?;
 
         // Realized-model capture (F-01): emit `ModelObserved` at the response
@@ -1319,7 +1320,7 @@ impl Provider for OpenAIProvider {
             );
         }
 
-        if !wire_calls.is_empty() {
+        if disposition == TerminalDisposition::Normal && !wire_calls.is_empty() {
             // I4 — the spine pushes the assistant envelope to the log BEFORE
             // the tool results land (the pre-extraction
             // `messages.push(choice.message)` ordering, now enforced by the
@@ -1344,7 +1345,10 @@ impl Provider for OpenAIProvider {
         // content_filter, …) is a loud loop terminator: the operator sees the
         // partial reply rather than a silent retry, same semantics as the
         // pre-extraction fall-through.
-        Ok(Turn::Stop(content.unwrap_or_default()))
+        Ok(Turn::Terminal(TerminalResponse::new(
+            content.unwrap_or_default(),
+            disposition,
+        )))
     }
 
     fn tool_schema(&self) -> Vec<ToolDeclaration> {
@@ -1471,6 +1475,8 @@ struct StreamChunk {
 struct StreamChoice {
     #[serde(default)]
     delta: StreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 /// The incremental `delta` of one streamed choice — text and/or tool-call
@@ -1522,6 +1528,9 @@ struct StreamAccumulator {
     /// stable index order regardless of the interleaving of their fragments
     /// across frames.
     tool_calls: std::collections::BTreeMap<usize, ToolCallBuf>,
+    finish_reason: Option<String>,
+    saw_done: bool,
+    malformed_data: bool,
 }
 
 #[cfg(feature = "http")]
@@ -1552,7 +1561,11 @@ impl StreamAccumulator {
             return false;
         };
         let payload = payload.trim();
-        if payload.is_empty() || payload == "[DONE]" {
+        if payload.is_empty() {
+            return true;
+        }
+        if payload == "[DONE]" {
+            self.saw_done = true;
             return true;
         }
         let Ok(chunk) = serde_json::from_str::<StreamChunk>(payload) else {
@@ -1560,9 +1573,13 @@ impl StreamAccumulator {
                 target: "cosmon_provider::openai",
                 "skipping unparseable SSE data frame (non-fatal)"
             );
+            self.malformed_data = true;
             return true;
         };
         for choice in chunk.choices {
+            if choice.finish_reason.is_some() {
+                self.finish_reason = choice.finish_reason;
+            }
             if let Some(text) = choice.delta.content {
                 self.content.push_str(&text);
             }
@@ -1593,12 +1610,16 @@ impl StreamAccumulator {
     /// ([`finalize_streamed_args`]) to every tool call's arguments. A buffer
     /// that never received an `id` is given a deterministic `call_<index>`
     /// synthetic id so the assistant↔tool_result pairing (I4) still holds.
-    fn finish(self) -> (Option<String>, Vec<WireToolCall>) {
+    fn finish(self) -> (Option<String>, Vec<WireToolCall>, TerminalDisposition) {
         let content = if self.content.is_empty() {
             None
         } else {
             Some(self.content)
         };
+        let incomplete_tool = self
+            .tool_calls
+            .values()
+            .any(|buf| buf.id.as_deref().is_none_or(str::is_empty) || buf.name.is_empty());
         let wire_calls = self
             .tool_calls
             .into_iter()
@@ -1611,7 +1632,26 @@ impl StreamAccumulator {
                 },
             })
             .collect();
-        (content, wire_calls)
+        let disposition = if self.malformed_data || incomplete_tool {
+            TerminalDisposition::Incomplete
+        } else if let Some(reason) = self.finish_reason.as_deref() {
+            map_openai_finish_reason(reason)
+        } else if self.saw_done {
+            TerminalDisposition::Normal
+        } else {
+            TerminalDisposition::Incomplete
+        };
+        (content, wire_calls, disposition)
+    }
+}
+
+#[cfg(feature = "http")]
+fn map_openai_finish_reason(reason: &str) -> TerminalDisposition {
+    match reason {
+        "stop" | "tool_calls" | "function_call" => TerminalDisposition::Normal,
+        "length" | "max_tokens" => TerminalDisposition::OutputLimit,
+        "content_filter" | "refusal" | "safety" => TerminalDisposition::Refused,
+        other => TerminalDisposition::Unknown(other.to_owned()),
     }
 }
 
@@ -1705,11 +1745,12 @@ async fn consume_chat_completion(
     }
 
     if saw_sse_frame {
-        let (content, wire_calls) = acc.finish();
+        let (content, wire_calls, disposition) = acc.finish();
         return Ok(ChatCompletionOutcome {
             content,
             wire_calls,
             realized_model,
+            disposition,
         });
     }
 
@@ -1733,6 +1774,10 @@ async fn consume_chat_completion(
         content: choice.message.content,
         wire_calls,
         realized_model,
+        disposition: choice
+            .finish_reason
+            .as_deref()
+            .map_or(TerminalDisposition::Incomplete, map_openai_finish_reason),
     })
 }
 
@@ -1743,6 +1788,7 @@ struct ChatCompletionOutcome {
     content: Option<String>,
     wire_calls: Vec<WireToolCall>,
     realized_model: Option<String>,
+    disposition: TerminalDisposition,
 }
 
 /// Pull the served `model` out of one SSE line (`data: {…}`), if it carries
@@ -2124,7 +2170,7 @@ mod tests {
         ));
         assert!(acc.ingest_sse_line("data: [DONE]"));
 
-        let (content, calls) = acc.finish();
+        let (content, calls, _) = acc.finish();
         assert!(content.is_none(), "a pure tool-call turn has no text");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call-1");
@@ -2140,7 +2186,7 @@ mod tests {
         assert!(acc.ingest_sse_line(r#"data: {"choices":[{"delta":{"content":"Hello, "}}]}"#));
         assert!(acc.ingest_sse_line(r#"data: {"choices":[{"delta":{"content":"world."}}]}"#));
         assert!(acc.ingest_sse_line("data: [DONE]"));
-        let (content, calls) = acc.finish();
+        let (content, calls, _) = acc.finish();
         assert_eq!(content.as_deref(), Some("Hello, world."));
         assert!(calls.is_empty());
     }
@@ -2170,7 +2216,7 @@ mod tests {
         assert!(acc.ingest_sse_line(
             r#"data: {"choices":[{"delta":{"tool_calls":[{"index":2,"function":{"name":"read_file","arguments":"{}"}}]}}]}"#
         ));
-        let (_content, calls) = acc.finish();
+        let (_content, calls, _) = acc.finish();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_2");
         assert_eq!(calls[0].function.name, "read_file");
@@ -2217,7 +2263,7 @@ mod tests {
             r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-x","function":{"name":"write_file","arguments":"{\"path\":\"a"}}]}}]}"#
         ));
         // No [DONE] — stream ended abruptly; finish anyway.
-        let (_content, calls) = acc.finish();
+        let (_content, calls, _) = acc.finish();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.arguments, r#"{"path":"a"#);
         assert_ne!(
@@ -2785,5 +2831,26 @@ mod tests {
                 limit: 4_096,
             }
         ));
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn terminal_reasons_cover_every_disposition() {
+        assert_eq!(
+            map_openai_finish_reason("stop"),
+            TerminalDisposition::Normal
+        );
+        assert_eq!(
+            map_openai_finish_reason("length"),
+            TerminalDisposition::OutputLimit
+        );
+        assert_eq!(
+            map_openai_finish_reason("content_filter"),
+            TerminalDisposition::Refused
+        );
+        assert_eq!(
+            map_openai_finish_reason("future_reason"),
+            TerminalDisposition::Unknown("future_reason".to_owned())
+        );
     }
 }
