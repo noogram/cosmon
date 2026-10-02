@@ -13,9 +13,9 @@
 //!
 //! # What is IN the plan (pure, decided here)
 //!
-//! - the **adapter selection** — the six-level Q5a chain (flag → formula-step
-//!   pin → `$COSMON_DEFAULT_ADAPTER` → per-galaxy config → global config →
-//!   built-in floor), validated against the dispatch registry
+//! - the **adapter selection** — the seven-level Q5a chain (flag → molecule
+//!   pin → formula-step pin → `$COSMON_DEFAULT_ADAPTER` → per-galaxy config →
+//!   global config → built-in floor), validated against the dispatch registry
 //!   ([`resolve_selection`]);
 //! - the **model selection** — the sibling six-level chain scoped to the
 //!   resolved adapter (delib-20260704-b476 C1);
@@ -107,6 +107,8 @@ pub struct MoleculeBrief<'a> {
 pub struct SelectionRequest<'a> {
     /// `--adapter <name>` if the operator passed it.
     pub adapter_flag: Option<&'a str>,
+    /// Durable adapter pin recorded on this molecule at nucleation.
+    pub molecule_adapter: Option<&'a str>,
     /// `--model <id>` if the operator passed it.
     pub model_flag: Option<&'a str>,
     /// Model recommendation recorded on this molecule at nucleation.
@@ -185,7 +187,7 @@ pub struct TackleSelection {
 }
 
 /// Resolve the adapter, model, and spawn axes for a tackle — the pure
-/// composition of the two six-level Q5a chains plus registry validation.
+/// composition of the adapter and model Q5a chains plus registry validation.
 ///
 /// Order of decisions mirrors the historical inline sequence in
 /// `cmd::tackle::run` phase 3a exactly: adapter chain → fallback sharpening →
@@ -225,6 +227,15 @@ pub fn resolve_selection(req: &SelectionRequest<'_>) -> Result<TackleSelection, 
         req.global_adapters,
         req.global_config_path,
     );
+    let (adapter_name, adapter_source) = if req.adapter_flag.is_none_or(str::is_empty) {
+        req.molecule_adapter
+            .filter(|adapter| !adapter.trim().is_empty())
+            .map_or((adapter_name, adapter_source), |adapter| {
+                (adapter.to_owned(), AdapterSelectionSource::MoleculePin)
+            })
+    } else {
+        (adapter_name, adapter_source)
+    };
     let adapter_source = sharpen_adapter_fallback(adapter_source, req.formula_absence);
 
     // Compose the full dispatch registry: built-in Adapter names ∪ TOML
@@ -443,7 +454,9 @@ impl TacklePlan {
 /// Resolve the Worker-Spawn Port Adapter name for a tackle (ADR-097 / C6;
 /// ADR-108 Q5a chain).
 ///
-/// Walks the six-level resolution chain, highest priority first:
+/// Walks the base six-level resolution chain, highest priority first.
+/// [`resolve_selection`] inserts the durable molecule pin between the flag
+/// and formula step because this lower-level helper predates that state field.
 ///
 /// 1. `--adapter <name>` (flag passed) → [`AdapterSelectionSource::Cli`].
 /// 2. **formula step `adapter = "<name>"`** → [`AdapterSelectionSource::FormulaStep`].
@@ -556,7 +569,8 @@ pub fn resolve_adapter_selection(
     (
         BUILTIN_FLOOR_ADAPTER.to_owned(),
         AdapterSelectionSource::Default {
-            fallback_reason: "no --adapter flag, no formula-step adapter pin, no \
+            fallback_reason: "no --adapter flag, no molecule adapter pin, no \
+                              formula-step adapter pin, no \
                               $COSMON_DEFAULT_ADAPTER, and no [adapters.default] in \
                               either the per-galaxy or global config; using built-in \
                               'local' (Ollama-backed in-process loop, no Claude Code \
@@ -1696,6 +1710,7 @@ mod tests {
 
         let selection_req = SelectionRequest {
             adapter_flag: Some("claude"),
+            molecule_adapter: None,
             model_flag: None,
             molecule_model: None,
             formula: None,
@@ -1870,6 +1885,7 @@ mod tests {
     fn tackle_plan_refuses_unknown_adapter_purely() {
         let req = SelectionRequest {
             adapter_flag: Some("definitely-not-an-adapter"),
+            molecule_adapter: None,
             model_flag: None,
             molecule_model: None,
             formula: None,
@@ -1894,6 +1910,7 @@ mod tests {
     fn selection_floor_is_local_with_default_source() {
         let req = SelectionRequest {
             adapter_flag: None,
+            molecule_adapter: None,
             model_flag: None,
             molecule_model: None,
             formula: None,

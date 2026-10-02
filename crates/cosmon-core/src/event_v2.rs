@@ -3386,27 +3386,29 @@ impl HarnessLaunchStatus {
 ///
 /// 1. [`AdapterSelectionSource::Cli`] — the operator (or a driver
 ///    shelling out to `cs tackle`) passed `--adapter <name>`.
-/// 2. [`AdapterSelectionSource::FormulaStep`] — no flag was passed and the
+/// 2. [`AdapterSelectionSource::MoleculePin`] — no flag was passed and the
+///    molecule carries a durable adapter pin stamped at nucleation.
+/// 3. [`AdapterSelectionSource::FormulaStep`] — no higher pin was present and the
 ///    *currently executing formula step* pins `adapter = "<name>"`
 ///    (per-workflow override). Ranks above
 ///    every default so a `deep-think` panel can demand frontier reasoning
 ///    regardless of the operator's blanket preference.
-/// 3. [`AdapterSelectionSource::EnvVar`] — no flag and no step pin, and
+/// 4. [`AdapterSelectionSource::EnvVar`] — no flag and no pin, and
 ///    `$COSMON_DEFAULT_ADAPTER` is set non-empty: the operator's
 ///    session-scoped "right now, everywhere" hammer. Ranks above both
 ///    config files (it is the explicit live intent) but below the
 ///    formula-step pin (a correctness need outranks a blanket preference).
-/// 4. [`AdapterSelectionSource::Config`] — no flag, no step pin, no env, and
+/// 5. [`AdapterSelectionSource::Config`] — no flag, no pin, no env, and
 ///    the per-galaxy `.cosmon/config.toml::[adapters.default]` resolved
 ///    the name.
-/// 5. [`AdapterSelectionSource::GlobalConfig`] — no flag, no step pin, no
+/// 6. [`AdapterSelectionSource::GlobalConfig`] — no flag, no pin, no
 ///    env, and the per-galaxy config carried no default, so the global
 ///    `~/.config/cosmon/config.toml::[adapters.default]` (the operator's
 ///    machine-wide preference) resolved the name.
-/// 6. [`AdapterSelectionSource::Default`] — nothing above resolved, so the
+/// 7. [`AdapterSelectionSource::Default`] — nothing above resolved, so the
 ///    built-in `"local"` floor won (the config-undeletable invariant: no
 ///    config = local autonomy).
-/// 7. [`AdapterSelectionSource::EnvelopeRole`] — reserved for a future
+/// 8. [`AdapterSelectionSource::EnvelopeRole`] — reserved for a future
 ///    envelope-driven dispatch path (academy-shim's role → adapter
 ///    resolution). Not emitted by C6.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3418,6 +3420,9 @@ pub enum AdapterSelectionSource {
         /// The verbatim flag value the operator (or driver) passed.
         flag: String,
     },
+    /// A durable adapter pin recorded on the molecule at nucleation, below an
+    /// explicit tackle flag and above the executing formula step.
+    MoleculePin,
     /// The selection came from the currently executing formula step's
     /// `adapter = "<name>"` pin (a per-workflow override).
     /// Ranks above [`Config`](Self::Config) because a

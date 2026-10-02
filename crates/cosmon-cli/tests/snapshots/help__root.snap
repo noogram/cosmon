@@ -238,13 +238,14 @@ ADAPTERS — canonical names and their per-Adapter axes (registry projection, AD
 
 Selection happens at 'cs tackle' time. Resolution order:
   'cs tackle --adapter <NAME>'      → CLI flag wins.
+  molecule adapter pin              → durable choice stamped by 'cs nucleate --adapter'.
   formula step 'adapter = "<NAME>"'  → per-workflow override (e.g. a deep-think panel pins claude).
   $COSMON_DEFAULT_ADAPTER            → operator session hammer (one export, everywhere, no committed config).
   '.cosmon/config.toml::[adapters.default]'  → per-galaxy default for the project.
   '~/.config/cosmon/config.toml::[adapters.default]'  → global machine-wide default (only when the per-galaxy config is silent).
   built-in 'local'                  → config-undeletable floor (Ollama-backed, no Claude Code in the default path).
 
-Every 'cs tackle' invocation — with or without the flag — emits one 'adapter_selected' envelope to events.jsonl carrying { adapter_name, selection_source (cli|formula_step|env_var|config|global_config|default), role_hint?, loop_ownership (cosmon|external) }. The cat-test over the event log answers "which Adapter ran for this molecule?" without parsing shell history (jq -c 'select(.type == "adapter_selected")'). The same envelope is what 'cs demo' will reuse when its --adapter pass-through lands — the demo verb merely forwards the flag to 'cs tackle'; the dispatch site is unchanged.
+Every 'cs tackle' invocation — with or without the flag — emits one 'adapter_selected' envelope to events.jsonl carrying { adapter_name, selection_source (cli|molecule_pin|formula_step|env_var|config|global_config|default), role_hint?, loop_ownership (cosmon|external) }. The cat-test over the event log answers "which Adapter ran for this molecule?" without parsing shell history (jq -c 'select(.type == "adapter_selected")'). The same envelope is what 'cs demo' will reuse when its --adapter pass-through lands — the demo verb merely forwards the flag to 'cs tackle'; the dispatch site is unchanged.
 
 Discovery path: an unknown name on 'cs tackle --adapter <UNKNOWN>' aborts with a typed 'AdapterNotFound' carrying the available names — no silent fallback (godin's error-path discoverability rule). The full registry projection is exposed read-only via 'cs config adapters [--json]' (cs.adapters.list/v1 envelope, ADR-106 D3).
 

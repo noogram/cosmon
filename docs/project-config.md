@@ -65,7 +65,8 @@ from `ProjectConfig` must be read by production code, or carry an inline
 
 > **`[adapters].default` resolution chain (Q5a, `task-20260530-c089`,
 > extended by `task-20260531-c99e`).** `cs tackle` picks its adapter,
-> highest priority first: `--adapter` flag → formula-step `adapter` pin →
+> highest priority first: `--adapter` flag → durable molecule adapter pin →
+> formula-step `adapter` pin →
 > `$COSMON_DEFAULT_ADAPTER` env var → this per-galaxy `[adapters].default`
 > → global `~/.config/cosmon/config.toml` `[adapters].default` → built-in
 > `"local"` floor. The env var is the operator's session-wide hammer (an

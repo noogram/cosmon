@@ -1205,21 +1205,15 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // ambient model env is ignored — the in-process equivalent of
         // `SubprocessExecutor::apply_dispatch_pin`'s `--adapter`/`--model` +
         // env strip.
-        let pinned = pin.is_pinned();
-        let env_default_adapter = if pinned {
-            None
-        } else {
-            std::env::var("COSMON_DEFAULT_ADAPTER").ok()
-        };
-        let env_model = if pinned { None } else { env_default_model() };
+        let (env_default_adapter, env_model) = selection_env_defaults(pin);
         let config_path = self.paths.config_path.clone();
         let project_config =
             cosmon_filestore::load_project_config(&config_path).unwrap_or_default();
         let global_cfg_path = global_adapter_config_path();
         let global_adapters = load_global_adapters(&global_cfg_path);
-
         let mut selection = resolve_selection(&SelectionRequest {
             adapter_flag: pin.adapter.as_deref(),
+            molecule_adapter: None,
             model_flag: pin.model.as_deref(),
             molecule_model: mol.model_recommendation(),
             formula: formula.as_ref(),
@@ -2304,6 +2298,18 @@ fn env_default_model() -> Option<(String, String)> {
                 .filter(|s| !s.is_empty())
                 .map(|v| (v, "ANTHROPIC_MODEL".to_owned()))
         })
+}
+
+/// Read ambient adapter/model defaults only for an unpinned dispatch.
+fn selection_env_defaults(pin: &DispatchPin) -> (Option<String>, Option<(String, String)>) {
+    if pin.is_pinned() {
+        (None, None)
+    } else {
+        (
+            std::env::var("COSMON_DEFAULT_ADAPTER").ok(),
+            env_default_model(),
+        )
+    }
 }
 
 /// Path of the operator's global adapter config
