@@ -44,6 +44,9 @@ id = "implement"
 title = "Implement the solution"
 description = "What the worker does in this step."
 acceptance = "The exit criterion the step must meet before advancing."
+# Optional: declare the normal final response as this step's deliverable.
+# The path is relative to the canonical molecule directory.
+response_artifact = "result.md"
 
 [[steps]]
 id = "verify"
@@ -61,7 +64,24 @@ acceptance = "cargo check + test + clippy + fmt all pass"
 | `[tier] level` | `0` = leaf (no children); higher tiers may decompose. |
 | `[[steps]]` | Ordered steps. Each `cs evolve` advances one step. |
 | `steps.acceptance` | The exit criterion sealed into `briefing.md` per step. |
+| `steps.response_artifact` | Optional relative destination for a normal, non-empty worker final response. |
 | `requires_capabilities` | Optional. Worker faculties these steps need: `shell`, `vcs`, `cs-cli`. |
+
+### Declared worker deliverables
+
+An owned in-process worker advances only the formula step it was dispatched
+for. Set `response_artifact` when that step's deliverable is the worker's final
+text. Cosmon publishes the exact non-empty response atomically below the
+canonical molecule directory before recording the transition; absolute paths,
+`..`, and symlink escapes are refused. When the tenant single-result directory
+is active, the same bytes are also published as `result.md`.
+
+For file-producing steps, use `acceptance_artifacts` and structured
+`verification`; only fresh artifacts declared by the current step count. A
+legacy code step with neither declaration needs a turn-scoped worktree change.
+A tool attempt, a read-only call, or an unchanged worktree is telemetry, not
+deliverable evidence. One accepted response never skips a later worker, gate,
+native, query, or checkpointed-model step.
 
 ### `requires_capabilities`
 

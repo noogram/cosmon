@@ -35,8 +35,10 @@ use cosmon_core::formula::Formula;
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::molecule::MoleculeStatus;
 #[cfg(test)]
+use cosmon_core::spawn_seam::validate_adapter_name;
+#[cfg(test)]
 use cosmon_core::spawn_seam::LoopOwnership;
-use cosmon_core::spawn_seam::{validate_adapter_name, ValidatedAdapterName};
+use cosmon_core::spawn_seam::ValidatedAdapterName;
 use cosmon_core::transport::TransportBackend;
 #[cfg(test)]
 use cosmon_core::worker::DesiredState;
@@ -2054,9 +2056,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // stranded worker that the supervision layer cannot heal. Only the
     // tmux path is checked — the in-process branch (Direct-API adapters)
     // runs its agent loop synchronously inside `spawn_and_prompt` and its
-    // race window is already closed by the time we land here, while the
-    // imminent `finalize_inprocess_molecule` call overwrites `status` to
-    // `Completed` anyway.
+    // race window is already closed by the time we land here. Formula-bound
+    // acceptance later re-reads the exact dispatched step under the fleet lock.
     //
     // Caveat: this check still happens **outside** the fleet lock, so a
     // racer that writes between our read-back and the next observer can
@@ -2180,34 +2181,28 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // smoke chronicle `2026-05-18-grok-direct-api-smoke-result-2.md`
     // §"Ce qui n'a pas marché" #2.
     if adapter_completes_inline(&adapter) {
-        // L9 completion invariant (ADR-100 R2): a completed molecule must have
-        // executed its steps or collapsed loudly. The synchronous loop witnesses
-        // its own work through the tool-dispatch count carried out on
-        // `SpawnOutcome`. A loop that returned Ok having dispatched ZERO tools
-        // wrote no file and ran no command — its worktree is byte-identical to
-        // the pre-dispatch state and no formula artefact exists. Sealing that as
-        // Completed is exactly the silent-inadmissibility the founding witness
-        // `cmbverify-20260724-54cd` exhibited (sealed 0/4, empty worktree). We
-        // collapse it loudly instead.
-        let tools_dispatched = spawn_outcome
-            .inprocess_work
-            .as_ref()
-            .map_or(0, |w| w.tools_dispatched);
-        if tools_dispatched > 0 {
-            finalize_inprocess_molecule(&store, &state_dir, &mol_id, &adapter)?;
-        } else {
-            let reason = format!(
-                "in-process {} agent loop returned Ok but dispatched zero tools — \
-                 no file written, no command run, worktree untouched; no formula \
-                 step executed and no artefact emitted. Collapsed loudly rather \
-                 than sealed a false Completed (ADR-100 R2 completion invariant). \
-                 A capable model given this briefing must drive its steps through \
-                 the harness tools; a single text-only turn is not admissible work.",
-                adapter.as_str()
-            );
-            eprintln!("cs tackle: {reason}");
-            super::collapse::collapse_one(&store, &state_dir, &mol_id, &reason)?;
-        }
+        let work = spawn_outcome.inprocess_work.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("cs tackle: inline adapter returned without worker outcome")
+        })?;
+        let formula = formula.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cs tackle: cannot accept inline worker output because formula `{}` is unavailable",
+                updated.formula_id
+            )
+        })?;
+        accept_worker_turn(
+            &store,
+            &state_dir,
+            &mol_id,
+            formula,
+            work.expected_step,
+            &work.synthesis,
+            work.normal_termination,
+            work.worktree_changed,
+            work.step_started_at,
+            &worktree_path,
+            adapter.as_str(),
+        )?;
     }
 
     // 10. Output.
@@ -4411,7 +4406,7 @@ fn report_existing_session(
 ///
 /// The `adapter` parameter is `&ValidatedAdapterName`, not `&str`. The
 /// only constructor for [`ValidatedAdapterName`] is
-/// [`validate_adapter_name`], so this signature makes
+/// [`cosmon_core::spawn_seam::validate_adapter_name`], so this signature makes
 /// "spawn-without-validation" a compile error. The catch-all match arm
 /// below is genuinely unreachable from in-tree callers and exists as a
 /// completeness guard: if a future PR adds a new adapter to the
@@ -4455,29 +4450,29 @@ pub(super) struct SpawnOutcome {
     /// `None` for every non-claude adapter, and for a claude dispatch that
     /// resolved no explicit config dir (the environment default applies).
     pub claude_config_dir: Option<String>,
-    /// The observable work an in-process Direct-API loop (openai / anthropic)
-    /// performed, or `None` for every tmux / detached arm (whose completion is
-    /// witnessed elsewhere). The dispatch site consults
-    /// [`InprocessWork::tools_dispatched`] to choose *complete* vs *collapse
-    /// loudly*: a loop that dispatched zero tools wrote no artefact and must
-    /// never be sealed `Completed` (ADR-100 R2; founding witness
-    /// `cmbverify-20260724-54cd`).
+    /// The observable outcome of an inline owned loop, or `None` for every
+    /// pane-backed and detached arm. Formula-bound acceptance consumes this
+    /// evidence; tool counts are deliberately not lifecycle authority.
     pub inprocess_work: Option<InprocessWork>,
 }
 
 /// The observable output of a synchronous in-process Direct-API agent loop.
 ///
-/// Carried out of [`spawn_openai_session`] / [`spawn_anthropic_session`] so
-/// the dispatch site can enforce the completion invariant *a completed
-/// molecule must have executed its steps or collapsed loudly*: `Some` work
-/// with `tools_dispatched == 0` is a silent no-op (the model stopped without
-/// writing a file or running a command) and licenses a **collapse**, not a
-/// completion.
+/// Carried out of each direct-provider spawn so the dispatch site can publish
+/// an explicitly declared response or prove a turn-scoped file deliverable,
+/// then advance exactly the step that produced it.
 #[derive(Debug, Clone)]
 pub(super) struct InprocessWork {
-    /// Cumulative count of tool calls the loop dispatched. `0` means no
-    /// observable work — no artefact, untouched worktree.
-    pub tools_dispatched: u32,
+    /// Final response text retained by the provider-neutral loop.
+    pub synthesis: String,
+    /// Whether the provider reported an ordinary completed response.
+    pub normal_termination: bool,
+    /// Turn-scoped witness that the worker changed the worktree.
+    pub worktree_changed: bool,
+    /// Wall-clock floor used to reject stale declared artifacts.
+    pub step_started_at: std::time::SystemTime,
+    /// Formula step this turn was dispatched to execute.
+    pub expected_step: usize,
 }
 
 /// A synchronous loop error that retains the work it actually performed.
@@ -4852,8 +4847,7 @@ fn adapter_completes_inline(adapter: &ValidatedAdapterName) -> bool {
     matches!(adapter.as_str(), "openai" | "anthropic")
 }
 
-/// Drive the canonical Running → Completed transition for an in-process
-/// Direct-API molecule once `spawn_and_prompt` has returned Ok.
+/// Accept one owned-loop turn against the formula step it was dispatched for.
 ///
 /// **Pattern divergence from tmux adapters** — for `claude` / `aider`,
 /// the `pane-died` hook installed by [`install_harvest_hook`] is the
@@ -4882,28 +4876,213 @@ fn adapter_completes_inline(adapter: &ValidatedAdapterName) -> bool {
 ///
 /// See an internal chronicle for the L9
 /// rationale and the failure mode this prevents.
-pub(super) fn finalize_inprocess_molecule(
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+fn accept_worker_turn(
     store: &FileStore,
     state_dir: &Path,
     mol_id: &MoleculeId,
-    adapter: &ValidatedAdapterName,
+    formula: &Formula,
+    expected_step: usize,
+    response_text: &str,
+    normal_termination: bool,
+    worktree_changed: bool,
+    step_started_at: std::time::SystemTime,
+    worktree: &Path,
+    adapter: &str,
 ) -> anyhow::Result<()> {
-    // Reason string is adapter-honest. The `local` / `ollama` floor no longer
-    // runs in-process — it is a DETACHED worker (`cs local-worker`) that drives
-    // Ollama out of the caller's address space — so the historic
-    // "in-process agent loop … ADR-100 Direct-API" phrasing describes an
-    // execution model the local path has not used since the detached-worker
-    // split. Only the true Direct-API adapters (openai, anthropic) keep it.
-    let reason = match adapter.as_str() {
-        "local" | "ollama" => {
+    use cosmon_core::evolve::{self, EvolveRequest, NewState};
+    use cosmon_core::worker_acceptance::{
+        decide, AcceptanceEvidence, DeclaredArtifactEvidence, TerminationEvidence, WorktreeEvidence,
+    };
+
+    let observed = store.load_molecule(mol_id)?;
+    let step = formula.steps.get(expected_step).ok_or_else(|| {
+        anyhow::anyhow!(
+            "worker acceptance step {expected_step} is outside formula `{}`",
+            formula.name
+        )
+    })?;
+    let step_id = cosmon_core::id::StepId::new(&step.id)?;
+    if observed.completed_steps.contains(&step_id) {
+        return Ok(());
+    }
+    if observed.current_step != expected_step {
+        anyhow::bail!(
+            "worker acceptance refused: dispatched step {} but molecule is now at step {}",
+            expected_step,
+            observed.current_step
+        );
+    }
+
+    let missing = super::evolve::unsatisfied_expected_artifacts(
+        &store.molecule_dir(mol_id),
+        &step.expected_artifacts,
+        Some(step_started_at),
+    );
+    let evidence_kind = decide(
+        if normal_termination {
+            TerminationEvidence::Normal
+        } else {
+            TerminationEvidence::NonNormal
+        },
+        step.response_artifact.as_deref(),
+        response_text,
+        if step.expected_artifacts.is_empty() {
+            DeclaredArtifactEvidence::NotDeclared
+        } else if missing.is_empty() {
+            DeclaredArtifactEvidence::Satisfied
+        } else {
+            DeclaredArtifactEvidence::Missing
+        },
+        if worktree_changed {
+            WorktreeEvidence::Changed
+        } else {
+            WorktreeEvidence::Unchanged
+        },
+    )
+    .map_err(|error| anyhow::anyhow!("worker output rejected for step `{}`: {error}", step.id))?;
+
+    let evidence = match evidence_kind {
+        AcceptanceEvidence::ResponseArtifact => {
+            let relative = step
+                .response_artifact
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("response artifact decision lost its path"))?;
+            let receipt = cosmon_cli::worker_acceptance::publish_response_artifact(
+                &store.molecule_dir(mol_id),
+                relative,
+                response_text,
+            )?;
             format!(
-                "detached local worker returned Ok ({} adapter)",
-                adapter.as_str()
+                "{adapter} worker published declared response artifact `{relative}` (sha256={})",
+                receipt.sha256
             )
         }
-        other => format!("in-process agent loop returned Ok ({other} adapter, ADR-100 Direct-API)"),
+        AcceptanceEvidence::DeclaredArtifacts => format!(
+            "{adapter} worker produced fresh declared artifacts for step `{}`: {}",
+            step.id,
+            step.expected_artifacts.join(", ")
+        ),
+        AcceptanceEvidence::LegacyWorktreeChange => format!(
+            "{adapter} worker terminated normally with a turn-scoped worktree change for legacy step `{}`",
+            step.id
+        ),
     };
-    super::complete::complete_one(store, state_dir, mol_id, &reason).map(|_| ())
+
+    if let Some(verification) = step.verification.as_ref() {
+        if !verification.criteria.is_empty() {
+            cosmon_cli::trust::ensure_trusted(worktree)?;
+            let output = ProcessCommand::new("sh")
+                .arg("-c")
+                .arg(&verification.criteria)
+                .current_dir(worktree)
+                .output()
+                .map_err(|error| anyhow::anyhow!("failed to run verification command: {error}"))?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "verification failed for step `{}`: {}{}",
+                    step.id,
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+        }
+    }
+
+    let outcome = evolve::evolve(
+        observed.status,
+        observed.current_step,
+        &observed.completed_steps,
+        formula,
+        &EvolveRequest {
+            evidence,
+            timestamp: Utc::now(),
+        },
+    )?;
+
+    let updated = {
+        let _guard = store.lock_fleet()?;
+        let mut current = store.load_molecule(mol_id)?;
+        if current.completed_steps.contains(&step_id) {
+            return Ok(());
+        }
+        if current.current_step != expected_step {
+            anyhow::bail!(
+                "worker acceptance raced with another transition: expected step {}, found {}",
+                expected_step,
+                current.current_step
+            );
+        }
+        current.completed_steps.push(step_id);
+        current.updated_at = Utc::now();
+        current.last_progress_at = Some(current.updated_at);
+        current.last_output_at = Some(current.updated_at);
+        match outcome.new_state {
+            NewState::Active { current_step, .. } => {
+                current.current_step = current_step;
+                current.status = MoleculeStatus::Running;
+            }
+            NewState::Completed => {
+                current.current_step = current.total_steps;
+                current.status = if current.freeze_on_last_step {
+                    MoleculeStatus::Frozen
+                } else {
+                    MoleculeStatus::Completed
+                };
+            }
+            _ => {}
+        }
+        store.save_molecule(mol_id, &current)?;
+        current
+    };
+
+    let events_path = state_dir.join("events.jsonl");
+    let step_sequence = cosmon_state::event_log::emit_one(
+        &events_path,
+        cosmon_core::event_v2::EventV2::MoleculeStepCompleted {
+            molecule_id: mol_id.clone(),
+            step: outcome.completed_step.index,
+            total: formula.steps.len(),
+            duration_ms: None,
+            step_hash: None,
+        },
+        None,
+    )
+    .ok();
+    if matches!(outcome.new_state, NewState::Completed) {
+        let _ = cosmon_state::event_log::emit_one(
+            &events_path,
+            cosmon_core::event_v2::EventV2::MoleculeCompleted {
+                molecule_id: mol_id.clone(),
+                duration_ms: None,
+                reason: "all formula steps accepted".to_owned(),
+            },
+            step_sequence,
+        );
+    }
+
+    let molecule_dir = store.molecule_dir(mol_id);
+    let log_path = molecule_dir.join("log.md");
+    let existing = fs::read_to_string(&log_path).unwrap_or_default();
+    let log = if existing.is_empty() {
+        format!("# Evolution Log\n\n{}", outcome.log_entry)
+    } else {
+        format!("{existing}{}", outcome.log_entry)
+    };
+    fs::write(&log_path, log)?;
+    let briefing_path = molecule_dir.join("briefing.md");
+    if let Some(briefing) = outcome.briefing {
+        let task = cosmon_core::briefing::render_task(&updated.variables);
+        fs::write(&briefing_path, format!("{task}{briefing}"))?;
+    } else {
+        fs::write(
+            &briefing_path,
+            "# Molecule Briefing\n\n**Status:** COMPLETED\n\nAll steps have been completed.\n",
+        )?;
+    }
+    super::evolve::deliver_committee_posture_reference(&molecule_dir, &briefing_path)?;
+    Ok(())
 }
 
 /// What the receipt-overlay mint did, in one word the dispatch trace carries.
@@ -7153,6 +7332,7 @@ fn aider_default_model() -> &'static str {
 /// `api.openai.com` with a Grok model identifier, producing a 404. The
 /// config row makes the binding authoritative.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn spawn_openai_session(
     wid: &cosmon_core::id::WorkerId,
     session_name: &str,
@@ -7163,6 +7343,8 @@ fn spawn_openai_session(
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
 ) -> anyhow::Result<InprocessWork> {
+    let step_started_at = std::time::SystemTime::now();
+    let baseline = WorktreeBaseline::capture_at_head(worktree_path);
     let (api_key, base_url) = openai_credentials(adapter_entry)
         .ok_or_else(|| anyhow::anyhow!(missing_openai_credentials_message(adapter_entry)))?;
     // `--model` / formula-pin (delib-20260704-b476 C1) is the top tier,
@@ -7269,7 +7451,14 @@ fn spawn_openai_session(
         "openai in-process agent loop completed"
     );
     Ok(InprocessWork {
-        tools_dispatched: outcome.tools_dispatched,
+        synthesis: outcome.synthesis,
+        normal_termination: matches!(
+            outcome.terminal_disposition,
+            cosmon_agent_harness::TerminalDisposition::Normal
+        ),
+        worktree_changed: local_worker_produced_real_work(worktree_path, &baseline),
+        step_started_at,
+        expected_step: mol.current_step,
     })
 }
 
@@ -8062,7 +8251,7 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
     // the agent loop; the completion decision below deliberately does NOT trust
     // it (a synthesis body is not a work product — Jesse #4), so the value is
     // dropped here.
-    let _synthesis = match result {
+    let synthesis = match result {
         Ok(synthesis) => synthesis,
         Err(error) => {
             let _ = append_local_worker_failure(&job.molecule_dir, &error);
@@ -8090,77 +8279,39 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
         };
     }
 
-    // BUG #4 real-work guard (Jesse #4 acceptance-artifact closure). The agent
-    // loop returning `Ok` proves only that the transport did not error — NOT
-    // that the weak local model did any work. A no-op turn must NOT be booked
-    // "completed": that is a silent false success. Jesse's clean-room audit
-    // reproduced it on cs 0.2.2 — a task-work brief of "reply with the single
-    // word hello, create no files" reached `completed` with energy untouched,
-    // an EMPTY branch, and a synthesis body of just "hello." The prior guard
-    // accepted any non-empty synthesis, so that chatter passed. A synthesis
-    // body is not a work product; real work on this floor is a worktree
-    // deliverable (see [`local_worker_produced_real_work`]). Refuse to finalize
-    // otherwise, and fail LOUDLY with a repair-naming message. The molecule is
-    // left Running with the worker stopped — recoverable and re-tacklable —
-    // rather than collapsed (terminal, work lost) or completed (false success).
-    if !local_worker_produced_real_work(&job.worktree_path, &baseline) {
-        let guard_error = anyhow::anyhow!(
-            "cs local-worker: the local agent loop returned but produced NO real work \
-             product — the worktree branch is empty (no file created or edited) and the \
-             only output is the model's synthesis chatter. A synthesis body is not a \
-             deliverable: any chat model emits text, so booking this \"completed\" would \
-             be a silent false success (Jesse #4). The molecule is NOT completed; it \
-             needs attention. If this was a genuine task, re-tackle with a model the \
-             backend can actually serve — one that writes its deliverable to a file (the \
-             formula's RESULT CONTRACT) or edits the worktree — pinned via --model, \
-             [adapters.local].default_model, or COSMON_LOCAL_MODEL."
-        );
-        let _ = append_local_worker_failure(&job.molecule_dir, &guard_error);
-        return match mark_detached_local_worker_stopped(&store, &mol_id, &wid) {
-            Ok(()) => Err(guard_error),
-            Err(mark_error) => Err(guard_error.context(format!(
-                "cs local-worker: additionally failed to mark worker {wid} stopped: {mark_error}"
-            ))),
-        };
-    }
-
-    // General acceptance-artifact enforcement (Jesse #4 primitive). When the
-    // formula DECLARES machine-checkable `acceptance_artifacts`, refuse to book
-    // `completed` unless every one landed under the canonical molecule dir —
-    // present, non-empty, inside the dir, and written during THIS turn (newer
-    // than `step_start`). This fires only where declared, so text-only formulas
-    // are unaffected. It closes the falsifier "a molecule whose declared
-    // artifact is absent reaches status=completed" on the in-process completion
-    // path, which never traverses the per-step `cs evolve` gate that already
-    // enforces the same contract for the multi-step (claude) path.
-    let missing_declared =
-        missing_declared_acceptance_artifacts(&job.state_dir, &mol, &job.molecule_dir, step_start);
-    if !missing_declared.is_empty() {
-        let guard_error = anyhow::anyhow!(
-            "cs local-worker: the formula declares acceptance_artifacts that did not land \
-             under the molecule directory {} during this turn: {}. A declared artifact \
-             that is absent, empty, outside the molecule dir, or older than the step \
-             start is not proof of work — the molecule is NOT completed and needs \
-             attention.",
-            job.molecule_dir.display(),
-            missing_declared.join(", "),
-        );
-        let _ = append_local_worker_failure(&job.molecule_dir, &guard_error);
-        return match mark_detached_local_worker_stopped(&store, &mol_id, &wid) {
-            Ok(()) => Err(guard_error),
-            Err(mark_error) => Err(guard_error.context(format!(
-                "cs local-worker: additionally failed to mark worker {wid} stopped: {mark_error}"
-            ))),
-        };
-    }
-
     publish_local_worker_output(&job, &mol_id, &baseline);
 
-    mark_detached_local_worker_stopped(&store, &mol_id, &wid)?;
-
-    let adapter =
-        validate_adapter_name(&job.adapter_name, std::slice::from_ref(&job.adapter_name))?.0;
-    finalize_inprocess_molecule(&store, &job.state_dir, &mol_id, &adapter)
+    let acceptance = (|| {
+        let formula = load_formula_for_molecule(&job.state_dir, &mol).ok_or_else(|| {
+            anyhow::anyhow!(
+                "cs local-worker: cannot accept output because formula `{}` is unavailable",
+                mol.formula_id
+            )
+        })?;
+        accept_worker_turn(
+            &store,
+            &job.state_dir,
+            &mol_id,
+            &formula,
+            mol.current_step,
+            &synthesis,
+            true,
+            local_worker_produced_real_work(&job.worktree_path, &baseline),
+            step_start,
+            &job.worktree_path,
+            &job.adapter_name,
+        )
+    })();
+    if let Err(error) = acceptance {
+        let _ = append_local_worker_failure(&job.molecule_dir, &error);
+        return match mark_detached_local_worker_stopped(&store, &mol_id, &wid) {
+            Ok(()) => Err(error),
+            Err(mark_error) => Err(error.context(format!(
+                "cs local-worker: additionally failed to mark worker {wid} stopped: {mark_error}"
+            ))),
+        };
+    }
+    mark_detached_local_worker_stopped(&store, &mol_id, &wid)
 }
 
 /// Hand a finished local worker's output to the operator: commit it, then
@@ -8508,34 +8659,6 @@ fn sync_worktree_deliverables_to_artifact_dir(
     sync_worktree_deliverables(worktree, &artifact_dir, baseline)
 }
 
-/// The declared `acceptance_artifacts` a detached-local turn failed to produce,
-/// per the strengthened presence contract
-/// ([`super::evolve::unsatisfied_expected_artifacts`]).
-///
-/// Empty when the formula declares none (or cannot be loaded) — enforcement
-/// fires only where declared, so text-only formulas are unaffected. The
-/// `step_start` floor rejects any declared artifact left over from a prior
-/// tackle (mtime before this turn began).
-fn missing_declared_acceptance_artifacts(
-    state_dir: &Path,
-    mol: &MoleculeData,
-    mol_dir: &Path,
-    step_start: std::time::SystemTime,
-) -> Vec<String> {
-    let Some(formula) = load_formula_for_molecule(state_dir, mol) else {
-        return Vec::new();
-    };
-    let expected: Vec<String> = formula
-        .steps
-        .iter()
-        .flat_map(|s| s.expected_artifacts.iter().cloned())
-        .collect();
-    if expected.is_empty() {
-        return Vec::new();
-    }
-    super::evolve::unsatisfied_expected_artifacts(mol_dir, &expected, Some(step_start))
-}
-
 /// Whether a finished local worker produced *real work* worth booking as a
 /// completed molecule (BUG #4 / Jesse #4).
 ///
@@ -8644,6 +8767,20 @@ struct WorktreeBaseline {
 }
 
 impl WorktreeBaseline {
+    /// Capture against the exact commit checked out when an inline turn starts.
+    ///
+    /// Keeping the resolved object id (rather than the symbolic `HEAD`) makes a
+    /// commit created by the worker remain visible in the post-turn diff.
+    fn capture_at_head(worktree: &Path) -> Self {
+        let base = git_stdout(worktree, &["rev-parse", "HEAD"])
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "HEAD".to_owned());
+        Self::capture(worktree, &base)
+    }
+
     /// A worktree that differed from `main` in no way before the turn — the
     /// ordinary freshly linked molecule worktree, where turn-scoped and
     /// branch-wide discovery coincide.
@@ -9231,6 +9368,8 @@ fn spawn_anthropic_session(
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
 ) -> anyhow::Result<InprocessWork> {
+    let step_started_at = std::time::SystemTime::now();
+    let baseline = WorktreeBaseline::capture_at_head(worktree_path);
     let key_env = adapter_entry
         .and_then(|e| e.api_key_env.as_deref())
         .unwrap_or("ANTHROPIC_API_KEY");
@@ -9331,7 +9470,14 @@ fn spawn_anthropic_session(
         "anthropic in-process agent loop completed"
     );
     Ok(InprocessWork {
-        tools_dispatched: outcome.tools_dispatched,
+        synthesis: outcome.synthesis,
+        normal_termination: matches!(
+            outcome.terminal_disposition,
+            cosmon_agent_harness::TerminalDisposition::Normal
+        ),
+        worktree_changed: local_worker_produced_real_work(worktree_path, &baseline),
+        step_started_at,
+        expected_step: mol.current_step,
     })
 }
 
@@ -14459,27 +14605,17 @@ mod tests {
     /// `SupervisionMode` field on `ValidatedAdapterName`; until then,
     /// this string `match` IS the structural divergence and a test
     /// pins each adapter's verdict.
-    /// GAP #6 — `finalize_inprocess_molecule` is the call site
-    /// `cs tackle` invokes for in-process Direct-API adapters
-    /// immediately after `spawn_and_prompt` returns Ok. It must drive
-    /// the molecule from `Running` to `Completed` and produce the
-    /// canonical event sequence; the structural pin lives here so a
-    /// future refactor of the helper (e.g. when ADR-101's
-    /// `SupervisionMode::InProcess` lands and the dispatch becomes
-    /// typed instead of predicate-driven) cannot accidentally drop
-    /// the completion-emit responsibility.
-    ///
-    /// The integration-test counterpart in
-    /// `tests/tackle_inprocess_completion.rs` exercises the same
-    /// contract through the `cs complete` CLI surface — together they
-    /// pin the helper's contract from both sides of the function
-    /// boundary.
+    /// Formula-bound acceptance publishes an explicitly declared final-text
+    /// result before advancing, and advances one step only. A later failing
+    /// gate therefore remains pending and cannot be skipped by the first
+    /// provider response. Repeating the same acceptance is idempotent.
     #[test]
-    fn finalize_inprocess_molecule_drives_completion() {
+    fn worker_acceptance_advances_only_the_dispatched_step() {
         let (_tmp, state_dir) = make_store();
         let store = FileStore::new(&state_dir);
 
         let mut mol = sample_molecule("task-20260518-gap6", MoleculeStatus::Running);
+        mol.total_steps = 2;
         // Match the state cs tackle step 9 leaves us in: Running, with
         // a bound process. The completion-emit must survive that
         // shape on disk.
@@ -14488,19 +14624,52 @@ mod tests {
             "openai-inprocess-gap6".to_owned(),
         ));
         store.save_molecule(&mol.id, &mol).unwrap();
+        let formula = Formula::parse(
+            r#"
+formula = "worker-acceptance-test"
+version = 1
 
-        let registry = ["claude".to_owned(), "openai".to_owned()];
-        let (adapter, _supervision, _ownership) =
-            validate_adapter_name("openai", &registry).unwrap();
+[[steps]]
+id = "answer"
+title = "Answer"
+description = "Produce text."
+response_artifact = "result.md"
 
-        finalize_inprocess_molecule(&store, &state_dir, &mol.id, &adapter)
-            .expect("finalize_inprocess_molecule must succeed on a Running molecule");
+[[steps]]
+id = "verify"
+title = "Verify"
+description = "Run the gate."
+command = "false"
+needs = ["answer"]
+"#,
+        )
+        .unwrap();
+
+        accept_worker_turn(
+            &store,
+            &state_dir,
+            &mol.id,
+            &formula,
+            0,
+            "declared answer",
+            true,
+            false,
+            std::time::SystemTime::now(),
+            _tmp.path(),
+            "direct",
+        )
+        .expect("declared text must advance its current step");
 
         let reloaded = store.load_molecule(&mol.id).unwrap();
         assert_eq!(
             reloaded.status,
-            MoleculeStatus::Completed,
-            "GAP #6 — Running molecule must flip to Completed"
+            MoleculeStatus::Running,
+            "the later gate remains authoritative"
+        );
+        assert_eq!(reloaded.current_step, 1);
+        assert_eq!(
+            std::fs::read_to_string(store.molecule_dir(&mol.id).join("result.md")).unwrap(),
+            "declared answer"
         );
 
         let events_raw =
@@ -14513,15 +14682,27 @@ mod tests {
                     && row.get("molecule_id").and_then(|id| id.as_str()) == Some(mol.id.as_str())
             });
         assert!(
-            has_completed,
-            "GAP #6 — events.jsonl must contain V2 molecule_completed after \
-             finalize_inprocess_molecule fires. Events:\n{events_raw}"
+            !has_completed,
+            "the first response must not complete the tail"
         );
 
         // Idempotency: a second call (e.g. retry, double-tap) must
         // not error — `complete_one` short-circuits on already-completed.
-        finalize_inprocess_molecule(&store, &state_dir, &mol.id, &adapter)
-            .expect("finalize_inprocess_molecule must be idempotent");
+        accept_worker_turn(
+            &store,
+            &state_dir,
+            &mol.id,
+            &formula,
+            0,
+            "declared answer",
+            true,
+            false,
+            std::time::SystemTime::now(),
+            _tmp.path(),
+            "direct",
+        )
+        .expect("duplicate acceptance must be idempotent");
+        assert_eq!(store.load_molecule(&mol.id).unwrap().current_step, 1);
     }
 
     /// ADR-103: the validator-and-toml resolver assigns the per-Adapter

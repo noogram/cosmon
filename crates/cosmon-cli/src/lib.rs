@@ -29,6 +29,8 @@ pub mod briefing_receipt_hook;
 pub mod plan_observation_hook;
 pub mod work_hook;
 pub mod work_turn_input;
+/// Durable publication of formula-declared worker response artifacts.
+pub mod worker_acceptance;
 
 /// Argv contract of the detached `cs realized-watch` re-exec `cs tackle`
 /// arms at dispatch — shared by the spawner and the integration test that

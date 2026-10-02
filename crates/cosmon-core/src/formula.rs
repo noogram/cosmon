@@ -86,6 +86,15 @@ pub enum FormulaError {
     #[error("step \"{0}\" declares both `command` and `native` — choose one")]
     CommandAndNative(String),
 
+    /// A step's declared final-text destination is not a safe relative path.
+    #[error("step \"{step}\" declares invalid response_artifact \"{path}\" — use a relative path containing no `..`")]
+    InvalidResponseArtifact {
+        /// The offending step id.
+        step: String,
+        /// The rejected path.
+        path: String,
+    },
+
     /// A step declares more than one of `command` / `native` / `[steps.query]`
     /// / `[steps.llm]`. The four execution kinds are mutually exclusive — a
     /// step is either a Claude worker (none set), a shell gate (`command`),
@@ -300,6 +309,12 @@ struct RawStep {
     /// steps are unaffected.
     #[serde(default)]
     acceptance_artifacts: Vec<String>,
+    /// Optional destination for the worker's normal final response.
+    ///
+    /// Presence explicitly makes final text the step deliverable; absence
+    /// never asks transport code to infer that contract from prose.
+    #[serde(default)]
+    response_artifact: Option<String>,
     #[serde(default)]
     needs: Vec<String>,
     #[serde(default)]
@@ -651,6 +666,9 @@ pub struct Step {
     /// are unaffected. The check is read-only and idempotent. Enforced in
     /// `cs evolve` (`crates/cosmon-cli/src/cmd/evolve.rs`).
     pub expected_artifacts: Vec<String>,
+    /// Relative path under the canonical molecule directory where a normal,
+    /// non-empty worker final response must be durably published.
+    pub response_artifact: Option<String>,
     /// IDs of steps that must complete before this one.
     pub depends_on: Vec<String>,
     /// Skills required or invoked by this step.
@@ -1090,12 +1108,21 @@ impl Formula {
                     .transpose()?;
                 let query = build_query_spec(&s.id, s.query)?;
                 let llm = build_llm_spec(&s.id, s.llm)?;
+                if let Some(path) = s.response_artifact.as_deref() {
+                    if !crate::worker_acceptance::validate_response_artifact_path(path) {
+                        return Err(FormulaError::InvalidResponseArtifact {
+                            step: s.id.clone(),
+                            path: path.to_owned(),
+                        });
+                    }
+                }
                 Ok::<_, FormulaError>(Step {
                     id: s.id,
                     title: s.title,
                     description: s.description,
                     exit_criteria: s.acceptance,
                     expected_artifacts: s.acceptance_artifacts,
+                    response_artifact: s.response_artifact,
                     depends_on: s.needs,
                     skills: s.skills,
                     order,
@@ -1727,6 +1754,28 @@ needs = ["dispatch"]
         // Legacy step that omits the key → empty (no-op gate).
         let legacy = f.steps.iter().find(|s| s.id == "legacy").unwrap();
         assert!(legacy.expected_artifacts.is_empty());
+    }
+
+    #[test]
+    fn response_artifact_declares_final_text_delivery() {
+        let formula = Formula::parse(
+            r#"
+formula = "text-delivery"
+version = 1
+
+[[steps]]
+id = "answer"
+title = "Answer"
+description = "Return the answer."
+response_artifact = "result.md"
+"#,
+        )
+        .expect("response_artifact is a valid step contract");
+
+        assert_eq!(
+            formula.steps[0].response_artifact.as_deref(),
+            Some("result.md")
+        );
     }
 
     #[test]

@@ -1387,6 +1387,22 @@ fn artifact_satisfied(mol_dir: &Path, entry: &str, min_mtime: Option<SystemTime>
         return false;
     }
     let path = mol_dir.join(rel);
+    let Ok(canonical_root) = mol_dir.canonicalize() else {
+        return false;
+    };
+    let mut cursor = canonical_root.clone();
+    for component in Path::new(rel).components() {
+        cursor.push(component.as_os_str());
+        if fs::symlink_metadata(&cursor).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return false;
+        }
+    }
+    let Ok(canonical_path) = path.canonicalize() else {
+        return false;
+    };
+    if canonical_path == canonical_root || !canonical_path.starts_with(&canonical_root) {
+        return false;
+    }
     if entry.ends_with('/') {
         // Directory contract: exists, holds at least one entry, and — when a
         // step-start floor is given — at least one entry is fresher than it.
@@ -1395,6 +1411,12 @@ fn artifact_satisfied(mol_dir: &Path, entry: &str, min_mtime: Option<SystemTime>
         };
         let mut saw_child = false;
         for child in read.flatten() {
+            if child
+                .file_type()
+                .is_ok_and(|file_type| file_type.is_symlink())
+            {
+                continue;
+            }
             saw_child = true;
             if mtime_at_or_after(&child.path(), min_mtime) {
                 return true;
@@ -1889,6 +1911,26 @@ mod tests {
         assert_eq!(
             unsatisfied_expected_artifacts(td.path(), std::slice::from_ref(&abs), None),
             vec![abs]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_guard_refuses_a_symlink_outside_canonical_custody() {
+        use std::os::unix::fs::symlink;
+
+        let molecule = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("result.md"), "outside").unwrap();
+        symlink(
+            outside.path().join("result.md"),
+            molecule.path().join("result.md"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            unsatisfied_expected_artifacts(molecule.path(), &["result.md".to_owned()], None),
+            vec!["result.md".to_owned()]
         );
     }
 

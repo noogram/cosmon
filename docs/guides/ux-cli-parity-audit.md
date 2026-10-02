@@ -245,6 +245,17 @@ says so.
 |---|---|---|---|
 | Preserve work after an in-process loop error | `cs tackle` collapses with `agent_loop_failed`, retains the branch and worktree, and writes a partial synthesis; a pre-work failure rolls back | No equivalent recovery action audited | `cs status` and `cs peek` display the collapsed molecule; the branch needs an audit before removal |
 
+## Formula-bound worker acceptance (issue #151, W2)
+
+| Capability | CLI | Native UI | Other CLI views |
+|---|---|---|---|
+| Publish declared final text and advance only its current formula step | `cs tackle` and the detached local worker honor `steps.response_artifact`; publication precedes the transition and later steps remain pending | No formula-authoring or acceptance control audited | Status views read the ordinary current-step and completed-step state; no separate acceptance action exists |
+| Refuse empty, stale, missing, unsafe, or ambiguous output | The worker run returns an error and the molecule stays recoverable on its current step | No equivalent refusal detail audited | Existing status views show the unchanged step |
+
+The field is part of the formula contract, not a new lifecycle command. Tool
+counts and provider-normal termination remain visible evidence but never grant
+completion authority by themselves.
+
 ## Blocked dependents (issue #118)
 
 | Capability | CLI | Native UI | Other CLI views |

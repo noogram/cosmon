@@ -1,58 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! GAP #6 — `cs tackle` must drive in-process Direct-API molecules to
-//! `Completed` and emit `MoleculeCompleted` so `cs wait` unblocks.
+//! Explicit user-driven completion remains available independently of owned
+//! worker acceptance.
 //!
-//! Source: academy smoke chronicle §"Ce qui n'a
-//! pas marché" #2 — the openai / anthropic Direct-API adapters
-//! (`SupervisionMode::InProcess`) returned `Ok(())` from the agent loop
-//! and from `spawn_and_prompt`, emitted a `WorkerSpawnAttempted` event,
-//! but never followed up with `MoleculeStatusChanged(running→completed)`
-//! nor `MoleculeCompleted`. The molecule sat indefinitely in `Running`,
-//! `cs wait` timed out (GAP #8), and `cs ensemble` painted the row as a
-//! dead pane (GAP #7). Closing #6 collapses all three.
-//!
-//! # Contract pinned by this file
-//!
-//! The new in-process completion contract — inscribed in an internal
-//! chronicle — is:
-//!
-//! > For tmux-backed adapters the `pane-died` hook owns the completion
-//! > emit. For in-process Direct-API adapters, **`spawn_and_prompt`
-//! > owns the completion emit** (driven by
-//! > `tackle::finalize_inprocess_molecule` immediately after the agent
-//! > loop returns Ok).
-//!
-//! The canonical sequence — `Running → Completed` status flip,
-//! `MoleculeStatusChanged` event, `MoleculeCompleted` event, log /
-//! briefing / proof-of-work artefacts — is implemented exactly once in
-//! `cmd::complete::complete_one`. `finalize_inprocess_molecule`
-//! delegates to it verbatim.
-//!
-//! # Why this test does not invoke `cs tackle` end-to-end
-//!
-//! Driving the openai / anthropic Direct-API branch of `spawn_and_prompt`
-//! through `cs tackle` would require a wiremock-style HTTP server (or a
-//! live API key). Neither is wired into the workspace today; the
-//! Direct-API live smokes in `crates/cosmon-provider/tests/` are
-//! `#[ignore]`d behind `OPENAI_LIVE_SMOKE=1` / `ANTHROPIC_LIVE_SMOKE=1`.
-//!
-//! Instead, the tests below drive the **observable contract** that
-//! `finalize_inprocess_molecule` is responsible for: starting from a
-//! `Running` molecule (the state `cs tackle` step 9 leaves us in), an
-//! explicit `cs complete` invocation — exercising the same
-//! `complete_one` code path the helper wraps — must produce:
+//! An owned loop now publishes and accepts the current formula step rather
+//! than force-completing the formula. These tests pin the separate, unchanged
+//! `cs complete` command: starting from a `Running` molecule, an explicit
+//! operator invocation must produce:
 //!
 //! 1. a `Completed` molecule on disk (`state.json`), and
 //! 2. a `MoleculeCompleted` row on `events.jsonl`, and
 //! 3. a `cs wait <mol> --for completed` invocation that returns within
 //!    its timeout (proving the GAP #8 cascade is closed).
 //!
-//! Mocking the Direct-API agent loop would test the same surface this
-//! file already covers, so we keep the test cheap and deterministic.
-//! The structural pin — that `tackle.rs` *calls* `complete_one` for
-//! `!adapter_uses_tmux(&adapter)` — is enforced by a unit test inside
-//! `tackle.rs::tests` (see `finalize_inprocess_molecule_drives_completion`).
+//! Formula-bound acceptance has its own end-to-end loopback and lifecycle
+//! regressions; this file deliberately covers only explicit completion.
 
 use std::fs;
 use std::path::Path;
@@ -72,9 +34,7 @@ fn cosmon_bin_in(cwd: &Path) -> Command {
 }
 
 /// Set up a tempdir with a state store and one nucleated molecule
-/// transitioned to `Running` (the state `cs tackle` step 9 leaves the
-/// molecule in for an in-process Direct-API adapter, just before
-/// `finalize_inprocess_molecule` fires).
+/// transitioned to `Running`, the state from which explicit completion acts.
 fn setup_running_molecule() -> (tempfile::TempDir, std::path::PathBuf, String) {
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = tmp.path().join("state");
@@ -123,8 +83,7 @@ acceptance = "Done"
 
     // Transition the nucleated (pending) molecule into Running directly
     // via the FileStore — mirrors the state `cs tackle` step 9 commits
-    // for an in-process adapter, just before our new
-    // `finalize_inprocess_molecule` step would fire.
+    // before a lifecycle completion command acts.
     let store = cosmon_filestore::FileStore::new(&state_dir);
     let mol_id = cosmon_core::id::MoleculeId::new(&molecule_id).unwrap();
     let mut mol = cosmon_state::StateStore::load_molecule(&store, &mol_id).unwrap();
@@ -134,8 +93,7 @@ acceptance = "Done"
     (tmp, state_dir, molecule_id)
 }
 
-/// `cs complete` (the code path `finalize_inprocess_molecule` delegates
-/// to) must flip `Running → Completed` and persist the new status on
+/// `cs complete` must flip `Running → Completed` and persist the new status on
 /// `state.json`. This is GAP #6 part (1) — the state-machine fix.
 #[test]
 fn complete_flips_running_to_completed_on_disk() {

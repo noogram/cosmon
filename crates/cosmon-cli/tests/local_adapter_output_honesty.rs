@@ -266,6 +266,13 @@ fn first_absolute_backticked_path(body: &str) -> Option<String> {
 /// `cs` with a hermetic environment: no operator config, no parent molecule,
 /// and the mock endpoint pinned as the local floor's backend.
 fn cs(project: &Path, mock: &MockOllama) -> Command {
+    let config_home = project.parent().unwrap_or(project).join(format!(
+        ".cosmon-test-config-{}",
+        project
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("local-output")
+    ));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
     cmd.current_dir(project)
         .env_remove("COSMON_PARENT_MOL_ID")
@@ -280,10 +287,7 @@ fn cs(project: &Path, mock: &MockOllama) -> Command {
         .env_remove("COSMON_ARTIFACT_DIR")
         .env_remove("OLLAMA_HOST")
         .env_remove("OPENAI_BASE_URL")
-        .env(
-            "COSMON_CONFIG_HOME",
-            std::env::temp_dir().join("cosmon-test-xdg-isolated-local-output-honesty"),
-        )
+        .env("COSMON_CONFIG_HOME", config_home)
         .env("COSMON_LOCAL_BASE_URL", &mock.base_url)
         .env("COSMON_LOCAL_MODEL", MOCK_MODEL)
         .env("COSMON_LOCAL_TIMEOUT", "60")
@@ -345,6 +349,32 @@ fn setup_project(dir: &Path) {
     fs::write(dir.join("README.md"), "# local-output-honesty\n").unwrap();
     git(dir, &["add", "."]);
     git(dir, &["commit", "-q", "-m", "init"]);
+}
+
+/// Narrow the fixture to one legacy file-producing step when a test exercises
+/// teardown rather than multi-step progression.
+fn install_one_step_task_formula(project: &Path) {
+    fs::write(
+        project.join(".cosmon/formulas/task-work.formula.toml"),
+        r#"
+formula = "task-work"
+version = 1
+description = "Produce one file."
+id_prefix = "task"
+
+[vars.topic]
+description = "Task"
+required = true
+
+[[steps]]
+id = "implement"
+title = "Implement"
+description = "Produce the requested file."
+"#,
+    )
+    .unwrap();
+    git(project, &["add", ".cosmon/formulas/task-work.formula.toml"]);
+    git(project, &["commit", "-q", "-m", "test formula"]);
 }
 
 fn nucleate(project: &Path, mock: &MockOllama) -> String {
@@ -501,6 +531,7 @@ fn local_synthesis_reports_the_path_the_file_is_actually_at() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let project = tmp.path();
     setup_project(project);
+    install_one_step_task_formula(project);
     let mol_id = nucleate(project, &mock);
     let mol_dir = tackle_and_wait(project, &mock, &mol_id);
 
@@ -548,6 +579,7 @@ fn local_worker_output_survives_cs_done_without_force() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let project = tmp.path();
     setup_project(project);
+    install_one_step_task_formula(project);
     let mol_id = nucleate(project, &mock);
     let mol_dir = tackle_and_wait(project, &mock, &mol_id);
 
@@ -718,6 +750,51 @@ fn no_op_retackle_on_a_diverged_branch_commits_nothing_and_recommends_no_force()
         !synthesis.contains("## Files this worker produced (verified on disk)"),
         "a no-op turn produced no files, so it must claim none:\n{synthesis}"
     );
+}
+
+/// A formula may explicitly make normal final text its deliverable. The same
+/// zero-tool response rejected by a legacy step must then be published under
+/// canonical molecule custody and complete this one-step formula.
+#[test]
+fn declared_response_artifact_accepts_a_zero_tool_final_response() {
+    let mock = MockOllama::start_with(MOCK_MODEL, Script::Chatter);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project = tmp.path();
+    setup_project(project);
+    fs::write(
+        project.join(".cosmon/formulas/task-work.formula.toml"),
+        r#"
+formula = "task-work"
+version = 1
+description = "Return a declared text result."
+id_prefix = "task"
+
+[vars.topic]
+description = "Task"
+required = true
+
+[[steps]]
+id = "answer"
+title = "Answer"
+description = "Return the answer as final text."
+response_artifact = "result.md"
+"#,
+    )
+    .unwrap();
+    git(project, &["add", ".cosmon/formulas/task-work.formula.toml"]);
+    git(project, &["commit", "-q", "-m", "test formula"]);
+
+    let mol_id = nucleate(project, &mock);
+    let mol_dir = tackle_and_wait(project, &mock, &mol_id);
+
+    assert_eq!(
+        fs::read_to_string(mol_dir.join("result.md")).unwrap(),
+        "Everything already looks done.\n"
+    );
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(mol_dir.join("state.json")).unwrap()).unwrap();
+    assert_eq!(state["status"], "completed");
+    assert_eq!(state["current_step"], 1);
 }
 
 // ---------------------------------------------------------------------------
