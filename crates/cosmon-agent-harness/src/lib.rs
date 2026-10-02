@@ -100,13 +100,13 @@ pub use error::HarnessError;
 pub use message_log::{MessageLog, TranscriptEntry, TranscriptRole};
 pub use spine::{
     run_loop, run_loop_counted, run_loop_with_capability, run_loop_with_registry,
-    run_loop_with_registry_counted, InteractiveSession, ScriptedProviderFn, StepOutcome, Turn,
-    WorkerOutcome,
+    run_loop_with_registry_counted, InteractiveSession, ScriptedProviderFn, StepOutcome,
+    TerminalDisposition, TerminalResponse, Turn, WorkerOutcome,
 };
 pub use tool::{
     default_registry, default_registry_with_operator_block, local_sandbox_registry,
     ParametersSchema, ReadFile, ReadParams, ReadResult, Tool, ToolCall, ToolDeclaration, ToolError,
-    ToolRegistry, READ_FILE_CAP_BYTES,
+    ToolOutcome, ToolOutcomeCounts, ToolRegistry, READ_FILE_CAP_BYTES,
 };
 pub use tools::await_operator::AwaitOperator;
 pub use tools::edit_file::{EditError, EditFile, EditOp, EditParams, EditResult};
