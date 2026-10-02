@@ -19,7 +19,7 @@ this stage.
 
 ## [Unreleased]
 
-## [0.7.0] — 2026-10-01
+## [0.7.0] — 2026-10-02
 
 ### Breaking changes and operator actions on upgrade
 
@@ -66,32 +66,32 @@ Read this before upgrading. Each item names the action to take.
   sweep as well. Remove it to resume them.
 - Workers can no longer run `cs done` on their own molecule; harvest it from
   the pilot session.
-- duplicate `(issuer, subject, audience)` bindings stop adapter startup;
+- Duplicate `(issuer, subject, audience)` bindings stop adapter startup;
   remove the duplicate and reload.
-- synchronize issuer and adapter clocks and mint RPP tokens within the
+- Synchronize issuer and adapter clocks and mint RPP tokens within the
   posture's lifetime (15 minutes active, 24 hours prepared).
-- add `issuer` to subject-only or token-only deny entries to narrow them; each
+- Add `issuer` to subject-only or token-only deny entries to narrow them; each
   principal starts with a fresh rate-limit bucket after upgrade.
-- check the adapter log after editing `oidc-kill.toml` or `oidc-policy.toml`;
+- Check the adapter log after editing `oidc-kill.toml` or `oidc-policy.toml`;
   an invalid file closes tenant admission with HTTP 503.
 - RPP event and log streams close when admission ends; clients must reconnect
   with a current credential.
-- a staged JWKS file for an issuer absent from `security/trusted-issuers.toml`
+- A staged JWKS file for an issuer absent from `security/trusted-issuers.toml`
   is refused, and an empty list denies all issuers.
 - `cs land` and `POST /v1/molecules/{id}/land` are withdrawn; use `cs done`
   and `POST /v1/molecules/{id}/done`, which requires `reason`
   (`missing_reason`, exit code 77).
-- the retired `COSMON_RPP_CS` variable and the `cs_path` and
+- The retired `COSMON_RPP_CS` variable and the `cs_path` and
   `subprocess_timeout_sec` keys are ignored; `harvest_cs_binary` is kept for
   one release.
-- the adapter's tackle route labels `subprocess_timeout`,
+- The adapter's tackle route labels `subprocess_timeout`,
   `subprocess_spawn_failed`, `worker_credential_missing` and
   `adapter_backend_unreachable` are retired; clients must handle
   `worker_spawn_failed`, `not_tackleable` and the two `501` labels.
-- a bind-mounted galaxy owned by another uid needs a git `safe.directory`
+- A bind-mounted galaxy owned by another uid needs a git `safe.directory`
   waiver or matching ownership for the adapter image.
-- the API reference must be regenerated with `cargo xtask gen-api-ref` after
-  the route-count change.
+- Maintainers: regenerate the API reference with `cargo xtask gen-api-ref`
+  after the route-count change.
 - If you installed the skill from `skills/cosmon/`, reinstall it from
   `tools/cosmon-skill/` with `tools/cosmon-skill/install.sh`; on a
   multi-account setup, set the harness's configuration-directory variable first
