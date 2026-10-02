@@ -1,4 +1,4 @@
-# Crash recovery: state on disk, not in RAM
+# Crash recovery through state on disk
 
 > These commands use physics-inspired names (nucleate, evolve, reconcile, …). New
 > to the vocabulary? See [The physics vocabulary](./physics-vocabulary.md).
@@ -82,7 +82,7 @@ or run it ten times, you get the same result. This is enforced by tests. A
 projection that could drift on a second run would be a bug, because there is
 exactly one source of truth and reconcile only ever *reads* it.
 
-## Why this is the wedge, not a feature
+## Why this is the wedge
 
 Other orchestrators can restart a failed *function*: re-run the code and hope it
 was idempotent. Cosmon restarts a failed *entity*: the same worker, on the same

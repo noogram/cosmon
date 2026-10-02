@@ -31,8 +31,8 @@ The public `noogram/cosmon` product closure contains both service components:
 | `cosmon-rpp-adapter` | The HTTP fente and `/v1/...` service surface. | AGPL-3.0-only |
 | `cosmon-remote` | Thin client that drives the service. | AGPL-3.0-only |
 
-The two host-side binaries — `cosmon-rpp-adapter` (the fente) and `cs-oidc-mock`
-(the demo IdP used in Step 2) — ship as a signed `cosmon-service-<version>-<target>.tar.gz`
+The two host-side binaries, `cosmon-rpp-adapter` (the fente) and `cs-oidc-mock`
+(the demo IdP used in Step 2), ship as a signed `cosmon-service-<version>-<target>.tar.gz`
 release asset per target, alongside the `cs` CLI tarball. Step 1 therefore has
 two routes: **download the signed release bundle** (no Rust toolchain required),
 or **build from source**. Prefer the download route unless you need an unreleased
@@ -42,8 +42,8 @@ The client, `cosmon-remote`, is a laptop tool, so it ships *with* `cs`: the
 `cosmon-<version>-<target>.tar.gz` release tarball carries both, and the
 [one-liner installer](../getting-started/install.md) (`curl -fsSL https://noogram.org/cosmon/install.sh | sh`)
 and the Homebrew formula each place `cs` **and** `cosmon-remote` together. If you
-installed `cs`, you already have the connector — there is no separate client
-fetch. The steps below cover only the **host**; run the `cosmon-remote` commands
+installed `cs`, you already have the connector. There is no separate client
+fetch. The steps below cover only the **host**. Run the `cosmon-remote` commands
 from Step 4 on the machine where you installed `cs`.
 
 Remote harvest has two explicit profiles. **Scoped** lets a binding-granted
@@ -72,10 +72,10 @@ First, make the target directory on the host. This guide calls it `$COSMON_HOME`
 ssh <remote> "mkdir -p '$COSMON_HOME/bin' '$COSMON_HOME/state/security' '$COSMON_HOME/galaxies'"
 ```
 
-### Route A — download the signed release bundle (recommended)
+### Route A: download the signed release bundle (recommended)
 
 Each release ships a `cosmon-service-<version>-<target>.tar.gz` (the fente + demo
-IdP) next to the `cs` CLI tarball. Pick the target matching the host — a static
+IdP) next to the `cs` CLI tarball. Pick the target matching the host. A static
 Linux box uses `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`. Both
 tarballs are cosign-signed and Rekor-anchored; verify them as in
 [Verify the binary's provenance](./verify-the-binary.md).
@@ -91,7 +91,7 @@ tar xzf "cosmon-${ver}-${target}.tar.gz"
 scp cosmon-rpp-adapter cs-oidc-mock cs <remote>:$COSMON_HOME/bin/
 ```
 
-### Route B — build from source
+### Route B: build from source
 
 Build a static musl release on your development machine. `cargo-zigbuild` uses
 Zig as the cross-linker, so this works without a Linux container. Install its
@@ -265,7 +265,7 @@ ssh <remote> '
 ```
 
 The `rpp.toml` config declares the state directory, the tenant galaxies root, and
-the directory for tenant artifacts — for example:
+the directory for tenant artifacts. For example:
 
 ```toml
 bind_addr = "127.0.0.1:8443"
@@ -325,7 +325,7 @@ Resolution is `--profile` first, then
 
 Create the profile manually (or use the service's `install.sh` profile
 installer when your deployment provides one). `oidc-url` remains required by a
-profile, but the pre-minted token means this client does not need to reach it:
+profile. The pre-minted token means this client does not need to reach it:
 
 ```sh
 cosmon-remote config init demo http://127.0.0.1:8443
@@ -469,8 +469,8 @@ upgrade or binding reload chooses scoped or changes an existing binding.
 `cosmon-remote login` runs the browser half of the OAuth flow: it opens a
 one-shot listener for the redirect, sends you to the identity provider, and
 catches the `?code=…` the browser is bounced back with. By default that
-listener binds `127.0.0.1:7777`, and the URL registered with the provider —
-the one the browser is told to come back to — is `http://127.0.0.1:7777/callback`.
+listener binds `127.0.0.1:7777`. The URL registered with the provider, which is
+the one the browser is told to come back to, is `http://127.0.0.1:7777/callback`.
 On a laptop the two are the same machine and there is nothing to arrange.
 
 Inside a container or a VM they are not the same machine. The browser is on
@@ -492,7 +492,7 @@ cosmon-remote login --bind 0.0.0.0
 ```
 
 `--bind` moves the **listener** only. The advertised `redirect_uri` stays
-`http://127.0.0.1:7777/callback` — it is registered with the provider by exact
+`http://127.0.0.1:7777/callback`. It is registered with the provider by exact
 match, so changing it would simply be rejected, and it is the address your
 browser must dial for the forward to pick the redirect up. The port is not
 part of the flag, and it is not stored anywhere either: the listener's port is
@@ -502,8 +502,8 @@ have no way to disagree about it.
 A non-loopback bind is announced on stderr, once, before the browser opens. It
 widens who can *connect* to the catcher for the length of one login. What
 bounds that: only a request echoing this flow's high-entropy `state` can end
-the wait — everything else is answered `404` and discarded — and a captured
-code is useless without the PKCE verifier, which never leaves the process.
+the wait. Everything else is answered `404` and discarded. A captured code is
+useless without the PKCE verifier, which never leaves the process.
 Prefer forwarding from `127.0.0.1` on the desktop side (as above) so the
 forwarded port is not itself exposed to the desktop's network.
 
@@ -548,7 +548,7 @@ fetches bytes with `--out`; when omitted, it writes under
 
 A `503 tackle_unavailable` arrives bare: the client prints the status, the
 label, and the `request_id`, and no probable cause. That is deliberate. The
-label is a catch-all — the adapter collapses every dispatch failure it has no
+label is a catch-all. The adapter collapses every dispatch failure it has no
 named label for onto it (for example a local-adapter backend that is
 unreachable), so a cause printed here would
 be a guess, and a guess that names the wrong one sends the investigation the
@@ -591,7 +591,7 @@ pytest tests/e2e -m "not stack"               # the parts needing no docker
 It builds both images from `crates/cosmon-rpp-adapter/deploy/docker-compose.yml`,
 waits on the two healthchecks that file already declares, and then drives the
 stack with the compiled `cosmon-remote` binary over the published loopback
-ports — `login` (the real authorization-code + PKCE flow against the mock IdP,
+ports: `login` (the real authorization-code + PKCE flow against the mock IdP,
 headless), `auth me`, `nucleate`, `observe`, `tackle` (a real worker, spawned by
 the image), a wait for that worker to drive the molecule to `completed`, and a
 `done` that must come back having **merged** the worker's branch onto the tenant
@@ -605,14 +605,14 @@ received and the tail of the adapter's own log. Each exchange is also written to
 one-line-per-step `e2e.ndjson`.
 
 **The stack is reinitialised between test sets.** Each test class gets
-`down -v` + `up --wait` + reprovisioning, and a fresh tenant galaxy tree — so no
-molecule, inbox entry or rate-limiter bucket from one set can make the next one
+`down -v` + `up --wait` + reprovisioning, and a fresh tenant galaxy tree. No
+molecule, inbox entry, or rate-limiter bucket from one set can make the next one
 pass or fail. `tests/e2e/test_reinit.py` is the proof rather than the promise: it
 plants a molecule in one set and asserts its absence in the next, and it goes red
 under `RPP_E2E_REINIT=0`.
 
-Nothing of yours is touched. The tracked `deploy/` tree is copied, not written
-to; the nucleon binding is materialised into the copy from the tracked
+Nothing of yours is touched. The tracked `deploy/` tree is copied and remains
+unmodified; the nucleon binding is materialised into the copy from the tracked
 `.example`, so a template that has lost a key the loader reads turns the suite
 red instead of passing on a private copy you will never have; the tenant galaxy
 is a throwaway tree destroyed with the stack; `$HOME` is redirected so the run
@@ -622,13 +622,13 @@ running beside it. Set `RPP_E2E_KEEP=1` to leave the stack up and poke at it.
 
 If `docker` or `pytest` is missing the run exits 2 and says so. There is no skip
 path, on purpose: a smoke that prints green without running is how an absent
-prerequisite becomes a passing nightly. Exit 1 is a red test — "ran and failed"
+prerequisite becomes a passing nightly. Exit 1 is a red test: "ran and failed"
 and "could not run" are different verdicts.
 
 ### What the mock IdP does and does not prove
 
 The login flow runs against `cs-oidc-mock`, a mock. It proves the *shape* of the
-flow — discovery, an authorization-code redirect, PKCE-S256 on the token
+flow: discovery, an authorization-code redirect, PKCE-S256 on the token
 exchange, a signed JWT whose `(iss, sub, aud)` the adapter resolves against your
 nucleon binding. It proves nothing that depends on a real provider's policy, and
 it is known to deviate from one in these ways (the list is kept beside the
@@ -638,7 +638,7 @@ fixture, in `tests/e2e/conftest.py`):
   redirect chain, session cookie or interactive timeout is exercised.
 - `sub` is a fixed, readable string. A real IdP mints an opaque per-user
   identifier whose shape you must not assume.
-- **Discovery is minimal** — it carries what this client reads and no more. A
+- **Discovery is minimal:** it carries what this client reads and no more. A
   real document advertises `userinfo_endpoint`, `end_session_endpoint`,
   `claims_supported` and several `*_supported` arrays; a client that grew to
   depend on one of them would pass here and fail against production.
@@ -650,7 +650,7 @@ fixture, in `tests/e2e/conftest.py`):
 - **No refresh, revocation or introspection endpoints** exist, so no test here
   covers the paths that use them.
 
-The same tests run against a real IdP with no code change — the provider is read
+The same tests run against a real IdP with no code change. The provider is read
 entirely from configuration:
 
 ```sh
@@ -673,7 +673,7 @@ molecule to reach `completed`, then `done`.
 
 That leg is worth more than the rest put together, because it is the one thing
 no in-process test can tell you. Until issue #54, the adapter reached `tackle`,
-`run` and the harvest door by running the `cs` binary — which its own Dockerfile has
+`run` and the harvest door by running the `cs` binary, which its own Dockerfile has
 never contained. Every unit and route suite was green; all three routes failed
 against the image you actually deploy. The routes now dispatch in-process, and
 this step is the only place that claim is checked where it matters: inside the
@@ -682,22 +682,23 @@ briefing really pasted into it.
 
 The worker is a dummy, and it is **not** in the image you deploy.
 `deploy/docker-compose.e2e.yml` builds the adapter from the Dockerfile's `e2e`
-target — a `FROM runtime` layer that adds `tests/fakes/fake-claude` under the
+target, a `FROM runtime` layer that adds `tests/fakes/fake-claude` under the
 name `claude` plus a worker-side `cs`, so the worker can finish its molecule.
 The shipped stage still carries no `cs` and no agent CLI. A smoke that
 provisioned the tenant-facing image would be proving the claim about an image
 nobody runs.
 
-### The `done` leg: a merge, not a refusal
+### The `done` leg must merge
 
-`done` — one gesture again since issue #51 withdrew the second `land` verb — is
+`done`, restored as one gesture when issue #51 withdrew the second `land` verb,
+is
 where the walk ends, and what it asserts is a **merge commit on the tenant's
 base branch**, carrying the lineage trailers `cs done` writes.
 
 That is a change of verdict, and it took three issues. The door's decision half
 runs in-process (#54), so every pre-effect refusal answers with no `cs` binary
 present. The effect half became a library the adapter links, `cosmon-harvest`,
-and the *default* (#67, #68) — so a stock deployment reaches the real
+and the *default* (#67, #68). A stock deployment therefore reaches the real
 transaction instead of a `501 harvest_effect_unavailable`. The historical
 container suite exercises the legacy sealed profile, with both conditions:
 
@@ -713,7 +714,7 @@ Two further tests pin the parameter surface the D4 reversal put on the wire: a
 blank `--reason` is refused `400 missing_reason` (the door never invents a
 sentence), an unimplemented `--strategy` is refused `400 unsupported_parameter`
 rather than silently defaulted, and a second test set closes its molecule with
-`--no-merge` and asserts the opposite verdict — a 200 reporting `merged: false`
+`--no-merge` and asserts the opposite verdict: a 200 reporting `merged: false`
 with the base branch exactly where it was.
 
 `v1_done_library_effect.rs` proves the same merge in-process, and much faster.
@@ -732,9 +733,9 @@ RPP_E2E_EXPECT_TACKLE_LABEL=tackle_unavailable \
   bash scripts/rpp-remote-e2e.sh
 ```
 
-The tests that need a successful dispatch are then *deselected*, not skipped — a
-refused dispatch has no worker to wait for — and the run records the refusal it
-observed. Deselection rather than a skip is deliberate: nothing in this suite
+The tests that need a successful dispatch are then *deselected*. A refused
+dispatch has no worker to wait for, and the run records the refusal it observed.
+They are deselected rather than skipped: nothing in this suite
 prints green without having run.
 
 The same entry point runs nightly in CI as the non-blocking `rpp-remote-e2e`

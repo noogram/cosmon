@@ -41,8 +41,8 @@ fleet; you observe an ensemble.
 
 A fleet is not only agents working *beside* each other; it is agents working
 *on* each other's output. Reviewing is itself molecule-shaped, so the reviewer
-is a different molecule, run by a different worker, in a different worktree —
-never the author grading its own homework.
+is a different molecule, run by a different worker, in a different worktree.
+The author never grades its own work.
 
 Three shapes recur:
 
@@ -53,8 +53,8 @@ Three shapes recur:
   reads the merged code against its spec and returns NO-GO or GO with numbered
   findings. NO-GO does not revert; it nucleates the remediation, which faces
   another round.
-- A **verification molecule** re-checks a specific claim the gates cannot —
-  what a surface actually renders, whether a bug is closed everywhere.
+- A **verification molecule** re-checks a specific claim the gates cannot,
+  such as what a surface actually renders or whether a bug is closed everywhere.
 
 Each is an ordinary `cs nucleate --blocked-by` edge. There is no reviewer
 registry and no privileged molecule kind.
@@ -62,7 +62,8 @@ registry and no privileged molecule kind.
 [Adversarial review](./adversarial-review.md) works all three through, with the
 artifacts they leave on disk, the structural guard that stops a panel dodging
 its own question, a four-round NO-GO→GO example, and the honest limit: a panel
-of personas over one provider is channel-independent, not error-independent.
+of personas over one provider provides channel independence without error
+independence.
 
 ## A naming footgun, said once
 

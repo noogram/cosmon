@@ -106,7 +106,7 @@ cs run <A> \
 `cs run` calls `cs done` for each molecule as it completes, merging its branch
 before dispatching whatever depended on it, so each worker sees its
 predecessor's committed output in its own worktree. This is why order matters for
-*content*, not just timing: B's worker can read A's finished files because A was
+*content* as well as timing: B's worker can read A's finished files because A was
 merged first.
 
 If two molecules that touch the same file ever merge in a way that conflicts,

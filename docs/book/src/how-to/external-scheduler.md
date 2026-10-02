@@ -22,8 +22,8 @@ coordination, and each command is one transaction against it.
 
 ## Pattern A: tick a DAG from cron
 
-If you want cosmon to advance a dependency graph but do not want a long-running
-`cs run`, drive it one tick at a time. Point your scheduler at a bounded run:
+To advance a dependency graph without a long-running `cs run`, drive it one tick
+at a time. Point your scheduler at a bounded run:
 
 ```sh
 # crontab entry: every 5 minutes, advance the DAG rooted at <root>, then exit.

@@ -45,13 +45,13 @@ other harness. The exact chain, the `--model` sibling that pins a model within a
 adapter, and the events each dispatch emits are documented in the
 [Execution commands reference](../reference/execution.md).
 
-## The seam is typed, not stringly
+## The seam is typed
 
 The choice of adapter and the harness that actually launches are guaranteed to be
 the same thing. Cosmon's spawn seam refuses to compile if handed a bare string:
 the validated adapter name is the only value the launch site accepts, so "adapter
 `aider` selected" and "worker spawned with `aider`" are the same bytes by
-construction, not by a hopeful runtime check. A smoke test once showed a worker
+construction. It does not rely on a runtime check. A smoke test once showed a worker
 report `aider` and then route through Claude; that class of bug is now a type
 error rather than a possibility. The lineage is recorded in ADR-099 and its
 successors; the [Execution commands reference](../reference/execution.md)
@@ -62,7 +62,7 @@ documents the public dispatch behavior.
 Per-molecule adapter and model choice ships **today**: you can point any molecule
 at any registered harness, hosted or local, right now. The stronger reading
 (long, unattended runs entirely on local models with no human in the loop) reaches
-into the **Autonomous** regime, which is roadmap, not shipping. See
+into the **Autonomous** regime. That capability remains on the roadmap. See
 [The three regimes](./regimes.md) for where present capability ends and the
 roadmap begins.
 

@@ -41,7 +41,7 @@ kernel and the distribution built around it.
 The Linux kernel is a complete, load-bearing core. Debian and Ubuntu are
 distributions that compose that kernel with everything a usable system needs.
 **The kernel runs without the distribution**: it is not incomplete; the
-distribution is a convenience built on top, not a requirement. Cosmon is the
+distribution is an optional convenience built on top. Cosmon is the
 kernel; Noogram is the distribution built around it. Adopt the kernel alone and it
 is complete. Add the distribution and the kernel becomes the core inside it: the
 part that handles identity, lifecycle, and recovery while the larger system
@@ -55,24 +55,24 @@ stands on its own.
 A few deliberate limits on how this page talks:
 
 - **No private names.** Cosmon and Noogram are attributed to Noogram
-  (noogram.org) and to no one else — no other organization or individual name
+  (noogram.org) and to no one else. No other organization or individual name
   appears here.
 - **Mechanism over adjectives.** Cosmon earns its description by what it *does*
-  (identity, typed lifecycle, crash-recovery), not by adjectives like "powerful"
-  or "revolutionary."
+  through identity, typed lifecycle, and crash-recovery. Promotional adjectives
+  do not establish those capabilities.
 - **The distribution does not complete the kernel.** Naming Cosmon a "kernel" must
   never be read as "Cosmon needs Noogram to be useful." It does not; the disarm is
-  written into the analogy above, not left to inference.
+  stated directly in the analogy above.
 - **No claim of a running autonomous engine.** Today Cosmon is a stateless,
   one-shot CLI: it does not run itself. A resident runtime that walks work
   unattended is on the roadmap (see [The three regimes](./regimes.md)), not
   something shipping finished. This page will not imply otherwise.
-- **The lineage claim travels with the reader, not the stranger.** "Kernel of
+- **The lineage claim follows the reader's context.** "Kernel of
   Noogram" is a crisply falsifiable statement, and it belongs where the reader has
   already run `cs` and can see Cosmon standing on its own. It carries **no
   outbound link** while the public Noogram site is not yet live; a dead link would
   refute the claim on first contact. The sentence and any link to it go public
-  together, gated on the site actually resolving, not on a date.
+  together once the site resolves. No date substitutes for that check.
 
 For the physics vocabulary that names cosmon's commands, see
 [The physics vocabulary](./physics-vocabulary.md). For the design bet underneath

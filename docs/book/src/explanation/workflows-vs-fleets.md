@@ -13,8 +13,8 @@ samples on a separate manifest. Losing the leader's notebook must not erase
 where every team got to.
 
 A Claude Code **dynamic workflow** is the temporary workshop. A cosmon
-**fleet** is the expedition register. Neither is a more powerful version of
-the other. Choose the one whose failure boundary matches the work.
+**fleet** is the expedition register. They have different failure boundaries;
+choose the one that matches the work.
 
 ## The short decision
 
@@ -53,7 +53,8 @@ agents, token use, and progress in `/workflows`. Its subagents normally start
 with fresh contexts and return results to the parent. This is exactly the right
 trade when permanent per-agent identity would be bookkeeping without benefit.
 
-The **Dynamic workflow size** setting is guidance to Claude, not a hard quota.
+The **Dynamic workflow size** setting provides guidance to Claude and does not
+enforce a hard quota.
 `small`, `medium`, and `large` aim for fewer than 5, 15, and 50 agents. A prompt
 can request another size. Runtime caps still apply. See the
 [official Claude Code workflow documentation](https://code.claude.com/docs/en/workflows).
@@ -104,7 +105,7 @@ schedule, merge, or audit it independently.
 If that need appears, do not create “shadow molecules” after agents have already
 started. A true one-to-one bridge must let cosmon admit each spawn before it
 runs, assign its durable identity and worktree, and remain the only owner of its
-lifecycle. That is an architectural change, not an adapter convenience.
+lifecycle. That requires an architectural change beyond the adapter.
 
 ## Rule of thumb
 
@@ -117,4 +118,4 @@ Use the smallest durable boundary that would make a failure boring.
   it there and let `cs peek` show the durable boundary.
 
 Durability has a cost. Pay it where recovery, isolation, or accountability
-needs it—not for every temporary pair of hands.
+needs it. Temporary workers do not all need that boundary.

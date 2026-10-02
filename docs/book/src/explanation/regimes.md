@@ -61,16 +61,16 @@ does it, and calls `cs done` on each node as it finishes.
 
 Two honest notes about this regime:
 
-- **The runtime is a client, not a new brain.** It cannot do anything a human
+- **The runtime is a client of the core.** It cannot do anything a human
   could not do at the CLI. It owns no private truth; it reads the same JSON
   files, emits the same `cs evolve` / `cs done` calls. Kill it and restart it,
   and it rebuilds everything from disk. That is why it never threatens the
   crash-recovery guarantee.
-- **Full autonomy is still the north star, not the whole sky.** `cs run` walks
-  DAGs today; the deeper self-directed regime (long unattended missions with a
-  pluggable planner) is on the roadmap (ADR-016), not something that ships
-  finished. When you read "autonomous," read it as the direction cosmon is built
-  to grow into, with the guardrails already in place.
+- **Full autonomy remains a future direction.** `cs run` walks DAGs today. The
+  deeper self-directed regime (long unattended missions with a pluggable
+  planner) is on the roadmap (ADR-016) and does not ship today. Here,
+  "autonomous" names the direction cosmon is built to grow into, with the
+  guardrails already in place.
 
 ## Bounded autonomy: free inside a fence, stopped at the gates
 

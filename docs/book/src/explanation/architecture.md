@@ -5,9 +5,9 @@
 
 <figure>
   <img class="diag diag-light" src="../how-cosmon-runs-light.svg"
-       alt="How cosmon runs — four bands: the human pilot advances the lifecycle with a one-shot CLI; a molecule DAG whose edges encode ordering (done/not-done), never content; the .cosmon/ disk as the single source of truth that carries content, BLAKE3-sealed and tamper-evident; and three execution modes — local (built), remote via a cosmon-remote thin client talking HTTPS to a cosmon-rpp-adapter service on a host (a server exists), and peer-to-peer sharing marked as a planned roadmap.">
+       alt="How cosmon runs in four bands: the human pilot advances the lifecycle with a one-shot CLI; a molecule DAG whose edges encode ordering (done/not-done) and carry no content; the .cosmon/ disk is the single source of truth carrying BLAKE3-sealed, tamper-evident content; and the execution modes are local (built), remote via a cosmon-remote thin client talking HTTPS to a cosmon-rpp-adapter service on a host (a server exists), and peer-to-peer sharing marked as a planned roadmap.">
   <img class="diag diag-dark" src="../how-cosmon-runs.svg" alt="">
-  <figcaption>How cosmon runs — pilot, control plane (ordering), disk (content), and execution modes.</figcaption>
+  <figcaption>How cosmon runs: pilot, control plane (ordering), disk (content), and execution modes.</figcaption>
 </figure>
 
 Cosmon is organized as **two cooperating layers that share one state store.** The
@@ -87,7 +87,7 @@ verbosity for compile-time safety:
   compile. The type system makes invalid transitions unrepresentable.
 
 - **Newtype IDs.** Every identifier (`MoleculeId`, `WorkerId`, `AgentId`) is its
-  own wrapper type with validation on construction, not a bare `String`. Passing a
+  own wrapper type with validation on construction. It cannot be a bare `String`. Passing a
   `WorkerId` where an `AgentId` is expected is a compile error, and an ID that
   exists is guaranteed valid because it could not have been built otherwise.
 

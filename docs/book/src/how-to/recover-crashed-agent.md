@@ -5,7 +5,7 @@ call timed out) and a molecule is now stranded. This guide gets it moving again
 (or retires it) without losing any work.
 
 > The key fact that makes recovery cheap: cosmon keeps its truth on disk in
-> `.cosmon/state/`, not in the worker's memory. A crash preserves every molecule;
+> `.cosmon/state/`. Worker memory is not authoritative. A crash preserves every molecule;
 > it only *strands* the live worker that was driving it. Recovery is noticing the
 > strand and re-attaching a fresh worker. See
 > [Crash recovery](../explanation/crash-recovery.md) for the mechanism.

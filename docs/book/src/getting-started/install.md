@@ -3,14 +3,14 @@
 Cosmon is **one command**, `cs`. There is no daemon to run, no service to
 register, no account to create: you put it on your `PATH` and you are done.
 
-Two files actually land, not one: every route installs `cs` *and* `cosmon-remote`,
+Every route installs two files: `cs` *and* `cosmon-remote`,
 the connector for driving a remote cosmon service, side by side in the same
 directory. `cs` is the whole product; `cosmon-remote` is inert until you point it
 at a remote service, so you can ignore it. It is named here so the second file is
-not a surprise when you look at the install directory.
+listed here to explain its presence in the install directory.
 
 Pick whichever of the three routes below fits how you already manage tools. The
-first two install the **same bytes** — the release pipeline builds the tarballs
+first two install the **same bytes**. The release pipeline builds the tarballs
 once, signs them once, and Homebrew's formula is rendered from those very
 artifacts. The third compiles from source, for platforms outside the four
 release targets.
@@ -19,7 +19,7 @@ Already installed? To update or roll back, see
 [Update and roll back cosmon](../how-to/update-and-rollback.md); otherwise skip to
 [Ten minutes to cosmon](./ten-minutes.md).
 
-## Route 1 — the install script (recommended)
+## Route 1: the install script (recommended)
 
 Works on macOS and Linux, on arm64 and x86_64:
 
@@ -39,7 +39,7 @@ cs --help
 ```
 
 You should see the command groups (lifecycle, fleet, execution, …). That `export`
-only affects the current shell — put the same line in your shell profile
+only affects the current shell. Put the same line in your shell profile
 (`~/.zshrc`, `~/.bashrc`) so the next terminal finds `cs` too.
 
 If you installed elsewhere (`--dir`, `COSMON_INSTALL_DIR`, or the
@@ -47,7 +47,7 @@ If you installed elsewhere (`--dir`, `COSMON_INSTALL_DIR`, or the
 
 ### The same route, verifying the installer first
 
-The installer **is** signed — every release publishes it as
+The installer **is** signed. Every release publishes it as
 `cosmon-install-<version>.sh` with a `.sig` and a `.pem` beside it, keyless and
 Rekor-anchored like the binaries. But piping it into `sh` consumes it before
 anything could check that signature, so on the one-liner above the signature
@@ -55,8 +55,8 @@ does no work. Reported by an external reader on issue #32, and correct: the
 bytes served at that URL are byte-identical to the signed asset today, which is
 exactly the property an attacker at the CDN or in the TLS path would change.
 
-The convenience route stays. If you would rather check before you run — on a
-shared machine, in CI, or the first time you install cosmon anywhere — download
+The convenience route stays. If you would rather check before you run on a
+shared machine, in CI, or the first time you install cosmon anywhere, download
 the versioned asset, verify it, then run it:
 
 ```sh
@@ -78,7 +78,7 @@ cosign verify-blob \
 `cosign verify-blob` exits non-zero on anything it cannot tie back to
 `release.yml` at a cosmon tag, and the `&&` is what makes that exit status
 refuse to run the script. Everything after that is the same installer doing the
-same sha256 check on the same tarballs — you have only moved the trust boundary
+same sha256 check on the same tarballs. You have only moved the trust boundary
 from *the endpoint served me these bytes* to *this workflow, at this tag,
 produced them*.
 
@@ -105,7 +105,7 @@ here is the whole of it. The installer:
    to your `PATH` before the digest matches.
 5. **Unpacks and installs** `cs` into `~/.local/bin`, falling back to
    `/usr/local/bin` if that directory is not writable. The tarball also carries
-   `cosmon-remote` — the connector for driving a remote cosmon service — and the
+   `cosmon-remote`, the connector for driving a remote cosmon service, and the
    installer places it in the same directory, so one command gives you both
    laptop tools.
 
@@ -123,11 +123,11 @@ curl -fsSL https://noogram.org/cosmon/install.sh | sh -s -- --version v0.1.0
 curl -fsSL https://noogram.org/cosmon/install.sh | COSMON_VERSION=v0.1.0 sh
 ```
 
-`v0.1.0` is the tag format the installer expects, shown here as an example —
+`v0.1.0` is the tag format the installer expects, shown here as an example.
 pinning any specific version requires that tag to actually exist as a published
 release. `--dir <path>` (or `COSMON_INSTALL_DIR`) changes where `cs` lands.
 
-## Route 2 — Homebrew
+## Route 2: Homebrew
 
 Since **v0.2.0** the tap [`noogram/homebrew-tap`](https://github.com/noogram/homebrew-tap)
 is live, on macOS and on Linuxbrew, arm64 and x86_64 alike:
@@ -140,10 +140,10 @@ This is not a separate build. The release pipeline renders the formula from the
 *same* tagged, signed release tarballs the install script downloads, and `brew`
 verifies the *same* sha256 digests. Identical bytes, identical provenance.
 
-## Route 3 — build from source
+## Route 3: build from source
 
-If you would rather compile it yourself — or you are on a platform outside the
-four release targets — build from the cosmon repository.
+If you would rather compile it yourself, or you are on a platform outside the
+four release targets, build from the cosmon repository.
 
 On **Linux (glibc)** the build links the Secret Service keyring backend through
 `libdbus`, so install the system headers first, otherwise the compile fails at
@@ -180,8 +180,8 @@ signature check you run once, deliberately, and it is worth doing:
 
 The product **is** the `cs` binary published on GitHub Releases, versioned by the
 git tag it was built from. If cosmon ever appears on crates.io, npm, or PyPI,
-**those entries are name-holds, not the shipped binary** — they exist to hold the
-name and point back here. Do not expect `cargo install cosmon` /
+**those entries only hold the name and point back here**. They do not contain the
+shipped binary. Do not expect `cargo install cosmon` /
 `npm install cosmon` / `pip install cosmon` to give you the released binary.
 
 ## What is *not* installed
@@ -199,13 +199,13 @@ cs help guide      # the handbook
 cs <command> --help
 ```
 
-The generated CLI reference in this book — [CLI overview](../reference/overview.md)
-— is rendered from that same source.
+The [generated CLI reference in this book](../reference/overview.md) is rendered
+from that same source.
 
 ## Next
 
-- [Ten minutes to cosmon](./ten-minutes.md) — run one piece of work end to end.
-- [Update and roll back cosmon](../how-to/update-and-rollback.md) — move to a
+- [Ten minutes to cosmon](./ten-minutes.md): run one piece of work end to end.
+- [Update and roll back cosmon](../how-to/update-and-rollback.md): move to a
   newer or older release.
-- [Set up cosmon (prerequisites)](../tutorials/setup.md) — the other tools a
+- [Set up cosmon (prerequisites)](../tutorials/setup.md): the other tools a
   worker needs (git, tmux, a model backend) before the tutorials.

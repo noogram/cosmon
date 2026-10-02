@@ -9,28 +9,28 @@ The code lives at [github.com/noogram/cosmon](https://github.com/noogram/cosmon)
 open-core: the kernel, the CLI, and the runtime are AGPL-3.0-only, and the
 network SDK third parties link to talk to an instance over the wire is
 Apache-2.0 ([LICENSE](https://github.com/noogram/cosmon/blob/main/LICENSE) maps
-the split crate by crate). It is early-stage but functional — the core types,
+the split crate by crate). It is early-stage but functional. The core types,
 the `cs` CLI, state persistence, tmux transport, and the DAG engine all ship
 today, and the API is still moving, so expect breaking changes before 1.0.
 
 - **A social organization of agents.** A long mission becomes small tasks, each
   with a precise goal. Agents take them on side by side, wait on one another
   when one task depends on another, and
-  [cross-examine each other's findings](./explanation/fleets.md) — panels,
-  reviews, counter-arguments — before anything reaches you. Work at scale, the
+  [cross-examine each other's findings](./explanation/fleets.md) through panels,
+  reviews, and counter-arguments before anything reaches you. Work at scale, the
   way a good team organizes itself.
 - **Runs inside your perimeter.** The agent works on your corpus, on your
   machine. Every step, every decision, and every result is written to plain
-  files on a disk you control. Only the model call leaves your machine — no
-  server in the loop, no database, no Cosmon account.
+  files on a disk you control. Only the model call leaves your machine. There is
+  no server in the loop, database, or Cosmon account.
 - **You stay the judge.** The agent hands you a draft on its own branch, with
   its reasoning and evidence alongside; what the gates couldn't verify is marked
   unverified, never silently accepted. Nothing lands until it passes your gates.
 - **The story can't be quietly rewritten.** Every mission leaves a complete,
-  replayable work record. If anyone — human or agent — edits it after the fact
-  without resealing it, `cs verify` notices. It catches a careless edit, not a
-  determined forger.
-- **A crash is a pause, not a loss.** Everything the agents record lives in
+  replayable work record. If anyone, human or agent, edits it after the fact
+  without resealing it, `cs verify` notices. It detects accidental edits; a
+  determined forger can rewrite the record and its seal.
+- **Work survives a crash.** Everything the agents record lives in
   those same plain files, so a fresh worker picks up where a crashed one
   stopped.
 - **A harness over the harnesses you already use:** Claude Code, Codex, Aider,

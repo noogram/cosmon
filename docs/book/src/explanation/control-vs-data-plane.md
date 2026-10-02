@@ -22,7 +22,7 @@ Cosmon links molecules with typed edges: `Blocks`, `BlockedBy`, `DecayProduct`,
 `Refines`, `Entangled`. Together they form a directed graph: the DAG. But look
 at how little information an edge carries. A `Blocks` edge between molecule A and
 molecule B says exactly one thing: *is A done yet, yes or no?* A single yes/no
-signal — done or not-done. Information theory has a precise name for a yes/no
+signal: done or not-done. Information theory has a precise name for a yes/no
 answer, and that name is **one bit**.
 
 That is the entire control signal. `cs evolve` writes the bit (A moved forward);
@@ -33,7 +33,7 @@ payload, no content, no message body. Just done / not-done, edge by edge.
 **"One bit" describes the signal, never the delivery.** This is worth spelling
 out, because a `cs done` clearly hands the next worker far more than a yes/no: a
 merged branch, a report, evidence files, however many megabytes of code. All of
-that is real — it just travels on the *other* channel. The data plane is
+that is real and travels on the *other* channel. The data plane is
 arbitrarily large; the control plane is one bit. The point of the split is
 exactly that contrast: the DAG says *go*, and the filesystem holds *everything
 you go and read*.
