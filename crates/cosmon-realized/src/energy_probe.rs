@@ -12,6 +12,7 @@
 //!
 //! Codex chain: worker → tmux pane cwd (`#{pane_current_path}`, with the
 //! fleet-recorded worktree as post-mortem fallback) →
+//! molecule-owned work-hook home first, then the ambient session home →
 //! `resolve_codex_session_by_cwd` (the `session_meta.payload.cwd` join)
 //! → [`cosmon_core::codex_energy`] token parser + price manifest →
 //! [`crate::energy_probe::WorkerEnergy`]. Cumulative deltas are priced against their exact realized
@@ -371,7 +372,7 @@ pub fn load_worker_energy_with_adapters<S: std::hash::BuildHasher>(
     // session history in one newest-first pass. Rebuilding and sorting the
     // complete ~/.codex session inventory once per Codex worker made a peek
     // refresh O(W × H), even after rollout bodies stopped being read.
-    let codex_cwds: HashMap<WorkerId, PathBuf> = fleet
+    let codex_workers: HashMap<WorkerId, (PathBuf, MoleculeId)> = fleet
         .workers
         .iter()
         .filter(|(_, data)| {
@@ -380,17 +381,34 @@ pub fn load_worker_energy_with_adapters<S: std::hash::BuildHasher>(
                 .and_then(|molecule| adapters.get(molecule))
                 .is_some_and(|adapter| adapter == "codex")
         })
-        .filter_map(|(worker_id, _)| {
+        .filter_map(|(worker_id, data)| {
             resolve_tmux_pane_cwd(backends, worker_id)
                 .or_else(|| resolve_recorded_worker_cwd(state_dir, worker_id))
-                .map(|cwd| (worker_id.clone(), cwd))
+                .zip(data.current_molecule.clone())
+                .map(|(cwd, molecule)| (worker_id.clone(), (cwd, molecule)))
         })
         .collect();
-    let codex_targets: HashSet<String> = codex_cwds
+    let codex_targets: HashSet<String> = codex_workers
         .values()
-        .map(|cwd| cwd.to_string_lossy().into_owned())
+        .map(|(cwd, _)| cwd.to_string_lossy().into_owned())
         .collect();
-    let codex_sessions = resolve_codex_sessions_by_cwd_under(&codex_sessions_dir(), &codex_targets);
+    let mut codex_sessions = HashMap::new();
+    for (cwd, molecule) in codex_workers.values() {
+        let Some(root) = codex_work_hook_sessions_dir(state_dir, molecule) else {
+            continue;
+        };
+        if let Some(session) = resolve_codex_session_by_cwd_under(&root, cwd) {
+            codex_sessions.insert(cwd.to_string_lossy().into_owned(), session);
+        }
+    }
+    let unresolved = codex_targets
+        .into_iter()
+        .filter(|cwd| !codex_sessions.contains_key(cwd))
+        .collect();
+    codex_sessions.extend(resolve_codex_sessions_by_cwd_under(
+        &codex_sessions_dir(),
+        &unresolved,
+    ));
 
     for (worker_id, data) in &fleet.workers {
         let adapter = data
@@ -399,9 +417,9 @@ pub fn load_worker_energy_with_adapters<S: std::hash::BuildHasher>(
             .and_then(|m| adapters.get(m))
             .map(String::as_str);
         let energy = if adapter == Some("codex") {
-            codex_cwds
+            codex_workers
                 .get(worker_id)
-                .and_then(|cwd| codex_sessions.get(cwd.to_string_lossy().as_ref()))
+                .and_then(|(cwd, _)| codex_sessions.get(cwd.to_string_lossy().as_ref()))
                 .and_then(|session| read_codex_worker_energy(session, worker_id))
         } else {
             let plan_root = data
@@ -693,7 +711,11 @@ fn probe_codex_worker_energy(
 ) -> Option<WorkerEnergy> {
     let cwd = resolve_tmux_pane_cwd(backends, worker_id)
         .or_else(|| resolve_recorded_worker_cwd(state_dir, worker_id))?;
-    let session_path = resolve_codex_session_by_cwd(&cwd)?;
+    let molecule = last_molecule_for_worker(state_dir, worker_id);
+    let session_path = molecule
+        .as_ref()
+        .and_then(|mol| resolve_codex_work_hook_session(state_dir, mol, &cwd))
+        .or_else(|| resolve_codex_session_by_cwd(&cwd))?;
     read_codex_worker_energy(&session_path, worker_id)
 }
 
@@ -1063,6 +1085,18 @@ fn resolve_recorded_worker_cwd(state_dir: &Path, worker_id: &WorkerId) -> Option
     })
 }
 
+/// The molecule currently assigned to `worker_id` in the fleet roster.
+fn last_molecule_for_worker(state_dir: &Path, worker_id: &WorkerId) -> Option<MoleculeId> {
+    use cosmon_state::StateStore as _;
+    cosmon_filestore::FileStore::new(state_dir)
+        .load_fleet()
+        .ok()?
+        .workers
+        .get(worker_id)?
+        .current_molecule
+        .clone()
+}
+
 /// The live working directory of a worker's tmux pane
 /// (`#{pane_current_path}`), probing every socket in `backends`. `None` when
 /// no pane answers — the worker is dead or was never tmux-hosted.
@@ -1346,7 +1380,26 @@ impl RealizedCapture {
             }
         }
         self.ticks_since_resolve = 0;
+        if let Some(path) =
+            resolve_codex_work_hook_session(&self.state_dir, &self.mol_id, &self.cwd)
+        {
+            return Some(path);
+        }
         resolve_codex_session_by_cwd(&self.cwd)
+    }
+
+    /// The session-log root this capture actually searches first.
+    #[must_use]
+    pub fn session_log_root(
+        &self,
+        adapter: Option<&str>,
+        claude_projects_root: Option<&Path>,
+    ) -> Option<PathBuf> {
+        if adapter == Some("codex") {
+            return codex_work_hook_sessions_dir(&self.state_dir, &self.mol_id)
+                .or_else(|| Some(codex_sessions_dir()));
+        }
+        session_log_root_for_adapter(adapter, claude_projects_root)
     }
 
     fn last_assessment(
@@ -1694,6 +1747,22 @@ fn resolve_claude_session_by_cwd_under(projects_root: &Path, cwd: &Path) -> Opti
 /// chain reports through its pid sidecar.
 fn resolve_codex_session_by_cwd(cwd: &Path) -> Option<PathBuf> {
     resolve_codex_session_by_cwd_under(&codex_sessions_dir(), cwd)
+}
+
+/// The molecule-owned Codex session root created by a `cs work` launch.
+fn codex_work_hook_sessions_dir(state_dir: &Path, mol_id: &MoleculeId) -> Option<PathBuf> {
+    let home =
+        cosmon_state::archive::resolve_molecule_dir(state_dir, mol_id)?.join("codex-work-home");
+    home.is_dir().then(|| home.join("sessions"))
+}
+
+/// Resolve a rollout from the molecule-owned home before any ambient home.
+fn resolve_codex_work_hook_session(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    cwd: &Path,
+) -> Option<PathBuf> {
+    resolve_codex_session_by_cwd_under(&codex_work_hook_sessions_dir(state_dir, mol_id)?, cwd)
 }
 
 /// Resolve a Codex rollout under an explicitly named session root.
@@ -2947,6 +3016,69 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    /// A work-hook launch puts the rollout below the molecule-owned Codex
+    /// home, so both operator projections must find it without inheriting
+    /// the worker's `CODEX_HOME`.
+    #[test]
+    fn codex_work_hook_home_projects_usage_and_realized_model() {
+        let _guard = test_support::home_guard();
+        let home = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let mol = MoleculeId::new("task-20261002-217b").unwrap();
+        let state_dir = root.path().join(".cosmon").join("state");
+        let wt = root.path().join(".worktrees").join(mol.as_str());
+        std::fs::create_dir_all(&wt).unwrap();
+        let store = seed_running_molecule(&state_dir, &mol);
+        // A matching ambient rollout is deliberately present: the
+        // molecule-owned source must win, not merely act as a fallback.
+        seed_codex_rollout(&wt, "gpt-7-hypothetical");
+        let sessions = store
+            .molecule_dir(&mol)
+            .join("codex-work-home/sessions/2026/10/02");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("rollout-synthetic.jsonl"),
+            format!(
+                concat!(
+                    r#"{{"type":"session_meta","payload":{{"cwd":"{cwd}","session_id":"synthetic"}}}}"#,
+                    "\n",
+                    r#"{{"type":"turn_context","payload":{{"model":"gpt-5.3-codex"}}}}"#,
+                    "\n",
+                    r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":1200,"cached_input_tokens":200,"output_tokens":300,"reasoning_output_tokens":100,"total_tokens":1500}}}}}}}}"#,
+                    "\n",
+                ),
+                cwd = wt.to_string_lossy(),
+            ),
+        )
+        .unwrap();
+
+        seed_dispatch(&state_dir, &mol, "codex", "worker-1");
+        register_fleet_worker(
+            &state_dir,
+            &mol,
+            "worker-1",
+            &format!(".worktrees/{}", mol.as_str()),
+        );
+        capture_realized_from_cwd(&state_dir, &mol, &wt);
+
+        let energy = probe_one_worker_energy(&state_dir, "worker-1")
+            .expect("peek must read usage from the molecule-owned Codex home");
+        assert_eq!(energy.token_tuple(), (1_200, 200, 300, 100));
+        assert_eq!(
+            fold_from_log(&state_dir, &mol).realized,
+            cosmon_core::adapter_attribution::Realized::Observed(vec!["gpt-5.3-codex".to_owned()]),
+            "observe must read model evidence from the molecule-owned Codex home"
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     /// A codex dispatch fills the row with real tokens and a
