@@ -28,4 +28,5 @@ pub mod exec_command;
 pub mod find_file;
 pub mod grep;
 pub mod list_dir;
+pub mod shell_environment;
 pub mod write_file;

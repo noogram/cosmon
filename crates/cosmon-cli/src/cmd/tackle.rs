@@ -7396,8 +7396,10 @@ fn spawn_openai_session(
         .enable_all()
         .build()
         .map_err(|e| anyhow::anyhow!("cs tackle: tokio runtime build failed: {e}"))?;
-    // In-process tools inherit this process environment, unlike tmux workers
-    // whose spawn argv carries the same molecule path explicitly.
+    // The in-process shell tool does not inherit this process environment
+    // wholesale; it copies a reviewed allowlist (`shell_environment`), which
+    // includes `COSMON_MOL_DIR`. Set it here so the worker's `cs` reaches its
+    // own molecule, as tmux workers do through their spawn argv.
     std::env::set_var("COSMON_MOL_DIR", mol_state_dir);
     let turn_input = cosmon_cli::work_turn_input::WorkTurnInput::discover(mol_state_dir)
         .map_err(|e| anyhow::anyhow!("cs tackle: work turn input failed: {e}"))?;

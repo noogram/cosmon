@@ -407,11 +407,11 @@ impl ExecSession {
         // `exec_command { "claude -p '…'" }` then finds the remote API
         // physically unreachable — a *refused syscall*, not a *detected
         // anomaly* (turing's master finding: the witness lives below the
-        // harness, in the spawner's process-group + netns ownership). When the
-        // var is unset the policy is `AllowAll` and the wrapped command is
-        // byte-identical to the pre-guard `/bin/bash --noprofile --norc`
-        // shape, so every existing codepath (tests, claude workers) is
-        // unaffected.
+        // harness, in the spawner's process-group + netns ownership). The
+        // policy is fail-closed: an unset or corrupt variable resolves to
+        // `DenyExternal`, and only an explicit `allow-all` yields the plain
+        // `/bin/bash --noprofile --norc` shape. The resolved token, not the
+        // raw variable, is what the shell environment receives.
         let policy = cosmon_core::egress::EgressPolicy::from_env_value(
             std::env::var(cosmon_core::egress::EgressPolicy::ENV_VAR)
                 .ok()
@@ -430,12 +430,16 @@ impl ExecSession {
         let jailed =
             cosmon_core::egress::EgressJail::wrap_with_mode(mode, policy, "/bin/bash", &base_args);
         let mut cmd = Command::new(&jailed.program);
+        // The shell gets an explicit minimal environment, never the parent's
+        // (issue #151 W3): see `shell_environment`. The policy resolved above
+        // is passed through as an explicit token.
         cmd.args(&jailed.args)
             .current_dir(work_dir)
-            .env("PS1", "")
-            .env("PS2", "")
-            .env("HISTFILE", "/dev/null")
-            .env("TERM", "dumb")
+            .env_clear()
+            .envs(super::shell_environment::build(
+                |name| std::env::var_os(name),
+                policy,
+            ))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
