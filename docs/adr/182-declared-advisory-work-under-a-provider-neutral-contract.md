@@ -445,3 +445,14 @@ the provider-neutral collaboration contract. No runtime comparison was executed 
 C1 proposal; C2 capability/enforcement evidence and C3 preregistration remain
 open. The durable C1 `report.md` distinguishes static evidence, gate results,
 inference and remaining work.
+
+---
+
+## Amendment of 2026-10-02 (issue #147 W1)
+
+A caller admitted by a non-local boundary is recorded as
+`SenderEvidence::AdmittedNonLocal`: the boundary derived the seat from its own
+binding, and the wire cannot choose that value. Remote admission changes who
+may reach the owning work's custody, not what a message is: it stays advisory
+evidence and confers no lifecycle authority. The routes and limits are fixed in
+[`docs/specs/cross-machine-collaboration.md`](../specs/cross-machine-collaboration.md).
