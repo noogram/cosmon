@@ -415,3 +415,14 @@ without the brief in hand. Falsifier 1 is new and belongs to this ADR alone.
 - **Nothing in this ADR is executable.** No flag, no verb, no output byte
   changed. The next molecule that touches a user-facing command owes the
   CLI/UI parity audit, `cs help` and `man cs` in the same change.
+
+---
+
+## Amendment of 2026-10-02 (issue #147 W1)
+
+When the session substrate is reached from another machine through the RPP, it
+carries pilot notes, presence and checkpoints only, as listed in
+[`docs/specs/cross-machine-collaboration.md`](../specs/cross-machine-collaboration.md).
+It does not carry delivery into a model's context, a lease or a signed grant;
+those stay host-local, and a remote acknowledgment reports only the stage the
+host or the client actually observed.

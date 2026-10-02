@@ -1014,3 +1014,16 @@ The doctrine emerges strengthened: the RPP is a substrate instance, not a new la
 ---
 
 *Authored 2026-04-27 by `task-20260427-16aa`, parent deliberation `delib-20260427-d2ce`, panel forgemaster · turing · tolnay · jobs · wheeler. Children to unblock after ratification: `task-20260427-4e84` (V0 implementation), `task-20260427-4745` (api-cli-coverage audit).*
+
+---
+
+## 6.7 Collaboration routes and scopes *(added 2026-10-02, issue #147 W1)*
+
+The exposure list for routes that let a second machine exchange advisory work
+messages and pilot notes with one authoritative host is
+[`docs/specs/cross-machine-collaboration.md`](../specs/cross-machine-collaboration.md).
+It adds four scopes to the grid of §6.6, `cosmon:work:read`,
+`cosmon:work:write`, `cosmon:sessions:read` and `cosmon:sessions:write`, each
+requiring an exact operator-provisioned binding and none implying lifecycle,
+spawn, harvest or lease authority. The routes are proposed there and mounted,
+with their canon and OpenAPI entries, only by the units that name them.
