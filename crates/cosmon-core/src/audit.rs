@@ -78,6 +78,7 @@ impl Action {
             | EventV2::DecaySpliced { .. }
             | EventV2::MergeDispatched { .. }
             | EventV2::WorkerSpawned { .. }
+            | EventV2::WorkerSessionMissing { .. }
             | EventV2::WorkerHeartbeat { .. }
             | EventV2::EnergyTick { .. }
             | EventV2::UsageObserved { .. }

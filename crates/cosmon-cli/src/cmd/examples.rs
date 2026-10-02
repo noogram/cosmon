@@ -809,7 +809,9 @@ codex*. A money-stake marker or a recognised unknown confirmation/menu widget
 refuses with exit 5; unknown means the widget is real but its choice is not
 safe to infer. Ordinary output without those signals is delivered. Routine
 permission prompts remain deliverable. A refusal prints the matching rule and
-pane tail lines so the operator can inspect the choice.
+pane tail lines so the operator can inspect the choice. If no tmux session
+of the recorded name exists (killed or renamed), it refuses with exit 6
+(session not found).
 
 To wait for the worker's answer, follow with `cs wait <mol>`: even on
 a completed molecule it returns only after a new commit on feat/<mol>.";

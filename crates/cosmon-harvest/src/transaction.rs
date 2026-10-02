@@ -2244,10 +2244,7 @@ fn run_with_remote_before_lock(
     // Resolve the tmux session name the worker was tackled with. Stored
     // on the molecule at tackle time so renames stay in lockstep with
     // teardown; falls back to the raw molecule ID for legacy molecules.
-    let session_name = mol
-        .session_name
-        .clone()
-        .unwrap_or_else(|| mol_id.to_string());
+    let session_name = mol.teardown_session();
 
     // --dry-run: compute plan and display, no side effects.
     if args.dry_run {
@@ -4153,9 +4150,7 @@ fn run_with_remote_before_lock(
 fn purge_stale_worker_for(store: &FileStore, mol: &cosmon_state::MoleculeData) -> bool {
     // Prefer the inline live-process record over the legacy
     // `session_name` field (delib-20260426-1bcd #1 fold-in).
-    let session_name = mol
-        .tmux_session()
-        .map_or_else(|| mol.id.to_string(), str::to_owned);
+    let session_name = mol.teardown_session();
     let Ok(wid) = WorkerId::new(&session_name) else {
         return false;
     };

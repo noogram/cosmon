@@ -622,6 +622,22 @@ pub enum EventV2 {
         /// Human-readable reason.
         reason: String,
     },
+    /// A worker's recorded tmux session was observed to be missing.
+    ///
+    /// States the observation, not an action: the observer (for example the
+    /// dispatch watcher, which then parks the molecule) looked for
+    /// `session` and did not find it. Nothing was killed, and the worker
+    /// process may well still be running under another session name — a
+    /// renamed session looks exactly like this. [`Self::WorkerKilled`] is
+    /// reserved for a kill that actually happened (issue #155).
+    WorkerSessionMissing {
+        /// The worker whose session was looked for.
+        worker_id: WorkerId,
+        /// The tmux session name that was recorded and not found.
+        session: String,
+        /// Short tag naming the observer (e.g. `dispatch_watcher`).
+        observed_by: String,
+    },
     /// Periodic liveness signal from a running worker.
     ///
     /// Emitted every 30–60 seconds by a worker (or its bridge) so the runtime
@@ -2877,6 +2893,7 @@ impl EventV2 {
             | Self::OperatorSigned { mol_id, .. } => mol_id.as_ref(),
             Self::OperatorSpark { mol_ref, .. } => mol_ref.as_ref(),
             Self::WorkerKilled { .. }
+            | Self::WorkerSessionMissing { .. }
             | Self::WorkerHeartbeat { .. }
             | Self::EnergyTick { .. }
             | Self::UsageObserved { .. }
@@ -4054,6 +4071,11 @@ mod tests {
                 worker_id: wid("quartz"),
                 reason: "purge".to_owned(),
             },
+            EventV2::WorkerSessionMissing {
+                worker_id: wid("quartz"),
+                session: "quartz".to_owned(),
+                observed_by: "dispatch_watcher".to_owned(),
+            },
             EventV2::WorkerHeartbeat {
                 worker_id: wid("quartz"),
                 ts: DateTime::parse_from_rfc3339("2026-04-12T10:00:00Z")
@@ -4730,6 +4752,7 @@ mod tests {
             | EventV2::PostMergeHook { .. }
             | EventV2::WorkerSpawned { .. }
             | EventV2::WorkerKilled { .. }
+            | EventV2::WorkerSessionMissing { .. }
             | EventV2::WorkerHeartbeat { .. }
             | EventV2::WorkerSilenceDetected { .. }
             | EventV2::BlockingDialogueDetected { .. }

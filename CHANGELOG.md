@@ -19,6 +19,21 @@ this stage.
 
 ## [Unreleased]
 
+### Fixed
+
+- `cs whisper` on a molecule whose recorded tmux session does not exist now
+  refuses with `session not found` (exit code 6, JSON `session_not_found`)
+  instead of `pane_current_command=<missing>`. (#155)
+- When the dispatch watcher parks a molecule whose session has gone, the event
+  log records `worker_session_missing` (what was observed) instead of
+  `worker_killed`: nothing was killed, and a renamed session looks the same.
+  (#155)
+- `cs done --no-merge` on a collapsed molecule now kills the live recorded
+  session and purges its worker, as `--dry-run` announces. `cs collapse` clears
+  the recorded session name, so teardown looked for the molecule id and missed
+  functionally named sessions; it now falls back to the preserved worker id.
+  (#155)
+
 ## [0.7.1] — 2026-10-02
 
 ### Fixed
