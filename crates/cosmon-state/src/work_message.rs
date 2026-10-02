@@ -117,7 +117,7 @@ impl FileWorkMessageStore {
             .join(format!("{key}.jsonl"))
     }
 
-    fn lock(&self) -> Result<File, WorkStoreError> {
+    pub(crate) fn lock(&self) -> Result<File, WorkStoreError> {
         private_dir(&self.work_dir())?;
         reject_symlink(&self.work_dir().join("work.lock"))?;
         let file = private_options()
@@ -167,11 +167,11 @@ impl FileWorkMessageStore {
         bytes: &[u8],
         now: DateTime<Utc>,
     ) -> Result<Admission, WorkStoreError> {
-        self.submit_inner(submission, bytes, now, || Ok(()))
+        self.submit_inner(submission, bytes, now, |_| Ok(()))
     }
 
     #[cfg(test)]
-    fn submit_with_hook<F: FnOnce() -> Result<(), WorkStoreError>>(
+    fn submit_with_hook<F: FnMut(SubmissionWriteStage) -> Result<(), WorkStoreError>>(
         &self,
         submission: Submission,
         bytes: &[u8],
@@ -181,12 +181,12 @@ impl FileWorkMessageStore {
         self.submit_inner(submission, bytes, now, hook)
     }
 
-    fn submit_inner<F: FnOnce() -> Result<(), WorkStoreError>>(
+    fn submit_inner<F: FnMut(SubmissionWriteStage) -> Result<(), WorkStoreError>>(
         &self,
         submission: Submission,
         bytes: &[u8],
         now: DateTime<Utc>,
-        hook: F,
+        mut hook: F,
     ) -> Result<Admission, WorkStoreError> {
         if Hash::of_bytes(bytes) != submission.payload_digest
             || u64::try_from(bytes.len()).ok() != Some(submission.payload_bytes)
@@ -202,13 +202,15 @@ impl FileWorkMessageStore {
             match &decision {
                 Admission::Admit(envelope) => {
                     self.put_payload(&envelope.payload_digest, bytes)?;
-                    hook()?;
+                    hook(SubmissionWriteStage::AfterPayload)?;
                     match self.put_envelope(envelope)? {
                         PutOutcome::Created => {}
                         PutOutcome::AlreadyPresent => {
                             return Err(WorkStoreError::EnvelopeConflict(envelope.key.clone()))
                         }
                     }
+                    hook(SubmissionWriteStage::AfterEnvelope)?;
+                    hook(SubmissionWriteStage::BeforeReceipt)?;
                     self.append_receipt(&Receipt::for_envelope(
                         envelope,
                         ObserverId::Boundary,
@@ -263,6 +265,20 @@ impl FileWorkMessageStore {
 
     fn verify_payload(&self, envelope: &Envelope) -> Result<(), WorkStoreError> {
         self.read_payload(envelope).map(|_| ())
+    }
+
+    pub(crate) fn put_note(&self, digest: &Hash, bytes: &[u8]) -> Result<(), WorkStoreError> {
+        if Hash::of_bytes(bytes) != *digest {
+            return Err(WorkStoreError::PayloadMismatch);
+        }
+        let path = self.work_dir().join("notes").join(digest.to_hex());
+        if !write_create_only(&path, bytes)? {
+            reject_symlink(&path)?;
+            if Hash::of_bytes(&fs::read(path)?) != *digest {
+                return Err(WorkStoreError::ExistingPayloadMismatch);
+            }
+        }
+        Ok(())
     }
 
     /// Rebuild stages from disk and report missing, changed and orphan bytes.
@@ -328,6 +344,13 @@ impl FileWorkMessageStore {
             findings,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmissionWriteStage {
+    AfterPayload,
+    AfterEnvelope,
+    BeforeReceipt,
 }
 
 impl WorkMessageStore for FileWorkMessageStore {
@@ -611,6 +634,7 @@ mod tests {
     }
     fn submission(scope: &WorkScope, key: &str, bytes: &[u8]) -> Submission {
         Submission {
+            scope_owner: scope.owner.clone(),
             scope_revision: scope.revision().unwrap(),
             sender: seat("a"),
             recipient: seat("b"),
@@ -639,7 +663,7 @@ mod tests {
             submission(&scope, "m1", b"finding"),
             b"finding",
             time(),
-            || Err(WorkStoreError::Injected),
+            |_| Err(WorkStoreError::Injected),
         );
         assert!(matches!(result, Err(WorkStoreError::Injected)));
         assert!(store.load_all().unwrap().envelopes.is_empty());
@@ -648,6 +672,43 @@ mod tests {
             .findings
             .iter()
             .any(|f| matches!(f, PayloadIntegrityFinding::OrphanPayload { .. })));
+    }
+    #[test]
+    fn retry_repairs_each_submission_crash_window_once() {
+        for fault in [
+            SubmissionWriteStage::AfterPayload,
+            SubmissionWriteStage::AfterEnvelope,
+            SubmissionWriteStage::BeforeReceipt,
+        ] {
+            let (_dir, store, scope) = setup(2);
+            let failed = store.submit_with_hook(
+                submission(&scope, "m1", b"finding"),
+                b"finding",
+                time(),
+                |stage| {
+                    if stage == fault {
+                        Err(WorkStoreError::Injected)
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert!(matches!(failed, Err(WorkStoreError::Injected)), "{fault:?}");
+            store
+                .submit(submission(&scope, "m1", b"finding"), b"finding", time())
+                .unwrap();
+            let records = store.load_all().unwrap();
+            assert_eq!(records.envelopes.len(), 1, "{fault:?}");
+            assert_eq!(
+                records
+                    .receipts
+                    .iter()
+                    .filter(|receipt| receipt.stage == Stage::Admitted)
+                    .count(),
+                1,
+                "{fault:?}"
+            );
+        }
     }
     #[test]
     fn concurrent_submits_of_one_key_create_one_envelope() {

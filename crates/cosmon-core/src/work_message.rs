@@ -279,11 +279,64 @@ pub enum SenderEvidence {
     /// Derived from the caller's `COSMON_MOL_DIR`; any same-uid process can
     /// set it.
     CallerEnvSameUid,
+    /// Supplied by a non-local admission boundary after it derived the work
+    /// seat from its own binding. The binding mechanism remains outside this
+    /// pure contract; a wire request cannot select this value for itself.
+    AdmittedNonLocal,
+}
+
+/// Caller identity already admitted by the boundary invoking a work operation.
+///
+/// The value carries only the facts the pure work contract needs. Constructing
+/// it does not authenticate anyone: the local CLI derives it from its checked
+/// molecule reference, while a future transport must construct it only after
+/// its own binding admission succeeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmittedWorkCaller {
+    scope_owner: MoleculeId,
+    seat: AdvisorySeatId,
+    sender_evidence: SenderEvidence,
+}
+
+impl AdmittedWorkCaller {
+    /// Build a caller from facts admitted by an outer boundary.
+    #[must_use]
+    pub fn new(
+        scope_owner: MoleculeId,
+        seat: AdvisorySeatId,
+        sender_evidence: SenderEvidence,
+    ) -> Self {
+        Self {
+            scope_owner,
+            seat,
+            sender_evidence,
+        }
+    }
+
+    /// Owning molecule whose work custody this caller was admitted to use.
+    #[must_use]
+    pub fn scope_owner(&self) -> &MoleculeId {
+        &self.scope_owner
+    }
+
+    /// Seat derived by the admitting boundary.
+    #[must_use]
+    pub fn seat(&self) -> &AdvisorySeatId {
+        &self.seat
+    }
+
+    /// Evidence describing the admission boundary.
+    #[must_use]
+    pub fn sender_evidence(&self) -> SenderEvidence {
+        self.sender_evidence
+    }
 }
 
 /// A sender's request to admit one message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Submission {
+    /// Owning work scope selected by the admitted caller.
+    pub scope_owner: MoleculeId,
     /// Revision the sender read before submitting.
     pub scope_revision: ScopeRevision,
     /// Sending seat.
@@ -833,6 +886,12 @@ pub fn admit(
     now: DateTime<Utc>,
 ) -> Result<Admission, WorkMessageError> {
     scope.validate()?;
+    if submission.scope_owner != scope.owner {
+        return Err(WorkMessageError::WrongScopeOwner {
+            submitted: submission.scope_owner.to_string(),
+            current: scope.owner.to_string(),
+        });
+    }
     let current = scope.revision()?;
     if submission.scope_revision != current {
         return Err(WorkMessageError::StaleScopeRevision {
@@ -1187,6 +1246,14 @@ pub enum WorkMessageError {
     /// Scope could not be canonicalised.
     #[error("cannot canonicalise work scope: {0}")]
     Canonical(String),
+    /// The admitted caller was bound to a different owning work scope.
+    #[error("caller was admitted for work {submitted}, not current work {current}")]
+    WrongScopeOwner {
+        /// Owner named by the admitted caller.
+        submitted: String,
+        /// Owner stored in the current scope.
+        current: String,
+    },
     /// The submission was prepared against another revision.
     #[error("stale scope revision: submitted {submitted}, current {current}")]
     StaleScopeRevision {
@@ -1249,6 +1316,16 @@ pub enum WorkMessageError {
     /// Bytes offered for rendering are not the admitted payload.
     #[error("payload does not match the digest of envelope {0}")]
     PayloadDigestMismatch(MessageKey),
+    /// An operation named the right key with a different expected digest.
+    #[error("message {key} has digest {current}, not expected digest {expected}")]
+    EnvelopeDigestMismatch {
+        /// Envelope key.
+        key: MessageKey,
+        /// Digest supplied by the caller.
+        expected: Hash,
+        /// Digest in canonical custody.
+        current: Hash,
+    },
 }
 
 #[cfg(test)]
@@ -1300,6 +1377,7 @@ mod tests {
 
     fn submission(scope: &WorkScope, k: &str, payload: &[u8]) -> Submission {
         Submission {
+            scope_owner: scope.owner.clone(),
             scope_revision: scope.revision().unwrap(),
             sender: seat("a"),
             recipient: seat("b"),
@@ -1313,6 +1391,16 @@ mod tests {
             ttl_secs: None,
             sender_evidence: SenderEvidence::CallerEnvSameUid,
         }
+    }
+
+    #[test]
+    fn sender_evidence_keeps_legacy_records_and_names_non_local_admission() {
+        let legacy: SenderEvidence = serde_json::from_str("\"caller_env_same_uid\"").unwrap();
+        assert_eq!(legacy, SenderEvidence::CallerEnvSameUid);
+        assert_eq!(
+            serde_json::to_string(&SenderEvidence::AdmittedNonLocal).unwrap(),
+            "\"admitted_non_local\""
+        );
     }
 
     /// Admit `submission` and return the new envelope, failing the test on a
