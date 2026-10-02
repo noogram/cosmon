@@ -7,7 +7,7 @@
 
 use cosmon_core::model_realization::{
     assess_claude_model_evidence, realized_models_from_claude_jsonl, ModelEvidenceCoverage,
-    ModelEvidenceReason,
+    ModelEvidenceReason, ModelEvidenceStats,
 };
 
 #[test]
@@ -55,4 +55,51 @@ fn claude_trajectory_alone_cannot_distinguish_missing_model_evidence() {
         assess_claude_model_evidence(format!("{missing}\n").as_bytes(), true).coverage,
         ModelEvidenceCoverage::Degraded(vec![ModelEvidenceReason::MissingAssistantModel])
     );
+}
+
+/// Issue #157: record types that carry no model field must not count as
+/// unclassified, otherwise every current Claude worker reads as degraded.
+/// The fixture has the record shapes of a recent transcript with all text
+/// removed.
+#[test]
+fn claude_neutral_record_types_keep_coverage_complete() {
+    let content = include_str!("fixtures/claude_transcript/neutral_records.jsonl");
+    let assessment = assess_claude_model_evidence(content.as_bytes(), true);
+    assert_eq!(assessment.coverage, ModelEvidenceCoverage::CompleteRecords);
+    let ModelEvidenceStats::Claude {
+        assistant_records,
+        usable_model_records,
+        malformed_records,
+        unclassified_records,
+        ..
+    } = assessment.stats
+    else {
+        panic!("claude grammar must yield claude stats");
+    };
+    assert_eq!(
+        (
+            assistant_records,
+            usable_model_records,
+            malformed_records,
+            unclassified_records
+        ),
+        (2, 2, 0, 0)
+    );
+}
+
+/// An unknown future record type is still counted, so the grammar stays
+/// closed over what it has not been taught.
+#[test]
+fn claude_unknown_record_type_is_still_unclassified() {
+    let content = concat!(
+        r#"{"type":"assistant","message":{"model":"model-a"}}"#,
+        "\n",
+        r#"{"type":"record-type-from-the-future"}"#,
+        "\n",
+    );
+    let assessment = assess_claude_model_evidence(content.as_bytes(), true);
+    assert!(matches!(
+        assessment.coverage,
+        ModelEvidenceCoverage::Degraded(_)
+    ));
 }
