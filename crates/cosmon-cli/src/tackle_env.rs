@@ -209,10 +209,13 @@ where
 /// then `CB_SESSION_ROLE=worker`, `CB_DEPTH=<parent+1>`, and the
 /// always-present `COSMON_MOL_DIR` and `COSMON_PARENT_MOL_ID`. The
 /// final command is
-/// `<env> <claude_bin> --permission-mode <perm_mode> --disallowedTools '…' 2> <stderr>`,
+/// `<env> exec <claude_bin> --permission-mode <perm_mode> --disallowedTools '…' 2> <stderr>`,
 /// where the `--disallowedTools` fragment removes the operator-bound
 /// browser MCP servers (see [`OPERATOR_BOUND_BROWSER_MCPS`]) that would
-/// otherwise deadlock a headless worker.
+/// otherwise deadlock a headless worker. The explicit `exec` makes the worker
+/// the tmux pane's foreground program under Bash even though stderr is
+/// redirected; `cs whisper` uses that foreground identity as a fail-closed
+/// delivery guard.
 ///
 /// # Model pin pass-through (avatar-surface D1)
 ///
@@ -432,7 +435,7 @@ where
     // `cosmon_core::worker_argv::ClaudeLaunch` for why each is additive and
     // why an absent one leaves the command byte-identical to the shape that
     // predates it.
-    format!("{prefix}{demote}{claude_bin} {flags} 2> {worker_stderr}")
+    format!("{prefix}exec {demote}{claude_bin} {flags} 2> {worker_stderr}")
 }
 
 /// Append one `NAME=value ` pair to the env prefix, taking the name from the
@@ -455,6 +458,128 @@ fn push_pilot_var(prefix: &mut String, var: PilotVar, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real tmux server used by a test must not outlive that test, including
+    /// when an assertion panics.
+    struct TmuxServerGuard(String);
+
+    impl Drop for TmuxServerGuard {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux")
+                .args(["-L", &self.0, "kill-server"])
+                .status();
+        }
+    }
+
+    /// Compile a silent, blocking worker stub at `path`.
+    ///
+    /// A script would make `pane_current_command` report its interpreter, so
+    /// this fixture is a real executable whose basename is the adapter
+    /// program name. It accepts and ignores every launch flag.
+    fn compile_worker_stub(path: &std::path::Path) {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let mut child = std::process::Command::new(rustc)
+            .args(["--crate-name", "cosmon_worker_stub", "-o"])
+            .arg(path)
+            .arg("-")
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|err| panic!("spawn rustc for worker stub: {err}"));
+        child
+            .stdin
+            .as_mut()
+            .unwrap_or_else(|| panic!("rustc worker-stub stdin was not piped"))
+            .write_all(b"fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }\n")
+            .unwrap_or_else(|err| panic!("write worker stub source: {err}"));
+        let status = child
+            .wait()
+            .unwrap_or_else(|err| panic!("wait for worker-stub rustc: {err}"));
+        assert!(status.success(), "worker-stub rustc failed: {status}");
+    }
+
+    /// Issue #154 RED: Bash retains the pane foreground slot when the final
+    /// simple command has a stderr redirect. Run the exact rendered command
+    /// under `bash -c` in a real tmux pane and assert the observable property
+    /// `cs whisper` relies on: the foreground command is the worker program.
+    #[test]
+    fn bash_tmux_observes_worker_program_for_rendered_command() {
+        let temp = tempfile::tempdir().unwrap_or_else(|err| panic!("create tempdir: {err}"));
+        let worker = temp.path().join("claude");
+        compile_worker_stub(&worker);
+
+        let command = build_claude_command(
+            temp.path()
+                .to_str()
+                .unwrap_or_else(|| panic!("tempdir path is not UTF-8")),
+            "task-test",
+            "claude",
+            "bypassPermissions",
+            &[],
+            &RootSpawnDecision::SpawnAsIs,
+            None,
+            &[],
+            cb_absent,
+            |_| None,
+        );
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|err| panic!("system clock precedes Unix epoch: {err}"))
+            .as_nanos();
+        let socket = format!("cosmon-tackle-env-{}-{nonce}", std::process::id());
+        let session = "rendered-command";
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(temp.path().to_path_buf())
+                .chain(std::env::split_paths(&inherited_path)),
+        )
+        .unwrap_or_else(|err| panic!("assemble worker-stub PATH: {err}"));
+
+        let spawned = std::process::Command::new("tmux")
+            .args(["-L", &socket, "new-session", "-d", "-s", session])
+            .arg("bash")
+            .arg("-c")
+            .arg(&command)
+            .env("PATH", path)
+            .status()
+            .unwrap_or_else(|err| panic!("spawn real tmux pane: {err}"));
+        assert!(spawned.success(), "tmux new-session failed: {spawned}");
+        let _guard = TmuxServerGuard(socket.clone());
+
+        let mut observed = String::new();
+        for _ in 0..50 {
+            let output = std::process::Command::new("tmux")
+                .args([
+                    "-L",
+                    &socket,
+                    "display-message",
+                    "-p",
+                    "-t",
+                    session,
+                    "#{pane_current_command}",
+                ])
+                .output()
+                .unwrap_or_else(|err| panic!("query pane_current_command: {err}"));
+            if output.status.success() {
+                observed = String::from_utf8(output.stdout)
+                    .unwrap_or_else(|err| panic!("pane_current_command is not UTF-8: {err}"))
+                    .trim()
+                    .to_owned();
+                if observed == "claude" {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        assert_eq!(
+            observed, "claude",
+            "the rendered worker command must replace bash in the tmux pane"
+        );
+    }
 
     /// COSMON-DEV #75 parity guard: everything between the binary token and
     /// the stderr redirect is EXACTLY the shared builder's tokens, quoted.
@@ -526,7 +651,7 @@ mod tests {
             "CB_SESSION_ROLE=worker CB_DEPTH=1 \
              COSMON_MOL_DIR=/tmp/state/mol-X \
              COSMON_PARENT_MOL_ID=task-20260522-62c3 \
-             /usr/local/bin/claude --permission-mode bypassPermissions \
+             exec /usr/local/bin/claude --permission-mode bypassPermissions \
              --disallowedTools 'mcp__playwright-extension mcp__claude-in-chrome' \
              2> /tmp/state/mol-X/worker.stderr"
         );
@@ -1320,8 +1445,9 @@ mod tests {
         tokens
     }
 
-    /// The token the shell would actually `exec`: the first token that is not
-    /// a leading `NAME=value` environment assignment.
+    /// The worker program token reached by the shell's explicit `exec`: the
+    /// first token that is neither a leading `NAME=value` environment
+    /// assignment nor the `exec` special builtin.
     ///
     /// This is the *positional* observation the contract needs. A mere
     /// `contains("setpriv … -- <bin>")` substring check is satisfied by the
@@ -1338,7 +1464,7 @@ mod tests {
         };
         shell_tokens(cmd)
             .into_iter()
-            .find(|t| !is_assignment(t))
+            .find(|t| !is_assignment(t) && t != "exec")
             .unwrap_or_default()
     }
 

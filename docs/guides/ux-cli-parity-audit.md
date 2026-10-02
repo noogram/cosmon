@@ -177,6 +177,7 @@ reclamation; neither purge path collapses the molecule.
 | Capability | CLI | Native UI | Other CLI |
 |---|---|---|---|
 | Deliver a whisper through ordinary pane output, including status prose, an informational update banner, and earlier questions above the latest idle input field | `cs whisper` allows the active tail and records the delivery | No matching pane-dialogue guard audited | No matching pane-dialogue guard audited |
+| Identify a live steerable worker by its built-in foreground-program signatures | `cs whisper` accepts `claude`, `claude*`, `node`, `<version>`, `codex`, and `codex*`; `cs whisper --help` lists the same set | No equivalent signature list audited | No equivalent signature list audited |
 | Refuse a recognised money-stake or unknown confirmation/menu widget, including mid-line yes/no choices and risky prompts without a permission marker, and show the matched rule and tail lines | `cs whisper` exits 5 before persistence or paste; `cs whisper --help` states the policy | No equivalent refusal detail audited | No equivalent refusal detail audited |
 
 Unknown here is a recognised widget or risky prompt whose choice cannot be inferred safely.
