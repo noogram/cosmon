@@ -21,7 +21,8 @@ use cosmon_core::root_spawn_policy::RootSpawnDecision;
 
 /// When both cb and env are absent, the assembled command has no
 /// `CLAUDE_CONFIG_DIR` token but does include the Gödel self-reference
-/// guard vars (`CB_SESSION_ROLE=worker CB_DEPTH=1`).
+/// guard vars (`CB_SESSION_ROLE=worker CB_DEPTH=1`) and the foreground-worker
+/// `exec` boundary.
 #[test]
 fn absent_cb_and_env_yields_byte_identical_legacy_command() {
     let cmd = build_claude_command(
@@ -39,12 +40,13 @@ fn absent_cb_and_env_yields_byte_identical_legacy_command() {
     // Note: the trailing `2> <mol_dir>/worker.stderr` redirect is the C2
     // crash-trail capture (task-20260614-e483 / delib-20260614-98f2),
     // already merged into `build_claude_command`.
+    // Issue #154 intentionally adds `exec` before the worker program.
     assert_eq!(
         cmd,
         "CB_SESSION_ROLE=worker CB_DEPTH=1 \
          COSMON_MOL_DIR=/state/mol-A \
          COSMON_PARENT_MOL_ID=task-20260522-62c3 \
-         /usr/local/bin/claude --permission-mode bypassPermissions \
+         exec /usr/local/bin/claude --permission-mode bypassPermissions \
          --disallowedTools 'mcp__playwright-extension mcp__claude-in-chrome' \
          2> /state/mol-A/worker.stderr"
     );

@@ -210,9 +210,8 @@ fn the_spawn_command_installs_the_overlay_and_names_the_compiled_binary() {
 }
 
 /// **The guard on the spawn path.** A worker with no overlay — every
-/// pre-existing session, and every adapter but Claude Code — must spawn with a
-/// command byte-identical to the pre-receipt shape. The receipt is additive or
-/// it is a regression.
+/// pre-existing session, and every adapter but Claude Code — must spawn without
+/// receipt settings while retaining the foreground-worker `exec` boundary.
 #[test]
 fn a_worker_without_an_overlay_spawns_byte_identically() {
     let cmd = build_claude_command(
@@ -227,12 +226,13 @@ fn a_worker_without_an_overlay_spawns_byte_identically() {
         || None,
         |_| None,
     );
+    // Issue #154 intentionally adds `exec` before the worker program.
     assert_eq!(
         cmd,
         "CB_SESSION_ROLE=worker CB_DEPTH=1 \
          COSMON_MOL_DIR=/state/mol-A \
          COSMON_PARENT_MOL_ID=task-20260801-8620 \
-         /usr/local/bin/claude --permission-mode bypassPermissions \
+         exec /usr/local/bin/claude --permission-mode bypassPermissions \
          --disallowedTools 'mcp__playwright-extension mcp__claude-in-chrome' \
          2> /state/mol-A/worker.stderr"
     );
