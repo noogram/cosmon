@@ -25,6 +25,10 @@ for _ in $(seq 1 100); do
 done
 [ -s "$ROOT/port" ] || fail "fake endpoint did not start"
 
+COSMON_BOT_READER_TEST_MODE=1 COSMON_BOT_READER_TEST_ROOT="$ROOT" \
+  python3 "$HERE/bot-reader-transfer.py" enroll --host-id test-host >/dev/null \
+  || fail "synthetic reader could not enroll"
+
 output=$(COSMON_BOT_READER_TEST_MODE=1 \
   COSMON_BOT_READER_TEST_ROOT="$ROOT" \
   COSMON_BOT_READER_TEST_ENDPOINT="http://127.0.0.1:$(cat "$ROOT/port")" \
@@ -94,3 +98,6 @@ pass "test endpoint requires explicit isolated mode"
 
 python3 "$HERE/../tests/harness/bot_reader_capture_test.py"
 pass "capture ordering and failure outcomes"
+
+python3 "$HERE/../tests/harness/bot_reader_fencing_test.py"
+pass "per-host admission fencing and ownership journal"
