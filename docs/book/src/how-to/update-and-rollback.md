@@ -11,7 +11,8 @@ It applies to the two client programs installed by [Install cosmon](../getting-s
 ## 1. Check what is installed
 
 ```sh
-command -v cs cosmon-remote
+command -v cs
+command -v cosmon-remote
 cs --version
 cosmon-remote --version
 ```
