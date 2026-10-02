@@ -2,7 +2,10 @@
 # telegram-listen.sh — the inbound bot control channel ("channel d'écoute").
 #
 # Polls one update batch, captures operator messages, and advances the
-# checkpoint only after every accepted record is durable.
+# checkpoint only after every accepted record is durable. The reader polls
+# only once enrolled (scripts/bot-reader-transfer.py enroll) and only while
+# its ownership journal is active; the stop file below is re-checked under
+# the per-host lock immediately before any network request.
 set -uo pipefail
 export PATH=/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH
 
@@ -15,7 +18,7 @@ if [ "${COSMON_BOT_READER_TEST_MODE:-}" = "1" ]; then
   TOKEN_FILE="$TEST_ROOT/bot.toml"
   TEST_ENDPOINT=(--test-endpoint "${COSMON_BOT_READER_TEST_ENDPOINT:?test endpoint is required}")
 else
-  if [ -n "${COSMON_BOT_READER_TEST_ROOT:-}${COSMON_BOT_READER_TEST_ENDPOINT:-}${COSMON_BOT_READER_TEST_INTERRUPT:-}" ]; then
+  if [ -n "${COSMON_BOT_READER_TEST_ROOT:-}${COSMON_BOT_READER_TEST_ENDPOINT:-}${COSMON_BOT_READER_TEST_INTERRUPT:-}${COSMON_BOT_READER_TEST_PAUSE:-}" ]; then
     printf '%s\n' '{"outcome":"test_endpoint_refused"}' >&2
     exit 2
   fi
@@ -25,12 +28,13 @@ else
 fi
 
 KILL="$ROOT/telegram-listen.off"
-[ -f "$KILL" ] && exit 0
+if [ -f "$KILL" ]; then
+  printf '%s\n' '{"outcome": "stopped"}'
+  exit 0
+fi
 
 exec /usr/bin/python3 "$HERE/bot_reader.py" \
+  --state-root "$ROOT" \
   --token-file "$TOKEN_FILE" \
   --operator-chat "$OPERATOR_CHAT" \
-  --inbox "$ROOT/telegram-inbox" \
-  --checkpoint "$ROOT/telegram-offset" \
-  --log "$ROOT/logs/telegram-listen.log" \
   "${TEST_ENDPOINT[@]}"
