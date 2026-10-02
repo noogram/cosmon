@@ -16,6 +16,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
+
 fn cosmon_bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
     cmd.env_remove("COSMON_PARENT_MOL_ID")
@@ -182,6 +185,38 @@ fn write_minimal_config(project_root: &Path, _state_dir: &Path, adapters_block: 
     fs::create_dir_all(&cosmon_dir).unwrap();
     let body = format!("[project]\nproject_id = \"tackle-adapter-test-c6c6\"\n\n{adapters_block}",);
     fs::write(cosmon_dir.join("config.toml"), body).unwrap();
+}
+
+#[cfg(unix)]
+fn install_stub_harnesses(project_root: &Path) -> std::path::PathBuf {
+    let bin_dir = project_root.join("stub-bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    for (name, banner) in [("aider", "Aider v0.0.0"), ("opencode", "OpenCode v0.0.0")] {
+        let path = bin_dir.join(name);
+        fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '{banner}\\n'\nexec sleep 600\n"),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+    bin_dir
+}
+
+#[cfg(unix)]
+fn process_adapter(state_dir: &Path, mol_id: &str) -> String {
+    let state_path = state_dir
+        .join("fleets/default/molecules")
+        .join(mol_id)
+        .join("state.json");
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(state_path).unwrap()).unwrap();
+    state["process"]["adapter_name"]
+        .as_str()
+        .expect("tackle must persist the dispatched adapter in the process locator")
+        .to_owned()
 }
 
 /// Read every `AdapterSelected` envelope from
@@ -388,6 +423,103 @@ fn tackle_honours_adapters_default_from_config() {
     let source = event.get("selection_source").expect("selection_source");
     assert_eq!(source["source"], "config");
     assert_eq!(source["key"], "adapters.default");
+}
+
+/// A durable adapter pin stamped by `cs nucleate --adapter` outranks the
+/// configured default on a later bare `cs tackle`; an explicit tackle flag
+/// remains the one higher-priority override. Stub harnesses keep both real
+/// dispatches local and deterministic.
+#[cfg(unix)]
+#[test]
+fn tackle_honours_durable_molecule_adapter_pin_and_explicit_override() {
+    for (explicit, expected) in [(None, "aider"), (Some("opencode"), "opencode")] {
+        let (tmp, state_dir, _) = setup_project_with_molecule();
+        write_minimal_config(
+            tmp.path(),
+            &state_dir,
+            "[adapters]\ndefault = \"opencode\"\n",
+        );
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "test@cosmon.invalid"][..],
+            &["config", "user.name", "cosmon-test"][..],
+            &["add", ".cosmon/config.toml"][..],
+            &["commit", "-q", "-m", "test: initialize fixture"][..],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(tmp.path())
+                    .status()
+                    .unwrap()
+                    .success(),
+                "git {args:?} failed"
+            );
+        }
+
+        let formulas_dir = tmp.path().join("formulas");
+        let nucleated = cosmon_bin_in(tmp.path())
+            .args([
+                "--json",
+                "nucleate",
+                "tackle-adapter-test",
+                "--store-dir",
+                state_dir.to_str().unwrap(),
+                "--formulas-dir",
+                formulas_dir.to_str().unwrap(),
+                "--adapter",
+                "aider",
+            ])
+            .output()
+            .expect("nucleate pinned molecule");
+        assert!(
+            nucleated.status.success(),
+            "nucleate failed: {}",
+            String::from_utf8_lossy(&nucleated.stderr)
+        );
+        let molecule: serde_json::Value = serde_json::from_slice(&nucleated.stdout).unwrap();
+        let mol_id = molecule["id"].as_str().unwrap();
+
+        let socket = format!("cosmon-pin-{}", &mol_id[mol_id.len().saturating_sub(8)..]);
+        let stub_dir = install_stub_harnesses(tmp.path());
+        let path = format!(
+            "{}:{}",
+            stub_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut command = cosmon_bin_in(tmp.path());
+        command
+            .env("PATH", path)
+            .env("COSMON_TMUX_SOCKET", &socket)
+            .env("COSMON_ALLOW_NO_WORKTREE", "1")
+            .args([
+                "tackle",
+                mol_id,
+                "--no-worktree",
+                "--config",
+                state_dir.to_str().unwrap(),
+            ]);
+        if let Some(adapter) = explicit {
+            command.args(["--adapter", adapter]);
+        }
+        let tackled = command.output().expect("tackle pinned molecule");
+        let _ = Command::new("tmux")
+            .args(["-L", &socket, "kill-server"])
+            .output();
+        assert!(
+            tackled.status.success(),
+            "tackle failed: {}",
+            String::from_utf8_lossy(&tackled.stderr)
+        );
+        assert_eq!(process_adapter(&state_dir, mol_id), expected);
+        let event = single_adapter_selected_event(&state_dir, mol_id);
+        let expected_source = if explicit.is_some() {
+            "cli"
+        } else {
+            "molecule_pin"
+        };
+        assert_eq!(event["selection_source"]["source"], expected_source);
+    }
 }
 
 /// `--adapter` (CLI) wins over `[adapters.default]` (config) — the

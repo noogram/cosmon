@@ -265,13 +265,14 @@ ADAPTERS — canonical names and their per\-Adapter axes (registry projection, A
 .PP
 Selection happens at \*(Aqcs tackle\*(Aq time. Resolution order:
   \*(Aqcs tackle \-\-adapter <NAME>\*(Aq      → CLI flag wins.
+  molecule adapter pin              → durable choice stamped by \*(Aqcs nucleate \-\-adapter\*(Aq.
   formula step \*(Aqadapter = "<NAME>"\*(Aq  → per\-workflow override (e.g. a deep\-think panel pins claude).
   $COSMON_DEFAULT_ADAPTER            → operator session hammer (one export, everywhere, no committed config).
   \*(Aq.cosmon/config.toml::[adapters.default]\*(Aq  → per\-galaxy default for the project.
   \*(Aq~/.config/cosmon/config.toml::[adapters.default]\*(Aq  → global machine\-wide default (only when the per\-galaxy config is silent).
   built\-in \*(Aqlocal\*(Aq                  → config\-undeletable floor (Ollama\-backed, no Claude Code in the default path).
 .PP
-Every \*(Aqcs tackle\*(Aq invocation — with or without the flag — emits one \*(Aqadapter_selected\*(Aq envelope to events.jsonl carrying { adapter_name, selection_source (cli|formula_step|env_var|config|global_config|default), role_hint?, loop_ownership (cosmon|external) }. The cat\-test over the event log answers "which Adapter ran for this molecule?" without parsing shell history (jq \-c \*(Aqselect(.type == "adapter_selected")\*(Aq). The same envelope is what \*(Aqcs demo\*(Aq will reuse when its \-\-adapter pass\-through lands — the demo verb merely forwards the flag to \*(Aqcs tackle\*(Aq; the dispatch site is unchanged.
+Every \*(Aqcs tackle\*(Aq invocation — with or without the flag — emits one \*(Aqadapter_selected\*(Aq envelope to events.jsonl carrying { adapter_name, selection_source (cli|molecule_pin|formula_step|env_var|config|global_config|default), role_hint?, loop_ownership (cosmon|external) }. The cat\-test over the event log answers "which Adapter ran for this molecule?" without parsing shell history (jq \-c \*(Aqselect(.type == "adapter_selected")\*(Aq). The same envelope is what \*(Aqcs demo\*(Aq will reuse when its \-\-adapter pass\-through lands — the demo verb merely forwards the flag to \*(Aqcs tackle\*(Aq; the dispatch site is unchanged.
 .PP
 Discovery path: an unknown name on \*(Aqcs tackle \-\-adapter <UNKNOWN>\*(Aq aborts with a typed \*(AqAdapterNotFound\*(Aq carrying the available names — no silent fallback (godin\*(Aqs error\-path discoverability rule). The full registry projection is exposed read\-only via \*(Aqcs config adapters [\-\-json]\*(Aq (cs.adapters.list/v1 envelope, ADR\-106 D3).
 .PP

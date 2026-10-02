@@ -150,7 +150,8 @@ pub struct Args {
     /// Worker-Spawn Port Adapter to dispatch (ADR-097 / C6; ADR-108 Q5a
     /// chain).
     ///
-    /// Resolution order (highest priority first): this flag → formula-step
+    /// Resolution order (highest priority first): this flag → durable molecule
+    /// pin stamped by `cs nucleate --adapter` → formula-step
     /// `adapter = "<name>"` pin → `$COSMON_DEFAULT_ADAPTER` env var →
     /// per-galaxy `.cosmon/config.toml::[adapters] default = "…"` → global
     /// `~/.config/cosmon/config.toml::[adapters] default = "…"` → built-in
@@ -185,10 +186,10 @@ pub struct Args {
     ///
     /// The resident loop (`cs run --resident`) is **not a second resolver**; it
     /// is a composer that delegates to this one chain. Its scheduler owns only
-    /// the two rung-1 flag intents — a per-molecule pin and the opt-in
+    /// the two dispatch intents — a per-molecule pin and the opt-in
     /// `cs run --adapter <name>` run directive — and stamps them onto the shelled
     /// `cs tackle`. When neither is present it stamps **no** `--adapter` flag, so
-    /// this full six-level chain runs unchanged in the child: formula step →
+    /// the remaining six-level chain runs unchanged in the child: formula step →
     /// `$COSMON_DEFAULT_ADAPTER` → per-galaxy config → global config → the
     /// `local` floor. The floor is therefore reached under `--resident` iff it is
     /// reached under a bare `cs tackle`, and the operator's env and committed
@@ -800,7 +801,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // missing or garbled file falls through, it never aborts dispatch.
     //
     // The env/config *reads* stay here (they are effects); the resolution
-    // itself — both six-level chains, registry validation, the ADR-103
+    // itself — both resolution chains, registry validation, the ADR-103
     // ownership axis — is the pure decision half extracted to
     // `cosmon_core::tackle_plan` (issue #54 / U4). The per-step
     // adapter/model pins are read from the formula inside the resolver.
@@ -849,6 +850,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let selection = match cosmon_core::tackle_plan::resolve_selection(
         &cosmon_core::tackle_plan::SelectionRequest {
             adapter_flag: args.adapter.as_deref(),
+            molecule_adapter: mol.adapter.as_deref(),
             model_flag: args.model.as_deref(),
             molecule_model: mol.model_recommendation(),
             formula: formula.as_ref(),

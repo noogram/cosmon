@@ -490,6 +490,8 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              same floor and stamps 'ollama' in events.\n\n\
              Selection happens at 'cs tackle' time. Resolution order:\n  \
              'cs tackle --adapter <NAME>'      → CLI flag wins.\n  \
+             molecule adapter pin              → durable choice stamped by \
+             'cs nucleate --adapter'.\n  \
              formula step 'adapter = \"<NAME>\"'  → per-workflow override \
              (e.g. a deep-think panel pins claude).\n  \
              $COSMON_DEFAULT_ADAPTER            → operator session hammer \
@@ -503,7 +505,7 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              Every 'cs tackle' invocation — with or without the flag — emits \
              one 'adapter_selected' envelope to events.jsonl carrying \
              { adapter_name, selection_source \
-             (cli|formula_step|env_var|config|global_config|default), \
+             (cli|molecule_pin|formula_step|env_var|config|global_config|default), \
              role_hint?, loop_ownership (cosmon|external) }. The cat-test \
              over the event log answers \"which Adapter ran for this \
              molecule?\" without parsing shell history (jq -c \

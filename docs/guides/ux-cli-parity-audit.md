@@ -232,6 +232,12 @@ The loser receives a recorded model pin when one exists. If the winning
 adapter chose its own default, the exact model is unrecorded and the error
 says so.
 
+## Durable adapter dispatch (issue #156)
+
+| Capability | CLI | Native UI | Other CLI views |
+|---|---|---|---|
+| Dispatch a molecule through its durable adapter pin | Bare `cs tackle <id>` honours the adapter stamped by `cs nucleate --adapter`; an explicit `cs tackle --adapter` overrides it | No equivalent dispatch control audited | `cs run --resident` already prefers the durable pin over its run-wide directive |
+
 ## In-process failure after work (issue #150)
 
 | Capability | CLI | Native UI | Other CLI views |

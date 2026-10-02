@@ -354,6 +354,8 @@ fn belongs_to_current_attempt(
 pub enum AdapterSource {
     /// `cs tackle --adapter <flag>`.
     Cli,
+    /// A durable molecule pin stamped at nucleation.
+    Molecule,
     /// A formula step's `adapter = "<name>"` pin.
     Formula,
     /// The `$COSMON_DEFAULT_ADAPTER` environment variable.
@@ -374,6 +376,7 @@ impl AdapterSource {
     pub fn tag(self) -> &'static str {
         match self {
             Self::Cli => "cli",
+            Self::Molecule => "molecule",
             Self::Formula => "formula",
             Self::Env => "env",
             Self::Config => "config",
@@ -388,6 +391,7 @@ impl AdapterSource {
     pub fn from_event(src: &AdapterSelectionSource) -> Self {
         match src {
             AdapterSelectionSource::Cli { .. } => Self::Cli,
+            AdapterSelectionSource::MoleculePin => Self::Molecule,
             AdapterSelectionSource::FormulaStep { .. } => Self::Formula,
             AdapterSelectionSource::EnvVar { .. } => Self::Env,
             AdapterSelectionSource::Config { .. } => Self::Config,
@@ -1476,6 +1480,7 @@ mod tests {
     #[test]
     fn source_tags_are_compact() {
         assert_eq!(AdapterSource::Cli.tag(), "cli");
+        assert_eq!(AdapterSource::Molecule.tag(), "molecule");
         assert_eq!(AdapterSource::Formula.tag(), "formula");
         assert_eq!(ModelSource::Flag.tag(), "flag");
         assert_eq!(ModelSource::Default.tag(), "default");
