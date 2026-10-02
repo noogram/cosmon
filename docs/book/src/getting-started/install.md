@@ -15,7 +15,9 @@ once, signs them once, and Homebrew's formula is rendered from those very
 artifacts. The third compiles from source, for platforms outside the four
 release targets.
 
-Already installed? Skip to [Ten minutes to cosmon](./ten-minutes.md).
+Already installed? To update or roll back, see
+[Update and roll back cosmon](../how-to/update-and-rollback.md); otherwise skip to
+[Ten minutes to cosmon](./ten-minutes.md).
 
 ## Route 1 — the install script (recommended)
 
@@ -203,5 +205,7 @@ The generated CLI reference in this book — [CLI overview](../reference/overvie
 ## Next
 
 - [Ten minutes to cosmon](./ten-minutes.md) — run one piece of work end to end.
+- [Update and roll back cosmon](../how-to/update-and-rollback.md) — move to a
+  newer or older release.
 - [Set up cosmon (prerequisites)](../tutorials/setup.md) — the other tools a
   worker needs (git, tmux, a model backend) before the tutorials.

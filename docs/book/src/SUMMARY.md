@@ -17,6 +17,7 @@
 # How-to guides
 
 - [Verify the binary's provenance](./how-to/verify-the-binary.md)
+- [Update and roll back cosmon](./how-to/update-and-rollback.md)
 - [Recover a crashed agent](./how-to/recover-crashed-agent.md)
 - [Curate the backlog with temperature tags](./how-to/temperature-tags.md)
 - [Bootstrap a new project with cs init](./how-to/bootstrap-project.md)
