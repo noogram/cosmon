@@ -210,12 +210,10 @@ fn collect_ids(args: &Args) -> anyhow::Result<Vec<MoleculeId>> {
 /// Still errors on `Collapsed`: that is a deliberate terminal state and
 /// overriding it to `Completed` would lose the collapse reason.
 ///
-/// Exposed as `pub(crate)` so the in-process Direct-API branch of
-/// `cs tackle` can call it as the canonical completion-emit site once
-/// the agent loop returns Ok — see [`super::tackle::finalize_inprocess_molecule`]
-/// and an internal chronicle for the
-/// pattern divergence with tmux adapters (whose `pane-died` hook
-/// indirectly drives this same transition via `cs harvest`).
+/// Exposed as `pub(crate)` for lifecycle callers that explicitly complete a
+/// molecule. Owned agent loops instead pass through formula-bound worker
+/// acceptance, which advances one current step and reaches this terminal state
+/// only when that accepted step is the formula tail.
 pub(crate) fn complete_one(
     store: &FileStore,
     ops_dir: &std::path::Path,

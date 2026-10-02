@@ -83,6 +83,8 @@ pub mod tag;
 /// Versioned, I/O-free usage observations shared by event and UI readers.
 pub mod usage;
 pub mod worker;
+/// Formula-bound acceptance for owned worker turns.
+pub mod worker_acceptance;
 
 // ---------------------------------------------------------------------------
 // Workspace-internal modules — `pub` for sibling crates, `#[doc(hidden)]` to

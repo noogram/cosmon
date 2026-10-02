@@ -340,6 +340,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 /// Returns an error if the molecule cannot be loaded or saved, or if it is
 /// already in a terminal `Completed` state (collapsing a completed molecule
 /// would erase its completion). An already-`Collapsed` molecule is idempotent.
+#[cfg(test)]
 pub(crate) fn collapse_one(
     store: &FileStore,
     ops_dir: &std::path::Path,
@@ -352,7 +353,7 @@ pub(crate) fn collapse_one(
 /// Collapse a synchronous worker with a recorded machine-readable cause.
 ///
 /// # Errors
-/// Returns the same persistence and transition errors as [`collapse_one`].
+/// Returns persistence and transition errors from the canonical collapse path.
 pub(crate) fn collapse_one_with_kind(
     store: &FileStore,
     ops_dir: &std::path::Path,
