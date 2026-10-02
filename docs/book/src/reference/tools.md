@@ -1242,11 +1242,12 @@ EXAMPLES:
 
 Experimental v0. Perturbation port, not a control-plane event.
 Refuses unless the target pane's foreground command has an allowed pane
-signature. A money-stake marker or a recognised unknown confirmation/menu
-widget refuses with exit 5; unknown means the widget is real but its choice
-is not safe to infer. Ordinary output without those signals is delivered.
-Routine permission prompts remain deliverable. A refusal prints the matching
-rule and pane tail lines so the operator can inspect the choice.
+signature. Built-in signatures: claude, claude*, node, <version>, codex,
+codex*. A money-stake marker or a recognised unknown confirmation/menu widget
+refuses with exit 5; unknown means the widget is real but its choice is not
+safe to infer. Ordinary output without those signals is delivered. Routine
+permission prompts remain deliverable. A refusal prints the matching rule and
+pane tail lines so the operator can inspect the choice.
 
 To wait for the worker's answer, follow with `cs wait <mol>`: even on
 a completed molecule it returns only after a new commit on feat/<mol>.
