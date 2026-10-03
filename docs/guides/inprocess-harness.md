@@ -336,3 +336,12 @@ file at its exact path.
   nothing can prove that.
 - Only the `openai` and `anthropic` arms keep turn evidence. The `local` floor
   cannot be resumed.
+
+## Comparing the arms on identical tasks
+
+`tests/harness-eval/` holds the harness for deciding where the in-process arms
+may be used. It is described in [harness-evaluation.md](harness-evaluation.md).
+It ships fixtures, a runner and a validator; the paid comparison itself is a
+separate, operator-approved run. Until that run reports and the agreed adoption
+threshold is met, long autonomous coding stays on the established subprocess
+route, and the self-test only proves the evaluator, not the arms.
