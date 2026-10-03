@@ -967,6 +967,7 @@ mod tests {
                 molecule_id: MoleculeId::new(mol).unwrap(),
                 duration_ms: None,
                 reason: "done".to_owned(),
+                summary: None,
             },
         )
     }

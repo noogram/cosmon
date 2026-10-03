@@ -585,6 +585,7 @@ mod tests {
                     total: 2,
                     duration_ms: Some(100),
                     step_hash: None,
+                    evidence: None,
                 },
             ),
             env(
@@ -593,6 +594,7 @@ mod tests {
                     molecule_id: m.clone(),
                     duration_ms: Some(1000),
                     reason: "ok".into(),
+                    summary: None,
                 },
             ),
             env(

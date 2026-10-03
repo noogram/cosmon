@@ -56,6 +56,12 @@ const AUTO_COMMIT_MAX_PATHS: usize = 1_000;
 /// stage without a deliberate commit by the worker.
 const AUTO_COMMIT_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
+/// The evidence text as an event field: `None` when the worker recorded none,
+/// so the event omits the key rather than carrying an empty string.
+fn non_empty(text: &str) -> Option<String> {
+    (!text.trim().is_empty()).then(|| text.to_owned())
+}
+
 /// Find generated-artifact roots identified by the standard `CACHEDIR.TAG`
 /// marker.
 ///
@@ -1000,6 +1006,7 @@ The molecule has NOT advanced — its state is unchanged, so this is recoverable
                                     total: formula.steps.len(),
                                     duration_ms: None,
                                     step_hash: None,
+                                    evidence: Some(gate_request.evidence.clone()),
                                 },
                                 None,
                             );
@@ -1014,6 +1021,7 @@ The molecule has NOT advanced — its state is unchanged, so this is recoverable
                                             "gate step \"{}\" auto-executed, all steps done",
                                             next_step.id
                                         ),
+                                        summary: Some(gate_request.evidence.clone()),
                                     },
                                     None,
                                 );
@@ -1107,6 +1115,7 @@ The molecule has NOT advanced — its state is unchanged, so this is recoverable
             total: updated.total_steps,
             duration_ms: None,
             step_hash: None,
+            evidence: non_empty(&args.evidence),
         },
         None,
     )
@@ -1119,6 +1128,7 @@ The molecule has NOT advanced — its state is unchanged, so this is recoverable
                 molecule_id: mol_id.clone(),
                 duration_ms: None,
                 reason: "all steps completed".to_owned(),
+                summary: non_empty(&args.evidence),
             },
             step_seq,
         );

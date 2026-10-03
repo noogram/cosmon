@@ -79,6 +79,9 @@ pub struct Args {
 /// pending with which blockers?").
 #[derive(serde::Serialize)]
 struct EnsembleOutput {
+    /// Version of the `cs ensemble --json` read contract. Within one value
+    /// the output changes additively only; a breaking change bumps it.
+    schema_version: u32,
     workers: Vec<WorkerRow>,
     worker_roles: WorkerRoleSummary,
     molecules: MoleculeSummary,
@@ -90,6 +93,9 @@ struct EnsembleOutput {
     /// 2026-07-19 incident run for 17 hours.
     stall_alert: StallAlert,
 }
+
+/// Current value of `schema_version` in `cs ensemble --json`.
+const ENSEMBLE_SCHEMA_VERSION: u32 = 1;
 
 /// Per-molecule projection of the canonical state read by machine consumers
 /// (the resident runtime, GraphQL adapters, smoke tests).
@@ -648,6 +654,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             build_molecule_states(&molecules)
         };
         let output = EnsembleOutput {
+            schema_version: ENSEMBLE_SCHEMA_VERSION,
             stall_alert: stall_alert(&rows, &molecules, Utc::now()),
             workers: rows,
             worker_roles,
@@ -1622,6 +1629,7 @@ fn run_cluster_with_probe(
 
     if ctx.json {
         let output = serde_json::json!({
+            "schema_version": ENSEMBLE_SCHEMA_VERSION,
             "cluster_root": root.to_string_lossy(),
             "galaxies": rows,
             "machine": machine.to_json(),
@@ -2056,6 +2064,7 @@ mod tests {
         // operator-facing dashboard fields sitting alongside the
         // machine-readable `molecule_states`.
         let output = EnsembleOutput {
+            schema_version: ENSEMBLE_SCHEMA_VERSION,
             workers: Vec::new(),
             stall_alert: StallAlert::default(),
             worker_roles: WorkerRoleSummary {

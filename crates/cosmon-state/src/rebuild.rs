@@ -713,6 +713,7 @@ mod tests {
                     total: 2,
                     duration_ms: None,
                     step_hash: None,
+                    evidence: None,
                 },
                 EventV2::MoleculeStepCompleted {
                     molecule_id: id.clone(),
@@ -720,6 +721,7 @@ mod tests {
                     total: 2,
                     duration_ms: None,
                     step_hash: None,
+                    evidence: None,
                 },
                 EventV2::MoleculeStepCompleted {
                     molecule_id: id.clone(),
@@ -727,6 +729,7 @@ mod tests {
                     total: 2,
                     duration_ms: None,
                     step_hash: None,
+                    evidence: None,
                 },
             ],
         );
@@ -802,11 +805,13 @@ mod tests {
                     total: 1,
                     duration_ms: None,
                     step_hash: None,
+                    evidence: None,
                 },
                 EventV2::MoleculeCompleted {
                     molecule_id: id.clone(),
                     duration_ms: None,
                     reason: "ok".into(),
+                    summary: None,
                 },
             ],
         );
@@ -1110,6 +1115,7 @@ mod tests {
                     total: 2,
                     duration_ms: None,
                     step_hash: None,
+                    evidence: None,
                 },
             ],
         );

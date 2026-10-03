@@ -3257,6 +3257,7 @@ fn advance_gate_step(
             total: formula.steps.len(),
             duration_ms: None,
             step_hash: None,
+            evidence: Some("gate step completed (exit 0)".to_owned()),
         },
         None,
     );
@@ -3268,6 +3269,7 @@ fn advance_gate_step(
                 molecule_id: mol_id.clone(),
                 duration_ms: None,
                 reason: "all gate steps completed".to_owned(),
+                summary: Some("gate step completed (exit 0)".to_owned()),
             },
             None,
         );
@@ -4996,7 +4998,7 @@ fn accept_worker_turn(
         &observed.completed_steps,
         formula,
         &EvolveRequest {
-            evidence,
+            evidence: evidence.clone(),
             timestamp: Utc::now(),
         },
     )?;
@@ -5046,6 +5048,7 @@ fn accept_worker_turn(
             total: formula.steps.len(),
             duration_ms: None,
             step_hash: None,
+            evidence: Some(evidence.clone()),
         },
         None,
     )
@@ -5057,6 +5060,7 @@ fn accept_worker_turn(
                 molecule_id: mol_id.clone(),
                 duration_ms: None,
                 reason: "all formula steps accepted".to_owned(),
+                summary: Some(evidence),
             },
             step_sequence,
         );

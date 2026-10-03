@@ -171,6 +171,7 @@ fn spec_audit_is_clean_on_sanctioned_merge() {
             total: 1,
             duration_ms: Some(10),
             step_hash: None,
+            evidence: None,
         },
     );
     let completed = Envelope::new(
@@ -180,6 +181,7 @@ fn spec_audit_is_clean_on_sanctioned_merge() {
             molecule_id: mol.clone(),
             duration_ms: Some(20),
             reason: "ok".into(),
+            summary: None,
         },
     );
     let merged = Envelope::new(

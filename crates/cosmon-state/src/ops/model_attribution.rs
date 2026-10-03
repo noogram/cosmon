@@ -457,6 +457,7 @@ mod tests {
                 total: 2,
                 duration_ms: None,
                 step_hash: None,
+                evidence: None,
             },
             EventV2::ModelEvidenceAssessed {
                 mol_id: m.clone(),

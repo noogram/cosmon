@@ -1313,6 +1313,7 @@ mod tests {
             molecule_id: mid(),
             duration_ms: None,
             reason: "done".to_string(),
+            summary: None,
         }
     }
 

@@ -341,6 +341,7 @@ pub(crate) fn complete_one(
             molecule_id: mol_id.clone(),
             duration_ms: None,
             reason: reason.to_owned(),
+            summary: Some(reason.to_owned()),
         },
         status_seq,
     );

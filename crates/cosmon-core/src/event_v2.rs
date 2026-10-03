@@ -361,6 +361,38 @@ impl Envelope {
         }
     }
 
+    /// The envelope as an external consumer reads it: the serialized record
+    /// plus `schema_version` ([`EVENT_SCHEMA_VERSION`]) and the canonical
+    /// `molecule_id`.
+    ///
+    /// Variants name their molecule `molecule_id`, `mol_id` or `molecule`.
+    /// This adds `molecule_id` when the variant spells it differently and
+    /// leaves the original key in place, so a reader of any of the three
+    /// spellings keeps working. An event about no molecule gains no
+    /// `molecule_id`. This is the form the canonical log writer appends.
+    ///
+    /// # Errors
+    ///
+    /// Returns `serde_json::Error` if the envelope cannot be serialized.
+    pub fn to_contract_value(&self) -> Result<serde_json::Value, serde_json::Error> {
+        let mut value = serde_json::to_value(self)?;
+        if let Some(map) = value.as_object_mut() {
+            map.insert(
+                "schema_version".to_owned(),
+                serde_json::Value::from(EVENT_SCHEMA_VERSION),
+            );
+            if !map.contains_key("molecule_id") {
+                if let Some(id) = self.event.molecule_id() {
+                    map.insert(
+                        "molecule_id".to_owned(),
+                        serde_json::Value::from(id.as_str()),
+                    );
+                }
+            }
+        }
+        Ok(value)
+    }
+
     /// Parse one JSONL line — tries `EventV2` first, then falls back to legacy
     /// coercion.
     ///
@@ -404,6 +436,14 @@ impl Envelope {
         }
     }
 }
+
+/// Version of the `events.jsonl` read contract stamped on every record the
+/// canonical writer appends as `schema_version`.
+///
+/// Within one value the contract changes additively only: fields may be added,
+/// none is removed or renamed. A breaking change bumps this number. Lines
+/// written before the stamp existed have no `schema_version` and read as `1`.
+pub const EVENT_SCHEMA_VERSION: u32 = 1;
 
 /// The canonical `EventV2` payload.
 ///
@@ -460,6 +500,13 @@ pub enum EventV2 {
         /// compatible: older readers ignore the field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         step_hash: Option<cosmon_hash::StepHash>,
+        /// The evidence text the worker recorded when it closed the step
+        /// (`cs evolve --evidence`), carried on the event so a reader of
+        /// `events.jsonl` need not parse `log.md`. `None` for steps closed
+        /// without a recorded text and for lines written before the field
+        /// existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<String>,
     },
     /// A molecule reached the `Completed` terminal status.
     MoleculeCompleted {
@@ -470,6 +517,12 @@ pub enum EventV2 {
         duration_ms: Option<u64>,
         /// Human-readable summary.
         reason: String,
+        /// The completion summary the worker recorded (the final step's
+        /// evidence, or the `cs complete --reason` text), carried on the
+        /// event so a reader of `events.jsonl` need not parse `log.md`.
+        /// `None` for lines written before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
     },
     /// A molecule reached the `Collapsed` terminal status.
     MoleculeCollapsed {
@@ -3130,6 +3183,7 @@ pub fn migrate_legacy_line(line: &str) -> Result<Envelope, serde_json::Error> {
             molecule_id: molecule_id("molecule_id").ok_or_else(invalid_shape)?,
             duration_ms: obj.get("duration_ms").and_then(serde_json::Value::as_u64),
             reason: reason("reason"),
+            summary: None,
         },
         "molecule_collapsed" => EventV2::MoleculeCollapsed {
             molecule_id: molecule_id("molecule_id").ok_or_else(invalid_shape)?,
@@ -4021,11 +4075,13 @@ mod tests {
                 total: 3,
                 duration_ms: Some(1234),
                 step_hash: None,
+                evidence: None,
             },
             EventV2::MoleculeCompleted {
                 molecule_id: mid("cs-20260411-aaaa"),
                 duration_ms: Some(9999),
                 reason: "ok".to_owned(),
+                summary: None,
             },
             EventV2::MoleculeCollapsed {
                 molecule_id: mid("cs-20260411-aaaa"),
@@ -5324,6 +5380,7 @@ mod tests {
                 total: 2,
                 duration_ms: Some(500),
                 step_hash: None,
+                evidence: None,
             },
         );
 

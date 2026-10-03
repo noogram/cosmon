@@ -52,6 +52,7 @@ fn ten_concurrent_writers_emit_one_thousand_events_each_without_corruption() {
                     total: EVENTS_PER_WRITER,
                     duration_ms: Some(step as u64),
                     step_hash: None,
+                    evidence: None,
                 };
                 // The lock is non-blocking with a 500 ms ceiling. Under
                 // 10-way contention some attempts will hit `WouldBlock`
