@@ -82,6 +82,7 @@
 
 pub mod bootstrap;
 pub mod budget;
+pub mod checkpoint;
 pub mod compaction;
 pub mod egress_probe;
 pub mod error;
@@ -92,6 +93,7 @@ pub mod tool;
 pub mod tools;
 
 pub use budget::{ContextBudget, LoopBudget, ToolBudget, TurnBudget, ZeroBudget};
+pub use checkpoint::TurnJournal;
 pub use compaction::{
     build_summary_body, CompactionError, CompactionPolicy, CompactionReport,
     COMPACTION_SUMMARY_PREFIX,

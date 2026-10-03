@@ -152,6 +152,14 @@ impl MessageLog for OpenAILog {
         u32::try_from(chars / 4).unwrap_or(u32::MAX)
     }
 
+    fn encode_assistant(&self, msg: &Self::AssistantMsg) -> Option<Vec<u8>> {
+        serde_json::to_vec(msg).ok()
+    }
+
+    fn encode_checkpoint(&self) -> Option<Vec<u8>> {
+        serde_json::to_vec(&self.messages).ok()
+    }
+
     fn invariant_well_formed(&self) -> bool {
         // I4 — every assistant message carrying tool_calls is
         // followed immediately by len(tool_calls) `role:"tool"`

@@ -44,6 +44,24 @@ use cosmon_core::usage::{
 /// Stable source name carried by every record this module produces.
 pub const USAGE_SOURCE: &str = "direct_harness_response";
 
+/// History id of one in-process worker attempt.
+///
+/// It carries the molecule, worker and the attempt's own invocation id, so a
+/// re-tackle starts a new cumulative history. Turn evidence uses the same id,
+/// which is what ties an attempt's checkpoints to its usage records.
+#[must_use]
+pub fn attempt_history_id(
+    molecule: &cosmon_core::id::MoleculeId,
+    worker: &WorkerId,
+    invocation: &str,
+) -> String {
+    format!(
+        "harness/{}/{}/{invocation}",
+        molecule.as_str(),
+        worker.as_str()
+    )
+}
+
 /// What happened to one delivered sample.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RecordOutcome {

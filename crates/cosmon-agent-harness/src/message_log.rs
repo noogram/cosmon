@@ -226,4 +226,24 @@ pub trait MessageLog: Sized + Send + Sync {
         let _ = (target_tokens, policy);
         Err(CompactionError::NotApplicable)
     }
+
+    /// Encode one assistant envelope in this provider's native schema, for
+    /// durable turn evidence.
+    ///
+    /// The bytes must decode back to the same envelope the provider would
+    /// have sent. The default returns `None`, which records the turn without
+    /// a blob; a production impl overrides it. Encoding stays per provider
+    /// because the OpenAI and Anthropic envelopes are not isomorphic at the
+    /// type level.
+    fn encode_assistant(&self, msg: &Self::AssistantMsg) -> Option<Vec<u8>> {
+        let _ = msg;
+        None
+    }
+
+    /// Encode the whole native log, for a checkpoint at a complete
+    /// tool-result boundary. The default returns `None`; see
+    /// [`Self::encode_assistant`].
+    fn encode_checkpoint(&self) -> Option<Vec<u8>> {
+        None
+    }
 }

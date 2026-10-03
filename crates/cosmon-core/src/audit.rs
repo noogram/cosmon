@@ -82,6 +82,11 @@ impl Action {
             | EventV2::WorkerHeartbeat { .. }
             | EventV2::EnergyTick { .. }
             | EventV2::UsageObserved { .. }
+            // Direct-arm turn evidence: a durable record of what a worker
+            // attempt requested, ran and received. It is intent/receipt
+            // evidence, not a lifecycle action; the spec transition system
+            // never sees the loop's internal turns.
+            | EventV2::HarnessTurnRecorded { .. }
             | EventV2::Expired { .. }
             | EventV2::GateStarted { .. }
             | EventV2::GateCompleted { .. }

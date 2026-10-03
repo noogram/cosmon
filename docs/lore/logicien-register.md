@@ -2,6 +2,23 @@
 
 # Logic register
 
+## Issue #151 W8: turn and effect evidence is outside lifecycle state
+
+`harness_turn_recorded` rows are append-only intent and receipt telemetry about
+what a direct-arm worker requested, received and ran. They do not change
+molecule status, worker admission, dependency readiness, dispatch ownership,
+step progress or harvest authority, and nothing in the lifecycle reads them
+back in this unit. `docs/specs/CosmonRun.tla` therefore gains no variable or
+action for them, and the audit classification lists the event as a non-action.
+
+The record ordering is an executable property of the loop and of the pure
+reconstruction: a request intent precedes the request, an assistant envelope
+precedes its tools, a tool intent precedes the effect, a receipt precedes the
+next call, and a sequence that violates this is refused. The crash-seam tests
+check it against a killed process. A future change that lets these records
+drive a transition, such as resuming a molecule from a checkpoint, must revisit
+the TLA+ model before it ships.
+
 ## Issue #151 W2: worker acceptance refines the existing step guard
 
 `response_artifact` adds no lifecycle state and no new transition. It supplies

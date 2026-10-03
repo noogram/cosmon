@@ -771,6 +771,20 @@ pub enum EventV2 {
         /// Canonical usage sample.
         usage: Box<UsageRecord>,
     },
+    /// One durable fact about a direct-arm worker attempt: a request intent,
+    /// an assistant envelope, a tool intent or receipt, a checkpoint or the
+    /// terminal response.
+    ///
+    /// The row carries counts, call identifiers and blob digests, never raw
+    /// model or tool text; that stays in immutable blobs under the molecule
+    /// directory. The ledger owns the ordering, so this is the single stream
+    /// the molecule journal projects.
+    HarnessTurnRecorded {
+        /// The molecule the attempt works on.
+        mol_id: MoleculeId,
+        /// The record and the attempt identity that scopes it.
+        evidence: Box<crate::harness_turn::HarnessTurnEvidence>,
+    },
     /// A molecule's TTL fired and an expiry policy was applied (ADR-029).
     ///
     /// Emitted by `cs expire` / `cs patrol --expire` after evaluating a
@@ -2880,7 +2894,8 @@ impl EventV2 {
             | Self::SF4ToolCallExecutionFailure { mol_id, .. }
             | Self::SF5ContextOverflow { mol_id, .. }
             | Self::SF6SupervisionSetupFailed { mol_id, .. }
-            | Self::SF7BinaryVersionMismatch { mol_id, .. } => Some(mol_id),
+            | Self::SF7BinaryVersionMismatch { mol_id, .. }
+            | Self::HarnessTurnRecorded { mol_id, .. } => Some(mol_id),
             Self::DecaySpliced { parent, .. } => Some(parent),
             Self::MergeDispatched { molecule, .. }
             | Self::MergeCompleted { molecule, .. }
@@ -4761,6 +4776,7 @@ mod tests {
             | EventV2::WorkerBlockedOnOperator { .. }
             | EventV2::EnergyTick { .. }
             | EventV2::UsageObserved { .. }
+            | EventV2::HarnessTurnRecorded { .. }
             | EventV2::Expired { .. }
             | EventV2::GateStarted { .. }
             | EventV2::GateCompleted { .. }
