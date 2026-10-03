@@ -226,6 +226,17 @@ impl MessageLog for AnthropicLog {
         .ok()
     }
 
+    fn decode_checkpoint(bytes: &[u8]) -> Option<Self> {
+        #[derive(serde::Deserialize)]
+        struct Checkpoint {
+            system: String,
+            messages: Vec<ApiMessage>,
+        }
+        let Checkpoint { system, messages } = serde_json::from_slice(bytes).ok()?;
+        let log = Self { system, messages };
+        log.invariant_well_formed().then_some(log)
+    }
+
     fn invariant_well_formed(&self) -> bool {
         // I4 — every assistant turn whose `content` blocks include
         // one or more `tool_use` blocks is followed by a user turn

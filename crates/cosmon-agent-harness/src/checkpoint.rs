@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use cosmon_core::harness_turn::{
     bounded_reason, BlobDigest, BlobKind, BlobRef, CallEvidence, EvidenceError, InputEvidence,
-    TerminalKind, TurnEvidenceStore, TurnLimits, TurnRecord, TurnToolOutcome,
+    ResumePlan, TerminalKind, TurnEvidenceStore, TurnLimits, TurnRecord, TurnToolOutcome,
 };
 
 use crate::budget::LoopBudget;
@@ -63,6 +63,16 @@ impl TurnJournal {
         self
     }
 
+    /// The pins the `attempt_started` record will carry: the caller's, with
+    /// the loop's own taking precedence. A continuation compares these against
+    /// what the attempt recorded.
+    #[must_use]
+    pub fn effective_pins(&self, loop_pins: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        let mut merged = self.pins.clone();
+        merged.extend(loop_pins.iter().map(|(k, v)| (k.clone(), v.clone())));
+        merged
+    }
+
     fn blob(&self, kind: BlobKind, bytes: Option<&[u8]>) -> Result<Option<BlobRef>, EvidenceError> {
         bytes.map(|b| self.store.put_blob(kind, b)).transpose()
     }
@@ -86,6 +96,22 @@ impl TurnJournal {
                 max_input_tokens: budget.context.max_input_tokens,
             },
             pins,
+        })
+    }
+
+    /// Record that this attempt continues `plan`'s attempt, directly after
+    /// `attempt_started` and before the first request.
+    ///
+    /// # Errors
+    /// Returns the store's error if the record is not durable.
+    pub fn resumed(&self, plan: &ResumePlan) -> Result<(), EvidenceError> {
+        self.store.append(TurnRecord::Resumed {
+            from_history_id: plan.from_history_id.clone(),
+            checkpoint_turn: plan.checkpoint_turn,
+            log: plan.log.clone(),
+            tools_spent: plan.tools_spent,
+            requests_sent: plan.requests_sent,
+            elapsed_secs: plan.elapsed_secs,
         })
     }
 

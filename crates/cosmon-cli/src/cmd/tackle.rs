@@ -99,6 +99,22 @@ pub struct Args {
     #[arg(long)]
     pub force: bool,
 
+    /// Continue the molecule's interrupted in-process (`openai` / `anthropic`)
+    /// attempt from its last complete tool-result checkpoint instead of
+    /// starting a fresh log. Use with `--force` to thaw a frozen molecule.
+    ///
+    /// Continuation reads the durable turn evidence on disk and nothing else.
+    /// It is refused, with the reason, when the evidence does not prove it
+    /// safe: a tool with no receipt (its effect is unknown and is never
+    /// repeated), a request with no outcome (it may have been billed), a shell
+    /// session whose state no record captures, no complete checkpoint, a
+    /// changed formula, model, tool registry, briefing, worktree or loop
+    /// ceiling, a spent wall-clock budget, or damaged evidence. Tool calls and
+    /// turns already spent stay spent. Without this flag a dispatch starts a
+    /// fresh attempt, as before.
+    #[arg(long)]
+    pub resume: bool,
+
     /// Override the tmux session name. ASCII alphanumerics and hyphens
     /// are kept; everything else is replaced with `-`. Max 50 chars.
     /// Default: `{slug}-{shortid}` derived from the molecule topic + id.
@@ -1833,6 +1849,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &harness_args,
         &recorded,
         cmd_t0,
+        args.resume,
     ) {
         Ok(outcome) => outcome,
         Err(e) => {
@@ -4594,7 +4611,18 @@ pub(super) fn spawn_and_prompt(
     // `cs tackle`'s own entry instant, threaded down so every phase of the
     // dispatch profile shares one origin (COSMON #26-C).
     dispatch_t0: std::time::Instant,
+    // Continue the interrupted in-process attempt from its last proven-safe
+    // checkpoint (`cs tackle --resume`). Only the `openai` and `anthropic`
+    // arms keep durable turn evidence, so any other adapter refuses it.
+    resume: bool,
 ) -> anyhow::Result<SpawnOutcome> {
+    if resume && !matches!(adapter.as_str(), "openai" | "anthropic") {
+        return Err(anyhow::anyhow!(
+            "cs tackle --resume: adapter `{}` keeps no durable turn evidence; only the \
+             `openai` and `anthropic` in-process arms can be resumed",
+            adapter.as_str()
+        ));
+    }
     // The token proves *a* dispatch was recorded; check it is *this* one.
     // Without this, a caller holding a stale token from an earlier molecule
     // would satisfy the type and reintroduce the exact hole the type exists
@@ -4724,6 +4752,7 @@ pub(super) fn spawn_and_prompt(
             state_dir,
             adapter_entry,
             preferred_model,
+            resume,
         )
         .map(|work| SpawnOutcome {
             inprocess_work: Some(work),
@@ -4739,6 +4768,7 @@ pub(super) fn spawn_and_prompt(
             state_dir,
             adapter_entry,
             preferred_model,
+            resume,
         )
         .map(|work| SpawnOutcome {
             inprocess_work: Some(work),
@@ -7351,9 +7381,14 @@ fn spawn_openai_session(
     state_dir: &std::path::Path,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
+    resume: bool,
 ) -> anyhow::Result<InprocessWork> {
     let step_started_at = std::time::SystemTime::now();
-    let baseline = WorktreeBaseline::capture_at_head(worktree_path);
+    let baseline = if resume {
+        WorktreeBaseline::continuing_attempt(worktree_path)
+    } else {
+        WorktreeBaseline::capture_at_head(worktree_path)
+    };
     let (api_key, base_url) = openai_credentials(adapter_entry)
         .ok_or_else(|| anyhow::anyhow!(missing_openai_credentials_message(adapter_entry)))?;
     // `--model` / formula-pin (delib-20260704-b476 C1) is the top tier,
@@ -7380,6 +7415,10 @@ fn spawn_openai_session(
     );
     let timeout_secs = resolve_local_timeout_secs(adapter_entry.and_then(|e| e.timeout_secs), None);
     let provider = provider.with_timeout(std::time::Duration::from_secs(timeout_secs));
+    // One loop owner per molecule; a requested continuation is decided from
+    // the durable evidence before anything is emitted or sent.
+    let (_loop_owner, resume_state, timeout_secs) =
+        prepare_inprocess_attempt(resume, mol, mol_state_dir, state_dir, timeout_secs)?;
 
     // Emit WorkerSpawnAttempted before the loop so the cat-test sees the
     // intent even if the HTTP call never lands.
@@ -7401,6 +7440,7 @@ fn spawn_openai_session(
         &invocation_uuid,
         "openai",
         &model_label,
+        worktree_path,
     );
     let telemetry = cosmon_provider::openai::telemetry_for(
         mol.id.clone(),
@@ -7434,6 +7474,9 @@ fn spawn_openai_session(
         .map_err(|e| anyhow::anyhow!("cs tackle: work turn input failed: {e}"))?;
     let mut progress =
         cosmon_agent_harness::spine::LoopProgress::default().with_journal(turn_journal);
+    if let Some(state) = resume_state {
+        progress = progress.with_resume(state);
+    }
     let outcome = if let Some(source) = turn_input.as_ref() {
         run_local_future_with_timeout(
             &rt,
@@ -8055,12 +8098,57 @@ fn inprocess_usage_sink(
     ))
 }
 
+/// Take the molecule's loop ownership and, when `resume` is set, decide from
+/// disk whether the interrupted attempt can be continued.
+///
+/// Returns the ownership guard (held for the whole loop), the checkpoint to
+/// continue from (`None` for a fresh attempt) and the wall-clock budget left:
+/// a continuation inherits the time its attempt already spent, so a restart
+/// never refreshes the deadline.
+///
+/// # Errors
+/// A refusal names the fact the evidence does not establish; nothing was
+/// recorded, emitted or sent when it is returned.
+fn prepare_inprocess_attempt(
+    resume: bool,
+    mol: &MoleculeData,
+    mol_state_dir: &Path,
+    state_dir: &Path,
+    timeout_secs: u64,
+) -> anyhow::Result<(
+    cosmon_state::harness_checkpoint::LoopOwner,
+    Option<cosmon_agent_harness::spine::ResumeState>,
+    u64,
+)> {
+    let owner = cosmon_state::harness_checkpoint::acquire_loop_owner(mol_state_dir)
+        .map_err(|e| anyhow::anyhow!("cs tackle: {e}"))?;
+    if !resume {
+        return Ok((owner, None, timeout_secs));
+    }
+    let candidate =
+        cosmon_state::harness_checkpoint::load_resumable(state_dir, mol_state_dir, &mol.id)
+            .map_err(|e| anyhow::anyhow!("cs tackle --resume: {e}"))?;
+    let remaining = candidate
+        .plan
+        .remaining_secs(timeout_secs)
+        .map_err(|e| anyhow::anyhow!("cs tackle --resume: {e}"))?;
+    Ok((
+        owner,
+        Some(cosmon_agent_harness::spine::ResumeState {
+            plan: candidate.plan,
+            log: candidate.log,
+        }),
+        remaining,
+    ))
+}
+
 /// Build the durable turn evidence journal for one in-process worker attempt.
 ///
 /// Records go to the galaxy ledger under `state_dir`, the stream the molecule
 /// journal projects; blobs go under the molecule directory, which `cs done`
 /// does not destroy. The history id is the one the attempt's usage records
 /// carry.
+#[allow(clippy::too_many_arguments)]
 fn inprocess_turn_journal(
     mol: &MoleculeData,
     wid: &cosmon_core::id::WorkerId,
@@ -8069,7 +8157,12 @@ fn inprocess_turn_journal(
     invocation_uuid: &str,
     adapter: &str,
     requested_model: &str,
+    worktree_path: &Path,
 ) -> std::sync::Arc<cosmon_agent_harness::TurnJournal> {
+    let worktree_digest =
+        cosmon_core::harness_turn::BlobDigest::of(worktree_path.to_string_lossy().as_bytes())
+            .as_str()
+            .to_owned();
     let store = cosmon_state::harness_checkpoint::FileTurnEvidenceStore::new(
         state_dir,
         mol_state_dir,
@@ -8077,10 +8170,21 @@ fn inprocess_turn_journal(
         wid.clone(),
         cosmon_cli::harness_usage::attempt_history_id(&mol.id, wid, invocation_uuid),
     );
+    // What the attempt ran against. A continuation compares every one of these
+    // and refuses on any difference: a changed formula step, model, adapter or
+    // worktree is a new admission, not a continuation.
     std::sync::Arc::new(
         cosmon_agent_harness::TurnJournal::new(std::sync::Arc::new(store))
             .with_pin("adapter", adapter)
-            .with_pin("requested_model", requested_model),
+            .with_pin("requested_model", requested_model)
+            .with_pin(
+                "formula",
+                format!(
+                    "{}:{}/{}",
+                    mol.formula_id, mol.current_step, mol.total_steps
+                ),
+            )
+            .with_pin("worktree", worktree_digest),
     )
 }
 
@@ -8889,6 +8993,29 @@ impl WorktreeBaseline {
         Self::capture(worktree, &base)
     }
 
+    /// The baseline of a continuation (`cs tackle --resume`).
+    ///
+    /// The attempt being continued already wrote into this worktree, and that
+    /// work is the molecule's own, so it must count as output of the run that
+    /// finishes it. Capturing the dirty state at resume time would instead
+    /// treat it as pre-existing and reject a worker that changed nothing *since
+    /// the restart*. Nothing is attributed to an operator here: a continuation
+    /// has no record of any uncommitted content that predates its attempt.
+    fn continuing_attempt(worktree: &Path) -> Self {
+        let base = git_stdout(worktree, &["rev-parse", "HEAD"])
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "HEAD".to_owned());
+        Self {
+            entries: std::collections::BTreeMap::new(),
+            pre_dirty: std::collections::BTreeSet::new(),
+            observed: true,
+            base,
+        }
+    }
+
     /// A worktree that differed from `main` in no way before the turn — the
     /// ordinary freshly linked molecule worktree, where turn-scoped and
     /// branch-wide discovery coincide.
@@ -9482,9 +9609,14 @@ fn spawn_anthropic_session(
     state_dir: &std::path::Path,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
+    resume: bool,
 ) -> anyhow::Result<InprocessWork> {
     let step_started_at = std::time::SystemTime::now();
-    let baseline = WorktreeBaseline::capture_at_head(worktree_path);
+    let baseline = if resume {
+        WorktreeBaseline::continuing_attempt(worktree_path)
+    } else {
+        WorktreeBaseline::capture_at_head(worktree_path)
+    };
     let key_env = adapter_entry
         .and_then(|e| e.api_key_env.as_deref())
         .unwrap_or("ANTHROPIC_API_KEY");
@@ -9530,6 +9662,10 @@ fn spawn_anthropic_session(
     );
     let timeout_secs = resolve_local_timeout_secs(adapter_entry.and_then(|e| e.timeout_secs), None);
     let provider = provider.with_timeout(std::time::Duration::from_secs(timeout_secs));
+    // One loop owner per molecule; a requested continuation is decided from
+    // the durable evidence before anything is emitted or sent.
+    let (_loop_owner, resume_state, timeout_secs) =
+        prepare_inprocess_attempt(resume, mol, mol_state_dir, state_dir, timeout_secs)?;
 
     // Emit WorkerSpawnAttempted before the loop so the cat-test sees the
     // intent even if the HTTP call never lands.
@@ -9551,6 +9687,7 @@ fn spawn_anthropic_session(
         &invocation_uuid,
         "anthropic",
         &model_label,
+        worktree_path,
     );
     let telemetry = cosmon_provider::anthropic::telemetry_for(
         mol.id.clone(),
@@ -9583,6 +9720,9 @@ fn spawn_anthropic_session(
         .map_err(|e| anyhow::anyhow!("cs tackle: work turn input failed: {e}"))?;
     let mut progress =
         cosmon_agent_harness::spine::LoopProgress::default().with_journal(turn_journal);
+    if let Some(state) = resume_state {
+        progress = progress.with_resume(state);
+    }
     let outcome = if let Some(source) = turn_input.as_ref() {
         run_local_future_with_timeout(
             &rt,
@@ -14438,6 +14578,7 @@ mod tests {
             dry_run: true,
             permission_mode: None,
             force: false,
+            resume: false,
             name: None,
             leaf: false,
             force_runtime: false,
@@ -14485,6 +14626,7 @@ mod tests {
                 dry_run: true,
                 permission_mode: None,
                 force: false,
+                resume: false,
                 name: None,
                 leaf: false,
                 force_runtime: false,
@@ -14535,6 +14677,7 @@ mod tests {
             dry_run: true,
             permission_mode: None,
             force: false,
+            resume: false,
             name: None,
             leaf: false,
             force_runtime: false,
@@ -14576,6 +14719,7 @@ mod tests {
             dry_run: true,
             permission_mode: None,
             force: false,
+            resume: false,
             name: None,
             leaf: false,
             force_runtime: false,
@@ -15653,6 +15797,7 @@ prompt = "Custom fleet prompt."
             dry_run: true,
             permission_mode: None,
             force: false,
+            resume: false,
             name: None,
             leaf: false,
             force_runtime: true,
@@ -15700,6 +15845,7 @@ prompt = "Custom fleet prompt."
             dry_run: true,
             permission_mode: None,
             force: false,
+            resume: false,
             name: None,
             leaf: true,
             force_runtime: false,
@@ -15754,6 +15900,7 @@ prompt = "Custom fleet prompt."
             dry_run: true,
             permission_mode: None,
             force: false,
+            resume: false,
             name: None,
             leaf: false,
             force_runtime: false,

@@ -28,8 +28,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use cosmon_core::event_v2::EventV2;
 use cosmon_core::harness_turn::{
-    reconstruct, AttemptReconstruction, BlobDigest, BlobKind, BlobRef, EvidenceError,
-    HarnessTurnEvidence, SequenceError, TurnEvidenceStore, TurnRecord, HARNESS_TURN_SCHEMA_VERSION,
+    plan_resume, reconstruct, AttemptReconstruction, BlobDigest, BlobKind, BlobRef, EvidenceError,
+    HarnessTurnEvidence, ResumePlan, ResumeRefusal, SequenceError, TurnEvidenceStore, TurnRecord,
+    HARNESS_TURN_SCHEMA_VERSION,
 };
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::usage::{UsageHistory, UsageObservationId};
@@ -283,6 +284,124 @@ pub fn load_attempt(
         usage_observation_ids,
         records_read: records.len(),
     })
+}
+
+/// A checkpoint that is proven safe to continue from, with its native log.
+#[derive(Debug)]
+pub struct ResumeCandidate {
+    /// What the evidence establishes about the continuation.
+    pub plan: ResumePlan,
+    /// The checkpoint's native log, validated against its digest.
+    pub log: Vec<u8>,
+}
+
+/// Find the molecule's latest in-process attempt and decide, from disk alone,
+/// whether it can be continued.
+///
+/// The latest attempt is the last `attempt_started` in the ledger for this
+/// molecule. An attempt that was itself a continuation carries the checkpoint
+/// it restored, so a chain of interruptions resumes from the freshest complete
+/// boundary and inherits every spent budget.
+///
+/// # Errors
+/// Returns the [`ResumeRefusal`] that applies: no attempt, a terminal one, an
+/// unresolved effect or request, shell state, no checkpoint, or damaged
+/// evidence. Nothing is repaired and nothing is written.
+pub fn load_resumable(
+    state_dir: &Path,
+    molecule_dir: &Path,
+    mol_id: &MoleculeId,
+) -> Result<ResumeCandidate, ResumeRefusal> {
+    let envelopes =
+        crate::event_log::read_all(crate::event_log::resolve_events_log_path(state_dir))
+            .map_err(|e| ResumeRefusal::Corrupt(format!("ledger unreadable: {e}")))?;
+    // History ids in order of first appearance, with their records and the
+    // wall-clock span between their first and last record.
+    let mut attempts: Vec<(String, Vec<TurnRecord>, [chrono::DateTime<chrono::Utc>; 2])> =
+        Vec::new();
+    for envelope in envelopes {
+        let EventV2::HarnessTurnRecorded {
+            mol_id: row_mol,
+            evidence,
+        } = envelope.event
+        else {
+            continue;
+        };
+        if row_mol != *mol_id {
+            continue;
+        }
+        if evidence.schema_version > HARNESS_TURN_SCHEMA_VERSION {
+            return Err(ResumeRefusal::Corrupt(format!(
+                "turn evidence schema {} is newer than this reader",
+                evidence.schema_version
+            )));
+        }
+        match attempts
+            .iter_mut()
+            .find(|(id, ..)| *id == evidence.history_id)
+        {
+            Some((_, records, span)) => {
+                records.push(evidence.record);
+                span[1] = envelope.timestamp;
+            }
+            None => attempts.push((
+                evidence.history_id,
+                vec![evidence.record],
+                [envelope.timestamp, envelope.timestamp],
+            )),
+        }
+    }
+    let (history_id, records, span) = attempts.pop().ok_or(ResumeRefusal::NothingToResume)?;
+    let attempt = reconstruct(&records).map_err(|e| ResumeRefusal::Corrupt(e.to_string()))?;
+    let millis = (span[1] - span[0]).num_milliseconds().max(0);
+    let own_span_secs = u64::try_from(millis / 1000 + i64::from(millis % 1000 != 0)).unwrap_or(0);
+    let plan = plan_resume(&history_id, &attempt, own_span_secs)?;
+    if let Some((reference, problem)) = attempt
+        .blob_refs()
+        .into_iter()
+        .find_map(|r| read_blob(molecule_dir, r).err().map(|e| (r, e)))
+    {
+        return Err(ResumeRefusal::Corrupt(format!(
+            "blob {}: {problem}",
+            reference.digest
+        )));
+    }
+    let log =
+        read_blob(molecule_dir, &plan.log).map_err(|e| ResumeRefusal::Corrupt(e.to_string()))?;
+    Ok(ResumeCandidate { plan, log })
+}
+
+/// Exclusive ownership of a molecule's in-process loop, released when dropped
+/// or when the owning process dies.
+///
+/// Two `cs tackle` invocations racing to continue the same interrupted attempt
+/// would each restore its checkpoint and each run its next tools. The loop
+/// takes this before it reads the evidence and holds it until it returns, so
+/// one of them is refused instead.
+#[derive(Debug)]
+pub struct LoopOwner {
+    _file: File,
+}
+
+/// Take exclusive ownership of the molecule's in-process loop.
+///
+/// # Errors
+/// Returns [`ResumeRefusal::ActiveOwner`] if another process holds it, and
+/// [`ResumeRefusal::Corrupt`] if the lock file cannot be created.
+pub fn acquire_loop_owner(molecule_dir: &Path) -> Result<LoopOwner, ResumeRefusal> {
+    use fs2::FileExt;
+    let dir = molecule_dir.join("harness-turns");
+    fs::create_dir_all(&dir)
+        .map_err(|e| ResumeRefusal::Corrupt(format!("create harness-turns dir: {e}")))?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("owner.lock"))
+        .map_err(|e| ResumeRefusal::Corrupt(format!("open owner lock: {e}")))?;
+    file.try_lock_exclusive()
+        .map_err(|_| ResumeRefusal::ActiveOwner)?;
+    Ok(LoopOwner { _file: file })
 }
 
 #[cfg(test)]

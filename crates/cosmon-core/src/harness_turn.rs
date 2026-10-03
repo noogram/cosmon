@@ -302,6 +302,26 @@ pub enum TurnRecord {
         /// Tool calls dispatched so far.
         tools_spent: u32,
     },
+    /// The attempt continues an earlier, interrupted one. Written once,
+    /// directly after `attempt_started`, before the first request.
+    ///
+    /// It names the attempt it continues and the checkpoint it restored, and
+    /// carries the budgets that attempt had already spent, so a chain of
+    /// resumes can never refresh a counter or a deadline.
+    Resumed {
+        /// History id of the attempt this one continues.
+        from_history_id: String,
+        /// Turn of the checkpoint the log was restored from.
+        checkpoint_turn: u32,
+        /// The checkpoint's native log; the same blob the earlier attempt wrote.
+        log: BlobRef,
+        /// Tool calls already dispatched at that checkpoint.
+        tools_spent: u32,
+        /// Provider round trips already made across the chain.
+        requests_sent: u32,
+        /// Wall-clock seconds already spent across the chain.
+        elapsed_secs: u64,
+    },
     /// The loop ended on a terminal response.
     Terminal {
         /// Turn that produced it.
@@ -454,6 +474,21 @@ pub struct AttemptReconstruction {
     pub last_checkpoint: Option<CheckpointRef>,
     /// How the attempt ended, when it did.
     pub terminal: Option<TerminalEvidence>,
+    /// The attempt this one continues, when it is a resumption.
+    pub resumed_from: Option<ResumedFrom>,
+}
+
+/// What a resumed attempt inherited from the attempt it continues.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumedFrom {
+    /// History id of the attempt that was continued.
+    pub history_id: String,
+    /// Turn of the restored checkpoint.
+    pub checkpoint_turn: u32,
+    /// Provider round trips already made across the chain.
+    pub requests_sent: u32,
+    /// Wall-clock seconds already spent across the chain.
+    pub elapsed_secs: u64,
 }
 
 impl AttemptReconstruction {
@@ -499,6 +534,239 @@ pub fn reconstruct(records: &[TurnRecord]) -> Result<AttemptReconstruction, Sequ
         fold.apply(record)?;
     }
     Ok(fold.finish())
+}
+
+/// Name of the shell tool. Its session keeps a working directory, exports and
+/// background processes that no record captures, so an attempt that used it
+/// cannot be continued on the assumption that they are intact.
+pub const SHELL_TOOL_NAME: &str = "exec_command";
+
+/// Why an interrupted attempt may not be continued automatically.
+///
+/// Every variant is a fact about what the evidence does not establish. None is
+/// a failure of the attempt, and none licenses replaying anything: the
+/// remedy is reconciliation by an operator.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResumeRefusal {
+    /// The attempt already ended on a terminal response.
+    #[error("the attempt already ended on a terminal response; there is nothing to resume")]
+    AlreadyTerminal,
+    /// A tool has an intent and no receipt: its effect may have happened.
+    #[error(
+        "{} tool call(s) have an intent and no receipt (first: `{}` call `{}`); \
+         their effect is unknown and will not be repeated or assumed",
+        .calls.len(), .calls[0].tool, .calls[0].call_id
+    )]
+    UnresolvedEffect {
+        /// The calls whose outcome is unknown.
+        calls: Vec<UnresolvedCall>,
+    },
+    /// A request has no recorded outcome: it may have been billed.
+    #[error(
+        "the request of turn {} has no recorded outcome and may have been billed; \
+         it will not be sent again without reconciliation",
+        .turns[0]
+    )]
+    UnresolvedRequest {
+        /// Turns whose request has no outcome.
+        turns: Vec<u32>,
+    },
+    /// A tool of the attempt used the persistent shell.
+    #[error(
+        "the attempt ran `{SHELL_TOOL_NAME}`; a fresh shell does not recover its working \
+         directory, exports or processes, so continuing would invent that state"
+    )]
+    ShellState,
+    /// The attempt never reached a complete tool-result boundary.
+    #[error("the attempt has no complete tool-result checkpoint to continue from")]
+    NoCheckpoint,
+    /// Work was begun after the last checkpoint and not completed.
+    #[error(
+        "turn {turn} began after the last checkpoint without completing; its tool \
+         effects are not covered by a checkpoint"
+    )]
+    IncompleteTurn {
+        /// The turn that started after the checkpoint.
+        turn: u32,
+    },
+    /// The attempt recorded no starting ceilings.
+    #[error("the attempt never recorded its ceilings")]
+    NoLimits,
+    /// A pinned input differs from what the attempt ran against.
+    #[error("`{name}` changed since the attempt started (recorded {recorded}, now {current}); re-admit explicitly")]
+    PinChanged {
+        /// Pin name, such as `formula` or `requested_model`.
+        name: String,
+        /// Value recorded at the start of the attempt.
+        recorded: String,
+        /// Value the continuation would run with.
+        current: String,
+    },
+    /// The configured ceilings differ from the recorded ones.
+    #[error(
+        "the loop ceilings changed since the attempt started; budgets are spent, not refreshed"
+    )]
+    LimitsChanged,
+    /// The attempt's own wall-clock budget is already spent.
+    #[error("the wall-clock deadline is already spent ({spent_secs}s of {limit_secs}s)")]
+    DeadlineSpent {
+        /// Seconds already spent across the chain.
+        spent_secs: u64,
+        /// The configured limit.
+        limit_secs: u64,
+    },
+    /// The stored evidence is damaged or breaks the ordering the writer guarantees.
+    #[error("the evidence is damaged: {0}")]
+    Corrupt(String),
+    /// The provider's log cannot be restored from a checkpoint.
+    #[error("this provider cannot restore its message log from a checkpoint")]
+    LogNotRestorable,
+    /// Another attempt owns this molecule's loop.
+    #[error("another in-process attempt owns this molecule's loop")]
+    ActiveOwner,
+    /// Resume was requested and the molecule has no interrupted attempt.
+    #[error("the molecule has no interrupted in-process attempt to resume")]
+    NothingToResume,
+}
+
+/// What an interrupted attempt establishes about a safe continuation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumePlan {
+    /// History id of the attempt being continued.
+    pub from_history_id: String,
+    /// Ceilings the attempt ran under; the continuation must run under the same.
+    pub limits: TurnLimits,
+    /// Pins the attempt ran against.
+    pub pins: BTreeMap<String, String>,
+    /// The turn the continuation sends first.
+    pub next_turn: u32,
+    /// Tool calls already dispatched.
+    pub tools_spent: u32,
+    /// Provider round trips already made across the chain.
+    pub requests_sent: u32,
+    /// Wall-clock seconds already spent across the chain.
+    pub elapsed_secs: u64,
+    /// The checkpoint to restore the native log from.
+    pub checkpoint_turn: u32,
+    /// The checkpoint's native log.
+    pub log: BlobRef,
+}
+
+impl ResumePlan {
+    /// Require every pin the attempt recorded to equal the one the
+    /// continuation would run with, and the ceilings to be unchanged.
+    ///
+    /// A pin the continuation does not carry is a mismatch: absence is not
+    /// evidence of sameness.
+    ///
+    /// # Errors
+    /// Returns [`ResumeRefusal::PinChanged`] or [`ResumeRefusal::LimitsChanged`].
+    pub fn check_unchanged(
+        &self,
+        pins: &BTreeMap<String, String>,
+        limits: TurnLimits,
+    ) -> Result<(), ResumeRefusal> {
+        for (name, recorded) in &self.pins {
+            let current = pins.get(name).map_or("<absent>", String::as_str);
+            if current != recorded {
+                return Err(ResumeRefusal::PinChanged {
+                    name: name.clone(),
+                    recorded: recorded.clone(),
+                    current: current.to_owned(),
+                });
+            }
+        }
+        for name in pins.keys() {
+            if !self.pins.contains_key(name) {
+                return Err(ResumeRefusal::PinChanged {
+                    name: name.clone(),
+                    recorded: "<absent>".to_owned(),
+                    current: pins[name].clone(),
+                });
+            }
+        }
+        if limits == self.limits {
+            Ok(())
+        } else {
+            Err(ResumeRefusal::LimitsChanged)
+        }
+    }
+
+    /// Wall-clock seconds left of `limit_secs` once the spent time is removed.
+    ///
+    /// # Errors
+    /// Returns [`ResumeRefusal::DeadlineSpent`] when nothing is left.
+    pub fn remaining_secs(&self, limit_secs: u64) -> Result<u64, ResumeRefusal> {
+        match limit_secs.checked_sub(self.elapsed_secs) {
+            Some(left) if left > 0 => Ok(left),
+            _ => Err(ResumeRefusal::DeadlineSpent {
+                spent_secs: self.elapsed_secs,
+                limit_secs,
+            }),
+        }
+    }
+}
+
+/// Decide whether one interrupted attempt can be continued, and from where.
+///
+/// Continuation is limited to a complete tool-result checkpoint with no
+/// unresolved effect or request and no dependence on shell state. Anything
+/// else is refused with the reason, never repaired. `own_span_secs` is the
+/// wall-clock span of this attempt's own records.
+///
+/// # Errors
+/// Returns the [`ResumeRefusal`] that applies first.
+pub fn plan_resume(
+    history_id: &str,
+    attempt: &AttemptReconstruction,
+    own_span_secs: u64,
+) -> Result<ResumePlan, ResumeRefusal> {
+    if attempt.terminal.is_some() {
+        return Err(ResumeRefusal::AlreadyTerminal);
+    }
+    if !attempt.unresolved_calls.is_empty() {
+        return Err(ResumeRefusal::UnresolvedEffect {
+            calls: attempt.unresolved_calls.clone(),
+        });
+    }
+    if !attempt.unresolved_requests.is_empty() {
+        return Err(ResumeRefusal::UnresolvedRequest {
+            turns: attempt.unresolved_requests.clone(),
+        });
+    }
+    if attempt
+        .completed_calls
+        .iter()
+        .any(|c| c.tool == SHELL_TOOL_NAME)
+    {
+        return Err(ResumeRefusal::ShellState);
+    }
+    let checkpoint = attempt
+        .last_checkpoint
+        .as_ref()
+        .ok_or(ResumeRefusal::NoCheckpoint)?;
+    let log = checkpoint.log.clone().ok_or(ResumeRefusal::NoCheckpoint)?;
+    if let Some(later) = attempt.assistants.iter().find(|a| a.turn > checkpoint.turn) {
+        return Err(ResumeRefusal::IncompleteTurn { turn: later.turn });
+    }
+    let limits = attempt.limits.ok_or(ResumeRefusal::NoLimits)?;
+    let inherited = attempt.resumed_from.as_ref();
+    let requests_sent = inherited
+        .map_or(0, |r| r.requests_sent)
+        .saturating_add(attempt.requests_sent);
+    Ok(ResumePlan {
+        from_history_id: history_id.to_owned(),
+        limits,
+        pins: attempt.pins.clone(),
+        next_turn: checkpoint.turn.saturating_add(1),
+        tools_spent: attempt.tools_spent.max(checkpoint.tools_spent),
+        requests_sent,
+        elapsed_secs: inherited
+            .map_or(0, |r| r.elapsed_secs)
+            .saturating_add(own_span_secs),
+        checkpoint_turn: checkpoint.turn,
+        log,
+    })
 }
 
 /// Running state of [`reconstruct`].
@@ -627,6 +895,34 @@ impl Fold {
                     turn: *turn,
                     log: log.clone(),
                     tools_spent: *tools_spent,
+                });
+            }
+            TurnRecord::Resumed {
+                from_history_id,
+                checkpoint_turn,
+                log,
+                tools_spent,
+                requests_sent,
+                elapsed_secs,
+            } => {
+                if !*started || out.requests_sent > 0 || out.resumed_from.is_some() {
+                    return Err(SequenceError::OutOfOrder(
+                        "resumed must follow attempt_started and precede every request".to_owned(),
+                    ));
+                }
+                out.tools_spent = out.tools_spent.max(*tools_spent);
+                // The restored log is this attempt's baseline boundary until
+                // it completes one of its own.
+                out.last_checkpoint = Some(CheckpointRef {
+                    turn: *checkpoint_turn,
+                    log: Some(log.clone()),
+                    tools_spent: *tools_spent,
+                });
+                out.resumed_from = Some(ResumedFrom {
+                    history_id: from_history_id.clone(),
+                    checkpoint_turn: *checkpoint_turn,
+                    requests_sent: *requests_sent,
+                    elapsed_secs: *elapsed_secs,
                 });
             }
             TurnRecord::Terminal {
@@ -874,6 +1170,256 @@ mod tests {
         assert!(text.contains(r#""record":"request_intent""#));
         let back: TurnRecord = serde_json::from_str(&text).expect("parse");
         assert_eq!(back, record);
+    }
+
+    // -- resume planning ---------------------------------------------------
+
+    fn blob(kind: BlobKind, bytes: &[u8]) -> BlobRef {
+        BlobRef {
+            kind,
+            digest: BlobDigest::of(bytes),
+            len: bytes.len() as u64,
+            schema_version: HARNESS_TURN_SCHEMA_VERSION,
+        }
+    }
+
+    /// One complete turn: request, envelope, intent, receipt, checkpoint.
+    fn complete_turn(turn: u32, tool: &str, spent: u32) -> Vec<TurnRecord> {
+        vec![
+            intent(turn, spent.saturating_sub(1)),
+            TurnRecord::AssistantReceived {
+                turn,
+                calls: vec![CallEvidence {
+                    call_id: format!("c{turn}"),
+                    tool: tool.to_owned(),
+                }],
+                envelope: None,
+                tools_spent: spent.saturating_sub(1),
+            },
+            TurnRecord::ToolIntent {
+                turn,
+                call_id: format!("c{turn}"),
+                tool: tool.to_owned(),
+                arguments_digest: BlobDigest::of(b"{}"),
+                tools_spent: spent,
+            },
+            TurnRecord::ToolReceipt {
+                turn,
+                call_id: format!("c{turn}"),
+                outcome: TurnToolOutcome::Succeeded,
+                result: None,
+                tools_spent: spent,
+            },
+            TurnRecord::Checkpoint {
+                turn,
+                log: Some(blob(BlobKind::LogCheckpoint, b"log")),
+                tools_spent: spent,
+            },
+        ]
+    }
+
+    fn plan_of(records: &[TurnRecord]) -> Result<ResumePlan, ResumeRefusal> {
+        let attempt = reconstruct(records).expect("ordered");
+        plan_resume("h1", &attempt, 5)
+    }
+
+    #[test]
+    fn a_complete_file_tool_checkpoint_resumes_with_spent_counters() {
+        let mut records = vec![started()];
+        records.extend(complete_turn(0, "write_file", 1));
+        records.extend(complete_turn(1, "read_file", 2));
+        let plan = plan_of(&records).expect("safe");
+        assert_eq!(plan.next_turn, 2);
+        assert_eq!(plan.tools_spent, 2);
+        assert_eq!(plan.requests_sent, 2);
+        assert_eq!(plan.checkpoint_turn, 1);
+        assert_eq!(plan.elapsed_secs, 5);
+        assert_eq!(plan.from_history_id, "h1");
+    }
+
+    #[test]
+    fn an_effect_with_no_receipt_is_never_planned_for_replay() {
+        let mut records = vec![started()];
+        records.extend(complete_turn(0, "write_file", 1));
+        records.extend([
+            intent(1, 1),
+            TurnRecord::AssistantReceived {
+                turn: 1,
+                calls: vec![CallEvidence {
+                    call_id: "c1".to_owned(),
+                    tool: SHELL_TOOL_NAME.to_owned(),
+                }],
+                envelope: None,
+                tools_spent: 1,
+            },
+            TurnRecord::ToolIntent {
+                turn: 1,
+                call_id: "c1".to_owned(),
+                tool: SHELL_TOOL_NAME.to_owned(),
+                arguments_digest: BlobDigest::of(b"{}"),
+                tools_spent: 2,
+            },
+        ]);
+        let refusal = plan_of(&records).expect_err("unknown effect");
+        assert!(
+            matches!(refusal, ResumeRefusal::UnresolvedEffect { ref calls } if calls.len() == 1)
+        );
+        assert!(refusal.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn a_request_with_no_outcome_needs_reconciliation() {
+        let mut records = vec![started()];
+        records.extend(complete_turn(0, "write_file", 1));
+        records.push(intent(1, 1));
+        assert_eq!(
+            plan_of(&records),
+            Err(ResumeRefusal::UnresolvedRequest { turns: vec![1] })
+        );
+    }
+
+    #[test]
+    fn a_completed_shell_call_blocks_resume_because_its_state_is_not_recorded() {
+        let mut records = vec![started()];
+        records.extend(complete_turn(0, SHELL_TOOL_NAME, 1));
+        assert_eq!(plan_of(&records), Err(ResumeRefusal::ShellState));
+    }
+
+    #[test]
+    fn no_checkpoint_a_terminal_response_and_a_dangling_turn_are_refused() {
+        assert_eq!(
+            plan_of(&[started(), intent(0, 0)])
+                .map_err(|e| matches!(e, ResumeRefusal::UnresolvedRequest { .. })),
+            Err(true)
+        );
+        let mut no_checkpoint = vec![started(), intent(0, 0)];
+        no_checkpoint.push(TurnRecord::RequestFailed {
+            turn: 0,
+            reason: "boom".to_owned(),
+        });
+        assert_eq!(plan_of(&no_checkpoint), Err(ResumeRefusal::NoCheckpoint));
+
+        let mut ended = vec![started()];
+        ended.extend(complete_turn(0, "write_file", 1));
+        ended.extend([
+            intent(1, 1),
+            TurnRecord::Terminal {
+                turn: 1,
+                disposition: TerminalKind::Normal,
+                partial_text: None,
+                tools_spent: 1,
+            },
+        ]);
+        assert_eq!(plan_of(&ended), Err(ResumeRefusal::AlreadyTerminal));
+
+        let mut dangling = vec![started()];
+        dangling.extend(complete_turn(0, "write_file", 1));
+        dangling.extend([
+            intent(1, 1),
+            TurnRecord::AssistantReceived {
+                turn: 1,
+                calls: Vec::new(),
+                envelope: None,
+                tools_spent: 1,
+            },
+        ]);
+        assert_eq!(
+            plan_of(&dangling),
+            Err(ResumeRefusal::IncompleteTurn { turn: 1 })
+        );
+    }
+
+    #[test]
+    fn a_resumed_attempt_inherits_the_checkpoint_and_every_spent_budget() {
+        let log = blob(BlobKind::LogCheckpoint, b"log");
+        let records = vec![
+            started(),
+            TurnRecord::Resumed {
+                from_history_id: "h0".to_owned(),
+                checkpoint_turn: 3,
+                log: log.clone(),
+                tools_spent: 4,
+                requests_sent: 5,
+                elapsed_secs: 100,
+            },
+        ];
+        let plan = plan_of(&records).expect("the restored boundary is the baseline");
+        assert_eq!(plan.next_turn, 4);
+        assert_eq!(plan.tools_spent, 4);
+        assert_eq!(plan.requests_sent, 5);
+        assert_eq!(plan.elapsed_secs, 105);
+        assert_eq!(plan.log, log);
+    }
+
+    #[test]
+    fn a_resumed_record_after_a_request_is_out_of_order() {
+        let records = vec![
+            started(),
+            intent(0, 0),
+            TurnRecord::Resumed {
+                from_history_id: "h0".to_owned(),
+                checkpoint_turn: 0,
+                log: blob(BlobKind::LogCheckpoint, b"log"),
+                tools_spent: 0,
+                requests_sent: 1,
+                elapsed_secs: 0,
+            },
+        ];
+        assert!(matches!(
+            reconstruct(&records),
+            Err(SequenceError::OutOfOrder(_))
+        ));
+    }
+
+    #[test]
+    fn a_changed_pin_or_ceiling_invalidates_the_continuation() {
+        let mut pins = BTreeMap::new();
+        pins.insert("requested_model".to_owned(), "m1".to_owned());
+        let mut records = vec![TurnRecord::AttemptStarted {
+            limits: limits(),
+            pins: pins.clone(),
+        }];
+        records.extend(complete_turn(0, "write_file", 1));
+        let plan = plan_of(&records).expect("safe");
+        assert_eq!(plan.check_unchanged(&pins, limits()), Ok(()));
+
+        let mut other = pins.clone();
+        other.insert("requested_model".to_owned(), "m2".to_owned());
+        assert!(matches!(
+            plan.check_unchanged(&other, limits()),
+            Err(ResumeRefusal::PinChanged { ref name, .. }) if name == "requested_model"
+        ));
+        assert!(matches!(
+            plan.check_unchanged(&BTreeMap::new(), limits()),
+            Err(ResumeRefusal::PinChanged { .. })
+        ));
+        let mut extra = pins.clone();
+        extra.insert("worktree".to_owned(), "w".to_owned());
+        assert!(matches!(
+            plan.check_unchanged(&extra, limits()),
+            Err(ResumeRefusal::PinChanged { .. })
+        ));
+        let mut raised = limits();
+        raised.max_tool_calls += 1;
+        assert_eq!(
+            plan.check_unchanged(&pins, raised),
+            Err(ResumeRefusal::LimitsChanged)
+        );
+    }
+
+    #[test]
+    fn the_deadline_only_ever_shrinks() {
+        let mut records = vec![started()];
+        records.extend(complete_turn(0, "write_file", 1));
+        let plan = plan_of(&records).expect("safe");
+        assert_eq!(plan.remaining_secs(60), Ok(55));
+        assert_eq!(
+            plan.remaining_secs(5),
+            Err(ResumeRefusal::DeadlineSpent {
+                spent_secs: 5,
+                limit_secs: 5
+            })
+        );
     }
 
     #[test]

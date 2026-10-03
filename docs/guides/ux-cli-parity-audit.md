@@ -149,6 +149,7 @@ The RPP route change has no CLI command behavior to mirror.
 | Read the latest briefing outcome and recovery gesture | `cs status <id>` and the `cs peek` briefing pane (`b`) show the typed delivery event and recovery gesture | No dedicated outcome view audited | A failed post-spawn confirmation returns `briefing_not_confirmed`; the typed outcome remains in the molecule event log |
 | Nudge without a lifecycle transition | `cs patrol --nudge` leaves molecule status unchanged; `--auto-freeze` and `--auto-collapse` opt into transitions | No equivalent control audited | No equivalent control audited |
 | Preserve work after worker purge | `cs purge <worker>` retains its Running molecule; `cs patrol --auto-collapse` reports the missing worker and holds the molecule for `cs tackle <molecule> --force` | No equivalent control audited | No equivalent control audited |
+| Continue an interrupted in-process attempt | `cs tackle <molecule> --force --resume` restores the last complete checkpoint of an `openai`/`anthropic` attempt, keeps spent turns, tool calls and wall-clock time, and refuses with the reason when the evidence does not prove it safe | No equivalent control audited | No equivalent control audited |
 
 An absent delivery event remains absent. A recorded `session_gone`,
 `unobservable`, `undelivered`, or `not_confirmed` outcome is never presented

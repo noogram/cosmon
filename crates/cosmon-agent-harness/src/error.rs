@@ -105,4 +105,9 @@ pub enum HarnessError<E: std::error::Error + Send + Sync + 'static> {
     /// receipt the tool had already run, and its effect is unconfirmed.
     #[error("turn evidence not durable: {0}")]
     Evidence(#[from] cosmon_core::harness_turn::EvidenceError),
+
+    /// A continuation from a checkpoint was refused. Nothing was sent and no
+    /// tool ran.
+    #[error("resume refused: {0}")]
+    Resume(#[from] cosmon_core::harness_turn::ResumeRefusal),
 }

@@ -160,6 +160,12 @@ impl MessageLog for OpenAILog {
         serde_json::to_vec(&self.messages).ok()
     }
 
+    fn decode_checkpoint(bytes: &[u8]) -> Option<Self> {
+        let messages: Vec<ChatMessage> = serde_json::from_slice(bytes).ok()?;
+        let log = Self { messages };
+        log.invariant_well_formed().then_some(log)
+    }
+
     fn invariant_well_formed(&self) -> bool {
         // I4 — every assistant message carrying tool_calls is
         // followed immediately by len(tool_calls) `role:"tool"`

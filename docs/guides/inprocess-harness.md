@@ -255,7 +255,7 @@ runs `cs tackle` against a loopback responder and reads the same evidence back.
 
 ### Limits
 
-- Nothing resumes. This is the evidence resume needs, not resume.
+- Resume is explicit and narrow; see [Resuming an interrupted attempt](#resuming-an-interrupted-attempt).
 - An uncertain effect is reported, never repaired or repeated.
 - The `local` floor runs a loop with no progress channel and writes no turn
   evidence. Interactive sessions do not write it either.
@@ -268,3 +268,71 @@ runs `cs tackle` against a loopback responder and reads the same evidence back.
 - Usage and turn records now go to the galaxy ledger. Before this change the
   `openai` and `anthropic` arms wrote `UsageObserved` rows to the molecule
   directory's own event file, where the usage projections do not read.
+
+## Resuming an interrupted attempt
+
+`cs tackle <molecule> --adapter openai|anthropic --force --resume` continues the
+molecule's latest in-process attempt from its last complete tool-result
+checkpoint. Without `--resume` a dispatch starts a fresh attempt, as before.
+`--force` is the existing gesture that thaws a frozen molecule; `--resume` adds
+only the intent to continue. `cs resurrect` rebuilds a Claude session and never
+continues an in-process attempt. A molecule that collapsed because its loop
+failed is terminal and is not resumable.
+
+Resume reads the durable evidence on disk and nothing else
+(`cosmon_state::harness_checkpoint::load_resumable`, then the pure rules in
+`cosmon_core::harness_turn::plan_resume`). It continues only when all of this
+holds, and otherwise refuses with the reason and does nothing:
+
+| Refused when | Why |
+|---|---|
+| a tool has an intent and no receipt | its effect is unknown; it is never repeated or assumed |
+| a request has no recorded outcome | it may have been billed; it is not sent again |
+| a completed call used `exec_command` | the shell's directory, exports and processes are not recorded |
+| there is no complete checkpoint, or a turn began after it | nothing proves the effects after the boundary |
+| the attempt already ended on a terminal response | there is nothing to resume |
+| a pin differs: formula step, adapter, requested model, tool registry, briefing, worktree | a changed input is a new admission, not a continuation |
+| the loop ceilings differ | budgets are spent, not refreshed |
+| the wall-clock budget is already spent | the deadline only shrinks |
+| a referenced blob is missing or altered, or the records break their ordering | the evidence is damaged |
+| another `cs tackle` holds the molecule's loop | one owner per molecule (`harness-turns/owner.lock`) |
+
+A continuation restores the native log from the checkpoint blob
+(`MessageLog::decode_checkpoint`), starts at the next turn with the tool count
+already spent, and runs with the wall-clock time the chain has left. It writes a
+new `attempt_started` and then a `resumed` record naming the attempt and
+checkpoint it continues, both before its first request. A refusal happens before
+either is written, so the interrupted attempt stays the latest one. The restored
+checkpoint is the baseline of a second interruption, so a chain of resumes
+inherits every spent budget. Work already in the worktree counts as the
+molecule's own output when the continuation is accepted.
+
+Peer input blocks are request-only and are marked delivered once the response
+returns. At a clean checkpoint every one of them was resolved, so none is
+delivered twice. Completion is unchanged: a continuation that ends normally goes
+through the same acceptance as a fresh attempt, and a terminal attempt is never
+resumed, so a pending completion cannot advance twice.
+
+To reconcile a refused attempt, inspect `harness-turns/` and the worktree, then
+either finish the work by hand and collapse the molecule, or collapse it and
+nucleate again. Nothing silently restarts it.
+
+### Test
+
+```text
+./scripts/no-pilot-env.sh cargo test -p cosmon-cli --test harness_resume
+./scripts/no-pilot-env.sh cargo test -p cosmon-core --lib harness_turn
+```
+
+The crash seams run the real loop in a child killed at a seam. The dispatch
+tests run `cs tackle` against a loopback responder that reads the galaxy ledger
+file at its exact path.
+
+### Limits
+
+- The tool-cycle detector restarts empty after a resume.
+- Wall-clock time spent between the last record and the kill is not counted.
+- A shell-using attempt is never resumable, however harmless its commands were;
+  nothing can prove that.
+- Only the `openai` and `anthropic` arms keep turn evidence. The `local` floor
+  cannot be resumed.
