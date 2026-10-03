@@ -571,37 +571,21 @@ fn native_session_id(payload: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-/// The hook body. Never fails outward — see the module docs.
-fn run_hook(ctx: &Context, args: &RunArgs) {
-    if hook_is_off() {
-        return;
-    }
-    let started = std::time::Instant::now();
-
-    let Ok(event) = HookEvent::parse(&args.event) else {
-        eprintln!(
-            "cs sessions hook: unknown event {:?} — doing nothing",
-            args.event
-        );
-        return;
-    };
-    let provider = match args.provider.as_deref() {
-        Some(raw) => match HookProvider::parse(raw) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("cs sessions hook: {e} — doing nothing");
-                return;
-            }
-        },
-        None => HookProvider::Claude,
-    };
-    let payload = read_payload(args);
-
+/// Resolve this session's id and emit its presence heartbeat.
+///
+/// Returns `None` when no id can be resolved, after saying so on stderr.
+fn beat_presence(
+    ctx: &Context,
+    args: &RunArgs,
+    event: HookEvent,
+    provider: HookProvider,
+    payload: &str,
+) -> Option<SessionId> {
     // A hook has no controlling tty, so without an explicit id or an exported
     // one every session would hash to the same fallback and overwrite each
     // other's record. The provider's own session id, from the payload, is the
     // next best identity and is distinct per session.
-    let native = native_session_id(&payload);
+    let native = native_session_id(payload);
     let explicit = args.session.clone().or_else(|| {
         let exported = ["COSMON_SESSION_ID", "CLAUDE_SESSION_ID"]
             .iter()
@@ -617,7 +601,7 @@ fn run_hook(ctx: &Context, args: &RunArgs) {
             "cs sessions hook: no session id ($COSMON_SESSION_ID unset and no tty) — \
              nothing to be present as"
         );
-        return;
+        return None;
     };
 
     // 1. Presence. No role, no follows, no capabilities: every co-pilotage
@@ -646,6 +630,38 @@ fn run_hook(ctx: &Context, args: &RunArgs) {
     ) {
         eprintln!("cs sessions hook: presence ping failed: {e}");
     }
+    Some(sid)
+}
+
+/// The hook body. Never fails outward — see the module docs.
+fn run_hook(ctx: &Context, args: &RunArgs) {
+    if hook_is_off() {
+        return;
+    }
+    let started = std::time::Instant::now();
+
+    let Ok(event) = HookEvent::parse(&args.event) else {
+        eprintln!(
+            "cs sessions hook: unknown event {:?} — doing nothing",
+            args.event
+        );
+        return;
+    };
+    let provider = match args.provider.as_deref() {
+        Some(raw) => match HookProvider::parse(raw) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("cs sessions hook: {e} — doing nothing");
+                return;
+            }
+        },
+        None => HookProvider::Claude,
+    };
+    let payload = read_payload(args);
+
+    let Some(sid) = beat_presence(ctx, args, event, provider, &payload) else {
+        return;
+    };
 
     // 2. The mailbox, but only where the pilot can read what comes out.
     let mut injected = 0usize;
