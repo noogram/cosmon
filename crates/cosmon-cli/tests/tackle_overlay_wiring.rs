@@ -150,6 +150,10 @@ fn tackle_claude_launch_overlay_carries_presence_hooks_and_deny_rules() {
     let tackled = cs(root)
         .env("PATH", path)
         .env("COSMON_ALLOW_NO_WORKTREE", "1")
+        // The stub claude never authenticates, but tackle refuses to spawn an
+        // interactive worker without a credential. CI has no keychain item, so
+        // give the preflight a placeholder token (never sent anywhere).
+        .env("CLAUDE_CODE_OAUTH_TOKEN", "test-placeholder-not-a-credential")
         .args([
             "tackle",
             &mol_id,
