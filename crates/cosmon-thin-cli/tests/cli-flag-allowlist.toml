@@ -778,6 +778,11 @@ verb = "collapse"
 flag = "--reason-kind"
 reason = "typed CollapseReasonKind discriminant — local cataloguing concern; rpp-adapter accepts free-form reason text only."
 
+[[flag_only_in_cs]]
+verb = "collapse"
+flag = "--with-seats"
+reason = "fans out over the local work roster (work-ref.json files in the molecule directories, issue #162); a remote tenant has no roster surface and the RPP collapse route acts on one molecule."
+
 # ─────────────────────────────────────────────────────────────────────
 # tackle — cs has rich local plumbing (worktree, tmux, adapter, fleet,
 # bypass-seal). cs-thin does not surface tackle at all (operator_only,
