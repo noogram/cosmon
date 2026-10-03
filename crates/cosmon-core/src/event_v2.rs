@@ -824,6 +824,20 @@ pub enum EventV2 {
         /// Canonical usage sample.
         usage: Box<UsageRecord>,
     },
+    /// One durable fact about a direct-arm worker attempt: a request intent,
+    /// an assistant envelope, a tool intent or receipt, a checkpoint or the
+    /// terminal response.
+    ///
+    /// The row carries counts, call identifiers and blob digests, never raw
+    /// model or tool text; that stays in immutable blobs under the molecule
+    /// directory. The ledger owns the ordering, so this is the single stream
+    /// the molecule journal projects.
+    HarnessTurnRecorded {
+        /// The molecule the attempt works on.
+        mol_id: MoleculeId,
+        /// The record and the attempt identity that scopes it.
+        evidence: Box<crate::harness_turn::HarnessTurnEvidence>,
+    },
     /// A molecule's TTL fired and an expiry policy was applied (ADR-029).
     ///
     /// Emitted by `cs expire` / `cs patrol --expire` after evaluating a
@@ -2933,7 +2947,8 @@ impl EventV2 {
             | Self::SF4ToolCallExecutionFailure { mol_id, .. }
             | Self::SF5ContextOverflow { mol_id, .. }
             | Self::SF6SupervisionSetupFailed { mol_id, .. }
-            | Self::SF7BinaryVersionMismatch { mol_id, .. } => Some(mol_id),
+            | Self::SF7BinaryVersionMismatch { mol_id, .. }
+            | Self::HarnessTurnRecorded { mol_id, .. } => Some(mol_id),
             Self::DecaySpliced { parent, .. } => Some(parent),
             Self::MergeDispatched { molecule, .. }
             | Self::MergeCompleted { molecule, .. }
@@ -4743,6 +4758,19 @@ mod tests {
                 resubmits: 3,
                 elapsed_ms: 8000,
             },
+            EventV2::HarnessTurnRecorded {
+                mol_id: MoleculeId::new("task-20260101-abcd").unwrap(),
+                evidence: Box::new(crate::harness_turn::HarnessTurnEvidence {
+                    schema_version: crate::harness_turn::HARNESS_TURN_SCHEMA_VERSION,
+                    history_id: "harness/mol/worker/inv".to_owned(),
+                    worker_id: WorkerId::new("worker-1").unwrap(),
+                    record: crate::harness_turn::TurnRecord::RequestIntent {
+                        turn: 0,
+                        estimated_input_tokens: 5,
+                        tools_spent: 0,
+                    },
+                }),
+            },
         ];
 
         // Exhaustiveness guard (C10 test review, review-report.md F2).
@@ -4817,6 +4845,7 @@ mod tests {
             | EventV2::WorkerBlockedOnOperator { .. }
             | EventV2::EnergyTick { .. }
             | EventV2::UsageObserved { .. }
+            | EventV2::HarnessTurnRecorded { .. }
             | EventV2::Expired { .. }
             | EventV2::GateStarted { .. }
             | EventV2::GateCompleted { .. }

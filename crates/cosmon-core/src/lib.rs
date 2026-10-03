@@ -71,6 +71,7 @@ pub mod event;
 pub mod fleet;
 pub mod formula;
 pub mod harness_settings;
+pub mod harness_turn;
 pub mod id;
 pub mod kind;
 pub mod molecule;

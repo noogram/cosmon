@@ -24,8 +24,9 @@
 //! impl is a load-bearing termination witness — without it,
 //! `Sending → Decoding` could block forever.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
@@ -33,6 +34,7 @@ use cosmon_transport::spawn::AdapterTelemetry;
 
 use crate::bootstrap;
 use crate::budget::{ContextBudget, LoopBudget, ToolBudget, TurnBudget};
+use crate::checkpoint::TurnJournal;
 use crate::compaction::{CompactionError, CompactionPolicy, CompactionReport};
 use crate::error::HarnessError;
 use crate::message_log::{MessageLog, TranscriptEntry};
@@ -408,6 +410,7 @@ pub enum TurnInputProviderError<E: std::error::Error + Send + Sync + 'static> {
 struct TurnInputProvider<'a, P, S> {
     provider: &'a P,
     source: &'a S,
+    journal: Option<Arc<TurnJournal>>,
 }
 
 #[async_trait]
@@ -428,6 +431,21 @@ where
                 .one_turn(log)
                 .await
                 .map_err(TurnInputProviderError::Provider);
+        }
+        if let Some(journal) = &self.journal {
+            journal
+                .inputs_selected(
+                    inputs
+                        .iter()
+                        .map(|input| cosmon_core::harness_turn::InputEvidence {
+                            key: input.key.clone(),
+                            digest: cosmon_core::harness_turn::BlobDigest::of(
+                                input.content.as_bytes(),
+                            ),
+                        })
+                        .collect(),
+                )
+                .map_err(|e| TurnInputProviderError::Source(e.to_string()))?;
         }
         let mut request_log = log.clone();
         for input in &inputs {
@@ -471,7 +489,11 @@ where
     S: TurnInputSource,
 {
     run_loop_counted(
-        &TurnInputProvider { provider, source },
+        &TurnInputProvider {
+            provider,
+            source,
+            journal: None,
+        },
         briefing,
         work_dir,
         telemetry,
@@ -499,7 +521,11 @@ where
     S: TurnInputSource,
 {
     run_loop_counted_with_progress_budgeted(
-        &TurnInputProvider { provider, source },
+        &TurnInputProvider {
+            provider,
+            source,
+            journal: progress.journal.clone(),
+        },
         briefing,
         work_dir,
         telemetry,
@@ -527,7 +553,11 @@ where
     S: TurnInputSource,
 {
     run_loop_counted_with_progress(
-        &TurnInputProvider { provider, source },
+        &TurnInputProvider {
+            provider,
+            source,
+            journal: progress.journal.clone(),
+        },
         briefing,
         work_dir,
         telemetry,
@@ -612,6 +642,20 @@ pub struct LoopProgress {
     pub tools_executed: u32,
     /// Most recent provider-neutral transcript after a tool result landed.
     pub transcript: Vec<TranscriptEntry>,
+    /// Durable turn evidence sink. When set, the loop records request intent,
+    /// the assistant envelope, each tool intent and receipt, checkpoints and
+    /// the terminal response through it, and stops before the next side effect
+    /// if a record is not durable. `None` keeps the loop memory-only.
+    pub journal: Option<Arc<TurnJournal>>,
+}
+
+impl LoopProgress {
+    /// Attach a durable turn evidence journal.
+    #[must_use]
+    pub fn with_journal(mut self, journal: Arc<TurnJournal>) -> Self {
+        self.journal = Some(journal);
+        self
+    }
 }
 
 /// [`run_loop`] variant that returns the full [`WorkerOutcome`] — synthesis
@@ -791,6 +835,9 @@ pub async fn run_loop_with_capability<P: Provider>(
 /// # Errors
 ///
 /// Identical to [`run_loop`].
+// The loop body is one sequence whose ordering (intent, effect, receipt) is the
+// property under test; splitting it would scatter that order.
+#[allow(clippy::too_many_lines)]
 async fn run_loop_with_registry_impl<P: Provider>(
     provider: &P,
     briefing: &str,
@@ -822,6 +869,21 @@ async fn run_loop_with_registry_impl<P: Provider>(
             estimated_tokens: estimated,
             limit: context_limit,
         });
+    }
+
+    let journal: Option<Arc<TurnJournal>> = progress.as_deref().and_then(|p| p.journal.clone());
+    if let Some(journal) = &journal {
+        // The attempt's ceilings and pins are durable before the first
+        // request, so a restart can see that budgets are spent, not refreshed.
+        let mut pins = BTreeMap::new();
+        pins.insert("registry".to_owned(), registry_digest(&registry));
+        pins.insert(
+            "briefing".to_owned(),
+            cosmon_core::harness_turn::BlobDigest::of(effective_briefing.as_bytes())
+                .as_str()
+                .to_owned(),
+        );
+        journal.started(budget, pins)?;
     }
 
     let mut log = <P::Log>::from_briefing(&effective_briefing);
@@ -858,7 +920,7 @@ async fn run_loop_with_registry_impl<P: Provider>(
     let compaction_threshold = compaction_policy.threshold_tokens(context_budget);
     let compaction_target = compaction_policy.target_tokens(context_budget);
 
-    for _turn in 0..max_turns {
+    for turn_index in 0..max_turns {
         // I4 self-check — release builds skip this; debug builds
         // catch a per-provider impl that violated well-formedness.
         debug_assert!(
@@ -870,12 +932,15 @@ async fn run_loop_with_registry_impl<P: Provider>(
         // interactive `InteractiveSession::step` path so both callers
         // see byte-identical escape-valve semantics — see
         // [`maybe_compact`].
-        maybe_compact(
+        let compaction = maybe_compact(
             &mut log,
             compaction_threshold,
             compaction_target,
             compaction_policy,
         );
+        if let (Some(journal), Some(report)) = (&journal, &compaction) {
+            journal.compacted(turn_index, report)?;
+        }
 
         // I3 in-loop enforcement (delib-20260519-e6db W5 / knuth §K6,
         // forgemaster AH5). The pre-flight check at the head of
@@ -892,10 +957,22 @@ async fn run_loop_with_registry_impl<P: Provider>(
             });
         }
 
-        let turn = provider
-            .one_turn(&log)
-            .await
-            .map_err(HarnessError::Provider)?;
+        // Intent precedes the request: a request with no later outcome may have
+        // been billed, and the record is what says so.
+        if let Some(journal) = &journal {
+            journal.request_intent(turn_index, estimated_now, used_tools)?;
+        }
+        let turn = match provider.one_turn(&log).await {
+            Ok(turn) => turn,
+            Err(error) => {
+                if let Some(journal) = &journal {
+                    // Best effort: the failure itself is already being
+                    // returned, and an unresolved intent is the safe reading.
+                    let _ = journal.request_failed(&error.to_string());
+                }
+                return Err(HarnessError::Provider(error));
+            }
+        };
 
         let terminal = match turn {
             Turn::ToolCalls { assistant, calls } => {
@@ -937,15 +1014,23 @@ async fn run_loop_with_registry_impl<P: Provider>(
                     &mut tool_outcomes,
                     tool_limit,
                     progress.as_deref_mut(),
+                    journal.as_deref(),
+                    turn_index,
                 )
-                .map_err(|DispatchHalt::ToolBudgetExhausted { limit }| {
-                    HarnessError::ToolBudgetExhausted { limit }
-                })?;
+                .map_err(DispatchHalt::into_harness_error)?;
                 continue;
             }
             Turn::Stop(text) => TerminalResponse::new(text, TerminalDisposition::Normal),
             Turn::Terminal(terminal) => terminal,
         };
+        if let Some(journal) = &journal {
+            journal.terminal(
+                turn_index,
+                &terminal.disposition,
+                &terminal.text,
+                used_tools,
+            )?;
+        }
         return Ok(WorkerOutcome {
             synthesis: terminal.text,
             tools_dispatched: used_tools,
@@ -955,6 +1040,23 @@ async fn run_loop_with_registry_impl<P: Provider>(
     }
 
     Err(HarnessError::TurnBudgetExhausted { limit: max_turns })
+}
+
+/// Digest of the tool surface an attempt ran against: every declaration's
+/// name, description and parameter schema, in registry order.
+fn registry_digest(registry: &ToolRegistry) -> String {
+    let mut text = String::new();
+    for declaration in registry.declarations() {
+        text.push_str(declaration.name);
+        text.push('\u{1}');
+        text.push_str(declaration.description);
+        text.push('\u{1}');
+        text.push_str(&declaration.parameters.as_json().to_string());
+        text.push('\u{2}');
+    }
+    cosmon_core::harness_turn::BlobDigest::of(text.as_bytes())
+        .as_str()
+        .to_owned()
 }
 
 /// Non-recoverable halt reason from [`dispatch_tool_calls`].
@@ -973,6 +1075,18 @@ enum DispatchHalt {
         /// The budget that was exceeded.
         limit: u32,
     },
+    /// Turn evidence was not durable. When it was a tool intent the call's
+    /// body was NOT run; when it was a receipt the body had run.
+    Evidence(cosmon_core::harness_turn::EvidenceError),
+}
+
+impl DispatchHalt {
+    fn into_harness_error<E: std::error::Error + Send + Sync + 'static>(self) -> HarnessError<E> {
+        match self {
+            Self::ToolBudgetExhausted { limit } => HarnessError::ToolBudgetExhausted { limit },
+            Self::Evidence(error) => HarnessError::Evidence(error),
+        }
+    }
 }
 
 /// Append the assistant envelope and dispatch its tool calls, appending
@@ -1005,12 +1119,32 @@ fn dispatch_tool_calls<L: MessageLog>(
     tool_outcomes: &mut ToolOutcomeCounts,
     tool_limit: u32,
     mut progress: Option<&mut LoopProgress>,
+    journal: Option<&TurnJournal>,
+    turn: u32,
 ) -> Result<(), DispatchHalt> {
+    // The valid envelope is durable before any of its tools can run.
+    if let Some(journal) = journal {
+        journal
+            .assistant_received(
+                turn,
+                &calls,
+                log.encode_assistant(&assistant).as_deref(),
+                *used_tools,
+            )
+            .map_err(DispatchHalt::Evidence)?;
+    }
     log.append_assistant(assistant);
     for call in calls {
         *used_tools = used_tools.saturating_add(1);
         if *used_tools > tool_limit {
             return Err(DispatchHalt::ToolBudgetExhausted { limit: tool_limit });
+        }
+        // Intent precedes effect: if this record is not durable the tool does
+        // not run.
+        if let Some(journal) = journal {
+            journal
+                .tool_intent(turn, &call, *used_tools)
+                .map_err(DispatchHalt::Evidence)?;
         }
         let execution = registry.execute(&call, work_dir);
         let (outcome, successful_effect) = ToolRegistry::classify_result(&call, &execution);
@@ -1032,6 +1166,18 @@ fn dispatch_tool_calls<L: MessageLog>(
             progress.tools_executed = progress.tools_executed.saturating_add(1);
             progress.transcript = log.transcript();
         }
+        // Receipt precedes the next step.
+        if let Some(journal) = journal {
+            journal
+                .tool_receipt(turn, &call, outcome, Some(&result), *used_tools)
+                .map_err(DispatchHalt::Evidence)?;
+        }
+    }
+    // Every call of the turn has a receipt: a complete tool-result boundary.
+    if let Some(journal) = journal {
+        journal
+            .checkpoint(turn, log.encode_checkpoint().as_deref(), *used_tools)
+            .map_err(DispatchHalt::Evidence)?;
     }
     Ok(())
 }
@@ -1049,10 +1195,10 @@ fn maybe_compact<L: MessageLog>(
     threshold: u32,
     target: u32,
     policy: CompactionPolicy,
-) {
+) -> Option<CompactionReport> {
     let estimated_pre_compact = log.estimate_tokens();
     if estimated_pre_compact <= threshold {
-        return;
+        return None;
     }
     match log.compact(target, policy) {
         Ok(report) => {
@@ -1063,6 +1209,7 @@ fn maybe_compact<L: MessageLog>(
                 messages_removed = report.messages_removed,
                 "compacted MessageLog above threshold"
             );
+            Some(report)
         }
         Err(CompactionError::NotApplicable) => {
             tracing::trace!(
@@ -1070,6 +1217,7 @@ fn maybe_compact<L: MessageLog>(
                 tokens = estimated_pre_compact,
                 "compaction not applicable; log too small to compact"
             );
+            None
         }
         Err(CompactionError::WouldBreakInvariant) => {
             tracing::debug!(
@@ -1077,6 +1225,7 @@ fn maybe_compact<L: MessageLog>(
                 tokens = estimated_pre_compact,
                 "compaction refused; would break I4 — retry next turn"
             );
+            None
         }
     }
 }
@@ -1362,7 +1511,7 @@ impl<P: Provider> InteractiveSession<P> {
         );
 
         // Compaction trigger — byte-identical semantics to `run_loop`.
-        maybe_compact(
+        let _ = maybe_compact(
             &mut self.log,
             self.compaction_threshold,
             self.compaction_target,
@@ -1399,10 +1548,10 @@ impl<P: Provider> InteractiveSession<P> {
                     &mut self.tool_outcomes,
                     self.tool_limit,
                     None,
+                    None,
+                    0,
                 )
-                .map_err(|DispatchHalt::ToolBudgetExhausted { limit }| {
-                    HarnessError::ToolBudgetExhausted { limit }
-                })?;
+                .map_err(DispatchHalt::into_harness_error)?;
                 Ok(StepOutcome::Continued)
             }
             // THE load-bearing branch (`InteractiveStopYields`): a model
@@ -2777,6 +2926,260 @@ mod tests {
             .await
             .expect_err("a 65-call fan-out must trip I2");
         assert!(matches!(err, HarnessError::ToolBudgetExhausted { .. }));
+    }
+
+    /// In-memory evidence store: keeps records in call order and can be told
+    /// to fail on one record kind.
+    #[derive(Default)]
+    struct MemoryStore {
+        records: Mutex<Vec<cosmon_core::harness_turn::TurnRecord>>,
+        blobs: Mutex<Vec<(cosmon_core::harness_turn::BlobKind, Vec<u8>)>>,
+        fail_on: Option<&'static str>,
+    }
+
+    impl MemoryStore {
+        fn failing_on(kind: &'static str) -> Self {
+            Self {
+                fail_on: Some(kind),
+                ..Self::default()
+            }
+        }
+
+        fn kinds(&self) -> Vec<String> {
+            self.records
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    serde_json::to_value(r).unwrap()["record"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect()
+        }
+    }
+
+    impl cosmon_core::harness_turn::TurnEvidenceStore for MemoryStore {
+        fn put_blob(
+            &self,
+            kind: cosmon_core::harness_turn::BlobKind,
+            bytes: &[u8],
+        ) -> Result<cosmon_core::harness_turn::BlobRef, cosmon_core::harness_turn::EvidenceError>
+        {
+            self.blobs.lock().unwrap().push((kind, bytes.to_vec()));
+            Ok(cosmon_core::harness_turn::BlobRef {
+                kind,
+                digest: cosmon_core::harness_turn::BlobDigest::of(bytes),
+                len: bytes.len() as u64,
+                schema_version: cosmon_core::harness_turn::HARNESS_TURN_SCHEMA_VERSION,
+            })
+        }
+
+        fn append(
+            &self,
+            record: cosmon_core::harness_turn::TurnRecord,
+        ) -> Result<(), cosmon_core::harness_turn::EvidenceError> {
+            let kind = serde_json::to_value(&record).unwrap()["record"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            if self.fail_on == Some(kind.as_str()) {
+                return Err(cosmon_core::harness_turn::EvidenceError::Io(format!(
+                    "injected failure on {kind}"
+                )));
+            }
+            self.records.lock().unwrap().push(record);
+            Ok(())
+        }
+    }
+
+    fn write_marker_script() -> ScriptedProvider {
+        ScriptedProvider::new(vec![
+            Turn::ToolCalls {
+                assistant: "write it".to_owned(),
+                calls: vec![ToolCall {
+                    id: "call-1".to_owned(),
+                    name: "write_file".to_owned(),
+                    arguments_json: serde_json::json!({
+                        "path": "marker.txt",
+                        "content": "effect"
+                    })
+                    .to_string(),
+                }],
+            },
+            Turn::Stop("all done".to_owned()),
+        ])
+    }
+
+    #[tokio::test]
+    async fn a_journaled_loop_records_intent_before_effect_and_receipt_before_the_next_turn() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(MemoryStore::default());
+        let mut progress =
+            LoopProgress::default().with_journal(Arc::new(TurnJournal::new(store.clone())));
+        let outcome = run_loop_counted_with_progress(
+            &write_marker_script(),
+            "brief",
+            dir.path(),
+            None,
+            &mut progress,
+        )
+        .await
+        .expect("loop completes");
+        assert_eq!(outcome.synthesis, "all done");
+        assert_eq!(
+            store.kinds(),
+            [
+                "attempt_started",
+                "request_intent",
+                "assistant_received",
+                "tool_intent",
+                "tool_receipt",
+                "checkpoint",
+                "request_intent",
+                "terminal",
+            ]
+        );
+        let reconstruction = cosmon_core::harness_turn::reconstruct(&store.records.lock().unwrap())
+            .expect("ordered");
+        assert_eq!(reconstruction.requests_sent, 2);
+        assert_eq!(reconstruction.tools_spent, 1);
+        assert_eq!(reconstruction.completed_calls.len(), 1);
+        assert!(reconstruction.unresolved_calls.is_empty());
+        assert!(reconstruction.unresolved_requests.is_empty());
+        assert!(reconstruction.terminal.is_some());
+        // TestLog does not encode, so no blob is stored for the envelope; the
+        // tool result and the terminal text are.
+        let blobs = store.blobs.lock().unwrap();
+        assert!(blobs
+            .iter()
+            .any(|(k, _)| *k == cosmon_core::harness_turn::BlobKind::ToolResult));
+        assert!(blobs.iter().any(
+            |(k, b)| *k == cosmon_core::harness_turn::BlobKind::PartialText
+                && b.as_slice() == b"all done"
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_tool_intent_that_is_not_durable_stops_the_loop_before_the_effect() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(MemoryStore::failing_on("tool_intent"));
+        let mut progress =
+            LoopProgress::default().with_journal(Arc::new(TurnJournal::new(store.clone())));
+        let err = run_loop_counted_with_progress(
+            &write_marker_script(),
+            "brief",
+            dir.path(),
+            None,
+            &mut progress,
+        )
+        .await
+        .expect_err("persistence failure must stop the loop");
+        assert!(matches!(err, HarnessError::Evidence(_)));
+        assert!(
+            !dir.path().join("marker.txt").exists(),
+            "the tool must not run when its intent is not durable"
+        );
+        assert_eq!(progress.tools_executed, 0);
+    }
+
+    #[tokio::test]
+    async fn an_assistant_envelope_that_is_not_durable_stops_the_loop_before_any_tool() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(MemoryStore::failing_on("assistant_received"));
+        let mut progress =
+            LoopProgress::default().with_journal(Arc::new(TurnJournal::new(store.clone())));
+        let err = run_loop_counted_with_progress(
+            &write_marker_script(),
+            "brief",
+            dir.path(),
+            None,
+            &mut progress,
+        )
+        .await
+        .expect_err("persistence failure must stop the loop");
+        assert!(matches!(err, HarnessError::Evidence(_)));
+        assert!(!dir.path().join("marker.txt").exists());
+        assert!(!store.kinds().contains(&"tool_intent".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn a_request_intent_that_is_not_durable_sends_no_request() {
+        let dir = tempdir().unwrap();
+        let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sent_in = Arc::clone(&sent);
+        let provider = ScriptedProviderFn::<TestLog, std::io::Error>::new(move |_| {
+            sent_in.fetch_add(1, Ordering::SeqCst);
+            Ok(Turn::Stop("unreachable".to_owned()))
+        });
+        let store = Arc::new(MemoryStore::failing_on("request_intent"));
+        let mut progress = LoopProgress::default().with_journal(Arc::new(TurnJournal::new(store)));
+        let err =
+            run_loop_counted_with_progress(&provider, "brief", dir.path(), None, &mut progress)
+                .await
+                .expect_err("persistence failure must stop the loop");
+        assert!(matches!(err, HarnessError::Evidence(_)));
+        assert_eq!(sent.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_request_is_recorded_as_resolved_not_left_as_possibly_billed() {
+        let dir = tempdir().unwrap();
+        let provider = ScriptedProviderFn::<TestLog, std::io::Error>::new(|_| {
+            Err(std::io::Error::other("scripted provider failure"))
+        });
+        let store = Arc::new(MemoryStore::default());
+        let mut progress =
+            LoopProgress::default().with_journal(Arc::new(TurnJournal::new(store.clone())));
+        assert!(run_loop_counted_with_progress(
+            &provider,
+            "brief",
+            dir.path(),
+            None,
+            &mut progress
+        )
+        .await
+        .is_err());
+        let reconstruction = cosmon_core::harness_turn::reconstruct(&store.records.lock().unwrap())
+            .expect("ordered");
+        assert_eq!(reconstruction.requests_sent, 1);
+        assert!(reconstruction.unresolved_requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_output_limited_terminal_keeps_its_partial_text_and_reason() {
+        let dir = tempdir().unwrap();
+        let provider = ScriptedProviderFn::<TestLog, std::io::Error>::new(|_| {
+            Ok(Turn::Terminal(TerminalResponse::new(
+                "cut o",
+                TerminalDisposition::OutputLimit,
+            )))
+        });
+        let store = Arc::new(MemoryStore::default());
+        let mut progress =
+            LoopProgress::default().with_journal(Arc::new(TurnJournal::new(store.clone())));
+        run_loop_counted_with_progress(&provider, "brief", dir.path(), None, &mut progress)
+            .await
+            .expect("a limited response is a terminal, not an error");
+        let reconstruction = cosmon_core::harness_turn::reconstruct(&store.records.lock().unwrap())
+            .expect("ordered");
+        let terminal = reconstruction.terminal.expect("terminal recorded");
+        assert_eq!(
+            terminal.disposition,
+            cosmon_core::harness_turn::TerminalKind::OutputLimit
+        );
+        assert!(terminal.partial_text.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_loop_without_a_journal_behaves_as_before() {
+        let dir = tempdir().unwrap();
+        let outcome = run_loop_counted(&write_marker_script(), "brief", dir.path(), None)
+            .await
+            .expect("loop completes");
+        assert_eq!(outcome.synthesis, "all done");
+        assert!(dir.path().join("marker.txt").exists());
     }
 
     /// The interactive constructor enforces the same I3 pre-flight gate

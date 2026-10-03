@@ -35,6 +35,7 @@ pub mod event_log;
 pub mod events;
 pub mod file_energy_tracker;
 pub mod frontier;
+pub mod harness_checkpoint;
 pub mod instrumentation;
 pub mod journal;
 pub mod ops;

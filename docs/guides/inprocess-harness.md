@@ -194,3 +194,77 @@ messages wire. The accumulator lives in memory for the attempt: after a process
 restart a new history begins, and resuming a history is part of the checkpoint
 work, not of this unit. Records are written best-effort; a failed write is
 logged and the next record carries the same totals.
+
+## Turn and effect evidence
+
+A direct-arm worker records what it requested, received and ran, so a killed
+attempt can be rebuilt from disk. `cs tackle` attaches a journal to the `openai`
+and `anthropic` arms; the records are ledger rows and the content is stored in
+blobs. See [ADR-185](../adr/185-turn-and-effect-evidence-is-durable-before-it-is-acted-on.md).
+
+What is written, in this order:
+
+| Record | Written | Means |
+|---|---|---|
+| `attempt_started` | before the first request | ceilings, tool registry digest, briefing digest, adapter, requested model |
+| `request_intent` | before the request | a request with no later outcome may have been billed |
+| `inputs_selected` | before the request | key and digest of each work-turn block that rides on it |
+| `request_failed` | after a failed request | the request is resolved, not possibly billed |
+| `compacted` | before the request it preceded | tokens before and after, messages replaced |
+| `assistant_received` | before any of its tools | the provider-native envelope is durable |
+| `tool_intent` | before the effect | if it cannot be written the tool does not run |
+| `tool_receipt` | before the next call | classified result and the result as appended |
+| `checkpoint` | after the last receipt of a turn | the native log at a complete boundary |
+| `terminal` | before the loop returns | disposition and the text received, possibly partial |
+
+Rows go to the galaxy ledger as `harness_turn_recorded`, so `cs events journal`
+projects them with the molecule's other rows. A row holds counts, call
+identifiers and digests, never raw model or tool text. The content is in
+`<molecule dir>/harness-turns/blobs/<sha256>`: written to a temporary file and
+renamed, named by its digest, never rewritten, and checked for length and digest
+on every read. The turn records carry the same history id as the attempt's
+`UsageObserved` rows, in the same ledger.
+
+Reading an attempt back is `cosmon_state::harness_checkpoint::load_attempt`. It
+returns the pure reconstruction (spent turns and tool calls, delivered input
+keys, assistants, completed calls, compactions, last checkpoint, terminal) with
+two lists that matter for recovery:
+
+- `unresolved_calls`: a tool intent with no receipt. The effect may have
+  happened. It is not a failure and not a success.
+- `unresolved_requests`: a request intent with no outcome. It may have been billed.
+
+A blob that is missing, truncated or altered is listed in `blob_problems` next
+to the records that survive; one bad blob does not discard the attempt.
+
+A record that cannot be written stops the loop with `HarnessError::Evidence`
+before the next side effect. When the failed record is a tool receipt the tool
+had already run, and the error says the effect is unconfirmed.
+
+### Test
+
+```text
+./scripts/no-pilot-env.sh cargo test -p cosmon-cli --test harness_checkpoint_crash
+./scripts/no-pilot-env.sh cargo test -p cosmon-core --lib harness_turn
+./scripts/no-pilot-env.sh cargo test -p cosmon-state --lib harness_checkpoint
+```
+
+The crash test re-executes itself as a child that exits abruptly at one seam,
+then rebuilds the attempt from the ledger and the blob directory. Another test
+runs `cs tackle` against a loopback responder and reads the same evidence back.
+
+### Limits
+
+- Nothing resumes. This is the evidence resume needs, not resume.
+- An uncertain effect is reported, never repaired or repeated.
+- The `local` floor runs a loop with no progress channel and writes no turn
+  evidence. Interactive sessions do not write it either.
+- A blob over 8 MiB is refused and stops the loop. Total retention per molecule
+  is not bounded yet.
+- Blobs hold the native conversation in clear text under the molecule directory.
+  They are as private as that directory and are never published.
+- The formula digest and a configuration digest are not pinned; the requested
+  model, adapter, registry and briefing are.
+- Usage and turn records now go to the galaxy ledger. Before this change the
+  `openai` and `anthropic` arms wrote `UsageObserved` rows to the molecule
+  directory's own event file, where the usage projections do not read.

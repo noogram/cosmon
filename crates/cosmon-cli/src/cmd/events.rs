@@ -158,6 +158,7 @@ fn event_type_tag(event: &EventV2) -> &'static str {
         EventV2::WorkerSessionMissing { .. } => "worker_session_missing",
         EventV2::EnergyTick { .. } => "energy_tick",
         EventV2::UsageObserved { .. } => "usage_observed",
+        EventV2::HarnessTurnRecorded { .. } => "harness_turn_recorded",
         EventV2::WorkerHeartbeat { .. } => "worker_heartbeat",
         EventV2::Expired { .. } => "expired",
         _ => "unknown",

@@ -214,6 +214,18 @@ impl MessageLog for AnthropicLog {
         u32::try_from(chars / 4).unwrap_or(u32::MAX)
     }
 
+    fn encode_assistant(&self, msg: &Self::AssistantMsg) -> Option<Vec<u8>> {
+        serde_json::to_vec(msg).ok()
+    }
+
+    fn encode_checkpoint(&self) -> Option<Vec<u8>> {
+        serde_json::to_vec(&serde_json::json!({
+            "system": self.system,
+            "messages": self.messages,
+        }))
+        .ok()
+    }
+
     fn invariant_well_formed(&self) -> bool {
         // I4 — every assistant turn whose `content` blocks include
         // one or more `tool_use` blocks is followed by a user turn

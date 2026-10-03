@@ -4721,6 +4721,7 @@ pub(super) fn spawn_and_prompt(
             prompt,
             mol,
             mol_state_dir,
+            state_dir,
             adapter_entry,
             preferred_model,
         )
@@ -4735,6 +4736,7 @@ pub(super) fn spawn_and_prompt(
             prompt,
             mol,
             mol_state_dir,
+            state_dir,
             adapter_entry,
             preferred_model,
         )
@@ -7346,6 +7348,7 @@ fn spawn_openai_session(
     prompt: &str,
     mol: &MoleculeData,
     mol_state_dir: &std::path::Path,
+    state_dir: &std::path::Path,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
 ) -> anyhow::Result<InprocessWork> {
@@ -7387,9 +7390,18 @@ fn spawn_openai_session(
     let provider = provider.with_usage_sink(Some(inprocess_usage_sink(
         mol,
         wid,
-        mol_state_dir,
+        state_dir,
         &invocation_uuid,
     )));
+    let turn_journal = inprocess_turn_journal(
+        mol,
+        wid,
+        state_dir,
+        mol_state_dir,
+        &invocation_uuid,
+        "openai",
+        &model_label,
+    );
     let telemetry = cosmon_provider::openai::telemetry_for(
         mol.id.clone(),
         wid.clone(),
@@ -7420,7 +7432,8 @@ fn spawn_openai_session(
     std::env::set_var("COSMON_MOL_DIR", mol_state_dir);
     let turn_input = cosmon_cli::work_turn_input::WorkTurnInput::discover(mol_state_dir)
         .map_err(|e| anyhow::anyhow!("cs tackle: work turn input failed: {e}"))?;
-    let mut progress = cosmon_agent_harness::spine::LoopProgress::default();
+    let mut progress =
+        cosmon_agent_harness::spine::LoopProgress::default().with_journal(turn_journal);
     let outcome = if let Some(source) = turn_input.as_ref() {
         run_local_future_with_timeout(
             &rt,
@@ -8031,19 +8044,44 @@ const DEFAULT_LOCAL_TIMEOUT_SECS: u64 = 600;
 fn inprocess_usage_sink(
     mol: &MoleculeData,
     wid: &cosmon_core::id::WorkerId,
-    mol_state_dir: &Path,
+    state_dir: &Path,
     invocation_uuid: &str,
 ) -> std::sync::Arc<cosmon_cli::harness_usage::HarnessUsageRecorder> {
     std::sync::Arc::new(cosmon_cli::harness_usage::HarnessUsageRecorder::new(
-        mol_state_dir,
+        state_dir,
         wid.clone(),
-        format!(
-            "harness/{}/{}/{invocation_uuid}",
-            mol.id.as_str(),
-            wid.as_str()
-        ),
+        cosmon_cli::harness_usage::attempt_history_id(&mol.id, wid, invocation_uuid),
         None,
     ))
+}
+
+/// Build the durable turn evidence journal for one in-process worker attempt.
+///
+/// Records go to the galaxy ledger under `state_dir`, the stream the molecule
+/// journal projects; blobs go under the molecule directory, which `cs done`
+/// does not destroy. The history id is the one the attempt's usage records
+/// carry.
+fn inprocess_turn_journal(
+    mol: &MoleculeData,
+    wid: &cosmon_core::id::WorkerId,
+    state_dir: &Path,
+    mol_state_dir: &Path,
+    invocation_uuid: &str,
+    adapter: &str,
+    requested_model: &str,
+) -> std::sync::Arc<cosmon_agent_harness::TurnJournal> {
+    let store = cosmon_state::harness_checkpoint::FileTurnEvidenceStore::new(
+        state_dir,
+        mol_state_dir,
+        mol.id.clone(),
+        wid.clone(),
+        cosmon_cli::harness_usage::attempt_history_id(&mol.id, wid, invocation_uuid),
+    );
+    std::sync::Arc::new(
+        cosmon_agent_harness::TurnJournal::new(std::sync::Arc::new(store))
+            .with_pin("adapter", adapter)
+            .with_pin("requested_model", requested_model),
+    )
 }
 
 /// Resolve the in-process loop budgets for `model` from the adapter row.
@@ -9441,6 +9479,7 @@ fn spawn_anthropic_session(
     prompt: &str,
     mol: &MoleculeData,
     mol_state_dir: &std::path::Path,
+    state_dir: &std::path::Path,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
 ) -> anyhow::Result<InprocessWork> {
@@ -9501,9 +9540,18 @@ fn spawn_anthropic_session(
     let provider = provider.with_usage_sink(Some(inprocess_usage_sink(
         mol,
         wid,
-        mol_state_dir,
+        state_dir,
         &invocation_uuid,
     )));
+    let turn_journal = inprocess_turn_journal(
+        mol,
+        wid,
+        state_dir,
+        mol_state_dir,
+        &invocation_uuid,
+        "anthropic",
+        &model_label,
+    );
     let telemetry = cosmon_provider::anthropic::telemetry_for(
         mol.id.clone(),
         wid.clone(),
@@ -9533,7 +9581,8 @@ fn spawn_anthropic_session(
     std::env::set_var("COSMON_MOL_DIR", mol_state_dir);
     let turn_input = cosmon_cli::work_turn_input::WorkTurnInput::discover(mol_state_dir)
         .map_err(|e| anyhow::anyhow!("cs tackle: work turn input failed: {e}"))?;
-    let mut progress = cosmon_agent_harness::spine::LoopProgress::default();
+    let mut progress =
+        cosmon_agent_harness::spine::LoopProgress::default().with_journal(turn_journal);
     let outcome = if let Some(source) = turn_input.as_ref() {
         run_local_future_with_timeout(
             &rt,

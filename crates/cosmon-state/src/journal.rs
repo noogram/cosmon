@@ -269,6 +269,19 @@ impl MoleculeJournal {
         self.entries.iter().filter(|entry| entry.is_blockage)
     }
 
+    /// The rows recording direct-arm turn and effect evidence: request
+    /// intents, assistant envelopes, tool intents and receipts, checkpoints and
+    /// terminal responses.
+    ///
+    /// They are ordinary ledger rows, so the journal gains no second stream.
+    /// Each row carries counts, call identifiers and blob digests, never raw
+    /// model or tool text, which is why they can be projected as they are.
+    pub fn turn_evidence(&self) -> impl Iterator<Item = &JournalEntry> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.event_type == "harness_turn_recorded")
+    }
+
     /// Timestamp of the `molecule_nucleated` row, when the ledger has one.
     ///
     /// Its presence is the machine-checkable form of "the journal exists from
@@ -358,6 +371,18 @@ fn blockage_detail(entry: &JournalEntry) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_evidence_rows_are_projected_for_their_molecule_only() {
+        let id = MoleculeId::new("task-20260730-7a74").expect("well-formed id");
+        let ledger = r#"{"seq":1,"type":"molecule_nucleated","molecule_id":"task-20260730-7a74","formula_id":"task-work"}
+{"seq":2,"type":"harness_turn_recorded","mol_id":"task-20260730-7a74","evidence":{"schema_version":1,"history_id":"h","worker_id":"w","record":{"record":"request_intent","turn":0,"estimated_input_tokens":5,"tools_spent":0}}}
+{"seq":3,"type":"harness_turn_recorded","mol_id":"task-19700101-0000","evidence":{"schema_version":1,"history_id":"h","worker_id":"w","record":{"record":"request_intent","turn":0,"estimated_input_tokens":5,"tools_spent":0}}}"#;
+        let journal = MoleculeJournal::project(ledger.lines(), &id);
+        assert_eq!(journal.turn_evidence().count(), 1);
+        assert_eq!(journal.entries.len(), 2);
+        assert_eq!(journal.blockages().count(), 0);
+    }
 
     fn ledger() -> String {
         [

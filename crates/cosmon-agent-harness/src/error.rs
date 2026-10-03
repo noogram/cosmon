@@ -98,4 +98,11 @@ pub enum HarnessError<E: std::error::Error + Send + Sync + 'static> {
         /// How many consecutive copies of the block were observed.
         repeats: usize,
     },
+
+    /// Durable turn evidence could not be written. The loop stopped before the
+    /// next side effect: a record that is not durable never licenses the
+    /// request, tool or step it announces. When the failed record was a tool
+    /// receipt the tool had already run, and its effect is unconfirmed.
+    #[error("turn evidence not durable: {0}")]
+    Evidence(#[from] cosmon_core::harness_turn::EvidenceError),
 }
