@@ -119,11 +119,34 @@ pub enum HookEvent {
     TurnStart,
     /// The pilot has finished a turn — a natural transition to checkpoint at.
     TurnEnd,
+    /// The session is blocked on a human: a permission prompt or an idle
+    /// notification. Claude's `Notification` hook.
+    Waiting,
+    /// The session is asking a question through the provider's ask-the-user
+    /// tool. Wired only by the worker overlay, which can scope it with a tool
+    /// matcher; the pilot installer has no matcher support and so leaves it out
+    /// of [`HookEvent::ALL`].
+    Asking,
 }
 
 impl HookEvent {
     /// Every moment, in the order a session meets them.
-    pub const ALL: [Self; 3] = [Self::SessionStart, Self::TurnStart, Self::TurnEnd];
+    pub const ALL: [Self; 4] = [
+        Self::SessionStart,
+        Self::TurnStart,
+        Self::TurnEnd,
+        Self::Waiting,
+    ];
+
+    /// Every token `cs sessions hook run --event` accepts: [`Self::ALL`] plus
+    /// the events only the worker overlay wires.
+    pub const ACCEPTED: [Self; 5] = [
+        Self::SessionStart,
+        Self::TurnStart,
+        Self::TurnEnd,
+        Self::Waiting,
+        Self::Asking,
+    ];
 
     /// The token an operator types after `--event`.
     #[must_use]
@@ -132,6 +155,8 @@ impl HookEvent {
             Self::SessionStart => "session-start",
             Self::TurnStart => "turn-start",
             Self::TurnEnd => "turn-end",
+            Self::Waiting => "waiting",
+            Self::Asking => "asking",
         }
     }
 
@@ -142,13 +167,13 @@ impl HookEvent {
     /// Returns the unknown token. A hook invoked with an event this build does
     /// not know does nothing rather than guessing at the nearest one.
     pub fn parse(raw: &str) -> Result<Self, String> {
-        Self::ALL
+        Self::ACCEPTED
             .into_iter()
             .find(|e| e.as_str() == raw)
             .ok_or_else(|| {
                 format!(
                     "unknown hook event '{raw}' — expected one of {}",
-                    Self::ALL
+                    Self::ACCEPTED
                         .iter()
                         .map(|e| e.as_str())
                         .collect::<Vec<_>>()
@@ -168,6 +193,8 @@ impl HookEvent {
             (HookProvider::Claude, Self::SessionStart) => Some("SessionStart"),
             (HookProvider::Claude, Self::TurnStart) => Some("UserPromptSubmit"),
             (HookProvider::Claude, Self::TurnEnd) => Some("Stop"),
+            (HookProvider::Claude, Self::Waiting) => Some("Notification"),
+            (HookProvider::Claude, Self::Asking) => Some("PreToolUse"),
             (HookProvider::Codex, Self::TurnEnd) => Some("notify"),
             (HookProvider::Codex, _) => None,
         }
@@ -198,6 +225,19 @@ impl HookEvent {
 #[must_use]
 pub fn hook_command(cs_bin: &str, event: HookEvent) -> String {
     format!("{cs_bin} sessions hook run --event {}", event.as_str())
+}
+
+/// The command a worker's per-dispatch settings overlay runs for `event`.
+///
+/// `cs_bin` is already shell-quoted by the caller. The provider is spelled out
+/// because an overlay is Claude-only and a worker has no tty to infer it from.
+/// Contains [`HOOK_MARKER`], like [`hook_command`].
+#[must_use]
+pub fn worker_hook_command(cs_bin: &str, event: HookEvent) -> String {
+    format!(
+        "{cs_bin} sessions hook run --event {} --provider claude",
+        event.as_str()
+    )
 }
 
 /// The outcome of an install or uninstall: the document that should be written

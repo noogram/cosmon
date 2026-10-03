@@ -124,7 +124,7 @@ pub struct StatusArgs {
 /// Arguments for `cs sessions hook run`.
 #[derive(clap::Args, Default)]
 pub struct RunArgs {
-    /// Which moment fired: `session-start`, `turn-start` or `turn-end`.
+    /// Which moment fired: `session-start`, `turn-start`, `turn-end`, `waiting` or `asking`.
     #[arg(long, value_name = "EVENT")]
     pub event: String,
     /// The pilot this hook runs inside. Inferred from the payload when it
@@ -597,7 +597,22 @@ fn run_hook(ctx: &Context, args: &RunArgs) {
     };
     let payload = read_payload(args);
 
-    let Ok(sid) = presence::resolve_or_derive_sid(args.session.as_deref()) else {
+    // A hook has no controlling tty, so without an explicit id or an exported
+    // one every session would hash to the same fallback and overwrite each
+    // other's record. The provider's own session id, from the payload, is the
+    // next best identity and is distinct per session.
+    let native = native_session_id(&payload);
+    let explicit = args.session.clone().or_else(|| {
+        let exported = ["COSMON_SESSION_ID", "CLAUDE_SESSION_ID"]
+            .iter()
+            .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()));
+        if exported {
+            None
+        } else {
+            native.clone()
+        }
+    });
+    let Ok(sid) = presence::resolve_or_derive_sid(explicit.as_deref()) else {
         eprintln!(
             "cs sessions hook: no session id ($COSMON_SESSION_ID unset and no tty) — \
              nothing to be present as"
@@ -607,13 +622,24 @@ fn run_hook(ctx: &Context, args: &RunArgs) {
 
     // 1. Presence. No role, no follows, no capabilities: every co-pilotage
     //    field is carried forward from the snapshot the operator wrote. This
-    //    heartbeat says "still here", never "I am in command".
+    //    heartbeat says "still here", never "I am in command". A worker (the
+    //    dispatch exported its molecule id) also names that molecule and says
+    //    what it is doing; a pilot's headline is its operator's and is left
+    //    alone.
+    let worker_molecule = std::env::var("COSMON_PARENT_MOL_ID")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<cosmon_core::id::MoleculeId>().ok());
+    let headline = worker_molecule
+        .as_ref()
+        .map(|_| format!("worker: {}", event.as_str()));
     if let Err(e) = presence::ping(
         ctx,
         &presence::PingArgs {
             session: Some(sid.as_str().to_owned()),
             provider: Some(provider.as_str().to_owned()),
-            native_session_id: native_session_id(&payload),
+            native_session_id: native,
+            molecule: worker_molecule,
+            headline,
             galaxy: "cosmon".to_owned(),
             ..presence::PingArgs::default()
         },

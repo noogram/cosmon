@@ -517,6 +517,7 @@ pub fn write_settings_overlay_for_work(
             }]
         }
     });
+    add_presence_hooks(&mut doc, cs_bin);
     if work_member {
         doc["hooks"]["PostToolUse"] = serde_json::json!([{
             "hooks": [{
@@ -537,6 +538,40 @@ pub fn write_settings_overlay_for_work(
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(())
+}
+
+/// Register the presence hooks beside the receipt hook.
+///
+/// A worker emits presence at turn start, turn end, session start, when it
+/// waits on a permission or notification, and when it asks a question, so its
+/// record is fresh without any operator gesture. Observe-and-emit only: the
+/// hook body (`cs sessions hook run`) pings presence and never claims a seat.
+/// The receipt's own `UserPromptSubmit` entry is kept; ours is appended.
+fn add_presence_hooks(doc: &mut serde_json::Value, cs_bin: &Path) {
+    use cosmon_core::copilot_hook::{worker_hook_command, HookEvent, HookProvider};
+    let cs = shell_quote(&cs_bin.to_string_lossy());
+    for event in HookEvent::ACCEPTED {
+        let Some(name) = event.provider_event(HookProvider::Claude) else {
+            continue;
+        };
+        let mut entry = serde_json::json!({
+            "hooks": [{
+                "type": "command",
+                "command": worker_hook_command(&cs, event),
+                "timeout": 5,
+            }]
+        });
+        if event == HookEvent::Asking {
+            entry["matcher"] = serde_json::json!("AskUserQuestion");
+        }
+        let list = &mut doc["hooks"][name];
+        if !list.is_array() {
+            *list = serde_json::json!([]);
+        }
+        if let Some(arr) = list.as_array_mut() {
+            arr.push(entry);
+        }
+    }
 }
 
 /// The hook's whole body: read the stamped nonce, write the receipt.
@@ -1131,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn the_overlay_registers_exactly_one_user_prompt_submit_hook() {
+    fn the_overlay_registers_exactly_one_receipt_hook() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("settings.json");
         let station = ReceiptStation::at(tmp.path().join("receipts"));
@@ -1142,9 +1177,21 @@ mod tests {
         let hooks = doc["hooks"]["UserPromptSubmit"]
             .as_array()
             .expect("UserPromptSubmit array");
-        assert_eq!(hooks.len(), 1);
-        assert_eq!(hooks[0]["hooks"].as_array().expect("inner").len(), 1);
-        assert!(doc["hooks"].get("PreToolUse").is_none());
+        let receipts = hooks
+            .iter()
+            .flat_map(|e| e["hooks"].as_array().expect("inner").iter())
+            .filter(|h| {
+                h["command"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("briefing-receipt-hook"))
+            })
+            .count();
+        assert_eq!(receipts, 1, "exactly one receipt hook: {doc}");
+        // The only PreToolUse entry is the presence hook scoped to the
+        // ask-the-user tool; no hook runs on every tool call.
+        let pre = doc["hooks"]["PreToolUse"].as_array().expect("PreToolUse");
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0]["matcher"], "AskUserQuestion");
 
         #[cfg(unix)]
         {

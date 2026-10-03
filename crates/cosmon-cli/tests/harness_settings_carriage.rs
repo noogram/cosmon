@@ -65,6 +65,8 @@ fn codex_config(harness_args: Vec<String>) -> CodexSessionConfig {
         harness_args,
         pass_api_key: false,
         work_hook_home: None,
+        mol_dir: None,
+        parent_mol_id: None,
     }
 }
 
