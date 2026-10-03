@@ -571,7 +571,7 @@ pub struct SessionEntry {
 pub struct SessionWaiting {
     /// The single field most readers consume.
     pub waiting: bool,
-    /// `none` · `permission` · `money_stake` · `unknown`.
+    /// `none` · `permission` · `money_stake` · `unknown` · `login_required`.
     pub class: String,
     /// The line that fired the classification.
     #[serde(default)]

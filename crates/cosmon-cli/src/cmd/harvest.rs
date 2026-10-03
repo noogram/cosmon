@@ -177,6 +177,11 @@ fn record_update_from_dead_pane(
     let Ok(mol) = store.load_molecule(mol_id) else {
         return Ok(());
     };
+    // The update/restart notice is a codex widget; a Claude pane's passive
+    // footer with the same words must not tag the molecule (issue #161).
+    if mol.process.as_ref().and_then(|p| p.adapter_name.as_deref()) != Some("codex") {
+        return Ok(());
+    }
     let Some(session) = mol.tmux_session() else {
         return Ok(());
     };
@@ -611,6 +616,13 @@ mod tests {
         backend.install_pane_died_hook(session, "true").unwrap();
         let mut mol = store.load_molecule(&mid).unwrap();
         mol.session_name = Some(session.to_owned());
+        mol.process = Some(
+            cosmon_core::process::MoleculeProcess::new(
+                cosmon_core::id::WorkerId::new(session).unwrap(),
+                session,
+            )
+            .with_adapter_name("codex"),
+        );
         store.save_molecule(&mid, &mol).unwrap();
         let mut notice_visible = false;
         for _ in 0..40 {

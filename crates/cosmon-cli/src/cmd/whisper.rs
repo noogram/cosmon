@@ -594,7 +594,7 @@ fn whisper_pane_verdict(pane: &str) -> Result<(), WhisperError> {
     let scan = classify_pane(pane);
     if matches!(
         scan.class,
-        DialogueClass::MoneyStake | DialogueClass::Unknown
+        DialogueClass::MoneyStake | DialogueClass::Unknown | DialogueClass::LoginRequired
     ) {
         return Err(WhisperError::DialogueBlocked {
             class: scan.class,
