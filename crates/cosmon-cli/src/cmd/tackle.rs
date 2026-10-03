@@ -8013,7 +8013,7 @@ const DEFAULT_LOCAL_TIMEOUT_SECS: u64 = 600;
 
 /// Resolve the in-process loop budgets for `model` from the adapter row.
 ///
-/// Returns the harness [`LoopBudget`] plus the request-level bounds the
+/// Returns the harness [`cosmon_agent_harness::LoopBudget`] plus the request-level bounds the
 /// provider sends and checks. A zero or overflowing value is refused here, at
 /// dispatch, rather than discovered mid-run.
 pub(crate) fn resolve_inprocess_budget(
