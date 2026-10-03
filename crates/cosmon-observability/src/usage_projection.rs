@@ -61,11 +61,47 @@ fn observation_time(record: &UsageRecord) -> Option<chrono::DateTime<chrono::Utc
         .or(record.tokens.provenance.captured_at)
 }
 
+/// How many token categories a record measures.
+///
+/// A cumulative history can lose a category: once one sample omits it, the
+/// running total stops being a total and the category turns unavailable.
+fn measured_categories(record: &UsageRecord) -> usize {
+    let tokens = &record.tokens;
+    [
+        tokens.input_tokens,
+        tokens.cached_input_tokens,
+        tokens.cache_write_tokens,
+        tokens.output_tokens,
+        tokens.reasoning_output_tokens,
+    ]
+    .iter()
+    .filter(|count| count.measured().is_some())
+    .count()
+}
+
+/// Whether `record` is a later observation of the same history that knows
+/// strictly less than `current`.
+///
+/// Both records must carry a source time and the newer one must have lost a
+/// measured category. A smaller total alone is not enough: that is what an
+/// out-of-order replay of an old record looks like, and it must not win.
+fn is_later_degradation(record: &UsageRecord, current: &UsageRecord) -> bool {
+    match (observation_time(record), observation_time(current)) {
+        (Some(new), Some(old)) => {
+            new > old && measured_categories(record) < measured_categories(current)
+        }
+        _ => false,
+    }
+}
+
 /// Keep one latest cumulative record per history in stable key order.
 ///
 /// A larger measured total wins. Equal totals use the newest supplied source
 /// time, which lets a plan-only refresh replace stale window metadata without
-/// adding the cumulative tokens again.
+/// adding the cumulative tokens again. A later record that lost a measured
+/// category also wins even with a smaller total: its totals are the honest ones
+/// once a gap has made an earlier category unknowable, and keeping the earlier
+/// record would present a partial sum as complete.
 #[must_use]
 pub fn deduplicate_histories<'a>(
     records: impl IntoIterator<Item = &'a UsageRecord>,
@@ -74,7 +110,9 @@ pub fn deduplicate_histories<'a>(
     for record in records {
         let key = history_key(record);
         let replace = by_history.get(&key).is_none_or(|current| {
-            measured_total(record) > measured_total(current)
+            is_later_degradation(record, current)
+                || (!is_later_degradation(current, record)
+                    && measured_total(record) > measured_total(current))
                 || (measured_total(record) == measured_total(current)
                     && observation_time(record) > observation_time(current))
         });
@@ -246,6 +284,31 @@ mod tests {
         assert_eq!(summary.amount_usd, Some(1.50));
         assert_eq!(summary.priced_histories, 1);
         assert_eq!(summary.total_histories, 1);
+    }
+
+    #[test]
+    fn a_later_record_that_lost_a_category_replaces_the_fuller_earlier_one() {
+        use chrono::{TimeZone, Utc};
+        let mut earlier = fixture();
+        // `observed_at` outranks `captured_at`; clear it so the capture times decide.
+        earlier.tokens.provenance.observed_at = None;
+        earlier.tokens.input_tokens = TokenCount::Measured { tokens: 900 };
+        earlier.tokens.provenance.captured_at =
+            Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap());
+        let mut later = earlier.clone();
+        later.tokens.input_tokens = TokenCount::Unavailable {
+            reason: cosmon_core::usage::UnavailableReason::NotObserved,
+        };
+        later.tokens.provenance.captured_at =
+            Some(Utc.with_ymd_and_hms(2026, 1, 1, 0, 1, 0).unwrap());
+
+        let kept = deduplicate_histories([&earlier, &later]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].tokens.input_tokens, later.tokens.input_tokens);
+
+        // An out-of-order replay of the older, fuller record must not win back.
+        let kept = deduplicate_histories([&later, &earlier]);
+        assert_eq!(kept[0].tokens.input_tokens, later.tokens.input_tokens);
     }
 
     #[test]

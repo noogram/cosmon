@@ -7378,6 +7378,12 @@ fn spawn_openai_session(
         "openai-{}",
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
     );
+    let provider = provider.with_usage_sink(Some(inprocess_usage_sink(
+        mol,
+        wid,
+        mol_state_dir,
+        &invocation_uuid,
+    )));
     let telemetry = cosmon_provider::openai::telemetry_for(
         mol.id.clone(),
         wid.clone(),
@@ -8010,6 +8016,29 @@ fn preflight_local_adapter_model(
 /// rather than hanging the worker forever. Override with
 /// `[adapters.<name>].timeout_secs` or `COSMON_LOCAL_TIMEOUT`.
 const DEFAULT_LOCAL_TIMEOUT_SECS: u64 = 600;
+
+/// Build the usage recorder for one in-process worker attempt.
+///
+/// The history id carries the molecule, worker and the attempt's own
+/// invocation id, so a re-tackle starts a new cumulative history instead of
+/// extending the previous attempt's.
+fn inprocess_usage_sink(
+    mol: &MoleculeData,
+    wid: &cosmon_core::id::WorkerId,
+    mol_state_dir: &Path,
+    invocation_uuid: &str,
+) -> std::sync::Arc<cosmon_cli::harness_usage::HarnessUsageRecorder> {
+    std::sync::Arc::new(cosmon_cli::harness_usage::HarnessUsageRecorder::new(
+        mol_state_dir,
+        wid.clone(),
+        format!(
+            "harness/{}/{}/{invocation_uuid}",
+            mol.id.as_str(),
+            wid.as_str()
+        ),
+        None,
+    ))
+}
 
 /// Resolve the in-process loop budgets for `model` from the adapter row.
 ///
@@ -9186,6 +9215,12 @@ fn run_local_agent_loop(
         "local-{}",
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
     );
+    let provider = provider.with_usage_sink(Some(inprocess_usage_sink(
+        mol,
+        wid,
+        mol_state_dir,
+        &invocation_uuid,
+    )));
     // The `local` floor reuses `OpenAIProvider` against Ollama. Stamp the
     // provider-level IFBDD events (`WorkerSpawnAttempted`,
     // `AdapterLivenessProbed`) with the validated floor name, not the
@@ -9457,6 +9492,12 @@ fn spawn_anthropic_session(
         "anthropic-{}",
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
     );
+    let provider = provider.with_usage_sink(Some(inprocess_usage_sink(
+        mol,
+        wid,
+        mol_state_dir,
+        &invocation_uuid,
+    )));
     let telemetry = cosmon_provider::anthropic::telemetry_for(
         mol.id.clone(),
         wid.clone(),
