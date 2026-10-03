@@ -141,3 +141,56 @@ error prefixed `turn input`.
 
 `crates/cosmon-cli/tests/harness_work_turn_parity.rs` drives `cs tackle
 --adapter anthropic` against a loopback server.
+
+## Usage accounting
+
+Both direct arms and the `local` floor report the token counters each answered
+request carried. The provider decodes the response's `usage` block at the same
+seam where it already captures the served model, and hands one per-request
+sample to a usage sink. `cs tackle` attaches a `HarnessUsageRecorder`, which
+folds the samples of one worker attempt into a cumulative history and writes
+each step as a `UsageObserved` event: the same record, history identity and
+availability vocabulary the other usage producers use. No schema or price table
+was added.
+
+What a record means:
+
+- **Cumulative, per attempt.** The history id names the molecule, worker and
+  that attempt's invocation, so a re-tackle starts a new history. Each record
+  carries the running totals, never one request's delta.
+- **Unknown stays unknown.** A category is a measured total only while every
+  sample reported it. One response without usage, or with a value the schema
+  cannot hold (negative, fractional, a string, a subset larger than its total),
+  makes that category unavailable from then on. It is never counted as zero. The
+  projection keeps the latest record of a history when it lost a category, so an
+  earlier partial sum is not shown as complete.
+- **Sample identity.** A sample is identified by its provider response id.
+  Delivering the same response twice changes nothing and writes nothing. A
+  response with no id gets a sequence key, so it cannot be replayed through this
+  path.
+- **Every answered request counts.** Output-limited, refused and incomplete
+  responses keep the usage they carried. A request that produced no decodable
+  body (transport failure, an HTTP error, a stream that broke before its last
+  frame) produces no sample and leaves a gap that later samples cannot fill.
+- **Models stay separate.** Counters are paired with the model the response
+  reported. The requested model is not stored as the served one; when a response
+  names no model the segment axis is unavailable.
+- **Cost.** The API-equivalent amount comes from the bundled reference tariff
+  through the existing valuation. An unlisted model, a missing model or a counter
+  gap yields partial coverage or no amount; a gap never produces a complete
+  total.
+
+The chat-completions wire asks a streamed response for its final usage frame
+(`stream_options.include_usage`) only when a sink is attached, so the default
+request body is unchanged. The messages wire reports input excluding cache
+traffic; the recorder's input total is the sum of fresh input, cache reads and
+cache writes.
+
+### Limits
+
+Usage is what the provider reported, not a billing record. The reasoning subset
+is reported only by the chat wire, and the cache-write subset only by the
+messages wire. The accumulator lives in memory for the attempt: after a process
+restart a new history begins, and resuming a history is part of the checkpoint
+work, not of this unit. Records are written best-effort; a failed write is
+logged and the next record carries the same totals.

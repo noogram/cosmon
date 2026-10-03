@@ -107,7 +107,7 @@ use cosmon_state::events::worker_spawn::{
 use cosmon_transport::spawn::{AdapterTelemetry, SpawnConfig, SpawnError, WorkerHandle};
 
 #[cfg(feature = "http")]
-use cosmon_agent_harness::spine::Provider;
+use cosmon_agent_harness::spine::{Provider, ReportedCount, ReportedUsage, UsageSample, UsageSink};
 use cosmon_agent_harness::{
     HarnessError, TerminalDisposition, TerminalResponse, ToolCall as HarnessToolCall,
     ToolDeclaration, Turn,
@@ -317,6 +317,9 @@ pub struct AnthropicProvider {
     /// agnostic `Provider::one_turn(&self, log)` carries its own telemetry as a
     /// field, mirroring [`crate::openai::OpenAIProvider`].
     telemetry: Option<AdapterTelemetry>,
+    /// Receiver for the token counters each answered request reports. `None`
+    /// (the constructor default) leaves the response path as it was.
+    usage_sink: Option<std::sync::Arc<dyn UsageSink>>,
 }
 
 impl std::fmt::Debug for AnthropicProvider {
@@ -340,6 +343,7 @@ impl Default for AnthropicProvider {
             max_output_tokens: DEFAULT_MAX_TOKENS,
             max_input_tokens: None,
             telemetry: None,
+            usage_sink: None,
         }
     }
 }
@@ -356,6 +360,7 @@ impl AnthropicProvider {
             max_output_tokens: DEFAULT_MAX_TOKENS,
             max_input_tokens: None,
             telemetry: None,
+            usage_sink: None,
         }
     }
 
@@ -376,6 +381,7 @@ impl AnthropicProvider {
             max_output_tokens: DEFAULT_MAX_TOKENS,
             max_input_tokens: None,
             telemetry: None,
+            usage_sink: None,
         }
     }
 
@@ -399,6 +405,18 @@ impl AnthropicProvider {
     ) -> Self {
         self.max_input_tokens = max_input_tokens;
         self.max_output_tokens = max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        self
+    }
+
+    /// Deliver the token counters of every answered request to `sink`.
+    ///
+    /// Each response that reaches decoding produces one [`UsageSample`]
+    /// whatever its stop reason, so an output-limited or refused answer keeps
+    /// the tokens it consumed. Mirrors
+    /// [`crate::openai::OpenAIProvider::with_usage_sink`]. Builder-style.
+    #[must_use]
+    pub fn with_usage_sink(mut self, sink: Option<std::sync::Arc<dyn UsageSink>>) -> Self {
+        self.usage_sink = sink;
         self
     }
 
@@ -715,6 +733,56 @@ struct MessagesResponse {
     /// captures it as the realized id. `None`/absent on shapes that omit it.
     #[serde(default)]
     model: Option<String>,
+    /// Provider response identifier, the identity a usage sample dedups on.
+    #[serde(default)]
+    id: Option<String>,
+    /// Token counters, kept raw so a malformed field is reported as malformed
+    /// instead of failing the turn.
+    #[serde(default)]
+    usage: Option<serde_json::Value>,
+}
+
+/// Decode a `/v1/messages` `usage` object into typed per-request counters.
+///
+/// The wire reports `input_tokens` *excluding* cache reads and writes, while
+/// the canonical record's input total includes them as subsets, so the total
+/// is the sum of the three. A total is only reported when its base counter
+/// is, and a malformed part makes the total malformed rather than partial.
+#[cfg(feature = "http")]
+fn reported_usage_from_messages(usage: Option<&serde_json::Value>) -> ReportedUsage {
+    let Some(usage) = usage.filter(|u| !u.is_null()) else {
+        return ReportedUsage::default();
+    };
+    if !usage.is_object() {
+        return ReportedUsage {
+            input_tokens: ReportedCount::Malformed,
+            cached_input_tokens: ReportedCount::Malformed,
+            cache_write_tokens: ReportedCount::Malformed,
+            output_tokens: ReportedCount::Malformed,
+            reasoning_output_tokens: ReportedCount::NotReported,
+        };
+    }
+    let count = |key: &str| ReportedCount::from_json(usage.get(key));
+    let base = count("input_tokens");
+    let cache_read = count("cache_read_input_tokens");
+    let cache_write = count("cache_creation_input_tokens");
+    // An absent cache counter contributes nothing to the total, a malformed one
+    // poisons it, and an absent base leaves the total unknown.
+    let add = |total: ReportedCount, part: ReportedCount| match (total, part) {
+        (ReportedCount::Measured(a), ReportedCount::Measured(b)) => a
+            .checked_add(b)
+            .map_or(ReportedCount::Malformed, ReportedCount::Measured),
+        (ReportedCount::Measured(a), ReportedCount::NotReported) => ReportedCount::Measured(a),
+        (ReportedCount::NotReported, _) => ReportedCount::NotReported,
+        _ => ReportedCount::Malformed,
+    };
+    ReportedUsage {
+        input_tokens: add(add(base, cache_read), cache_write),
+        cached_input_tokens: cache_read,
+        cache_write_tokens: cache_write,
+        output_tokens: count("output_tokens"),
+        reasoning_output_tokens: ReportedCount::NotReported,
+    }
 }
 
 #[cfg(feature = "http")]
@@ -823,6 +891,19 @@ impl Provider for AnthropicProvider {
         // BEFORE the tool results land (I4 ordering — same discipline
         // as the OpenAI adapter).
         let assistant_blocks = parsed.content;
+
+        // Usage capture: one sample per answered request, delivered before the
+        // loop decides what the answer means so a limited or refused response
+        // keeps the tokens it consumed.
+        if let Some(sink) = &self.usage_sink {
+            sink.record(UsageSample {
+                response_id: parsed.id.filter(|id| !id.is_empty()),
+                provider: "anthropic",
+                requested_model: self.model.clone(),
+                served_model: parsed.model.clone(),
+                usage: reported_usage_from_messages(parsed.usage.as_ref()),
+            });
+        }
 
         let calls: Vec<HarnessToolCall> = assistant_blocks
             .iter()

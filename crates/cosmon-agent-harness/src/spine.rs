@@ -79,6 +79,88 @@ impl TerminalResponse {
     }
 }
 
+/// One token category from a provider response, with absence kept typed.
+///
+/// A provider that omits a category and a provider that reports a value the
+/// schema cannot hold are different facts, and neither is a measured zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReportedCount {
+    /// The response did not carry the category.
+    #[default]
+    NotReported,
+    /// The response carried a value that is not a non-negative integer.
+    Malformed,
+    /// The response reported this many tokens; zero is a real measurement.
+    Measured(u64),
+}
+
+impl ReportedCount {
+    /// Read one counter from a decoded provider response.
+    ///
+    /// A missing or `null` field is [`Self::NotReported`]; anything that is not
+    /// a non-negative integer (a float, a negative number, a string) is
+    /// [`Self::Malformed`] and is never coerced into a count.
+    #[must_use]
+    pub fn from_json(value: Option<&serde_json::Value>) -> Self {
+        match value {
+            None | Some(serde_json::Value::Null) => Self::NotReported,
+            Some(v) => v.as_u64().map_or(Self::Malformed, Self::Measured),
+        }
+    }
+}
+
+/// Token counters one provider response reported for its own request.
+///
+/// These are per-request values. Turning them into cumulative per-attempt
+/// histories is the accumulator's job; a sink must never publish one of these
+/// as a cumulative total.
+// The field names mirror the canonical `TokenUsage` record they feed.
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReportedUsage {
+    /// Total input tokens, including cache-read and cache-write input.
+    pub input_tokens: ReportedCount,
+    /// Cache-read subset of the input.
+    pub cached_input_tokens: ReportedCount,
+    /// Cache-write subset of the input.
+    pub cache_write_tokens: ReportedCount,
+    /// Total output tokens, including reasoning output.
+    pub output_tokens: ReportedCount,
+    /// Reasoning subset of the output.
+    pub reasoning_output_tokens: ReportedCount,
+}
+
+/// One answered request, as seen at the provider response boundary.
+///
+/// The requested model is what cosmon asked for; the served model is what the
+/// response said ran. They are kept apart so neither stands in for the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageSample {
+    /// Provider response identifier, when the response carried one. It is the
+    /// sample identity a replayed receipt deduplicates on.
+    pub response_id: Option<String>,
+    /// Provider family that answered, such as `openai` or `anthropic`.
+    pub provider: &'static str,
+    /// Model identifier cosmon sent in the request.
+    pub requested_model: String,
+    /// Model identifier the response reported, when it reported one.
+    pub served_model: Option<String>,
+    /// Counters the response reported for this request.
+    pub usage: ReportedUsage,
+}
+
+/// Receives one [`UsageSample`] per answered request.
+///
+/// A sample is delivered for every response that reached decoding, including
+/// output-limited, refused and incomplete ones: those requests consumed tokens
+/// whatever the loop later does with the answer. A request that never produced
+/// a decodable body produces no sample, so the history it belongs to has a gap
+/// that no later sample can fill.
+pub trait UsageSink: Send + Sync {
+    /// Record one answered request. Must not block the request path.
+    fn record(&self, sample: UsageSample);
+}
+
 /// One round-trip outcome from [`Provider::one_turn`].
 ///
 /// `L::AssistantMsg` is opaque to the spine — the provider returns

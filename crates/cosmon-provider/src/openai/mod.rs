@@ -87,7 +87,7 @@ use cosmon_state::events::worker_spawn::{
 use cosmon_transport::spawn::{AdapterTelemetry, SpawnConfig, SpawnError, WorkerHandle};
 
 #[cfg(feature = "http")]
-use cosmon_agent_harness::spine::Provider;
+use cosmon_agent_harness::spine::{Provider, ReportedCount, ReportedUsage, UsageSample, UsageSink};
 use cosmon_agent_harness::{
     HarnessError, TerminalDisposition, TerminalResponse, ToolCall as HarnessToolCall,
     ToolDeclaration, Turn,
@@ -541,6 +541,10 @@ pub struct OpenAIProvider {
     /// secret-bearing form — the struct carries only molecule/worker IDs
     /// and a state-dir path.
     telemetry: Option<AdapterTelemetry>,
+    /// Receiver for the token counters each answered request reports. `None`
+    /// (the constructor default) leaves the request body and the response path
+    /// exactly as they were: usage is neither requested nor decoded.
+    usage_sink: Option<std::sync::Arc<dyn UsageSink>>,
 }
 
 impl std::fmt::Debug for OpenAIProvider {
@@ -574,6 +578,7 @@ impl OpenAIProvider {
             max_output_tokens: None,
             max_input_tokens: None,
             telemetry: None,
+            usage_sink: None,
         }
     }
 
@@ -621,6 +626,7 @@ impl OpenAIProvider {
             max_output_tokens: None,
             max_input_tokens: None,
             telemetry: None,
+            usage_sink: None,
         }
     }
 
@@ -691,6 +697,17 @@ impl OpenAIProvider {
     #[must_use]
     pub fn with_telemetry(mut self, telemetry: Option<AdapterTelemetry>) -> Self {
         self.telemetry = telemetry;
+        self
+    }
+
+    /// Deliver the token counters of every answered request to `sink`.
+    ///
+    /// With a sink attached the request asks the server to report usage on a
+    /// streamed response, and each response that reaches decoding produces one
+    /// [`UsageSample`] whatever its terminal disposition. Builder-style.
+    #[must_use]
+    pub fn with_usage_sink(mut self, sink: Option<std::sync::Arc<dyn UsageSink>>) -> Self {
+        self.usage_sink = sink;
         self
     }
 
@@ -1074,6 +1091,16 @@ struct ChatRequest<'a> {
     /// [`consume_chat_completion`]), so a malformed call becomes a recoverable
     /// `tool_result` bound to its `tool_call_id` instead of a dead worker.
     stream: bool,
+    /// Ask a streaming server for its final usage frame. Present only when a
+    /// usage sink is attached, so the default wire body is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+/// `stream_options` of a streamed chat-completions request.
+#[derive(Debug, Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 /// OpenAI chat-completions message envelope. `pub` only so the
@@ -1134,6 +1161,13 @@ struct ChatResponse {
     /// captures it as the realized id. `None`/absent on shapes that omit it.
     #[serde(default)]
     model: Option<String>,
+    /// Provider response identifier, the identity a usage sample dedups on.
+    #[serde(default)]
+    id: Option<String>,
+    /// Token counters for this request, kept raw so a malformed field is
+    /// reported as malformed instead of failing the whole turn.
+    #[serde(default)]
+    usage: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1200,6 +1234,9 @@ impl Provider for OpenAIProvider {
                     // — streaming only changes how the *success* body is
                     // consumed (see `consume_chat_completion`).
                     stream: true,
+                    stream_options: self.usage_sink.is_some().then_some(StreamOptions {
+                        include_usage: true,
+                    }),
                 };
 
                 // Final-request guard: the body is exactly what is about to be
@@ -1352,7 +1389,22 @@ impl Provider for OpenAIProvider {
             wire_calls,
             realized_model,
             disposition,
+            usage,
+            response_id,
         } = consume_chat_completion(resp).await?;
+
+        // Usage capture: one sample per answered request, delivered before the
+        // loop decides what the answer means so a limited, refused or
+        // incomplete response keeps the tokens it consumed.
+        if let Some(sink) = &self.usage_sink {
+            sink.record(UsageSample {
+                response_id,
+                provider: "openai",
+                requested_model: self.model.clone(),
+                served_model: realized_model.clone(),
+                usage: reported_usage_from_chat(usage.as_ref()),
+            });
+        }
 
         // Realized-model capture (F-01): emit `ModelObserved` at the response
         // seam, scoped to this worker, first-observation + on-change. The served
@@ -1399,6 +1451,34 @@ impl Provider for OpenAIProvider {
 
     fn tool_schema(&self) -> Vec<ToolDeclaration> {
         self.tools.clone()
+    }
+}
+
+/// Decode a chat-completions `usage` object into typed per-request counters.
+///
+/// `prompt_tokens` already includes the cached subset and `completion_tokens`
+/// already includes the reasoning subset, which is the canonical convention, so
+/// no category is added to another.
+fn reported_usage_from_chat(usage: Option<&serde_json::Value>) -> ReportedUsage {
+    let Some(usage) = usage.filter(|u| !u.is_null()) else {
+        return ReportedUsage::default();
+    };
+    if !usage.is_object() {
+        return ReportedUsage {
+            input_tokens: ReportedCount::Malformed,
+            cached_input_tokens: ReportedCount::Malformed,
+            cache_write_tokens: ReportedCount::NotReported,
+            output_tokens: ReportedCount::Malformed,
+            reasoning_output_tokens: ReportedCount::Malformed,
+        };
+    }
+    let count = |pointer: &str| ReportedCount::from_json(usage.pointer(pointer));
+    ReportedUsage {
+        input_tokens: count("/prompt_tokens"),
+        cached_input_tokens: count("/prompt_tokens_details/cached_tokens"),
+        cache_write_tokens: ReportedCount::NotReported,
+        output_tokens: count("/completion_tokens"),
+        reasoning_output_tokens: count("/completion_tokens_details/reasoning_tokens"),
     }
 }
 
@@ -1514,6 +1594,12 @@ struct StreamChunk {
     /// (delib-20260718-c70e / F-01). Captured as the realized id.
     #[serde(default)]
     model: Option<String>,
+    /// Response identifier, repeated on every frame of one response.
+    #[serde(default)]
+    id: Option<String>,
+    /// Token counters, normally on the final frame only.
+    #[serde(default)]
+    usage: Option<serde_json::Value>,
 }
 
 #[cfg(feature = "http")]
@@ -1577,6 +1663,10 @@ struct StreamAccumulator {
     finish_reason: Option<String>,
     saw_done: bool,
     malformed_data: bool,
+    /// Last non-null `usage` frame seen; a server that repeats it reports the
+    /// same cumulative request counters each time, so the last one wins.
+    usage: Option<serde_json::Value>,
+    response_id: Option<String>,
 }
 
 #[cfg(feature = "http")]
@@ -1622,6 +1712,12 @@ impl StreamAccumulator {
             self.malformed_data = true;
             return true;
         };
+        if chunk.usage.is_some() {
+            self.usage = chunk.usage;
+        }
+        if self.response_id.is_none() {
+            self.response_id = chunk.id.filter(|id| !id.is_empty());
+        }
         for choice in chunk.choices {
             if choice.finish_reason.is_some() {
                 self.finish_reason = choice.finish_reason;
@@ -1791,12 +1887,16 @@ async fn consume_chat_completion(
     }
 
     if saw_sse_frame {
+        let usage = acc.usage.take();
+        let response_id = acc.response_id.take();
         let (content, wire_calls, disposition) = acc.finish();
         return Ok(ChatCompletionOutcome {
             content,
             wire_calls,
             realized_model,
             disposition,
+            usage,
+            response_id,
         });
     }
 
@@ -1804,6 +1904,7 @@ async fn consume_chat_completion(
     let parsed: ChatResponse =
         serde_json::from_str(raw_body.trim()).map_err(|e| OpenAiError::Decode(e.to_string()))?;
     let realized_model = realized_model.or(parsed.model);
+    let (usage, response_id) = (parsed.usage, parsed.id.filter(|id| !id.is_empty()));
     let choice = parsed
         .choices
         .into_iter()
@@ -1824,6 +1925,8 @@ async fn consume_chat_completion(
             .finish_reason
             .as_deref()
             .map_or(TerminalDisposition::Incomplete, map_openai_finish_reason),
+        usage,
+        response_id,
     })
 }
 
@@ -1835,6 +1938,8 @@ struct ChatCompletionOutcome {
     wire_calls: Vec<WireToolCall>,
     realized_model: Option<String>,
     disposition: TerminalDisposition,
+    usage: Option<serde_json::Value>,
+    response_id: Option<String>,
 }
 
 /// Pull the served `model` out of one SSE line (`data: {…}`), if it carries

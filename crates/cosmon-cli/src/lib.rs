@@ -26,6 +26,8 @@ pub mod kill_switches;
 pub mod tackle_env;
 
 pub mod briefing_receipt_hook;
+/// Usage capture for the in-process direct arms through the canonical schema.
+pub mod harness_usage;
 pub mod plan_observation_hook;
 pub mod work_hook;
 pub mod work_turn_input;
