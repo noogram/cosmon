@@ -7359,11 +7359,16 @@ fn spawn_openai_session(
     // Capture the model id before it is moved into the provider — the
     // synthesis-persistence trailer names the model that produced the output.
     let model_label = model.clone();
+    let (loop_budget, resolved_budget) = resolve_inprocess_budget(adapter_entry, &model)?;
     let provider = if let Some(url) = base_url {
         cosmon_provider::OpenAIProvider::with_base_url(api_key, model, url)
     } else {
         cosmon_provider::OpenAIProvider::new(api_key, model)
-    };
+    }
+    .with_request_budget(
+        resolved_budget.max_input_tokens,
+        resolved_budget.max_output_tokens,
+    );
     let timeout_secs = resolve_local_timeout_secs(adapter_entry.and_then(|e| e.timeout_secs), None);
     let provider = provider.with_timeout(std::time::Duration::from_secs(timeout_secs));
 
@@ -7408,13 +7413,14 @@ fn spawn_openai_session(
         run_local_future_with_timeout(
             &rt,
             std::time::Duration::from_secs(timeout_secs),
-            cosmon_agent_harness::spine::run_loop_counted_with_turn_input_and_progress(
+            cosmon_agent_harness::spine::run_loop_counted_with_turn_input_and_progress_budgeted(
                 &provider.clone().with_telemetry(Some(telemetry.clone())),
                 prompt,
                 worktree_path,
                 Some(&telemetry),
                 source,
                 &mut progress,
+                loop_budget,
             ),
         )
         .map_err(|_| format!("wall-clock deadline ({timeout_secs}s) elapsed"))
@@ -7423,12 +7429,13 @@ fn spawn_openai_session(
         run_local_future_with_timeout(
             &rt,
             std::time::Duration::from_secs(timeout_secs),
-            cosmon_provider::openai::run_agent_loop_counted_with_progress(
+            cosmon_provider::openai::run_agent_loop_counted_with_progress_budgeted(
                 &provider,
                 prompt,
                 worktree_path,
                 Some(&telemetry),
                 &mut progress,
+                loop_budget,
             ),
         )
         .map_err(|_| format!("wall-clock deadline ({timeout_secs}s) elapsed"))
@@ -8003,6 +8010,32 @@ fn preflight_local_adapter_model(
 /// rather than hanging the worker forever. Override with
 /// `[adapters.<name>].timeout_secs` or `COSMON_LOCAL_TIMEOUT`.
 const DEFAULT_LOCAL_TIMEOUT_SECS: u64 = 600;
+
+/// Resolve the in-process loop budgets for `model` from the adapter row.
+///
+/// Returns the harness [`LoopBudget`] plus the request-level bounds the
+/// provider sends and checks. A zero or overflowing value is refused here, at
+/// dispatch, rather than discovered mid-run.
+pub(crate) fn resolve_inprocess_budget(
+    adapter_entry: Option<&AdapterEntry>,
+    model: &str,
+) -> anyhow::Result<(
+    cosmon_agent_harness::LoopBudget,
+    cosmon_core::config::ResolvedLoopBudget,
+)> {
+    let resolved = adapter_entry
+        .map(|e| e.loop_budget(model))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("cs tackle: invalid loop budget for model {model:?}: {e}"))?
+        .unwrap_or_default();
+    let budget = cosmon_agent_harness::LoopBudget::new(
+        resolved.max_turns,
+        resolved.max_tool_calls,
+        resolved.max_input_tokens,
+    )
+    .map_err(|e| anyhow::anyhow!("cs tackle: invalid loop budget for model {model:?}: {e}"))?;
+    Ok((budget, resolved))
+}
 
 /// Resolve the `local` / `ollama` floor's per-request HTTP timeout, in
 /// seconds (task-20260707-7d27, hole #3).
@@ -9405,11 +9438,16 @@ fn spawn_anthropic_session(
     // Capture the model id before it is moved into the provider — the
     // synthesis-persistence trailer names the model that produced the output.
     let model_label = model.clone();
+    let (loop_budget, resolved_budget) = resolve_inprocess_budget(adapter_entry, &model)?;
     let provider = if let Some(url) = base_url {
         cosmon_provider::AnthropicProvider::with_base_url(api_key, model, url)
     } else {
         cosmon_provider::AnthropicProvider::new(api_key, model)
-    };
+    }
+    .with_request_budget(
+        resolved_budget.max_input_tokens,
+        resolved_budget.max_output_tokens,
+    );
     let timeout_secs = resolve_local_timeout_secs(adapter_entry.and_then(|e| e.timeout_secs), None);
     let provider = provider.with_timeout(std::time::Duration::from_secs(timeout_secs));
 
@@ -9446,12 +9484,13 @@ fn spawn_anthropic_session(
     let outcome = run_local_future_with_timeout(
         &rt,
         std::time::Duration::from_secs(timeout_secs),
-        cosmon_provider::anthropic::run_agent_loop_counted_with_progress(
+        cosmon_provider::anthropic::run_agent_loop_counted_with_progress_budgeted(
             &provider,
             prompt,
             worktree_path,
             Some(&telemetry),
             &mut progress,
+            loop_budget,
         ),
     )
     .map_err(|_| format!("wall-clock deadline ({timeout_secs}s) elapsed"))

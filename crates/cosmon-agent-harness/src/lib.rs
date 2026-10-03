@@ -91,7 +91,7 @@ pub mod spine;
 pub mod tool;
 pub mod tools;
 
-pub use budget::{ContextBudget, ToolBudget, TurnBudget};
+pub use budget::{ContextBudget, LoopBudget, ToolBudget, TurnBudget, ZeroBudget};
 pub use compaction::{
     build_summary_body, CompactionError, CompactionPolicy, CompactionReport,
     COMPACTION_SUMMARY_PREFIX,

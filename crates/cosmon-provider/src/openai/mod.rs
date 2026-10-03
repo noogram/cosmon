@@ -525,6 +525,12 @@ pub struct OpenAIProvider {
     /// (e.g. [`RetryPolicy::DISABLED`] to delegate pacing to an external
     /// scheduler). See [`RetryPolicy`] for why pacing lives in the adapter.
     retry: RetryPolicy,
+    /// Output-token bound sent as `max_tokens` on every request. `None` omits
+    /// the field and leaves the bound to the server's own default.
+    max_output_tokens: Option<u32>,
+    /// Estimated-input-token ceiling for the serialized request body, checked
+    /// immediately before each network call. `None` disables the check.
+    max_input_tokens: Option<u32>,
     /// Optional adapter telemetry so [`Self::one_turn`] can emit the
     /// `AdapterLivenessProbed { Retried }` trail on each in-place transient
     /// retry (delib-20260707-df9b ride-along). `None` — the constructor
@@ -565,6 +571,8 @@ impl OpenAIProvider {
             timeout: Duration::from_secs(60),
             tools: default_tool_declarations(),
             retry: RetryPolicy::DEFAULT,
+            max_output_tokens: None,
+            max_input_tokens: None,
             telemetry: None,
         }
     }
@@ -610,6 +618,8 @@ impl OpenAIProvider {
             timeout: Duration::from_secs(60),
             tools: default_tool_declarations(),
             retry: RetryPolicy::DEFAULT,
+            max_output_tokens: None,
+            max_input_tokens: None,
             telemetry: None,
         }
     }
@@ -634,6 +644,21 @@ impl OpenAIProvider {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Bound the request: `max_output_tokens` is sent as `max_tokens`;
+    /// `max_input_tokens` is the estimated-token ceiling the serialized body
+    /// must fit under before any network call (a corrective retry is checked
+    /// again, since it changes the body). Builder-style.
+    #[must_use]
+    pub fn with_request_budget(
+        mut self,
+        max_input_tokens: Option<u32>,
+        max_output_tokens: Option<u32>,
+    ) -> Self {
+        self.max_input_tokens = max_input_tokens;
+        self.max_output_tokens = max_output_tokens;
         self
     }
 
@@ -1031,6 +1056,9 @@ struct ChatRequest<'a> {
     tools: Option<&'a [ToolSpec<'a>]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'a str>,
+    /// Output-token bound; omitted when the operator configured none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     /// Request a server-**streamed** SSE response (`stream:true`).
     ///
     /// Load-bearing for the mode-C fix (delib-20260707-df9b M2). With
@@ -1164,6 +1192,7 @@ impl Provider for OpenAIProvider {
                     messages: &current_messages,
                     tools: Some(&tools),
                     tool_choice: Some("auto"),
+                    max_tokens: self.max_output_tokens,
                     // Own-side tool-call extraction (delib-20260707-df9b M2):
                     // stream the response so ollama performs no server-side
                     // tool-call parse (the mode-C HTTP 500 trigger). The raw
@@ -1172,6 +1201,23 @@ impl Provider for OpenAIProvider {
                     // consumed (see `consume_chat_completion`).
                     stream: true,
                 };
+
+                // Final-request guard: the body is exactly what is about to be
+                // sent, so system text, messages, tool arguments/results and
+                // tool schemas all count, and a corrective message spliced in
+                // by a retry is checked on its own iteration. Refusal happens
+                // before any network I/O.
+                if let Some(limit) = self.max_input_tokens {
+                    let estimated = serde_json::to_vec(&body)
+                        .map(|b| estimate_body_tokens(b.len()))
+                        .map_err(|e| OpenAiError::Decode(e.to_string()))?;
+                    if estimated > limit {
+                        return Err(OpenAiError::ContextOverflow {
+                            estimated_tokens: estimated,
+                            limit,
+                        });
+                    }
+                }
 
                 // `.send()` is NOT `?`-propagated any more: a pre-response
                 // transport failure (DNS, connection refused, TLS, send
@@ -1879,6 +1925,14 @@ pub async fn run_agent_loop_counted(
         .await
 }
 
+/// Estimated tokens for a serialized request of `bytes` bytes: one token per
+/// four bytes, rounded up. A byte count is never below the character count, so
+/// non-ASCII text is over- rather than under-estimated. This is a heuristic,
+/// not a tokenizer.
+fn estimate_body_tokens(bytes: usize) -> u32 {
+    u32::try_from(bytes.div_ceil(4)).unwrap_or(u32::MAX)
+}
+
 /// Run the counted loop while exposing completed tool work to the caller.
 ///
 /// # Errors
@@ -1898,9 +1952,33 @@ pub async fn run_agent_loop_counted_with_progress(
     // transport-agnostic), so the adapter carries its own telemetry as a
     // field. The clone is cheap — a handful of IDs + a path — and leaves
     // the caller's `provider` untouched.
+    run_agent_loop_counted_with_progress_budgeted(
+        provider,
+        briefing,
+        work_dir,
+        telemetry,
+        progress,
+        cosmon_agent_harness::LoopBudget::DEFAULT,
+    )
+    .await
+}
+
+/// [`run_agent_loop_counted_with_progress`] with explicit loop ceilings.
+///
+/// # Errors
+/// Returns the same typed errors as [`run_agent_loop_counted`].
+#[cfg(feature = "http")]
+pub async fn run_agent_loop_counted_with_progress_budgeted(
+    provider: &OpenAIProvider,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+    progress: &mut cosmon_agent_harness::spine::LoopProgress,
+    budget: cosmon_agent_harness::LoopBudget,
+) -> Result<cosmon_agent_harness::WorkerOutcome, OpenAiError> {
     let provider = provider.clone().with_telemetry(telemetry.cloned());
-    match cosmon_agent_harness::spine::run_loop_counted_with_progress(
-        &provider, briefing, work_dir, telemetry, progress,
+    match cosmon_agent_harness::spine::run_loop_counted_with_progress_budgeted(
+        &provider, briefing, work_dir, telemetry, progress, budget,
     )
     .await
     {

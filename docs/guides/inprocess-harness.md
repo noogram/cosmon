@@ -74,3 +74,50 @@ and write anything the user can, as described above.
 `crates/cosmon-agent-harness/tests/file_authority.rs` plants links to a synthetic
 file outside a temporary root and drives every tool through the default
 registry.
+
+## Turn, tool and context budgets
+
+The `openai` and `anthropic` direct adapters run the loop in-process. Its
+ceilings are configured per adapter in `.cosmon/config.toml` and, optionally,
+per exact model id:
+
+```toml
+[adapters.openai]
+max_turns = 80            # model round-trips; default 30
+max_tool_calls = 200      # cumulative tool dispatches; default 64
+max_input_tokens = 120000 # estimated input ceiling; default 32768
+max_tokens = 4096         # output bound sent on the wire; default: none (openai), 8192 (anthropic)
+
+[adapters.openai.models."gpt-4o-mini"]
+max_turns = 120           # wins over the adapter-level value for this model only
+```
+
+Precedence per field is the exact-model row, then the adapter-level field, then
+the built-in default. Model ids are matched exactly; no capacity is inferred
+from a name. A zero value, or an input ceiling plus output bound that overflows
+`u32`, is refused at dispatch with the offending field named. An absent row
+keeps the previous fixed behaviour.
+
+`max_tokens` is sent as `max_tokens` on the chat-completions body and as
+`max_tokens` on the messages body.
+
+### Final request guard
+
+When `max_input_tokens` is configured, the serialized request body is measured
+immediately before each network call and refused with `ContextOverflow` if its
+estimate exceeds the ceiling. The body includes the system text, messages, tool
+arguments and results, and tool schemas, so a large tool argument from an
+earlier turn counts. The check runs on every attempt, including a retry that
+splices in a corrective message. A refused request sends nothing.
+
+### Limits
+
+- The estimate is one token per four bytes, rounded up. It is a heuristic, not
+  a tokenizer, and non-ASCII text is over-estimated. The ceiling is not
+  validated against the model's real context window.
+- The guard is active only when `max_input_tokens` is set. The spine's own
+  log-based check keeps using the default ceiling otherwise.
+- The guard refuses; it does not select or defer request-only peer input, and
+  it does not compact in response to a refusal. Peer-input selection under the
+  cap, and the interactive session's budgets, are not changed here.
+- Input and output allowances are not checked against a known model capacity.

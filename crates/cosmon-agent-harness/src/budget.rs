@@ -24,7 +24,7 @@
 /// and small enough that a runaway tool-call cascade cannot silently
 /// burn the operator's API budget. ADR-102 §D-6 names a v1 target of
 /// ~30 for real long-horizon work; the bump is a separate decision.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnBudget {
     /// Hard ceiling on the loop's `for turn in 0..max_turns` iteration.
     pub max_turns: u32,
@@ -54,7 +54,7 @@ impl Default for TurnBudget {
 /// promotion can bind `max_tool_calls` to an `I2` trait bound without
 /// changing the public budget API. The default (64) leaves headroom
 /// for the future `exec_command` + `edit_file` + `read_file` cascade.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToolBudget {
     /// Hard ceiling on `used_tools` across the entire loop.
     pub max_tool_calls: u32,
@@ -85,7 +85,7 @@ impl Default for ToolBudget {
 ///
 /// Loud failure on breach: [`crate::error::HarnessError::ContextOverflow`]
 /// — SF-5 in the ADR-100 silent-failure taxonomy.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextBudget {
     /// Hard ceiling on estimated input tokens, evaluated pre-dispatch.
     pub max_input_tokens: u32,
@@ -111,5 +111,113 @@ impl ContextBudget {
 impl Default for ContextBudget {
     fn default() -> Self {
         Self::DEFAULT
+    }
+}
+
+/// The three loop ceilings resolved together: turns, cumulative tool calls and
+/// estimated input tokens.
+///
+/// [`Self::DEFAULT`] is the historical fixed behaviour (30 turns, 64 tool
+/// calls, 32 768 estimated input tokens). A caller that reads configuration
+/// builds one with [`Self::new`], which refuses zero values, and hands it to
+/// the `*_budgeted` loop entry points. The legacy entry points use
+/// [`Self::DEFAULT`] and are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopBudget {
+    /// Model round-trip ceiling.
+    pub turns: TurnBudget,
+    /// Cumulative tool-dispatch ceiling.
+    pub tools: ToolBudget,
+    /// Estimated input-token ceiling.
+    pub context: ContextBudget,
+}
+
+/// A [`LoopBudget`] field was zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("{field} must be greater than zero")]
+pub struct ZeroBudget {
+    /// Name of the offending field.
+    pub field: &'static str,
+}
+
+impl LoopBudget {
+    /// The fixed budgets the loop used before they were configurable.
+    pub const DEFAULT: Self = Self {
+        turns: TurnBudget::DEFAULT,
+        tools: ToolBudget::DEFAULT,
+        context: ContextBudget::DEFAULT,
+    };
+
+    /// Build a budget, taking the default for each `None`.
+    ///
+    /// # Errors
+    ///
+    /// [`ZeroBudget`] when a provided value is zero: a zero turn budget would
+    /// stop the loop before its first request, a zero input ceiling would
+    /// refuse every briefing.
+    pub fn new(
+        max_turns: Option<u32>,
+        max_tool_calls: Option<u32>,
+        max_input_tokens: Option<u32>,
+    ) -> Result<Self, ZeroBudget> {
+        let nonzero = |field: &'static str, v: Option<u32>, d: u32| match v {
+            Some(0) => Err(ZeroBudget { field }),
+            Some(n) => Ok(n),
+            None => Ok(d),
+        };
+        Ok(Self {
+            turns: TurnBudget {
+                max_turns: nonzero("max_turns", max_turns, TurnBudget::DEFAULT.max_turns)?,
+            },
+            tools: ToolBudget {
+                max_tool_calls: nonzero(
+                    "max_tool_calls",
+                    max_tool_calls,
+                    ToolBudget::DEFAULT.max_tool_calls,
+                )?,
+            },
+            context: ContextBudget {
+                max_input_tokens: nonzero(
+                    "max_input_tokens",
+                    max_input_tokens,
+                    ContextBudget::DEFAULT.max_input_tokens,
+                )?,
+            },
+        })
+    }
+}
+
+impl Default for LoopBudget {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+#[cfg(test)]
+mod loop_budget_tests {
+    use super::*;
+
+    /// Absent values keep the historical fixed budgets.
+    #[test]
+    fn defaults_when_unset() {
+        assert_eq!(LoopBudget::new(None, None, None), Ok(LoopBudget::DEFAULT));
+    }
+
+    /// Provided values replace the matching default only.
+    #[test]
+    fn overrides_apply_per_field() {
+        let b = LoopBudget::new(Some(80), None, Some(100_000)).unwrap_or_default();
+        assert_eq!(b.turns.max_turns, 80);
+        assert_eq!(b.tools.max_tool_calls, 64);
+        assert_eq!(b.context.max_input_tokens, 100_000);
+    }
+
+    /// A zero budget is refused rather than silently stopping the loop.
+    #[test]
+    fn zero_is_refused() {
+        assert_eq!(
+            LoopBudget::new(Some(0), None, None),
+            Err(ZeroBudget { field: "max_turns" })
+        );
     }
 }
