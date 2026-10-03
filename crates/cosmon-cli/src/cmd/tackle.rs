@@ -9392,7 +9392,7 @@ fn missing_openai_credentials_message(adapter_entry: Option<&AdapterEntry>) -> S
 ///    default (`https://api.anthropic.com`).
 /// 3. `[adapters.anthropic].default_model` > `ANTHROPIC_MODEL` >
 ///    [`crate::cmd::config::ANTHROPIC_DEFAULT_MODEL`].
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn spawn_anthropic_session(
     wid: &cosmon_core::id::WorkerId,
     session_name: &str,
