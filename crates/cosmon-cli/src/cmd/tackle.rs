@@ -9480,19 +9480,41 @@ fn spawn_anthropic_session(
         .enable_all()
         .build()
         .map_err(|e| anyhow::anyhow!("cs tackle: tokio runtime build failed: {e}"))?;
+    // Same molecule context and work-turn input as the chat-completions arm:
+    // the shell tool reaches its own molecule through `COSMON_MOL_DIR`, and a
+    // declared work roster's pending evidence rides on the next request.
+    std::env::set_var("COSMON_MOL_DIR", mol_state_dir);
+    let turn_input = cosmon_cli::work_turn_input::WorkTurnInput::discover(mol_state_dir)
+        .map_err(|e| anyhow::anyhow!("cs tackle: work turn input failed: {e}"))?;
     let mut progress = cosmon_agent_harness::spine::LoopProgress::default();
-    let outcome = run_local_future_with_timeout(
-        &rt,
-        std::time::Duration::from_secs(timeout_secs),
-        cosmon_provider::anthropic::run_agent_loop_counted_with_progress_budgeted(
-            &provider,
-            prompt,
-            worktree_path,
-            Some(&telemetry),
-            &mut progress,
-            loop_budget,
-        ),
-    )
+    let outcome = if let Some(source) = turn_input.as_ref() {
+        run_local_future_with_timeout(
+            &rt,
+            std::time::Duration::from_secs(timeout_secs),
+            cosmon_provider::anthropic::run_agent_loop_counted_with_turn_input_and_progress_budgeted(
+                &provider,
+                prompt,
+                worktree_path,
+                Some(&telemetry),
+                source,
+                &mut progress,
+                loop_budget,
+            ),
+        )
+    } else {
+        run_local_future_with_timeout(
+            &rt,
+            std::time::Duration::from_secs(timeout_secs),
+            cosmon_provider::anthropic::run_agent_loop_counted_with_progress_budgeted(
+                &provider,
+                prompt,
+                worktree_path,
+                Some(&telemetry),
+                &mut progress,
+                loop_budget,
+            ),
+        )
+    }
     .map_err(|_| format!("wall-clock deadline ({timeout_secs}s) elapsed"))
     .and_then(|result| result.map_err(|e| e.to_string()))
     .map_err(|message| InprocessLoopFailure {

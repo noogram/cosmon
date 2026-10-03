@@ -258,6 +258,15 @@ The field is part of the formula contract, not a new lifecycle command. Tool
 counts and provider-normal termination remain visible evidence but never grant
 completion authority by themselves.
 
+## Work-turn input on the messages direct arm (issue #151, W6)
+
+| Capability | CLI | Native UI | Other CLI views |
+|---|---|---|---|
+| Deliver pending work evidence to an `anthropic` worker | `cs tackle --adapter anthropic` includes the member's pending `cs work` envelopes in its next request, as the `openai` arm does, and records a delivery receipt only after the request is answered | No equivalent delivery control audited | `cs work list` shows the delivery attempt per envelope |
+
+No command or flag changes. The receipt shows that the bytes were in a
+successfully answered request, not that the model used them.
+
 ## Blocked dependents (issue #118)
 
 | Capability | CLI | Native UI | Other CLI views |

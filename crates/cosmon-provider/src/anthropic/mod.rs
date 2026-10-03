@@ -1018,6 +1018,75 @@ pub async fn run_agent_loop_counted_with_progress_budgeted(
     }
 }
 
+/// [`run_agent_loop_counted_with_progress_budgeted`] with a request-only
+/// turn input source (peer work evidence).
+///
+/// Each selected block is appended to a clone of the log for exactly one
+/// request; the receipt is recorded after that request returns, so a failed
+/// HTTP call or an undecodable response records a failure and never an
+/// observed delivery. Errors land on the same [`AnthropicError`] classes and
+/// the same silent-failure telemetry as the input-free loop, so a run with and
+/// without peer input is told apart by its cause, not by its reporting path. A
+/// failure of the input source itself (custody unreadable, receipt not
+/// persisted) is reported as [`AnthropicError::ToolIo`] with a `turn input`
+/// prefix.
+///
+/// # Errors
+/// Returns the same typed errors as [`run_agent_loop_counted`].
+#[cfg(feature = "http")]
+pub async fn run_agent_loop_counted_with_turn_input_and_progress_budgeted<S>(
+    provider: &AnthropicProvider,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+    source: &S,
+    progress: &mut cosmon_agent_harness::spine::LoopProgress,
+    budget: cosmon_agent_harness::LoopBudget,
+) -> Result<cosmon_agent_harness::WorkerOutcome, AnthropicError>
+where
+    S: cosmon_agent_harness::spine::TurnInputSource,
+{
+    use cosmon_agent_harness::spine::TurnInputProviderError;
+
+    let provider = provider.clone().with_telemetry(telemetry.cloned());
+    match cosmon_agent_harness::spine::run_loop_counted_with_turn_input_and_progress_budgeted(
+        &provider, briefing, work_dir, telemetry, source, progress, budget,
+    )
+    .await
+    {
+        Ok(outcome) => Ok(outcome),
+        Err(harness_err) => {
+            let flattened = match harness_err {
+                HarnessError::Provider(TurnInputProviderError::Provider(e)) => {
+                    HarnessError::Provider(e)
+                }
+                HarnessError::Provider(TurnInputProviderError::Source(message)) => {
+                    HarnessError::Tool(cosmon_agent_harness::ToolError::Io(format!(
+                        "turn input: {message}"
+                    )))
+                }
+                HarnessError::Tool(e) => HarnessError::Tool(e),
+                HarnessError::ContextOverflow {
+                    estimated_tokens,
+                    limit,
+                } => HarnessError::ContextOverflow {
+                    estimated_tokens,
+                    limit,
+                },
+                HarnessError::TurnBudgetExhausted { limit } => {
+                    HarnessError::TurnBudgetExhausted { limit }
+                }
+                _ => HarnessError::Tool(cosmon_agent_harness::ToolError::Io(
+                    "harness error: unrecognised variant".into(),
+                )),
+            };
+            let err = harness_error_to_anthropic(flattened);
+            emit_silent_failure(telemetry, &err);
+            Err(err)
+        }
+    }
+}
+
 /// Map a [`cosmon_agent_harness::HarnessError`] back onto the
 /// Anthropic-named [`AnthropicError`] surface. Each variant lands on
 /// its ADR-100 SF class — the wrapper preserves the historical 1:1
