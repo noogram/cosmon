@@ -337,17 +337,26 @@ fn whisper_turn(record: &WhisperRecord, head_now: Option<&str>, pane: PaneActivi
 
 /// Observe the worker pane running in tmux session `session`.
 fn pane_activity(ctx: &Context, session: &str) -> PaneActivity {
-    use cosmon_transport::readiness::{detect_status, SessionStatus};
+    use cosmon_transport::readiness::detect_status;
     let Ok(worker) = WorkerId::new(session) else {
         return PaneActivity::Gone;
     };
     let backend = cosmon_transport::TmuxBackend::new(super::tmux_socket_name(ctx));
     match detect_status(&backend, &worker) {
-        Ok(SessionStatus::Dead) => PaneActivity::Gone,
-        Ok(SessionStatus::Working | SessionStatus::Loading) => PaneActivity::Working,
+        Ok(status) => activity_of(&status),
         // An unreadable pane is not evidence of work; the branch still has
         // to move before the wait returns.
-        Ok(_) | Err(_) => PaneActivity::Idle,
+        Err(_) => PaneActivity::Idle,
+    }
+}
+
+/// What the readiness classifier's verdict means for the whisper gate.
+fn activity_of(status: &cosmon_transport::readiness::SessionStatus) -> PaneActivity {
+    use cosmon_transport::readiness::SessionStatus;
+    match status {
+        SessionStatus::Dead => PaneActivity::Gone,
+        SessionStatus::Working | SessionStatus::Loading => PaneActivity::Working,
+        _ => PaneActivity::Idle,
     }
 }
 
@@ -608,6 +617,37 @@ mod tests {
         assert_eq!(
             holding_whisper(Some(legacy), MoleculeStatus::Completed),
             None
+        );
+    }
+
+    /// A worker that committed and is now running its gates for minutes paints
+    /// a `(1m 12s · …` clock. The pane text, read through the same classifier
+    /// `cs wait` uses, must keep the whisper pending even though the branch
+    /// moved.
+    #[test]
+    fn a_pane_showing_a_minutes_clock_keeps_the_whisper_pending() {
+        use cosmon_transport::readiness::classify_output;
+        let rec = record(Some(MoleculeStatus::Completed), Some("aaa"));
+        for clock in ["(21s", "(1m 12s", "(57m 12s", "(1h 0m 17s"] {
+            let pane = format!(
+                "✻ Cogitating… {clock} · ↑ 1.2k tokens · thinking)\n\
+                 ────────────────────────────────────────\n\
+                 ❯ \n\
+                 ────────────────────────────────────────\n"
+            );
+            assert_eq!(
+                whisper_turn(&rec, Some("bbb"), activity_of(&classify_output(&pane))),
+                WhisperTurn::Pending,
+                "a running clock ended the turn:\n{pane}"
+            );
+        }
+        let finished = "✻ Baked for 4m 12s\n\
+                        ────────────────────────────────────────\n\
+                        ❯ \n\
+                        ────────────────────────────────────────\n";
+        assert_eq!(
+            whisper_turn(&rec, Some("bbb"), activity_of(&classify_output(finished))),
+            WhisperTurn::Answered(Some("bbb".to_owned()))
         );
     }
 

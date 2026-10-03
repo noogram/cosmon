@@ -438,13 +438,48 @@ fn shows_work_in_flight(output: &str) -> bool {
     })
 }
 
-/// `true` when `line` carries a parenthesised elapsed-seconds token — the
-/// `(3s · …` of a status line whose clock is still running.
+/// `true` when `line` carries a parenthesised elapsed clock — the `(3s · …`,
+/// `(1m 12s · …` or `(1h 0m 17s · …` of a status line whose turn is still
+/// running.
+///
+/// The clock is the first thing inside the parenthesis, so only text opening
+/// with `<digits>h`, `<digits>m` or `<digits>s` units (in that order, each at
+/// most once, separated by single spaces) and then ending the token qualifies.
+/// Prose such as `(3 files)`, `(see 5s timeout)` or `(12m of work)` does not.
 fn has_elapsed_timer(line: &str) -> bool {
-    line.split('(').skip(1).any(|rest| {
+    line.split('(').skip(1).any(starts_with_clock)
+}
+
+/// `true` when `rest` — the text after an opening parenthesis — begins with an
+/// elapsed clock closed by `)` or by the ` ·` separator that precedes the
+/// status detail. A space followed by anything else (`(1h ago)`) is prose.
+fn starts_with_clock(mut rest: &str) -> bool {
+    let mut next_unit = 0;
+    loop {
         let digits = rest.trim_start_matches(|c: char| c.is_ascii_digit());
-        digits.len() < rest.len() && digits.starts_with('s')
-    })
+        if digits.len() == rest.len() {
+            return false;
+        }
+        let Some(unit) = digits.chars().next() else {
+            return false;
+        };
+        let Some(index) = ['h', 'm', 's'].iter().position(|&u| u == unit) else {
+            return false;
+        };
+        if index < next_unit {
+            return false;
+        }
+        next_unit = index + 1;
+        rest = &digits[1..];
+        // Another unit follows only after a single space and digits.
+        if let Some(more) = rest.strip_prefix(' ') {
+            if more.starts_with(|c: char| c.is_ascii_digit()) && next_unit < 3 {
+                rest = more;
+                continue;
+            }
+        }
+        return rest.starts_with(')') || rest.starts_with(" ·");
+    }
 }
 
 /// The box-drawing characters Claude Code paints around its composer.
@@ -2437,6 +2472,64 @@ mod tests {
                 classify_output(&pane),
                 SessionStatus::Working,
                 "a running clock above the composer was read as idle:\n{pane}"
+            );
+        }
+    }
+
+    /// Claude Code's spinner clock does not stay in seconds: past a minute it
+    /// reads `1m 12s`, past an hour `1h 0m 17s`. A predicate that knew only
+    /// `(<digits>s` called every turn longer than 59 s idle.
+    #[test]
+    fn every_running_clock_form_is_work_in_flight() {
+        for running_slot in [
+            "✢ Coalescing… (21s · thinking with medium effort)",
+            "✻ Cogitating… (1m 12s · ↑ 1.2k tokens · esc to interrupt)",
+            "✢ Coalescing… (57m 12s · thinking with medium effort)",
+            "✶ Pondering… (1h 0m 17s · ↓ 9.8k tokens)",
+            "✢ Coalescing… (2m · thinking)",
+            "✢ Coalescing… (3s)",
+        ] {
+            let pane = format!(
+                "{running_slot}\n\
+                 ────────────────────────────────────────\n\
+                 ❯ \n\
+                 ────────────────────────────────────────\n"
+            );
+            assert_eq!(
+                classify_output(&pane),
+                SessionStatus::Working,
+                "a running clock above the composer was read as idle:\n{pane}"
+            );
+        }
+    }
+
+    /// Parenthesised text that merely contains a digit and a unit letter is
+    /// not a clock, even on a line that opens with a spinner glyph.
+    #[test]
+    fn parenthesised_prose_is_not_a_running_clock() {
+        for idle_slot in [
+            "✻ Baked for 1m 12s",
+            "✻ Baked (3 files)",
+            "✻ Baked (see 5s timeout)",
+            "✻ Baked (5 seconds ago)",
+            "✻ Baked (2 min)",
+            "✻ Baked (12 steps)",
+            "✻ Baked (1h ago)",
+            "✻ Baked (12m of work)",
+            "✻ Baked (3sec)",
+            "✻ Baked (1m 2)",
+            "✻ Baked (5m 1h)",
+        ] {
+            let pane = format!(
+                "{idle_slot}\n\
+                 ────────────────────────────────────────\n\
+                 ❯ \n\
+                 ────────────────────────────────────────\n"
+            );
+            assert_eq!(
+                classify_output(&pane),
+                SessionStatus::Ready,
+                "prose in parentheses was read as a running clock:\n{pane}"
             );
         }
     }
