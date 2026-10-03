@@ -1311,6 +1311,35 @@ pub enum EventV2 {
         /// [`Self::OperatorPresent::source`] for the no-cloning rule.
         source: crate::presence_sensor::PresenceSource,
     },
+    /// A session reported a new lifecycle state through the presence hook.
+    ///
+    /// Emitted by `cs sessions hook run` to the galaxy ledger, on a state
+    /// change only: a session that reports the state it already holds appends
+    /// nothing. It is per session, unlike [`Self::OperatorPresent`], which is
+    /// per `cs` call.
+    ///
+    /// `provider` is the model provider (`claude`, `codex`). `worker_id` is
+    /// set when the worker's identity is known to the hook; `molecule_id` is
+    /// set for a worker session.
+    SessionPresence {
+        /// Cosmon session id.
+        session_id: String,
+        /// Model provider of the session, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        /// Whether the session is a pilot or a worker.
+        role: crate::presence::SessionKind,
+        /// Worker identity, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_id: Option<String>,
+        /// Molecule the session works on, when it is a worker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        molecule_id: Option<MoleculeId>,
+        /// The state the session moved into.
+        state: crate::presence::SessionState,
+        /// Wall-clock time (UTC) of the transition.
+        ts: DateTime<Utc>,
+    },
     /// An operator-emitted *spark* — a request that asks the system
     /// for a verdict. Joined with [`Self::OperatorVerdict`] /
     /// [`Self::OperatorRefused`] / [`Self::OperatorSilent`] by
@@ -2955,6 +2984,7 @@ impl EventV2 {
             | Self::PostMergeHook { molecule, .. } => Some(molecule),
             Self::WorkerSpawned { molecule, .. } => molecule.as_ref(),
             Self::InvocationCompleted { molecule_id, .. }
+            | Self::SessionPresence { molecule_id, .. }
             | Self::ChronicleAdded { molecule_id, .. } => molecule_id.as_ref(),
             Self::InputInjected { mol_id, .. }
             | Self::BriefingDelivery { mol_id, .. }
@@ -4254,6 +4284,17 @@ mod tests {
                 reason: "timeout".to_owned(),
                 source: crate::presence_sensor::PresenceSource::Internal,
             },
+            EventV2::SessionPresence {
+                session_id: "claude-4940f28e".to_owned(),
+                provider: Some("claude".to_owned()),
+                role: crate::presence::SessionKind::Worker,
+                worker_id: None,
+                molecule_id: Some(mid("task-20260731-9cf4")),
+                state: crate::presence::SessionState::WaitingPermission,
+                ts: DateTime::parse_from_rfc3339("2026-05-09T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            },
             EventV2::OperatorSpark {
                 spark_id: "spark-aaaa".to_owned(),
                 src: "cli".to_owned(),
@@ -4868,6 +4909,7 @@ mod tests {
             | EventV2::FleetTyped { .. }
             | EventV2::OperatorPresent { .. }
             | EventV2::OperatorAbsent { .. }
+            | EventV2::SessionPresence { .. }
             | EventV2::OperatorSpark { .. }
             | EventV2::OperatorVerdict { .. }
             | EventV2::OperatorRefused { .. }
@@ -4955,6 +4997,27 @@ mod tests {
             let back: EventV2 = serde_json::from_str(&json).unwrap();
             assert_eq!(back, evt, "RR-5 roundtrip failed for: {json}");
         }
+    }
+
+    #[test]
+    fn session_presence_wire_shape_for_external_readers() {
+        let evt = EventV2::SessionPresence {
+            session_id: "sid-1".to_owned(),
+            provider: Some("codex".to_owned()),
+            role: crate::presence::SessionKind::Pilot,
+            worker_id: None,
+            molecule_id: None,
+            state: crate::presence::SessionState::Idle,
+            ts: Utc::now(),
+        };
+        let env = Envelope::new(Seq(1), None, evt);
+        let value = env.to_contract_value().unwrap();
+        assert_eq!(value["type"], "session_presence");
+        assert_eq!(value["schema_version"], EVENT_SCHEMA_VERSION);
+        assert_eq!(value["role"], "pilot");
+        assert_eq!(value["state"], "idle");
+        assert_eq!(value["provider"], "codex");
+        assert!(value.get("molecule_id").is_none());
     }
 
     #[test]

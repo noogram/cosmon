@@ -56,6 +56,16 @@ Fields by event type:
 | `harvested` | `success` |
 | `worker_spawned`, `adapter_selected`, `model_selected`, `model_observed` | `worker_id` or `mol_id`, `adapter_name`, `model` where the type has them |
 | `energy_tick` | `worker_id`, `input_tokens`, `output_tokens`, `cost_usd` |
+| `session_presence` | `session_id`, `provider`, `role`, `worker_id`, `molecule_id`, `state`, `ts` |
+
+**Session presence.** `session_presence` is appended to the galaxy's
+`events.jsonl` by `cs sessions hook run`, once per change of session state; a
+hook that reports the state the session already holds appends nothing. `role`
+is `pilot` or `worker`. `state` is one of `session_start`, `working`, `idle`,
+`waiting_permission`, `asking`. `provider` (`claude`, `codex`), `worker_id` and
+`molecule_id` are absent when unknown; `molecule_id` is set for a worker
+session. `operator_present` is a different event: it is per `cs` call, not per
+session.
 
 A reader detects log rotation by a size decrease or an inode change.
 
@@ -72,6 +82,16 @@ Stable keys: `schema_version`, `id`, `status` (`pending`, `running`,
 
 Stable keys: `schema_version`, and for each entry of `workers`: `name`,
 `molecule`, `model`, `live`, `effective`, `ghost`, `molecule_health`.
+
+## Presence records
+
+`.cosmon/state/presence/<session_id>.json` holds the latest record of a
+session. Besides `session_id`, `galaxy`, `heartbeat_at` and `headline`, it
+carries `state` with the same values as `session_presence.state`; the key is
+absent for a session that has not reported one. `galaxy` is the name of the
+session's galaxy (the directory that holds `.cosmon/`). `headline` stays free
+text, and a reader should use `state` instead of parsing it. The file carries
+no `schema_version` and follows the same additive rule.
 
 ## Git conventions
 

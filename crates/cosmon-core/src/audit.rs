@@ -123,6 +123,7 @@ impl Action {
             | EventV2::FleetTyped { .. }
             | EventV2::OperatorPresent { .. }
             | EventV2::OperatorAbsent { .. }
+            | EventV2::SessionPresence { .. }
             | EventV2::OperatorSpark { .. }
             | EventV2::OperatorVerdict { .. }
             | EventV2::OperatorRefused { .. }
