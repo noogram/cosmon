@@ -686,7 +686,8 @@ mod tests {
         };
         let args = Args {
             molecule: "task-20260415-col1".to_owned(),
-            reason: "test blocker".to_owned(),
+            reason: Some("test blocker".to_owned()),
+            with_seats: false,
             cause: None,
             account: None,
             kind: None,
@@ -743,7 +744,8 @@ mod tests {
         };
         let args = Args {
             molecule: "task-20260415-col2".to_owned(),
-            reason: "replay".to_owned(),
+            reason: Some("replay".to_owned()),
+            with_seats: false,
             cause: None,
             account: None,
             kind: None,
@@ -784,7 +786,8 @@ mod tests {
         };
         let args = Args {
             molecule: "task-20260415-col3".to_owned(),
-            reason: "noop".to_owned(),
+            reason: Some("noop".to_owned()),
+            with_seats: false,
             cause: None,
             account: None,
             kind: None,
@@ -831,7 +834,8 @@ mod tests {
         };
         let args = Args {
             molecule: "task-20260421-k3xx".to_owned(),
-            reason: "Claude usage limit reached".to_owned(),
+            reason: Some("Claude usage limit reached".to_owned()),
+            with_seats: false,
             cause: Some("rate_limit".to_owned()),
             account: Some("you".to_owned()),
             kind: Some("max_rolling_5h".to_owned()),
@@ -885,7 +889,8 @@ mod tests {
         };
         let args = Args {
             molecule: "task-20260420-nudg".to_owned(),
-            reason: "ambiguous briefing".to_owned(),
+            reason: Some("ambiguous briefing".to_owned()),
+            with_seats: false,
             cause: None,
             account: None,
             kind: None,
@@ -927,7 +932,8 @@ mod tests {
         };
         let args = Args {
             molecule: "task-20260421-k3yy".to_owned(),
-            reason: "stalled".to_owned(),
+            reason: Some("stalled".to_owned()),
+            with_seats: false,
             cause: Some("manual".to_owned()),
             account: Some("you".to_owned()),
             kind: None,
