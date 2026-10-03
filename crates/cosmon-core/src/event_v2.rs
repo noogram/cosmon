@@ -4702,6 +4702,19 @@ mod tests {
                 resubmits: 3,
                 elapsed_ms: 8000,
             },
+            EventV2::HarnessTurnRecorded {
+                mol_id: MoleculeId::new("task-20260101-abcd").unwrap(),
+                evidence: Box::new(crate::harness_turn::HarnessTurnEvidence {
+                    schema_version: crate::harness_turn::HARNESS_TURN_SCHEMA_VERSION,
+                    history_id: "harness/mol/worker/inv".to_owned(),
+                    worker_id: WorkerId::new("worker-1").unwrap(),
+                    record: crate::harness_turn::TurnRecord::RequestIntent {
+                        turn: 0,
+                        estimated_input_tokens: 5,
+                        tools_spent: 0,
+                    },
+                }),
+            },
         ];
 
         // Exhaustiveness guard (C10 test review, review-report.md F2).
