@@ -1,0 +1,138 @@
+# Frozen corpus and trial policy for the in-process harness evaluation.
+#
+# Tasks, input digests and acceptance scripts are the same for every arm. Do not
+# reword a task or an expected output after seeing a failure: add a new task id
+# instead and bump `corpus_version`. `run.py --check-corpus` recomputes the
+# digests below and refuses a drifted fixture.
+
+schema_version = 1
+corpus_version = "2026-10-03.1"
+
+[policy]
+# Trials per (task, arm). The live count and spend cap are an operator decision
+# (plan question Q9) and are passed to `run.py --live`; this default is the mocked
+# self-check size.
+trials = 3
+# Arm order in trial t is the arm list rotated left by (t mod arms). Tasks always
+# run in manifest order. No randomness, so a re-run reproduces the order.
+ordering = "rotate-left-by-trial"
+# Adoption threshold: a candidate arm is recommended only when, on every task
+# applicable to both arms, its accepted fraction is not below the baseline's.
+baseline_arm = "subprocess-baseline"
+
+# ---- arms ------------------------------------------------------------------
+# `command` is an argv template. Placeholders: {workspace} {run_dir} {task_file}
+# {model} {peer_message}. A live arm is configured by the evaluation molecule;
+# the arms below with kind = "live" are inert unless run.py is given --live.
+
+[[arms]]
+id = "direct-chat"
+kind = "live"
+capabilities = ["shell", "large_context", "peer_messaging", "resume"]
+tools = ["read_file", "write_file", "edit_file", "list_dir", "grep", "find_file", "exec_command"]
+command = []
+
+[[arms]]
+id = "direct-messages"
+kind = "live"
+capabilities = ["shell", "large_context", "peer_messaging", "resume"]
+tools = ["read_file", "write_file", "edit_file", "list_dir", "grep", "find_file", "exec_command"]
+command = []
+
+[[arms]]
+id = "local-floor"
+kind = "live"
+capabilities = ["large_context"]
+tools = ["read_file", "write_file", "edit_file", "list_dir", "grep", "find_file"]
+command = []
+
+[[arms]]
+id = "subprocess-baseline"
+kind = "live"
+capabilities = ["shell", "large_context", "peer_messaging", "resume"]
+tools = ["subprocess-native"]
+command = []
+
+# Mocked arms: deterministic stand-ins that run through the same code path. They
+# prove the evaluator, never the harness; their runs carry evidence = "mock".
+[[arms]]
+id = "stub-solver"
+kind = "mock"
+capabilities = ["shell", "large_context", "peer_messaging", "resume"]
+tools = ["stub"]
+command = ["{python}", "{run_py}", "worker", "solver", "{workspace}", "{run_dir}", "{task_id}"]
+
+[[arms]]
+id = "stub-noop"
+kind = "mock"
+capabilities = ["shell", "large_context", "peer_messaging", "resume"]
+tools = ["stub"]
+command = ["{python}", "{run_py}", "worker", "noop", "{workspace}", "{run_dir}", "{task_id}"]
+
+[[arms]]
+id = "stub-replayer"
+kind = "mock"
+capabilities = ["shell", "large_context", "peer_messaging", "resume"]
+tools = ["stub"]
+command = ["{python}", "{run_py}", "worker", "replayer", "{workspace}", "{run_dir}", "{task_id}"]
+
+[[arms]]
+id = "stub-shell-free"
+kind = "mock"
+capabilities = ["large_context"]
+tools = ["stub"]
+command = ["{python}", "{run_py}", "worker", "solver", "{workspace}", "{run_dir}", "{task_id}"]
+
+# ---- tasks -----------------------------------------------------------------
+# `input_digest` is sha256 over the sorted (relative path, file sha256) pairs of
+# `fixtures/<id>/input/` plus `task.md` (and `peer_message.txt` when present).
+# `requires` names capabilities an arm must have; an arm without one is reported
+# `inapplicable`, never `failed`.
+
+[[tasks]]
+id = "text-output"
+kind = "declared text output"
+requires = []
+required_artifacts = ["answer.txt"]
+has_gate = false
+input_digest = "2f682fe40c3af75416668cd0f4de6e8645ff3e9b795f8608d96d76ad8fb3c1f4"
+
+[[tasks]]
+id = "bounded-edit"
+kind = "bounded edit with external tests"
+requires = []
+required_artifacts = ["textstat/util.py"]
+has_gate = true
+input_digest = "907e107fea1a0947649bd72fe816d083e647c5bb71daf081e5145c8532bd407d"
+
+[[tasks]]
+id = "gate-tail"
+kind = "multi-step work with a gate tail"
+requires = ["shell"]
+required_artifacts = ["config.json", "report.txt"]
+has_gate = true
+input_digest = "d1cae247d8ac36353508943d8b52f54203b2b32396293cba157d32d8e01a7e5c"
+
+[[tasks]]
+id = "peer-evidence"
+kind = "peer evidence"
+requires = ["peer_messaging"]
+required_artifacts = ["answer.txt"]
+has_gate = false
+input_digest = "2219b4ac803e5ef1e0be5148e123fa017cf354aed510f6f3a556eaf3fdfb3215"
+
+[[tasks]]
+id = "large-context"
+kind = "large context"
+requires = ["large_context"]
+required_artifacts = ["answer.txt"]
+has_gate = false
+input_digest = "fbe9c7cdbc579fc3bcc82c3a76f73acc5e58f795e39047caf632768650f0b016"
+
+[[tasks]]
+id = "interrupted-effects"
+kind = "interrupted side effects"
+requires = ["shell", "resume"]
+required_artifacts = ["effects.log"]
+has_gate = false
+input_digest = "9f2dfffba23eb2c5c4cfef4dd30222f158517a2e2e12231091ee2d588d44fc4c"

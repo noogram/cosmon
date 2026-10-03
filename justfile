@@ -259,6 +259,10 @@ quick:
     ./scripts/no-pilot-env.sh ./tools/cosmon-skill/install.test.sh
     ./scripts/no-pilot-env.sh ./scripts/check-fixture-independence.sh
     ./scripts/no-pilot-env.sh ./scripts/check-fixture-independence.test.sh
+    ./scripts/no-pilot-env.sh python3 tests/harness-eval/validate.py --self-test
+    ./scripts/no-pilot-env.sh python3 tests/harness-eval/validate.py --check-corpus
+    ./scripts/no-pilot-env.sh python3 tests/harness-eval/run.py --fixtures-witness
+    ./scripts/no-pilot-env.sh python3 tests/harness-eval/run.py --self-test
     ./scripts/no-pilot-env.sh ./scripts/license-table.sh --check
     ./scripts/no-pilot-env.sh python3 scripts/artifact-map-audit.py
     # `main HEAD` pins the fast local scope (what this branch adds). The
