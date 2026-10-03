@@ -81,10 +81,18 @@ Worker-callable. Advances the molecule one step per invocation.";
 
 pub const COLLAPSE: &str = "EXAMPLES:
   cs collapse <mol> --reason \"superseded by <other>\"
+  cs collapse <owner|seat> --with-seats --reason \"superseded by <other>\"
   cs collapse <mol> --reason \"Claude usage limit reached\" \\
       --cause rate_limit --account default --kind max_rolling_5h
 
 Terminal transition. Use instead of leaving stale pending molecules.
+
+--with-seats (molecule in a declared `cs work` roster): also collapse every
+other live member of the roster, with the same reason. Reads the roster once,
+then runs the ordinary collapse per seat; a completed seat is skipped and
+`cs done <seat>` printed; nothing is merged. --reason may be omitted when the
+named molecule is already collapsed: its recorded reason is inherited with the
+seat and work appended. Exit is non-zero if any seat failed; rerun to retry.
 
 Pass --cause to attribute the failure with a structured tag (ADR-062):
   rate_limit  — quota refused; pair with --account ALIAS --kind CURRENCY
@@ -1449,18 +1457,51 @@ pub const WORK: &str = "EXAMPLES:
   cs work ack <key> --considered                               # or --deferred / --rejected
   cs work list <owner>                                         # every message's stage, from evidence
 
-RECIPE — an implementer molecule plus a read-only reviewer, on the same
-or another provider:
-  1. Nucleate the reviewer molecule alongside the implementer.
-  2. `cs tackle <reviewer> --adapter <adapter> --model <model>` spawns it —
-     any provider this fleet supports, same one as the implementer or not.
-  3. `cs work declare <owner> --seat impl=<a> --seat review=<b>` records the
-     two-seat roster under the OWNING molecule (usually the implementer).
-  4. Either seat `cs work send`s bounded evidence to the other; the
-     recipient `cs work inbox`es and `cs work ack`s what it received.
-  5. `cs work list <owner>` reconstructs every message's admitted /
-     delivered / consumed stage from canonical evidence, for an operator
-     checking in later.
+RECIPE — implementer + cross-vendor reviewer (book: how-to/pair-implementer-and-reviewer):
+  1. Launch. Nucleate the implementer, then the reviewer with the
+     implementer's id as a variable (no `sed` into a brief):
+       impl=$(cs nucleate task-work --var topic=\"...\" --json | jq -r .id)
+       rev=$(cs nucleate task-work --var topic=\"review $impl\" --var impl=$impl --json | jq -r .id)
+       cs work declare \"$impl\" --seat impl=\"$impl\" --seat review=\"$rev\"
+       cs tackle \"$impl\" --adapter claude --model <model>
+       cs tackle \"$rev\"  --adapter codex  --model <model>
+     The owner is the implementer. Pin the model explicitly on each seat.
+  2. Implementer brief: goal, the request verbatim, inputs by path,
+     numbered items, constraints, deliverables. Read `cs work inbox` at
+     each milestone and ack. Send `--phase final` to `review`, naming the
+     final sha, before `cs complete`. Notes go to a per-molecule path.
+  3. Reviewer brief: find the peer with `cs work list` (or the impl id
+     variable); challenge at each milestone with `cs work send --to impl`;
+     3-6 task-specific checks; recompute one number independently from
+     saved outputs; every verdict names the impl sha it reviewed; do not
+     `cs complete` until the impl sent `final` or is terminal.
+  4. Steer with `cs whisper` to each seat, never with `cs work send`: a
+     roster message can be acked --rejected, a steering order must not be.
+     A real stop is `cs collapse`.
+  5. Watch with `cs work list <owner>` and `cs observe <seat>`. An impl
+     that is collapsed while the reviewer is live, or a reviewer that is
+     completed against an older impl sha, is yours to decide on.
+  6. When the implementer terminates, read its reason kind. A worker that
+     finished but could not pass the gates for an infrastructure cause
+     collapses with `--reason-kind verification_blocked --reason 'work
+     committed at <sha>; <gate> failed: <class>'` (find them with `cs
+     errors --kind verification_blocked`). That label is the worker's
+     claim, never merge-safety evidence: check `git log main..<branch>`
+     and whether the failing test touches the diff, then decide. Audit any
+     collapsed branch before deleting it.
+  7. Settle: `cs collapse <impl> --with-seats` collapses every live seat
+     with the owner's reason, skips a completed seat (and prints `cs done
+     <seat>`), never merges. Then `cs done` per seat; add `--no-merge` for
+     an implementer you already merged by hand.
+  8. Continue under a NEW owner: settle the old pair, nucleate both new
+     seats with `--decayed-from <old>`, open the brief with \"Continuation
+     of <old id> (<reason>): merged, do not redesign: ...; remains: ...\".
+     Never re-declare a seat name onto another molecule under the old
+     owner. The new reviewer starts cold; that cost is accepted.
+  9. Review notes: one file per molecule (notes/<mol_id>.md); regenerate
+     aggregates on main. Never union-merge code.
+ 10. Cost: reviewer on the other or the cheaper provider; strongest
+     models for framing and arbitration only. No savings are measured yet.
 
 Neither molecule's lifecycle moves because of a message: retries,
 acceptance and integration stay with each molecule's own owner. Provider

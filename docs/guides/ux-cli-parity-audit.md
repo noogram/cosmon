@@ -268,6 +268,14 @@ completion authority by themselves.
 No command or flag changes. The receipt shows that the bytes were in a
 successfully answered request, not that the model used them.
 
+## Seat-bound delivery and `cs collapse --with-seats` (issue #162)
+
+| Capability | CLI | Native UI | Other CLI views |
+|---|---|---|---|
+| Deliver a work envelope only to the molecule its scope revision bound to the recipient seat | `cs work inbox`, the work hook and the turn-input adapters stop offering an envelope whose revision bound the seat to another molecule; no flag changes | No equivalent delivery control audited | `cs work list` keeps the envelope, with `recipient_bound: false` and a `recipient_not_bound` finding |
+| Settle a declared work in one command | `cs collapse <owner\|member> --with-seats [--reason R] [--reason-kind K]` collapses every live seat through the ordinary collapse path, skips a completed seat and names `cs done <seat>`, merges nothing; exit is non-zero if any seat failed | No equivalent control audited | `cs work list <owner>` and `cs observe <seat>` show the result; no RPP route (the flag is not on the wire) |
+| Find infrastructure-blocked collapses | `--reason-kind verification_blocked` is a documented convention; `cs errors --kind verification_blocked` lists them | No equivalent view audited | The label is the worker's claim, not merge-safety evidence |
+
 ## Blocked dependents (issue #118)
 
 | Capability | CLI | Native UI | Other CLI views |

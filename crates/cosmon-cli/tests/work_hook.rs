@@ -7,6 +7,7 @@ use std::{fs, path::Path, process::Command};
 const OWNER: &str = "task-20260928-a001";
 const A: &str = "task-20260928-a002";
 const B: &str = "task-20260928-a003";
+const C: &str = "task-20260928-a004";
 
 fn mol(state: &Path, id: &str) -> std::path::PathBuf {
     state.join("fleets/default/molecules").join(id)
@@ -15,7 +16,7 @@ fn mol(state: &Path, id: &str) -> std::path::PathBuf {
 fn setup() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("temp galaxy");
     let state = dir.path().join(".cosmon/state");
-    for id in [OWNER, A, B] {
+    for id in [OWNER, A, B, C] {
         fs::create_dir_all(mol(&state, id)).expect("molecule dir");
         fs::write(mol(&state, id).join("state.json"), b"state\n").expect("state");
     }
@@ -265,4 +266,56 @@ fn declared_seats_exchange_and_ack_across_hook_adapters() {
             "considered"
         );
     }
+}
+
+/// The hook is a delivery site too: a molecule that took over seat `b` by
+/// re-declaration must not receive the previous holder's envelope (#162).
+#[test]
+fn hook_does_not_deliver_the_previous_holders_mail_to_a_new_holder() {
+    let (dir, state) = setup();
+    let sent = cs(
+        dir.path(),
+        &state,
+        A,
+        &[
+            "work",
+            "send",
+            "--to",
+            "b",
+            "--text",
+            "finding",
+            "--key",
+            "finding-1",
+        ],
+    );
+    assert!(sent.status.success());
+    let redeclared = cs(
+        dir.path(),
+        &state,
+        A,
+        &[
+            "work",
+            "declare",
+            OWNER,
+            "--seat",
+            &format!("a={A}"),
+            "--seat",
+            &format!("b={C}"),
+        ],
+    );
+    assert!(
+        redeclared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&redeclared.stderr)
+    );
+    let output = hook(dir.path(), &state, C, "claude");
+    assert!(output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "hook injected the old holder's envelope: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let receipts = fs::read_to_string(mol(&state, OWNER).join("work/receipts/finding-1.jsonl"))
+        .expect("admission receipt");
+    assert!(!receipts.contains("delivery_attempted"), "{receipts}");
 }

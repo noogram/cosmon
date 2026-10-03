@@ -265,3 +265,100 @@ fn messaging_causes_no_lifecycle_transition() {
         );
     }
 }
+
+fn send_finding(dir: &Path) {
+    ok(
+        dir,
+        Some(A),
+        &[
+            "work",
+            "send",
+            "--to",
+            "b",
+            "--text",
+            "Review line 4",
+            "--key",
+            "finding-1",
+        ],
+    );
+}
+
+/// Re-declaring the owner with seat `b` bound to another molecule must not
+/// hand the old holder's pending envelope to the new one (#162, item 1).
+#[test]
+fn redeclared_seat_does_not_inherit_the_previous_holders_mail() {
+    let fixture = fixture();
+    let dir = fixture.path();
+    declare(dir);
+    send_finding(dir);
+    ok(
+        dir,
+        None,
+        &[
+            "work",
+            "declare",
+            OWNER,
+            "--seat",
+            &format!("a={A}"),
+            "--seat",
+            &format!("b={OUTSIDER}"),
+        ],
+    );
+
+    let inbox = ok(dir, Some(OUTSIDER), &["work", "inbox"]);
+    assert!(
+        !inbox.contains("finding-1") && !inbox.contains("Review line 4"),
+        "new holder was offered the old holder's envelope: {inbox}"
+    );
+    let receipts = fs::read_to_string(
+        mol_dir(&dir.join(".cosmon/state"), OWNER).join("work/receipts/finding-1.jsonl"),
+    )
+    .expect("admission receipt");
+    assert!(
+        !receipts.contains("delivery_attempted"),
+        "no delivery attempt may be recorded for the new holder: {receipts}"
+    );
+    // The old holder can no longer pull either: it is not in the roster.
+    assert!(!cs(dir, Some(B), &["work", "inbox"]).status.success());
+
+    // The envelope is not lost: it stays visible, with a finding.
+    let listed: serde_json::Value =
+        serde_json::from_str(&ok(dir, None, &["--json", "work", "list", OWNER]))
+            .expect("list JSON");
+    assert!(listed["envelopes"]["finding-1"].is_object(), "{listed}");
+    assert_eq!(listed["envelopes"]["finding-1"]["recipient_bound"], false);
+    let findings = listed["findings"].as_array().expect("findings");
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["finding"] == "recipient_not_bound" && f["key"] == "finding-1"),
+        "{listed}"
+    );
+}
+
+/// Revising the roster without changing who holds the recipient seat keeps
+/// earlier mail deliverable: the check is about the molecule, not the revision.
+#[test]
+fn redeclaring_with_an_added_seat_keeps_pending_mail_deliverable() {
+    let fixture = fixture();
+    let dir = fixture.path();
+    declare(dir);
+    send_finding(dir);
+    ok(
+        dir,
+        None,
+        &[
+            "work",
+            "declare",
+            OWNER,
+            "--seat",
+            &format!("a={A}"),
+            "--seat",
+            &format!("b={B}"),
+            "--seat",
+            &format!("c={OUTSIDER}"),
+        ],
+    );
+    let inbox = ok(dir, Some(B), &["work", "inbox"]);
+    assert!(inbox.contains("finding-1"), "{inbox}");
+}

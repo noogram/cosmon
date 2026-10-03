@@ -653,6 +653,11 @@ pub struct WorkRecords {
     pub receipts: Vec<Receipt>,
     /// Every capability observation.
     pub capabilities: Vec<AdapterCapability>,
+    /// Every scope revision ever declared, current one included.
+    ///
+    /// Delivery needs the revision an envelope was admitted under to know
+    /// which molecule held the recipient seat at that time.
+    pub history: Vec<WorkScope>,
 }
 
 /// Canonical custody of one work, held by its owning molecule.
@@ -756,6 +761,10 @@ pub struct EnvelopeView {
     pub consumed: Option<ConsumptionView>,
     /// Expired by clock or by an `Expired` receipt.
     pub expired: bool,
+    /// The envelope's scope revision bound the recipient seat to the molecule
+    /// that holds that seat now. When `false` the envelope stays listed and is
+    /// never offered, because it was written for a different molecule.
+    pub recipient_bound: bool,
 }
 
 impl EnvelopeView {
@@ -767,6 +776,7 @@ impl EnvelopeView {
             context_delivered: None,
             consumed: None,
             expired: false,
+            recipient_bound: true,
         }
     }
 
@@ -798,6 +808,13 @@ pub enum ProjectionFinding {
     },
     /// An envelope was admitted under a revision other than the current one.
     EarlierRevision {
+        /// Envelope key.
+        key: MessageKey,
+    },
+    /// The revision an envelope was admitted under did not bind its recipient
+    /// seat to the molecule that holds the seat now (or that revision is not
+    /// on record), so the envelope is not offered to the current holder.
+    RecipientNotBound {
         /// Envelope key.
         key: MessageKey,
     },
@@ -998,16 +1015,88 @@ pub fn fold(
     receipts: &[Receipt],
     now: DateTime<Utc>,
 ) -> Result<WorkProjection, WorkMessageError> {
+    fold_with_history(scope, &[], envelopes, receipts, now)
+}
+
+/// Whether the revision `envelope` was admitted under bound its recipient seat
+/// to the molecule that holds that seat in `scope` now. A revision missing from
+/// `earlier` binds nothing.
+fn recipient_bound_now(
+    scope: &WorkScope,
+    earlier: &[(ScopeRevision, &WorkScope)],
+    envelope: &Envelope,
+) -> bool {
+    let holder_then = earlier
+        .iter()
+        .find(|(rev, _)| *rev == envelope.scope_revision)
+        .and_then(|(_, past)| past.seats.get(&envelope.recipient))
+        .map(|decl| &decl.molecule);
+    let holder_now = scope
+        .seats
+        .get(&envelope.recipient)
+        .map(|decl| &decl.molecule);
+    holder_then.is_some() && holder_then == holder_now
+}
+
+/// [`fold_with_history`] over everything a store returned, for a caller that
+/// already took the current scope out of `records`.
+///
+/// # Errors
+/// Returns [`WorkMessageError::Canonical`] if a scope cannot be hashed.
+pub fn fold_records(
+    scope: &WorkScope,
+    records: &WorkRecords,
+    now: DateTime<Utc>,
+) -> Result<WorkProjection, WorkMessageError> {
+    fold_with_history(
+        scope,
+        &records.history,
+        &records.envelopes,
+        &records.receipts,
+        now,
+    )
+}
+
+/// [`fold`] with the earlier scope revisions that envelopes were admitted under.
+///
+/// An envelope from a revision other than the current one is offered only if
+/// that revision, found in `history`, bound the recipient seat to the same
+/// molecule the current scope does. Re-declaring an owner to add a seat keeps
+/// earlier messages deliverable; re-declaring a seat onto another molecule does
+/// not hand the old holder's mail to the new one. A revision absent from
+/// `history` cannot be shown to bind anything, so its envelopes are withheld.
+///
+/// # Errors
+/// Returns [`WorkMessageError::Canonical`] if a scope cannot be hashed.
+pub fn fold_with_history(
+    scope: &WorkScope,
+    history: &[WorkScope],
+    envelopes: &[Envelope],
+    receipts: &[Receipt],
+    now: DateTime<Utc>,
+) -> Result<WorkProjection, WorkMessageError> {
     let revision = scope.revision()?;
+    let mut earlier = Vec::with_capacity(history.len());
+    for past in history {
+        earlier.push((past.revision()?, past));
+    }
     let mut findings = Vec::new();
     let mut views: BTreeMap<MessageKey, EnvelopeView> = BTreeMap::new();
     for envelope in envelopes {
+        let mut recipient_bound = true;
         if envelope.scope_revision != revision {
             findings.push(ProjectionFinding::EarlierRevision {
                 key: envelope.key.clone(),
             });
+            recipient_bound = recipient_bound_now(scope, &earlier, envelope);
+            if !recipient_bound {
+                findings.push(ProjectionFinding::RecipientNotBound {
+                    key: envelope.key.clone(),
+                });
+            }
         }
         let mut view = EnvelopeView::new(envelope.clone());
+        view.recipient_bound = recipient_bound;
         view.expired = envelope.is_expired_at(now);
         views.insert(envelope.key.clone(), view);
     }
@@ -1090,7 +1179,8 @@ pub fn fold(
 
 /// Envelopes `adapter` may offer to `seat` now.
 ///
-/// An envelope qualifies when it is addressed to `seat`, unexpired and
+/// An envelope qualifies when it is addressed to `seat`, bound to the
+/// molecule that holds `seat` now (see [`fold_with_history`]), unexpired and
 /// unconsumed, and this adapter either never tried it or last tried it at
 /// least `redeliver_after_secs` ago with fewer than `max_delivery_attempts`
 /// attempts.
@@ -1108,6 +1198,7 @@ pub fn deliverable<'a>(
         .envelopes
         .values()
         .filter(|view| &view.envelope.recipient == seat && view.consumed.is_none())
+        .filter(|view| view.recipient_bound)
         .filter(|view| !view.expired && !view.envelope.is_expired_at(now))
         .filter(|view| {
             let attempts = view.attempts_by(adapter).count();
@@ -1918,6 +2009,52 @@ mod tests {
         let folded = fold(&scope, &[envelope], &[late], t(500)).unwrap();
 
         assert!(folded.envelopes[&key("m1")].consumed.as_ref().unwrap().late);
+    }
+
+    #[test]
+    fn an_envelope_is_offered_only_to_the_molecule_its_revision_bound() {
+        let first = scope();
+        let envelope = admitted(&first, &empty(&first), submission(&first, "m1", b"finding"));
+        let rebind = |molecule: &str| {
+            let mut next = first.clone();
+            next.seats.get_mut(&seat("b")).unwrap().molecule = MoleculeId::new(molecule).unwrap();
+            next
+        };
+        let offered = |current: &WorkScope, history: &[WorkScope]| {
+            let projection = fold_with_history(
+                current,
+                history,
+                std::slice::from_ref(&envelope),
+                &[],
+                t(20),
+            )
+            .unwrap();
+            let count = deliverable(&projection, &seat("b"), DeliveryAdapter::Pull, t(20)).len();
+            (count, projection)
+        };
+
+        // Seat `b` moved to another molecule: the old envelope is listed, not offered.
+        let moved = rebind("task-20260928-cccc");
+        let (count, projection) = offered(&moved, &[first.clone(), moved.clone()]);
+        assert_eq!(count, 0);
+        assert!(projection.envelopes.contains_key(&key("m1")));
+        assert!(projection
+            .findings
+            .contains(&ProjectionFinding::RecipientNotBound { key: key("m1") }));
+
+        // Same holder after a revision that changed something else: still offered.
+        let mut widened = first.clone();
+        widened.budget.max_messages_per_seat += 1;
+        let (count, projection) = offered(&widened, &[first.clone(), widened.clone()]);
+        assert_eq!(count, 1);
+        assert!(!projection
+            .findings
+            .iter()
+            .any(|f| matches!(f, ProjectionFinding::RecipientNotBound { .. })));
+
+        // A revision missing from the record cannot be shown to bind anything.
+        let (count, _) = offered(&widened, &[widened.clone()]);
+        assert_eq!(count, 0);
     }
 
     #[test]
