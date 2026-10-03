@@ -820,7 +820,7 @@ The hook body — invoked by the provider, not usually by a human
 
 ###### **Options:**
 
-* `--event <EVENT>` — Which moment fired: `session-start`, `turn-start` or `turn-end`
+* `--event <EVENT>` — Which moment fired: `session-start`, `turn-start`, `turn-end`, `waiting` or `asking`
 * `--provider <NAME>` — The pilot this hook runs inside. Inferred from the payload when it names one; `claude` otherwise
 * `--session <SID>` — This session's cosmon id. Defaults to `$COSMON_SESSION_ID`
 

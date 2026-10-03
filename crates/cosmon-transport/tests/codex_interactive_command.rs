@@ -49,6 +49,8 @@ fn config(mode: CodexMode, prompt: Option<&str>, extra_args: Vec<String>) -> Cod
         harness_args: vec![],
         pass_api_key: false,
         work_hook_home: None,
+        mol_dir: None,
+        parent_mol_id: None,
     }
 }
 
@@ -272,4 +274,25 @@ fn interactive_worker_writes_settings_to_its_own_profile_overlay() {
         !exec.contains(" -p "),
         "exec has no TUI to persist from, got {exec:?}"
     );
+}
+
+/// Issue #163 item 3: every codex launch line names the molecule, member or not,
+/// so a wrapper the worker runs can stamp it.
+#[test]
+fn every_codex_launch_line_carries_the_molecule_env() {
+    for mode in [CodexMode::Interactive, CodexMode::Exec] {
+        let mut ordinary = config(mode, Some("go"), vec![]);
+        assert!(ordinary.work_hook_home.is_none(), "not a work member");
+        ordinary.mol_dir = Some(std::path::PathBuf::from("/tmp/state/mol X"));
+        ordinary.parent_mol_id = Some("task-20261003-cd5e".to_owned());
+        let command = build_codex_command(&ordinary);
+        assert!(
+            command.contains("COSMON_MOL_DIR='/tmp/state/mol X'"),
+            "{command}"
+        );
+        assert!(
+            command.contains("COSMON_PARENT_MOL_ID=task-20261003-cd5e"),
+            "{command}"
+        );
+    }
 }

@@ -541,6 +541,13 @@ pub struct CodexSessionConfig {
     /// Isolated Codex home containing this member's measured `hooks.json`
     /// form. `None` keeps a non-member launch byte-identical.
     pub work_hook_home: Option<PathBuf>,
+    /// The molecule's state directory, exported as `COSMON_MOL_DIR` so the
+    /// worker's `cs` and any wrapper it runs can stamp the molecule. `None`
+    /// exports nothing (a launch that is not a molecule dispatch).
+    pub mol_dir: Option<PathBuf>,
+    /// The molecule id, exported as `COSMON_PARENT_MOL_ID`. Present on every
+    /// adapter's launch line, not only the claude one.
+    pub parent_mol_id: Option<String>,
 }
 
 /// An operator git identity — the `(name, email)` pinned into the author and
@@ -644,16 +651,29 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             cmd
         }
     };
-    let cmd = if let Some(home) = &config.work_hook_home {
-        let member = home.parent().unwrap_or(home);
-        format!(
-            "CODEX_HOME={} COSMON_MOL_DIR={} {cmd}",
-            shell_escape(&home.to_string_lossy()),
-            shell_escape(&member.to_string_lossy())
-        )
-    } else {
-        cmd
-    };
+    let mut env_prefix = String::new();
+    if let Some(home) = &config.work_hook_home {
+        let _ = write!(
+            env_prefix,
+            "CODEX_HOME={} ",
+            shell_escape(&home.to_string_lossy())
+        );
+    }
+    let mol_dir = config
+        .mol_dir
+        .as_deref()
+        .or_else(|| config.work_hook_home.as_deref().and_then(Path::parent));
+    if let Some(dir) = mol_dir {
+        let _ = write!(
+            env_prefix,
+            "COSMON_MOL_DIR={} ",
+            shell_escape(&dir.to_string_lossy())
+        );
+    }
+    if let Some(id) = &config.parent_mol_id {
+        let _ = write!(env_prefix, "COSMON_PARENT_MOL_ID={} ", shell_escape(id));
+    }
+    let cmd = format!("{env_prefix}{cmd}");
     let cmd = push_api_key_strip(cmd, config.pass_api_key);
     prefix_git_identity_env(config.git_identity.as_ref(), cmd)
 }
@@ -1361,6 +1381,8 @@ mod tests {
             harness_args: vec![],
             pass_api_key: false,
             work_hook_home: None,
+            mol_dir: None,
+            parent_mol_id: None,
         }
     }
 

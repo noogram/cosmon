@@ -6797,6 +6797,8 @@ fn spawn_codex_and_prompt(
         harness_args: launch_harness_args,
         pass_api_key: resolve_codex_pass_api_key(adapter_entry, warn_codex_api_key_stripped),
         work_hook_home: mint_codex_work_hook_home(mol_state_dir),
+        mol_dir: Some(mol_state_dir.to_path_buf()),
+        parent_mol_id: Some(mol.id.as_str().to_owned()),
     };
 
     codex::spawn_codex_session(&config)
