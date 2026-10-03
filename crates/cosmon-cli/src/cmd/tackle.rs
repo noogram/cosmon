@@ -16113,3 +16113,30 @@ prompt = "Custom fleet prompt."
         assert!(msg.contains("MOONSHOT_API_KEY"));
     }
 }
+
+#[cfg(test)]
+mod inprocess_budget_wiring_tests {
+    use super::resolve_inprocess_budget;
+    use cosmon_core::config::ProjectConfig;
+
+    /// The budget `cs tackle` hands to the in-process harness is the one the
+    /// galaxy configured, not the harness default (issue #151 W5).
+    #[test]
+    fn configured_turn_budget_reaches_the_harness_loop() {
+        let cfg: ProjectConfig = toml::from_str(
+            "[adapters.openai]\nmax_turns = 80\n\n[adapters.openai.models.\"m-exact\"]\nmax_turns = 120\n",
+        )
+        .unwrap_or_else(|e| panic!("config parses: {e}"));
+        let entry = cfg
+            .adapters
+            .as_ref()
+            .and_then(|a| a.entries.get("openai"))
+            .unwrap_or_else(|| panic!("openai entry"));
+        let (budget, _) = resolve_inprocess_budget(Some(entry), "other-model")
+            .unwrap_or_else(|e| panic!("budget resolves: {e}"));
+        assert_eq!(budget.turns.max_turns, 80);
+        let (budget, _) = resolve_inprocess_budget(Some(entry), "m-exact")
+            .unwrap_or_else(|e| panic!("budget resolves: {e}"));
+        assert_eq!(budget.turns.max_turns, 120);
+    }
+}
