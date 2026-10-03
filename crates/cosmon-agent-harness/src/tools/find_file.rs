@@ -44,6 +44,7 @@ use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 
 use crate::tool::{sanitize_join, ParametersSchema, Tool, ToolDeclaration, ToolError};
+use crate::tools::path_authority::{self, entry_allowed};
 
 /// Hard cap on the number of paths returned by a single `find_file`
 /// call. Matches the truncation discipline of every other read-shaped
@@ -150,6 +151,7 @@ fn find(work_dir: &Path, params: &FindParams) -> Result<FindResult, ToolError> {
             params.path
         )));
     }
+    path_authority::resolve_existing(work_dir, &params.path)?;
 
     let cap = params
         .max_results
@@ -192,10 +194,8 @@ fn find(work_dir: &Path, params: &FindParams) -> Result<FindResult, ToolError> {
         }
         let path = entry.path();
 
-        if let Ok(canonical) = std::fs::canonicalize(path) {
-            if !canonical.starts_with(&canonical_work_dir) {
-                continue;
-            }
+        if !entry_allowed(&canonical_work_dir, path) {
+            continue;
         }
 
         // Match the user's glob against the path relative to the search

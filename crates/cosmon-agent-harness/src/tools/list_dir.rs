@@ -54,6 +54,7 @@ use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 
 use crate::tool::{sanitize_join, ParametersSchema, Tool, ToolDeclaration, ToolError};
+use crate::tools::path_authority::{self, entry_allowed};
 
 /// Cap on the number of entries returned by a single `list_dir` call.
 /// Mirrors the truncation discipline of `read_file` /
@@ -187,6 +188,7 @@ fn list(work_dir: &Path, params: &ListParams) -> Result<ListResult, ToolError> {
             params.path
         )));
     }
+    path_authority::resolve_existing(work_dir, &params.path)?;
     if !target.is_dir() {
         return Err(ToolError::Io(format!(
             "list_dir target is not a directory: {}",
@@ -235,14 +237,14 @@ fn list(work_dir: &Path, params: &ListParams) -> Result<ListResult, ToolError> {
             continue;
         }
 
-        // Confirm the entry is inside the canonical work_dir. The
-        // walker is configured with follow_links=false so this is
-        // belt-and-suspenders, but a future contributor flipping the
-        // switch should not silently leak entries outside.
-        if let Ok(canonical) = std::fs::canonicalize(path) {
-            if !canonical.starts_with(&canonical_work_dir) {
-                continue;
-            }
+        // A symlink is reported as metadata only (kind, no size, no
+        // target) and is never traversed, so it needs no containment
+        // check. Every other entry must resolve inside the canonical
+        // work_dir; an entry whose canonical form cannot be computed is
+        // skipped (fail closed).
+        let is_link = entry.file_type().is_some_and(|ft| ft.is_symlink());
+        if !is_link && !entry_allowed(&canonical_work_dir, path) {
+            continue;
         }
 
         let rel = path.strip_prefix(work_dir).unwrap_or(path);

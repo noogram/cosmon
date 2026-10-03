@@ -283,7 +283,7 @@ pub fn apply_edits(
         // Symlink-safety check (W5 / adversary §F5.2) — must run
         // before the read, so a symlink target outside `work_dir`
         // never sees a `read_to_string` call.
-        ensure_inside_work_dir(work_dir, &target)?;
+        crate::tools::path_authority::ensure_write_target_inside(work_dir, &target)?;
         match compute_file_ops(path, &target, &ops) {
             Ok((result, new_bytes)) => {
                 commits.push((target, new_bytes));
@@ -383,60 +383,6 @@ fn compute_file_ops(
         summary: summary_lines.join("; "),
     };
     Ok((result, final_content.into_bytes()))
-}
-
-/// Refuse a `target` whose canonical path (or any ancestor's
-/// canonical path) escapes `work_dir` via a symlink or an absolute
-/// link. Complements [`sanitize_join`], which only catches
-/// lexical `..` segments and absolute components — a previous turn's
-/// `exec_command "ln -s ~/.ssh/authorized_keys ./out"` would otherwise
-/// let the current turn's `edit_file path=out` overwrite the
-/// operator's SSH key via `std::fs::write`'s follow-symlink default.
-fn ensure_inside_work_dir(work_dir: &Path, target: &Path) -> Result<(), ToolError> {
-    let canonical_work_dir = std::fs::canonicalize(work_dir)
-        .map_err(|e| ToolError::Io(format!("canonicalize work_dir: {e}")))?;
-
-    // Reject the target outright if it exists as a symlink (even a
-    // dangling one). `std::fs::symlink_metadata` does NOT follow
-    // links — `Path::is_symlink` is the equivalent shortcut on
-    // current stable.
-    if let Ok(meta) = std::fs::symlink_metadata(target) {
-        if meta.file_type().is_symlink() {
-            return Err(ToolError::PathEscape(format!(
-                "symlink target refused: {}",
-                target.display()
-            )));
-        }
-    }
-
-    // Walk up to the deepest existing ancestor and verify its
-    // canonical form (with all symlinks resolved) stays inside the
-    // canonical `work_dir`. This catches ancestor symlinks pointing
-    // outside the worktree without requiring the target itself to
-    // exist (create-file ops legitimately reach here).
-    let mut probe = target.to_path_buf();
-    loop {
-        if probe.exists() {
-            let canonical = std::fs::canonicalize(&probe)
-                .map_err(|e| ToolError::Io(format!("canonicalize {}: {}", probe.display(), e)))?;
-            if !canonical.starts_with(&canonical_work_dir) {
-                return Err(ToolError::PathEscape(format!(
-                    "path escapes work_dir via symlink: {}",
-                    target.display()
-                )));
-            }
-            return Ok(());
-        }
-        match probe.parent() {
-            Some(p) if !p.as_os_str().is_empty() => probe = p.to_path_buf(),
-            _ => {
-                return Err(ToolError::PathEscape(format!(
-                    "cannot resolve any ancestor of {}",
-                    target.display()
-                )));
-            }
-        }
-    }
 }
 
 /// Count occurrences of `needle` in `haystack`, including positions that
