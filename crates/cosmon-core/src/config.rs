@@ -1963,6 +1963,67 @@ pub enum CodexUpdatePolicy {
     Operator,
 }
 
+/// Budget overrides for one exact model id, under
+/// `[adapters.<name>.models."<id>"]`. Every field is optional; see
+/// [`AdapterEntry::loop_budget`] for the precedence.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+// The `max_*` names are the TOML keys; they mirror `AdapterEntry`.
+#[allow(clippy::struct_field_names)]
+pub struct ModelBudgetEntry {
+    /// Turn budget for this model. See [`AdapterEntry::max_turns`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    /// Tool-call budget for this model. See [`AdapterEntry::max_tool_calls`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_calls: Option<u32>,
+    /// Estimated-input-token ceiling for this model. See
+    /// [`AdapterEntry::max_input_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u32>,
+    /// Output-token bound sent on the wire for this model. See
+    /// [`AdapterEntry::max_tokens`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+}
+
+/// Loop budgets resolved for one adapter and model. `None` means "use the
+/// harness default"; a `Some` value is nonzero and, together with the output
+/// bound, fits in `u32`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+// Field names mirror the config keys they were resolved from.
+#[allow(clippy::struct_field_names)]
+pub struct ResolvedLoopBudget {
+    /// Turn budget.
+    pub max_turns: Option<u32>,
+    /// Cumulative tool-call budget.
+    pub max_tool_calls: Option<u32>,
+    /// Estimated input-token ceiling.
+    pub max_input_tokens: Option<u32>,
+    /// Output-token bound for each request.
+    pub max_output_tokens: Option<u32>,
+}
+
+/// A configured loop budget that cannot be honoured.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LoopBudgetError {
+    /// A budget field was set to zero, which would stop the loop before its
+    /// first request.
+    #[error("{field} must be greater than zero (found 0)")]
+    Zero {
+        /// Name of the offending field.
+        field: &'static str,
+    },
+    /// Input ceiling plus output bound does not fit in `u32`.
+    #[error("max_input_tokens ({input}) + max_tokens ({output}) overflows u32")]
+    Overflow {
+        /// Resolved input ceiling.
+        input: u32,
+        /// Resolved output bound.
+        output: u32,
+    },
+}
+
 /// One row in the `[adapters]` table — an Adapter's static inventory
 /// signature (ADR-097 / C6, ADR-079 §6).
 ///
@@ -2103,6 +2164,49 @@ pub struct AdapterEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
 
+    /// Turn budget of the in-process agent loop: how many model round-trips
+    /// one worker may make before the loop stops with `TurnBudgetExhausted`.
+    ///
+    /// Read by the `cosmon`-owned Direct-API adapters (`openai`,
+    /// `anthropic`). Absent keeps the harness default (30). Zero is refused
+    /// by [`AdapterEntry::loop_budget`]. A `[adapters.<name>.models."<id>"]`
+    /// row overrides it for that exact model id.
+    ///
+    /// ```toml
+    /// [adapters.openai]
+    /// max_turns = 80
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+
+    /// Cumulative tool-call budget of the in-process agent loop. Absent keeps
+    /// the harness default (64). Zero is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_calls: Option<u32>,
+
+    /// Ceiling, in **estimated** input tokens, on the context the in-process
+    /// agent loop may send. Checked on the briefing, before compaction, and on
+    /// the serialized request body immediately before each network call.
+    /// Absent keeps the harness default (32 768). The estimate is a
+    /// 4-bytes-per-token heuristic, not a tokenizer, and the field does not
+    /// claim to match the model's real context window. Zero is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u32>,
+
+    /// Per-model budget overrides, keyed by the exact model id (no prefix or
+    /// pattern matching). A field set here wins over the adapter-level field
+    /// of the same name; an unset field falls through to the adapter level and
+    /// then to the harness default.
+    ///
+    /// ```toml
+    /// [adapters.openai.models."gpt-4o-mini"]
+    /// max_turns = 120
+    /// max_input_tokens = 100000
+    /// max_tokens = 4096
+    /// ```
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub models: std::collections::BTreeMap<String, ModelBudgetEntry>,
+
     /// Per-request HTTP timeout, in **seconds**, for a Direct-API adapter
     /// that forwards completions over HTTP — the `local` / `ollama` floor
     /// today (task-20260707-7d27, academy banc Mode C, hole #3).
@@ -2199,6 +2303,50 @@ pub struct AdapterEntry {
     /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass_api_key: Option<bool>,
+}
+
+impl AdapterEntry {
+    /// Resolve the in-process loop budgets for `model`.
+    ///
+    /// Precedence per field: the exact-model row under `models`, then the
+    /// adapter-level field, then `None` (the harness default). Output bound
+    /// reads `max_tokens`. Model ids are matched exactly; no capacity is
+    /// inferred from a model name.
+    ///
+    /// # Errors
+    ///
+    /// [`LoopBudgetError::Zero`] when a resolved field is zero, and
+    /// [`LoopBudgetError::Overflow`] when the input ceiling plus the output
+    /// bound does not fit in `u32`.
+    pub fn loop_budget(&self, model: &str) -> Result<ResolvedLoopBudget, LoopBudgetError> {
+        let row = self.models.get(model);
+        let pick = |model_level: Option<Option<u32>>, adapter: Option<u32>| {
+            model_level.flatten().or(adapter)
+        };
+        let resolved = ResolvedLoopBudget {
+            max_turns: pick(row.map(|r| r.max_turns), self.max_turns),
+            max_tool_calls: pick(row.map(|r| r.max_tool_calls), self.max_tool_calls),
+            max_input_tokens: pick(row.map(|r| r.max_input_tokens), self.max_input_tokens),
+            max_output_tokens: pick(row.map(|r| r.max_tokens), self.max_tokens),
+        };
+        for (field, value) in [
+            ("max_turns", resolved.max_turns),
+            ("max_tool_calls", resolved.max_tool_calls),
+            ("max_input_tokens", resolved.max_input_tokens),
+            ("max_tokens", resolved.max_output_tokens),
+        ] {
+            if value == Some(0) {
+                return Err(LoopBudgetError::Zero { field });
+            }
+        }
+        if let (Some(input), Some(output)) = (resolved.max_input_tokens, resolved.max_output_tokens)
+        {
+            if input.checked_add(output).is_none() {
+                return Err(LoopBudgetError::Overflow { input, output });
+            }
+        }
+        Ok(resolved)
+    }
 }
 
 impl AdaptersConfig {

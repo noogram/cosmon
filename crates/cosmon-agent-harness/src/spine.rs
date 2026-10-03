@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use cosmon_transport::spawn::AdapterTelemetry;
 
 use crate::bootstrap;
-use crate::budget::{ContextBudget, ToolBudget, TurnBudget};
+use crate::budget::{ContextBudget, LoopBudget, ToolBudget, TurnBudget};
 use crate::compaction::{CompactionError, CompactionPolicy, CompactionReport};
 use crate::error::HarnessError;
 use crate::message_log::{MessageLog, TranscriptEntry};
@@ -397,6 +397,36 @@ where
     .await
 }
 
+/// [`run_loop_counted_with_turn_input_and_progress`] with explicit
+/// [`LoopBudget`] ceilings.
+///
+/// # Errors
+/// Returns the normal harness errors or a turn input source failure.
+pub async fn run_loop_counted_with_turn_input_and_progress_budgeted<P, S>(
+    provider: &P,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+    source: &S,
+    progress: &mut LoopProgress,
+    budget: LoopBudget,
+) -> Result<WorkerOutcome, HarnessError<TurnInputProviderError<P::Error>>>
+where
+    P: Provider,
+    P::Log: Clone,
+    S: TurnInputSource,
+{
+    run_loop_counted_with_progress_budgeted(
+        &TurnInputProvider { provider, source },
+        briefing,
+        work_dir,
+        telemetry,
+        progress,
+        budget,
+    )
+    .await
+}
+
 /// Run a counted loop with turn input while retaining completed tool work on error.
 ///
 /// # Errors
@@ -520,6 +550,7 @@ pub async fn run_loop_counted<P: Provider>(
         work_dir,
         telemetry,
         default_registry(),
+        LoopBudget::DEFAULT,
         None,
     )
     .await
@@ -542,6 +573,32 @@ pub async fn run_loop_counted_with_progress<P: Provider>(
         work_dir,
         telemetry,
         default_registry(),
+        LoopBudget::DEFAULT,
+        Some(progress),
+    )
+    .await
+}
+
+/// [`run_loop_counted_with_progress`] with explicit [`LoopBudget`] ceilings.
+///
+/// # Errors
+/// Returns the same harness errors as [`run_loop_counted`]; the budget errors
+/// carry the configured limits.
+pub async fn run_loop_counted_with_progress_budgeted<P: Provider>(
+    provider: &P,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+    progress: &mut LoopProgress,
+    budget: LoopBudget,
+) -> Result<WorkerOutcome, HarnessError<P::Error>> {
+    run_loop_with_registry_impl(
+        provider,
+        briefing,
+        work_dir,
+        telemetry,
+        default_registry(),
+        budget,
         Some(progress),
     )
     .await
@@ -559,7 +616,16 @@ pub async fn run_loop_with_registry_counted<P: Provider>(
     telemetry: Option<&AdapterTelemetry>,
     registry: ToolRegistry,
 ) -> Result<WorkerOutcome, HarnessError<P::Error>> {
-    run_loop_with_registry_impl(provider, briefing, work_dir, telemetry, registry, None).await
+    run_loop_with_registry_impl(
+        provider,
+        briefing,
+        work_dir,
+        telemetry,
+        registry,
+        LoopBudget::DEFAULT,
+        None,
+    )
+    .await
 }
 
 /// Drive a worker session with a fixed capability registry.
@@ -578,9 +644,17 @@ pub async fn run_loop_with_registry<P: Provider>(
     telemetry: Option<&AdapterTelemetry>,
     registry: ToolRegistry,
 ) -> Result<String, HarnessError<P::Error>> {
-    run_loop_with_registry_impl(provider, briefing, work_dir, telemetry, registry, None)
-        .await
-        .map(|outcome| outcome.synthesis)
+    run_loop_with_registry_impl(
+        provider,
+        briefing,
+        work_dir,
+        telemetry,
+        registry,
+        LoopBudget::DEFAULT,
+        None,
+    )
+    .await
+    .map(|outcome| outcome.synthesis)
 }
 
 /// Drive a worker session, gating the `await_operator` blocking primitive
@@ -641,6 +715,7 @@ async fn run_loop_with_registry_impl<P: Provider>(
     work_dir: &Path,
     _telemetry: Option<&AdapterTelemetry>,
     registry: ToolRegistry,
+    budget: LoopBudget,
     mut progress: Option<&mut LoopProgress>,
 ) -> Result<WorkerOutcome, HarnessError<P::Error>> {
     // Bootstrapping (knuth §7) — walk up from `work_dir` collecting
@@ -658,7 +733,7 @@ async fn run_loop_with_registry_impl<P: Provider>(
     // pre-extraction `openai::MAX_INPUT_TOKENS` discipline. The check
     // sees the *augmented* briefing, so a 4 GiB `CLAUDE.md` blown
     // through pre-turn injection trips SF-5 loudly per knuth I3.
-    let context_limit = ContextBudget::DEFAULT.max_input_tokens;
+    let context_limit = budget.context.max_input_tokens;
     let estimated = estimate_briefing_tokens(&effective_briefing);
     if estimated > context_limit {
         return Err(HarnessError::ContextOverflow {
@@ -668,8 +743,8 @@ async fn run_loop_with_registry_impl<P: Provider>(
     }
 
     let mut log = <P::Log>::from_briefing(&effective_briefing);
-    let max_turns = TurnBudget::DEFAULT.max_turns;
-    let tool_limit = ToolBudget::DEFAULT.max_tool_calls;
+    let max_turns = budget.turns.max_turns;
+    let tool_limit = budget.tools.max_tool_calls;
     // I2 — cumulative tool dispatch counter (delib-20260519-e6db W5 /
     // knuth §K7). Lyapunov-variant `V = (K − turn, J − used_tools)`
     // requires both axes bound; without `used_tools` the worst-case
@@ -696,7 +771,7 @@ async fn run_loop_with_registry_impl<P: Provider>(
     // `[adapters.<name>].compaction.{threshold_ratio, target_ratio}`
     // in `Adapter.toml` once a second use-case asks for it; the
     // current default is sane for any provider with `n_ctx` ≥ 8_192.
-    let context_budget = ContextBudget::DEFAULT;
+    let context_budget = budget.context;
     let compaction_policy = CompactionPolicy::DEFAULT;
     let compaction_threshold = compaction_policy.threshold_tokens(context_budget);
     let compaction_target = compaction_policy.target_tokens(context_budget);
@@ -2142,6 +2217,98 @@ mod tests {
             .await
             .expect_err("must hit turn cap");
         assert!(matches!(err, HarnessError::TurnBudgetExhausted { .. }));
+    }
+
+    /// A script of `n` distinct-file reads followed by a stop.
+    fn read_script(dir: &std::path::Path, n: usize) -> ScriptedProvider {
+        let mut script = Vec::new();
+        for i in 0..n {
+            std::fs::write(dir.join(format!("note-{i}.txt")), "x").unwrap();
+            script.push(Turn::ToolCalls {
+                assistant: format!("turn {i}"),
+                calls: vec![ToolCall {
+                    id: format!("call-{i}"),
+                    name: "read_file".to_owned(),
+                    arguments_json: serde_json::json!({ "path": format!("note-{i}.txt") })
+                        .to_string(),
+                }],
+            });
+        }
+        script.push(Turn::Stop("done".to_owned()));
+        ScriptedProvider::new(script)
+    }
+
+    /// The fixed 30-turn budget is configurable: a 40-step task fails under
+    /// the default and completes under `LoopBudget { turns: 50, .. }`.
+    #[tokio::test]
+    async fn configured_turn_budget_lifts_the_fixed_cap() {
+        let dir = tempdir().unwrap();
+        let err = run_loop_counted(&read_script(dir.path(), 40), "go", dir.path(), None)
+            .await
+            .expect_err("default budget stops at 30 turns");
+        assert!(matches!(
+            err,
+            HarnessError::TurnBudgetExhausted { limit: 30 }
+        ));
+
+        let budget = LoopBudget::new(Some(50), None, None).unwrap();
+        let mut progress = LoopProgress::default();
+        let outcome = run_loop_counted_with_progress_budgeted(
+            &read_script(dir.path(), 40),
+            "go",
+            dir.path(),
+            None,
+            &mut progress,
+            budget,
+        )
+        .await
+        .expect("50-turn budget completes a 40-step task");
+        assert_eq!(outcome.tools_dispatched, 40);
+    }
+
+    /// A configured budget below the default is enforced with its own limit.
+    #[tokio::test]
+    async fn configured_turn_budget_can_tighten() {
+        let dir = tempdir().unwrap();
+        let budget = LoopBudget::new(Some(3), None, None).unwrap();
+        let mut progress = LoopProgress::default();
+        let err = run_loop_counted_with_progress_budgeted(
+            &read_script(dir.path(), 10),
+            "go",
+            dir.path(),
+            None,
+            &mut progress,
+            budget,
+        )
+        .await
+        .expect_err("3-turn budget");
+        assert!(matches!(
+            err,
+            HarnessError::TurnBudgetExhausted { limit: 3 }
+        ));
+    }
+
+    /// A configured input ceiling replaces the 32 768-token pre-flight limit.
+    #[tokio::test]
+    async fn configured_context_budget_governs_the_briefing_check() {
+        let dir = tempdir().unwrap();
+        let briefing = "x".repeat(4_000); // ~1 000 estimated tokens
+        let budget = LoopBudget::new(None, None, Some(500)).unwrap();
+        let mut progress = LoopProgress::default();
+        let err = run_loop_counted_with_progress_budgeted(
+            &ScriptedProvider::new(vec![Turn::Stop("ok".to_owned())]),
+            &briefing,
+            dir.path(),
+            None,
+            &mut progress,
+            budget,
+        )
+        .await
+        .expect_err("briefing above the configured ceiling");
+        assert!(matches!(
+            err,
+            HarnessError::ContextOverflow { limit: 500, .. }
+        ));
     }
 
     /// `ScriptedProviderFn` demonstration — the closure inspects the

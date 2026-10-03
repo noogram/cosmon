@@ -305,6 +305,12 @@ pub struct AnthropicProvider {
     model: String,
     /// Per-request timeout.
     timeout: Duration,
+    /// Output-token bound sent as `max_tokens`; the envelope requires one, so
+    /// the default is [`DEFAULT_MAX_TOKENS`].
+    max_output_tokens: u32,
+    /// Estimated-input-token ceiling for the serialized request body, checked
+    /// immediately before each network call. `None` disables the check.
+    max_input_tokens: Option<u32>,
     /// Optional telemetry (mol/worker/state-dir) so `one_turn` can emit the
     /// realized-model observation at the response seam (F-01). `None` (the
     /// constructor default) makes emission a silent no-op — the transport-
@@ -331,6 +337,8 @@ impl Default for AnthropicProvider {
             base_url: DEFAULT_BASE_URL.to_owned(),
             model: "claude-opus-4-7".to_owned(),
             timeout: Duration::from_secs(60),
+            max_output_tokens: DEFAULT_MAX_TOKENS,
+            max_input_tokens: None,
             telemetry: None,
         }
     }
@@ -345,6 +353,8 @@ impl AnthropicProvider {
             base_url: DEFAULT_BASE_URL.to_owned(),
             model: model.into(),
             timeout: Duration::from_secs(60),
+            max_output_tokens: DEFAULT_MAX_TOKENS,
+            max_input_tokens: None,
             telemetry: None,
         }
     }
@@ -363,6 +373,8 @@ impl AnthropicProvider {
             base_url: base_url.into(),
             model: model.into(),
             timeout: Duration::from_secs(60),
+            max_output_tokens: DEFAULT_MAX_TOKENS,
+            max_input_tokens: None,
             telemetry: None,
         }
     }
@@ -372,6 +384,21 @@ impl AnthropicProvider {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Bound the request: `max_output_tokens` (when `Some`) replaces the
+    /// default `max_tokens` sent on the wire; `max_input_tokens` is the
+    /// estimated-token ceiling the serialized body must fit under before any
+    /// network call. Builder-style.
+    #[must_use]
+    pub fn with_request_budget(
+        mut self,
+        max_input_tokens: Option<u32>,
+        max_output_tokens: Option<u32>,
+    ) -> Self {
+        self.max_input_tokens = max_input_tokens;
+        self.max_output_tokens = max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         self
     }
 
@@ -723,10 +750,25 @@ impl Provider for AnthropicProvider {
         let body = MessagesRequest {
             model: &self.model,
             messages: log.messages(),
-            max_tokens: DEFAULT_MAX_TOKENS,
+            max_tokens: self.max_output_tokens,
             system: Some(log.system_prompt()),
             tools: Some(&tools),
         };
+
+        // Final-request guard: the body is exactly what is about to be sent
+        // (system, messages, tool arguments/results, tool schemas). Refuse
+        // before any network I/O.
+        if let Some(limit) = self.max_input_tokens {
+            let estimated = serde_json::to_vec(&body)
+                .map(|b| u32::try_from(b.len().div_ceil(4)).unwrap_or(u32::MAX))
+                .map_err(|e| AnthropicError::Decode(e.to_string()))?;
+            if estimated > limit {
+                return Err(AnthropicError::ContextOverflow {
+                    estimated_tokens: estimated,
+                    limit,
+                });
+            }
+        }
 
         let resp = client
             .post(&url)
@@ -937,9 +979,33 @@ pub async fn run_agent_loop_counted_with_progress(
     // observation at the response seam (F-01) — the `Provider::one_turn(&self,
     // log)` trait is telemetry-free by design, so the adapter carries it as a
     // field. Cheap clone (a handful of IDs + a path). Mirrors openai.
+    run_agent_loop_counted_with_progress_budgeted(
+        provider,
+        briefing,
+        work_dir,
+        telemetry,
+        progress,
+        cosmon_agent_harness::LoopBudget::DEFAULT,
+    )
+    .await
+}
+
+/// [`run_agent_loop_counted_with_progress`] with explicit loop ceilings.
+///
+/// # Errors
+/// Returns the same typed errors as [`run_agent_loop_counted`].
+#[cfg(feature = "http")]
+pub async fn run_agent_loop_counted_with_progress_budgeted(
+    provider: &AnthropicProvider,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+    progress: &mut cosmon_agent_harness::spine::LoopProgress,
+    budget: cosmon_agent_harness::LoopBudget,
+) -> Result<cosmon_agent_harness::WorkerOutcome, AnthropicError> {
     let provider = provider.clone().with_telemetry(telemetry.cloned());
-    match cosmon_agent_harness::spine::run_loop_counted_with_progress(
-        &provider, briefing, work_dir, telemetry, progress,
+    match cosmon_agent_harness::spine::run_loop_counted_with_progress_budgeted(
+        &provider, briefing, work_dir, telemetry, progress, budget,
     )
     .await
     {
