@@ -142,6 +142,8 @@ pub mod cluster;
 #[doc(hidden)]
 pub mod codex_energy;
 #[doc(hidden)]
+pub mod collaboration;
+#[doc(hidden)]
 pub mod committee;
 #[doc(hidden)]
 pub mod config;

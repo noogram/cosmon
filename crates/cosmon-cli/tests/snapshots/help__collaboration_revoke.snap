@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Revoke one binding; earlier admissions fail at their commit
+
+Usage: cs collaboration revoke [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Binding ID (cb-…)
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Show one binding
+
+Usage: cs collaboration show [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Binding ID (cb-…)
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

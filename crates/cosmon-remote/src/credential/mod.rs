@@ -42,9 +42,12 @@
 //! - **Error taxonomy (C4).** [`crate::CredentialStoreError`] is an own
 //!   `#[non_exhaustive]` enum; foreign backend errors are captured opaquely.
 
+mod attachment;
 mod key;
 mod secret;
 mod store;
+
+pub use attachment::AttachmentSlot;
 
 pub use key::CredentialKey;
 pub use secret::{SecretToken, StoredCredential};

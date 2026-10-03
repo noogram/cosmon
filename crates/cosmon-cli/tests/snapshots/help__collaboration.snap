@@ -1,0 +1,50 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Provision, inspect and revoke collaboration bindings on the authoritative host.
+
+A binding lets one exact identity (issuer, subject, audience, tenant) act as one
+seat of a declared work, or as one pilot attachment of a mission, from another
+machine. Each binding has its own attachment ID and a private proof. The proof
+is written once to the file named by --proof-out and never stored on the host;
+hand it to the client, which keeps it in its credential store.
+
+Bindings grant only the collaboration scopes named with --scope. They confer no
+spawn, harvest, lease or operator right, and a request can never change its
+own binding. Revocation takes effect at the next admission and at the commit of
+any write already admitted. No network route uses these bindings yet.
+
+Usage: cs collaboration [OPTIONS] <COMMAND>
+
+Commands:
+  bind    Provision a binding and write its attachment proof to a new private file
+  list    List every binding, active and revoked, without verifiers or proofs
+  show    Show one binding
+  revoke  Revoke one binding; earlier admissions fail at their commit
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs collaboration bind --issuer https://idp.example --subject pilot-b \
+      --audience cosmon-rpp-demo --tenant demo \
+      --work-owner <owner> --seat review --scope cosmon:work:write \
+      --proof-out ./review.proof                  # proof written once, 0600
+  cs collaboration list                           # every binding, no proofs
+  cs collaboration show <binding-id>
+  cs collaboration revoke <binding-id>            # refuses the next admission and commit
+
+The proof file is the client's secret: move it to the client machine, store
+it in its credential store, then delete the file. The host keeps only a
+verifier.

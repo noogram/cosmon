@@ -104,6 +104,8 @@ inside a record treated as ordinary can still escape detection.
 
 `cs harvest-authority` is an operator terminal surface for remote harvest trust administration, status, challenge construction and signed-grant import (issue #120 W6). No native UI counterpart is shipped; the RPP exposes the corresponding tenant reads and imports and a disjoint host-sealed administration route. A native UI must use the same public-root and grant validation rules before parity can be claimed.
 
+`cs collaboration` is a host-local terminal surface that provisions, lists, shows and revokes collaboration bindings (issue #147 W2, `docs/specs/cross-machine-collaboration.md` §2). A binding ties one exact token identity to one work seat or pilot mission through an attachment with its own proof; the proof is written once to a new 0600 file and only its verifier stays on the host. No native UI counterpart is shipped and no RPP route exposes binding management: a remote request must never create, widen or revoke its own binding, so the gap is deliberate, not pending. The client keeps the proof through `cosmon-remote`'s credential store; no `cosmon-remote` command uses it until the work routes ship (W4).
+
 ## Remote harvest operator journeys (issue #120)
 
 | Capability | Operator terminal | Native UI | Remote service |

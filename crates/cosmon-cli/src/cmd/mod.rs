@@ -15,6 +15,7 @@ pub mod await_operator;
 pub mod briefing_backstop;
 pub mod claim;
 pub mod cluster;
+pub mod collaboration;
 pub mod collapse;
 pub mod complete;
 pub mod config;

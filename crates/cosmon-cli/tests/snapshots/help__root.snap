@@ -294,6 +294,7 @@ Commands:
   init               Bootstrap a project-local .cosmon/ directory (creates the target dir if missing)
   inbox              Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
   work               Work — separate molecules (e.g. an implementer and a reviewer, same or another provider) exchange findings, recorded and bounded (ADR-182)
+  collaboration      Collaboration — bind a remote identity to one work seat or mission attachment on this host; inspect and revoke
   spark              Spark — capture a one-line operator intent into the Inbox (ADR-061)
   drop               Drop — universal Inbox gesture (hotkey / zsh widget / menubar) → `cs spark`
   listen             Listen — voice → whisper.cpp → `cs nucleate spark` (MVP)

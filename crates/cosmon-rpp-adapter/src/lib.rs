@@ -67,6 +67,7 @@ pub mod audit;
 pub mod auth;
 pub mod auth_claude;
 pub mod backend_health;
+pub mod collaboration;
 pub mod config;
 pub mod delivery;
 pub mod deny_list;

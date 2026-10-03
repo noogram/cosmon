@@ -1,0 +1,23 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Provision a binding and write its attachment proof to a new private file
+
+Usage: cs collaboration bind [OPTIONS] --issuer <ISSUER> --subject <SUBJECT> --audience <AUDIENCE> --tenant <TENANT> --scope <SCOPES> --proof-out <PROOF_OUT>
+
+Options:
+      --config <PATH>            Path to configuration file
+      --issuer <ISSUER>          Exact token issuer
+      --subject <SUBJECT>        Exact token subject
+  -v, --verbose                  Enable verbose output
+      --audience <AUDIENCE>      Exact token audience
+      --json                     Output in JSON format
+      --tenant <TENANT>          Tenant the identity is bound to
+      --work-owner <WORK_OWNER>  Owning molecule of the declared work (requires --seat)
+      --seat <SEAT>              Work seat the attachment acts as
+      --mission <MISSION>        Mission whose pilot surface the attachment joins
+      --scope <SCOPES>           Granted scope; repeat for several (cosmon:work:read, cosmon:work:write, cosmon:sessions:read, cosmon:sessions:write)
+      --proof-out <PROOF_OUT>    New file that receives the attachment proof (created 0600, never overwritten)
+      --label <LABEL>            Display label for the client machine; never used for admission
+  -h, --help                     Print help

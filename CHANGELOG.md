@@ -19,6 +19,17 @@ this stage.
 
 ## [Unreleased]
 
+### Added
+
+- `cs collaboration bind | list | show | revoke` provisions, inspects and
+  revokes collaboration bindings on the authoritative host. A binding ties one
+  exact token identity to one work seat or pilot mission through an attachment
+  with its own proof; the proof is written once to a new 0600 file and the host
+  keeps only a verifier. Bindings confer no spawn, harvest, lease or operator
+  right, and no network route uses them yet. The four collaboration scopes
+  (`cosmon:work:read`, `cosmon:work:write`, `cosmon:sessions:read`,
+  `cosmon:sessions:write`) join the RPP scope catalog. (#147)
+
 ### Fixed
 
 - `cs whisper` on a molecule whose recorded tmux session does not exist now
