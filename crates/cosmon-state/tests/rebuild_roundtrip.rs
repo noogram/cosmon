@@ -69,6 +69,7 @@ fn roundtrip_delete_and_rebuild_preserves_status_and_seals() {
                 total: 2,
                 duration_ms: Some(1234),
                 step_hash: None,
+                evidence: None,
             },
             EventV2::BriefingSealed {
                 molecule_id: id.clone(),
@@ -84,11 +85,13 @@ fn roundtrip_delete_and_rebuild_preserves_status_and_seals() {
                 total: 2,
                 duration_ms: Some(2345),
                 step_hash: None,
+                evidence: None,
             },
             EventV2::MoleculeCompleted {
                 molecule_id: id.clone(),
                 duration_ms: Some(5000),
                 reason: "ok".into(),
+                summary: None,
             },
         ],
     );
@@ -154,11 +157,13 @@ fn two_rebuilds_produce_identical_bytes() {
                 total: 1,
                 duration_ms: None,
                 step_hash: None,
+                evidence: None,
             },
             EventV2::MoleculeCompleted {
                 molecule_id: id.clone(),
                 duration_ms: None,
                 reason: "ok".into(),
+                summary: None,
             },
         ],
     );

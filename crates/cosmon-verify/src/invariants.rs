@@ -446,6 +446,7 @@ mod tests {
             molecule_id: MoleculeId::new("cs-20260414-aaaa").unwrap(),
             duration_ms: None,
             reason: "ok".into(),
+            summary: None,
         });
         assert!(inv.check(&state, &evt, 1).is_err());
     }

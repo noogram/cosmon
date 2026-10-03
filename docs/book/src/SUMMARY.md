@@ -41,6 +41,7 @@
 - [Formula reference](./reference/formulas.md)
 - [Formula catalog](./reference/formula-catalog.md)
 - [Exit codes & JSON output](./reference/exit-codes.md)
+- [Read contracts for external consumers](./reference/read-contracts.md)
 
 # Explanation
 

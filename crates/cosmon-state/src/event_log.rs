@@ -389,7 +389,9 @@ impl EventLogWriter {
             emitter.meta_level,
             event,
         );
-        let mut line = serde_json::to_string(&env)
+        let mut line = env
+            .to_contract_value()
+            .and_then(|v| serde_json::to_string(&v))
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         line.push('\n');
         let written = line.len() as u64;
@@ -995,6 +997,82 @@ mod tests {
         MoleculeId::new(s).unwrap()
     }
 
+    /// Read the raw JSON objects of a log, bypassing the typed reader, so the
+    /// test asserts what an external consumer that never imports cosmon sees.
+    fn raw_lines(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    /// Read contract (issue #164): every record carries `schema_version`, and
+    /// every record about a molecule carries it under the canonical name
+    /// `molecule_id`, whichever alias the variant uses on the wire.
+    #[test]
+    fn records_carry_schema_version_and_canonical_molecule_id() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut w = EventLogWriter::open(&path).unwrap();
+        let m = mid("cs-20260411-aaaa");
+        w.emit(
+            EventV2::MoleculeStatusChanged {
+                molecule_id: m.clone(),
+                from: "pending".into(),
+                to: "running".into(),
+            },
+            None,
+        )
+        .unwrap();
+        w.emit(
+            EventV2::MergeDispatched {
+                molecule: m.clone(),
+                branch: "feat/cs-20260411-aaaa".into(),
+                federation_provenance: None,
+            },
+            None,
+        )
+        .unwrap();
+        w.emit(
+            EventV2::AdapterSelected {
+                mol_id: m.clone(),
+                adapter_name: "claude".into(),
+                selected_at: Utc::now(),
+                selection_source: cosmon_core::event_v2::AdapterSelectionSource::MoleculePin,
+                role_hint: None,
+                loop_ownership: Default::default(),
+            },
+            None,
+        )
+        .unwrap();
+        w.emit(
+            EventV2::EnergyTick {
+                worker_id: cosmon_core::id::WorkerId::new("w1").unwrap(),
+                input_tokens: 1,
+                output_tokens: 2,
+                cost_usd: 0.0,
+            },
+            None,
+        )
+        .unwrap();
+        w.sync().unwrap();
+
+        let lines = raw_lines(&path);
+        assert_eq!(lines.len(), 4);
+        for line in &lines {
+            assert_eq!(line["schema_version"], 1, "missing version: {line}");
+        }
+        for line in &lines[..3] {
+            assert_eq!(line["molecule_id"], m.as_str(), "no canonical id: {line}");
+        }
+        // The pre-existing aliases stay readable for existing consumers.
+        assert_eq!(lines[1]["molecule"], m.as_str());
+        assert_eq!(lines[2]["mol_id"], m.as_str());
+        // An event about no molecule invents no id.
+        assert!(lines[3].get("molecule_id").is_none());
+    }
+
     #[test]
     fn writer_assigns_monotone_sequence_from_empty() {
         let dir = tempdir().unwrap();
@@ -1019,6 +1097,7 @@ mod tests {
                     molecule_id: mid("cs-20260411-aaaa"),
                     duration_ms: Some(500),
                     reason: "ok".to_owned(),
+                    summary: None,
                 },
                 Some(s0),
             )
@@ -1066,6 +1145,7 @@ mod tests {
                     molecule_id: mid("cs-20260411-aaaa"),
                     duration_ms: None,
                     reason: "done".to_owned(),
+                    summary: None,
                 },
                 None,
             )
@@ -1093,6 +1173,7 @@ mod tests {
                 molecule_id: mid("cs-20260411-aaaa"),
                 duration_ms: Some(1),
                 reason: "ok".to_owned(),
+                summary: None,
             },
             None,
         )
@@ -1166,6 +1247,7 @@ mod tests {
                 total: 2,
                 duration_ms: None,
                 step_hash: None,
+                evidence: None,
             },
             None,
         )
@@ -1175,6 +1257,7 @@ mod tests {
                 molecule_id: a.clone(),
                 duration_ms: None,
                 reason: "ok".into(),
+                summary: None,
             },
             None,
         )
@@ -1184,6 +1267,7 @@ mod tests {
                 molecule_id: b.clone(),
                 duration_ms: None,
                 reason: "ok".into(),
+                summary: None,
             },
             None,
         )
@@ -1262,6 +1346,7 @@ mod tests {
                     total: 1,
                     duration_ms: None,
                     step_hash: None,
+                    evidence: None,
                 },
                 None,
             )
@@ -1417,6 +1502,7 @@ mod tests {
                 molecule_id: mid("cs-20260509-aaaa"),
                 duration_ms: Some(123),
                 reason: "ok".into(),
+                summary: None,
             },
             None,
         )

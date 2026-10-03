@@ -1009,7 +1009,18 @@ impl StateStore for FileStore {
     }
 
     fn save_molecule(&self, id: &MoleculeId, data: &MoleculeData) -> Result<(), CosmonError> {
-        let json = serde_json::to_string_pretty(data)?;
+        /// `MoleculeData` plus the read-contract version, flattened so the
+        /// file keeps every existing key.
+        #[derive(serde::Serialize)]
+        struct VersionedState<'a> {
+            schema_version: u32,
+            #[serde(flatten)]
+            data: &'a MoleculeData,
+        }
+        let json = serde_json::to_string_pretty(&VersionedState {
+            schema_version: cosmon_state::STATE_SCHEMA_VERSION,
+            data,
+        })?;
         // Write to the fleet-scoped state path, decoded from the write-path
         // taxonomy (B7 collapse, delib-20260607-aec8) so the writer emits the
         // path rather than re-stating the `fleets/<fleet>/molecules/<id>/state.json`

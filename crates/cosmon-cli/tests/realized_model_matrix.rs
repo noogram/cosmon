@@ -96,6 +96,7 @@ fn seed_completed(dir: &std::path::Path, m: &MoleculeId) {
             molecule_id: m.clone(),
             duration_ms: None,
             reason: "done".to_owned(),
+            summary: None,
         },
         None,
     )

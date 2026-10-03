@@ -267,6 +267,14 @@ pub struct RepoData {
 // MoleculeData — flat, serializable molecule representation
 // ---------------------------------------------------------------------------
 
+/// Version of the `state.json` read contract, written as `schema_version` on
+/// every molecule state file.
+///
+/// Within one value the file changes additively only: keys may be added, none
+/// is removed or renamed. A breaking change bumps this number. Files written
+/// before the stamp existed have no `schema_version` and read as `1`.
+pub const STATE_SCHEMA_VERSION: u32 = 1;
+
 /// Flat, serializable representation of a molecule for persistence.
 ///
 /// Unlike `Molecule<S>` (which uses typestate), this struct captures all

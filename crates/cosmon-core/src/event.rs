@@ -51,6 +51,13 @@ pub struct Envelope {
     /// Populated when the event is appended; absent on historical entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash: Option<Hash>,
+    /// Version of the `events.jsonl` read contract this line was written
+    /// under (`crate::event_v2::EVENT_SCHEMA_VERSION`).
+    ///
+    /// `None` on lines written before the stamp existed, so their canonical
+    /// hash payload is unchanged and `cs verify` still accepts them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u32>,
     /// The event payload.
     #[serde(flatten)]
     pub event: Event,
@@ -67,6 +74,7 @@ impl Envelope {
             timestamp: Utc::now(),
             prev_hash: None,
             hash: None,
+            schema_version: Some(crate::event_v2::EVENT_SCHEMA_VERSION),
             event,
         }
     }
