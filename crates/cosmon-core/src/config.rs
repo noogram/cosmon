@@ -1578,6 +1578,17 @@ pub struct WorkerConfig {
     /// - `commit+push+pr`: commit, push, and create a pull request
     #[serde(default)]
     pub on_complete: OnComplete,
+
+    /// Permission deny rules written into every worker's harness settings
+    /// overlay as the harness's own `permissions.deny` list.
+    ///
+    /// Brief prose such as "never push" binds only as far as the worker
+    /// reads it; a deny rule is enforced by the harness itself. Each entry
+    /// is passed through verbatim in the harness's rule syntax (for Claude
+    /// Code, e.g. `Bash(git push:*)`). Empty or absent means the overlay is
+    /// left exactly as it was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_rules: Vec<String>,
 }
 
 /// The action a worker takes after completing its molecule.
@@ -2640,6 +2651,14 @@ mod tests {
     }
 
     #[test]
+    fn worker_deny_rules_parse_and_default_empty() {
+        let config: ProjectConfig =
+            toml::from_str("[worker]\ndeny_rules = [\"Bash(git push:*)\"]\n").unwrap();
+        assert_eq!(config.worker.deny_rules, vec!["Bash(git push:*)"]);
+        assert!(ProjectConfig::default().worker.deny_rules.is_empty());
+    }
+
+    #[test]
     fn test_on_complete_display() {
         assert_eq!(OnComplete::Commit.to_string(), "commit");
         assert_eq!(OnComplete::CommitPush.to_string(), "commit+push");
@@ -2670,6 +2689,7 @@ mod tests {
         ] {
             let config = WorkerConfig {
                 on_complete: variant,
+                deny_rules: Vec::new(),
             };
             let serialized = toml::to_string(&config).unwrap();
             let deserialized: WorkerConfig = toml::from_str(&serialized).unwrap();

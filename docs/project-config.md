@@ -19,7 +19,7 @@ configuration surface without reading cosmon source code.
 | Section | Purpose | Required |
 |---------|---------|----------|
 | `[project]` | Project identity (`project_id`), reference trunk (`trunk_branch`), target repository (`target_repo`) | **yes** |
-| `[worker]` | Worker behavior on completion | no |
+| `[worker]` | Worker behavior on completion; `deny_rules` permission denials | no |
 | `[hooks]` | Lifecycle hook commands | no |
 | `[gates]` | Verification gate commands (language-agnostic) | no |
 | `[archive]` | Durable proof-of-work archive: on/off and retention | no |
@@ -27,6 +27,20 @@ configuration surface without reading cosmon source code.
 
 All sections except `[project]` are optional and default to sensible
 values. Missing sections never produce an error.
+
+## `[worker].deny_rules` — enforced permission denials
+
+```toml
+[worker]
+deny_rules = ["Bash(git push:*)", "Read(./.env)"]
+```
+
+Each entry is written, verbatim, into the per-worker harness settings overlay
+as Claude Code's `permissions.deny`, so a rule that a brief states in prose
+("never push") is refused by the harness itself. Entries use the harness's
+rule syntax; cosmon does not validate them. An empty or absent list leaves the
+overlay unchanged. The rules are merged after any `permissions.deny` the
+overlay already holds, without duplicates. Presence hooks are unaffected.
 
 ## `[adapters.codex].update` — worker update policy
 
