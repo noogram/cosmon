@@ -61,7 +61,7 @@ use serde::{Deserialize, Serialize};
 /// this module.
 ///
 /// Ordering of severity (for a human reader): `None` < `Permission` <
-/// `Unknown` < `MoneyStake`. The classifier picks the *most severe* class
+/// `Unknown` < `LoginRequired` < `MoneyStake`. The classifier picks the *most severe* class
 /// whose markers are present, so a permission prompt that also mentions a
 /// spend limit resolves to `MoneyStake` (fail-safe toward the alert path).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +87,11 @@ pub enum DialogueClass {
     /// (`rm -rf`, `git push`, `--force`, publish, …). Fails safe: surface to
     /// a human, never act.
     Unknown,
+    /// The CLI is asking the operator to authenticate: the session expired,
+    /// the credentials were rejected, or the login-method menu is open. No
+    /// keystroke the patrol can send completes a login, so this is **never**
+    /// auto-confirmable; the worker is stalled until a human signs in.
+    LoginRequired,
 }
 
 impl DialogueClass {
@@ -110,7 +115,7 @@ impl DialogueClass {
     /// never alerts.
     #[must_use]
     pub const fn requires_alert(self) -> bool {
-        matches!(self, Self::MoneyStake | Self::Unknown)
+        matches!(self, Self::MoneyStake | Self::Unknown | Self::LoginRequired)
     }
 
     /// Stable lowercase token for JSON output and `cs notify --level` routing.
@@ -121,6 +126,7 @@ impl DialogueClass {
             Self::Permission => "permission",
             Self::MoneyStake => "money_stake",
             Self::Unknown => "unknown",
+            Self::LoginRequired => "login_required",
         }
     }
 }
@@ -315,6 +321,27 @@ const MONEY_MARKERS: &[&str] = &[
     // save credit is itself a spend decision. Never auto-confirmable.
     "rate limit",
     "lower credit usage",
+    // Claude "extra usage" screens (issue #161): once the plan allowance is
+    // spent the CLI offers metered overage — a menu ("Adjust monthly spend
+    // limit" / "Wait for limit to reset") or a bare notice. Either way the
+    // next keystroke may bill, so it is a money stake, never confirmable.
+    "extra usage",
+];
+
+/// Login markers — case-insensitive substrings of the screens a CLI shows
+/// when it needs the operator to authenticate (issue #161). They are phrased
+/// as the sentences those screens print, not as the bare word "login", so
+/// code or test output that merely mentions a login module does not match.
+const LOGIN_MARKERS: &[&str] = &[
+    "run /login",
+    "select login method",
+    "session has expired",
+    "session expired",
+    "not logged in",
+    "oauth token has expired",
+    "login required",
+    "log in again",
+    "invalid api key",
 ];
 
 /// Destructive / irreversible markers — if present, a prompt that would
@@ -513,6 +540,9 @@ fn truncate_evidence(line: &str) -> String {
 /// cannot turn an idle pane into a blocking dialogue. Within that tail, the
 /// decision order encodes the safety invariants (most-severe wins):
 ///
+/// 0. **Login first.** A `LOGIN_MARKERS` hit yields
+///    [`DialogueClass::LoginRequired`]; it precedes money only because the
+///    login-method menu itself names "API usage billing".
 /// 1. **Money dominates.** If any `MONEY_MARKERS` entry is present in the active tail,
 ///    the verdict is [`DialogueClass::MoneyStake`] — full stop. A permission
 ///    prompt that also mentions a spend limit is a money decision.
@@ -540,6 +570,17 @@ pub fn classify_pane(text: &str) -> DialogueScan {
     // old prompts. A later prompt in the suffix still gets classified below.
     let live = lines.join("\n");
     let lower = live.to_lowercase();
+
+    // A login screen is checked first: the Claude login-method menu lists
+    // "API usage billing" as an account type, which must not read as a spend
+    // decision. Nothing on a login screen can be answered by the patrol.
+    if let Some(ev) = first_match(&lower, lines, LOGIN_MARKERS) {
+        return DialogueScan {
+            class: DialogueClass::LoginRequired,
+            evidence: Some(ev),
+            rule: Some("login marker"),
+        };
+    }
 
     // 1. Money dominates the active tail.
     if let Some(ev) = first_match(&lower, lines, MONEY_MARKERS) {
@@ -932,5 +973,49 @@ mod tests {
             classify_codex_dialog("Restart to update"),
             Some(CodexDialogKind::RestartRequired)
         );
+    }
+
+    // Issue #161: fixtures are built from the observed screen shapes only.
+
+    #[test]
+    fn issue161_extra_usage_menu_is_money_stake() {
+        let pane = "You're out of extra usage\n\nWhat do you want to do?\n\n \u{276f} 1. Adjust monthly spend limit\n   2. Wait for limit to reset\n";
+        let scan = classify_pane(pane);
+        assert_eq!(scan.class, DialogueClass::MoneyStake);
+        assert!(!scan.class.auto_confirmable());
+    }
+
+    #[test]
+    fn issue161_extra_usage_menu_without_spend_wording_is_money_stake() {
+        let pane = "Extra usage is required to continue\n\nWhat do you want to do?\n\n \u{276f} 1. Stop and wait for limit to reset\n   2. Keep going\n";
+        assert_eq!(classify_pane(pane).class, DialogueClass::MoneyStake);
+    }
+
+    #[test]
+    fn issue161_extra_usage_notice_without_menu_is_money_stake() {
+        let pane = "Working...\nYou are now using extra usage\n";
+        assert_eq!(classify_pane(pane).class, DialogueClass::MoneyStake);
+    }
+
+    #[test]
+    fn issue161_session_expired_screen_is_login_required() {
+        let pane = "Your session has expired. Please run /login to sign in again.\n";
+        let scan = classify_pane(pane);
+        assert_eq!(scan.class, DialogueClass::LoginRequired);
+        assert!(scan.class.requires_alert());
+        assert!(!scan.class.auto_confirmable());
+        assert_eq!(scan.class.as_str(), "login_required");
+    }
+
+    #[test]
+    fn issue161_login_method_menu_is_login_required() {
+        let pane = "Select login method:\n\n \u{276f} 1. Claude account with subscription\n   2. Anthropic Console account \u{b7} API usage billing\n";
+        assert_eq!(classify_pane(pane).class, DialogueClass::LoginRequired);
+    }
+
+    #[test]
+    fn issue161_ordinary_login_code_output_is_not_a_login_screen() {
+        let pane = "Edited src/auth/login.rs\ntest login::tests::rejects_bad_password ... ok\n";
+        assert_eq!(classify_pane(pane).class, DialogueClass::None);
     }
 }

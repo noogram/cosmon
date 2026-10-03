@@ -255,11 +255,11 @@ pub struct Args {
     /// spend-limit dialog with no human to press Enter. Per the be1e
     /// discipline (ADR-137 §2) pane text is read only to **surface** a
     /// finding — a `money_stake` class **always** pages the operator via `cs
-    /// notify` and is **never** auto-confirmed; an `unknown` block alerts
-    /// too; a safe `permission` prompt is auto-confirmed **only** when
-    /// `--auto-confirm-safe` is also passed. A recognised codex dialog is
-    /// reported alongside its `class` (`codex_dialog` in `--json`) so the
-    /// finding says *why* the worker is blocked, not only how severe.
+    /// notify` and is **never** auto-confirmed; an `unknown` block or a
+    /// `login_required` screen (expired session, login menu) alerts too; a safe `permission` prompt is auto-confirmed **only** when
+    /// `--auto-confirm-safe` is also passed. A recognised codex dialog
+    /// (read on codex panes only) is reported alongside its `class`
+    /// (`codex_dialog` in `--json`) so the finding says *why* the worker is blocked, not only how severe.
     /// Runs on every patrol by default; the flag remains accepted for
     /// existing scheduled invocations. No keystroke is sent by default.
     #[arg(long, default_value_t = true)]
@@ -3359,7 +3359,7 @@ pub(crate) struct DialogueScanReport {
 ///
 /// This is the whole policy, isolated from tmux so it is an executable spec:
 ///
-/// - `MoneyStake` / `Unknown` → page the operator (`Alerted`), escalating to
+/// - `MoneyStake` / `Unknown` / `LoginRequired` → page the operator (`Alerted`), escalating to
 ///   `CanaryRed` once blocked past `blocked_after`. **Never** auto-confirmed.
 /// - `Permission` with `auto_confirm_safe` → `AutoConfirmed`.
 /// - `Permission` without opt-in → `Reported`, but escalates to `CanaryRed`
@@ -3374,7 +3374,7 @@ pub(crate) fn decide_dialogue_action(
     use cosmon_core::dialogue::DialogueClass;
     let past_threshold = blocked_seconds.is_some_and(|s| s >= opts.blocked_after);
     match class {
-        DialogueClass::MoneyStake | DialogueClass::Unknown => {
+        DialogueClass::MoneyStake | DialogueClass::Unknown | DialogueClass::LoginRequired => {
             if past_threshold {
                 DialogueAction::CanaryRed
             } else {
@@ -3438,8 +3438,18 @@ pub(crate) fn dialogue_scan_sweep(
         let Ok(pane) = be.capture_output(wid, opts.lines) else {
             continue;
         };
-        let codex_kind = classify_codex_dialog(&pane);
-        if mol.process.as_ref().and_then(|p| p.adapter_name.as_deref()) == Some("codex")
+        // The codex dialog rules (update/restart notices, reasoning picker,
+        // rate-limit switch) describe codex widgets only. A Claude pane can
+        // show the same words as a passive footer ("Update installed ·
+        // Restart to update"), which is not a dialog (issue #161).
+        let is_codex =
+            mol.process.as_ref().and_then(|p| p.adapter_name.as_deref()) == Some("codex");
+        let codex_kind = if is_codex {
+            classify_codex_dialog(&pane)
+        } else {
+            None
+        };
+        if is_codex
             && opts.codex_update_policy != cosmon_core::config::CodexUpdatePolicy::Operator
             && (codex_kind == Some(CodexDialogKind::RestartRequired)
                 || (codex_kind == Some(CodexDialogKind::UpdateAvailable)
@@ -6325,7 +6335,12 @@ mod tests {
             ),
         ] {
             let (tmp, store) = make_store();
-            let mol = make_molecule("task-20260929-1221", MoleculeStatus::Running, Some("w1"));
+            // These are codex widgets; the sweep reads them on codex panes only.
+            let mut mol = make_molecule("task-20260929-1221", MoleculeStatus::Running, Some("w1"));
+            mol.process = Some(
+                cosmon_core::process::MoleculeProcess::new(WorkerId::new("w1").unwrap(), "w1")
+                    .with_adapter_name("codex"),
+            );
             store.save_molecule(&mol.id, &mol).unwrap();
             let molecules = store.list_molecules(&MoleculeFilter::default()).unwrap();
             let backend = mock_with_worker("w1", pane);
@@ -6678,13 +6693,108 @@ mod tests {
     }
 
     #[test]
+    fn issue161_sweep_ignores_codex_restart_footer_on_a_claude_pane() {
+        std::env::set_var("COSMON_NOTIFY_DRY_RUN", "1");
+        let (tmp, store) = make_store();
+        let mut mol = make_molecule("task-20261003-f001", MoleculeStatus::Running, Some("w1"));
+        mol.process = Some(
+            cosmon_core::process::MoleculeProcess::new(WorkerId::new("w1").unwrap(), "w1")
+                .with_adapter_name("claude"),
+        );
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let molecules = store.list_molecules(&MoleculeFilter::default()).unwrap();
+
+        // A passive footer beside an empty composer, as a Claude pane shows it.
+        let pane =
+            "\u{276f}\n  ? for shortcuts            Update installed \u{b7} Restart to update";
+        let backend = mock_with_worker("w1", pane);
+        let report = dialogue_scan_sweep(
+            &store,
+            tmp.path(),
+            &molecules,
+            Some(&backend as &dyn TransportBackend),
+            &opts(false),
+            Utc::now(),
+        )
+        .unwrap();
+
+        assert!(report.findings.is_empty());
+        let reloaded = store.load_molecule(&mol.id).unwrap();
+        assert!(
+            !reloaded
+                .tags
+                .iter()
+                .any(|t| t.as_str() == "worker-restart-requested"),
+            "a Claude footer must not record a codex restart request"
+        );
+    }
+
+    #[test]
+    fn issue161_sweep_pages_on_claude_extra_usage_without_a_codex_kind() {
+        std::env::set_var("COSMON_NOTIFY_DRY_RUN", "1");
+        let (tmp, store) = make_store();
+        let mol = make_molecule("task-20261003-f002", MoleculeStatus::Running, Some("w1"));
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let molecules = store.list_molecules(&MoleculeFilter::default()).unwrap();
+
+        let pane = "Extra usage is required to continue\n\nWhat do you want to do?\n\n \u{276f} 1. Stop and wait for limit to reset\n   2. Keep going\n";
+        let backend = mock_with_worker("w1", pane);
+        let report = dialogue_scan_sweep(
+            &store,
+            tmp.path(),
+            &molecules,
+            Some(&backend as &dyn TransportBackend),
+            &opts(true),
+            Utc::now(),
+        )
+        .unwrap();
+
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].class, DialogueClass::MoneyStake);
+        assert_eq!(report.findings[0].action, DialogueAction::Alerted);
+        assert_eq!(report.findings[0].codex_kind, None);
+    }
+
+    #[test]
+    fn issue161_sweep_pages_on_login_screen() {
+        std::env::set_var("COSMON_NOTIFY_DRY_RUN", "1");
+        let (tmp, store) = make_store();
+        let mol = make_molecule("task-20261003-f003", MoleculeStatus::Running, Some("w1"));
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let molecules = store.list_molecules(&MoleculeFilter::default()).unwrap();
+
+        let backend = mock_with_worker("w1", "Your session has expired. Please run /login.");
+        let report = dialogue_scan_sweep(
+            &store,
+            tmp.path(),
+            &molecules,
+            Some(&backend as &dyn TransportBackend),
+            &opts(true),
+            Utc::now(),
+        )
+        .unwrap();
+
+        assert_eq!(report.findings[0].class, DialogueClass::LoginRequired);
+        assert_eq!(report.findings[0].action, DialogueAction::Alerted);
+        let sent = backend
+            .calls()
+            .iter()
+            .any(|c| matches!(c, cosmon_transport::mock::MockCall::SendInput { .. }));
+        assert!(!sent, "a login screen must never receive a keystroke");
+    }
+
+    #[test]
     fn dialogue_sweep_reports_codex_rate_limit_switch_with_kind() {
         // issue #85: the sweep must not only alert on the codex rate-limit
         // "switch model" menu (MoneyStake), it must name *which* codex
         // dialog it is so a human reading the finding knows why.
         std::env::set_var("COSMON_NOTIFY_DRY_RUN", "1");
         let (tmp, store) = make_store();
-        let mol = make_molecule("task-20260704-codexrl", MoleculeStatus::Running, Some("w1"));
+        let mut mol = make_molecule("task-20260704-codexrl", MoleculeStatus::Running, Some("w1"));
+        mol.process = Some(
+            cosmon_core::process::MoleculeProcess::new(WorkerId::new("w1").unwrap(), "w1")
+                .with_adapter_name("codex"),
+        );
         store.save_molecule(&mol.id, &mol).unwrap();
         let molecules = store.list_molecules(&MoleculeFilter::default()).unwrap();
 

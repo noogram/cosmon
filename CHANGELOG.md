@@ -21,6 +21,11 @@ this stage.
 
 ### Added
 
+- The pane dialogue classifier treats Claude "extra usage" screens as a money
+  stake and adds a `login_required` class for expired-session and login-method
+  screens; neither is ever auto-confirmed. Codex update, restart, reasoning and
+  rate-limit rules now apply to Codex panes only, so a passive restart footer
+  on a Claude pane no longer tags the molecule. (#161)
 - `cs collaboration bind | list | show | revoke` provisions, inspects and
   revokes collaboration bindings on the authoritative host. A binding ties one
   exact token identity to one work seat or pilot mission through an attachment
