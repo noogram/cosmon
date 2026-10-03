@@ -121,3 +121,23 @@ splices in a corrective message. A refused request sends nothing.
   it does not compact in response to a refusal. Peer-input selection under the
   cap, and the interactive session's budgets, are not changed here.
 - Input and output allowances are not checked against a known model capacity.
+
+## Work-turn input and molecule context
+
+Both direct arms read the member's declared work roster (`work-ref.json`) at
+each request. Pending envelopes are appended to a copy of the message log for
+that one request, in each arm's native message shape; later turns do not repeat
+them. The delivery receipt is written after the request returns: `submitted`
+when the response decoded, `failed` when the HTTP call or the decode failed. It
+proves inclusion in an answered request, not comprehension, exactly-once
+transport, or task acceptance. A response cut off by the output limit still
+leaves a submitted receipt and cannot complete the step.
+
+Both arms set `COSMON_MOL_DIR` to the worker's own molecule directory before the
+loop, so `cs` run from the shell tool addresses that molecule. Errors from a run
+with peer input map to the same error classes and silent-failure telemetry as a
+run without. A failure of the input source itself is reported as a tool I/O
+error prefixed `turn input`.
+
+`crates/cosmon-cli/tests/harness_work_turn_parity.rs` drives `cs tackle
+--adapter anthropic` against a loopback server.
