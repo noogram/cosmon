@@ -540,6 +540,37 @@ pub fn write_settings_overlay_for_work(
     Ok(())
 }
 
+/// Merge permission deny rules into an already-written overlay as
+/// `permissions.deny`.
+///
+/// Rules are appended after any the overlay already carries, without
+/// duplicates. An empty `rules` slice returns `Ok(false)` without touching the
+/// file, so a project that configures nothing keeps a byte-identical overlay.
+///
+/// # Errors
+/// Returns an I/O or serialization error if the overlay cannot be read,
+/// parsed or rewritten.
+pub fn add_deny_rules(path: &Path, rules: &[String]) -> std::io::Result<bool> {
+    if rules.is_empty() {
+        return Ok(false);
+    }
+    let mut doc: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let deny = doc["permissions"]["deny"].take();
+    let mut merged: Vec<serde_json::Value> = match deny {
+        serde_json::Value::Array(items) => items,
+        _ => Vec::new(),
+    };
+    for rule in rules {
+        let value = serde_json::Value::String(rule.clone());
+        if !merged.contains(&value) {
+            merged.push(value);
+        }
+    }
+    doc["permissions"]["deny"] = serde_json::Value::Array(merged);
+    std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+    Ok(true)
+}
+
 /// Register the presence hooks beside the receipt hook.
 ///
 /// A worker emits presence at turn start, turn end, session start, when it
@@ -1163,6 +1194,46 @@ mod tests {
             !cmd.contains("python") && !cmd.contains("/usr/bin/env"),
             "the hook must not go through an interpreter or a shim: {cmd}"
         );
+    }
+
+    fn fresh_overlay(tmp: &tempfile::TempDir) -> PathBuf {
+        let path = tmp.path().join("settings.json");
+        let station = ReceiptStation::at(tmp.path().join("receipts"));
+        write_settings_overlay_for_work(&path, Path::new("/usr/local/bin/cs"), &station, false)
+            .expect("overlay");
+        path
+    }
+
+    #[test]
+    fn a_configured_deny_rule_appears_in_the_worker_overlay() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = fresh_overlay(&tmp);
+        let hooks_before: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+
+        let rules = vec!["Bash(git push:*)".to_owned(), "Read(./.env)".to_owned()];
+        assert!(add_deny_rules(&path, &rules).expect("merge"));
+        // A second application does not duplicate.
+        assert!(add_deny_rules(&path, &rules).expect("merge again"));
+
+        let doc: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        assert_eq!(
+            doc["permissions"]["deny"],
+            serde_json::json!(["Bash(git push:*)", "Read(./.env)"])
+        );
+        assert_eq!(doc["hooks"], hooks_before["hooks"], "hooks untouched");
+    }
+
+    #[test]
+    fn no_deny_rules_leaves_the_overlay_byte_identical() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = fresh_overlay(&tmp);
+        let before = std::fs::read(&path).expect("read");
+        assert!(!add_deny_rules(&path, &[]).expect("merge"));
+        assert_eq!(std::fs::read(&path).expect("read"), before);
+        let doc: serde_json::Value = serde_json::from_slice(&before).expect("json");
+        assert!(doc.get("permissions").is_none());
     }
 
     #[test]

@@ -5686,6 +5686,22 @@ fn spawn_claude_and_prompt(
         mint_briefing_receipt_overlay(wid, cosmon_cli::work_hook::is_current_member(mol_state_dir));
     let receipt_overlay = receipt_mint.path();
     if let Some(overlay) = receipt_overlay {
+        // Per-project deny rules (`[worker].deny_rules`) become the harness's
+        // own `permissions.deny`. Best-effort like the rest of the overlay.
+        let deny_rules =
+            cosmon_filestore::load_project_config(&cosmon_filestore::resolve_config_path(None))
+                .unwrap_or_default()
+                .worker
+                .deny_rules;
+        match cosmon_transport::briefing_receipt::add_deny_rules(overlay, &deny_rules) {
+            Ok(true) => {
+                tracing::info!(target: "cosmon::dispatch", phase = "deny.overlay", deny_rules = deny_rules.len());
+            }
+            Ok(false) => {}
+            Err(_) => {
+                tracing::warn!(target: "cosmon::dispatch", phase = "deny.overlay", deny_overlay = "unavailable");
+            }
+        }
         let settings =
             resolved_status_line_settings(config_dir.as_deref(), worktree_path, harness_args);
         match install_plan_observation_overlay(overlay, mol_state_dir, wid, settings.as_ref()) {
