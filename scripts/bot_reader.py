@@ -17,11 +17,14 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import fcntl
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import sys
 import tempfile
@@ -38,7 +41,27 @@ EXIT_CONFIGURATION = 2
 JOURNAL_SCHEMA = 1
 JOURNAL_MAX_BYTES = 4096
 HOST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-PHASES = ("active", "fenced")
+BOT_ID = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+TRANSFER_ID = re.compile(r"^[0-9a-f]{16}$")
+HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+MANIFEST_VERSION = 1
+MANIFEST_MAX_BYTES = 4096
+STOP_MARKER = "fenced by bot-reader-transfer\n"
+# Source phases: active -> fenced -> offered -> transferred (or back to active
+# on cancel). Destination phases: standby -> staged -> active.
+PHASES = ("active", "fenced", "offered", "transferred", "standby", "staged")
+OWNER_PHASES = ("active", "fenced", "offered")
+TRANSFER_PHASES = ("offered", "transferred", "staged")
+MANIFEST_FIELDS = (
+    "version",
+    "bot_id",
+    "source",
+    "destination",
+    "epoch",
+    "transfer_id",
+    "checkpoint",
+    "commit_hash",
+)
 TEST_VARIABLES = (
     "COSMON_BOT_READER_TEST_ROOT",
     "COSMON_BOT_READER_TEST_ENDPOINT",
@@ -195,6 +218,46 @@ def lock_state(paths: StatePaths) -> str:
     return "free"
 
 
+def _is_count(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def manifest_digest(manifest: dict[str, Any]) -> str:
+    """Digest the bound manifest fields so corruption or edits are detected."""
+    bound = {name: manifest.get(name) for name in MANIFEST_FIELDS}
+    encoded = json.dumps(bound, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validated_manifest(document: Any) -> dict[str, Any]:
+    """Accept only a well-formed manifest whose digest matches its fields.
+
+    The digest catches a damaged or hand-edited manifest; authority comes
+    from the source's commit receipt, never from the manifest itself.
+    """
+    if not isinstance(document, dict) or set(document) != set(MANIFEST_FIELDS) | {"digest"}:
+        raise CaptureError("invalid_manifest")
+    checks = (
+        document["version"] == MANIFEST_VERSION,
+        isinstance(document["bot_id"], str) and BOT_ID.match(document["bot_id"]) is not None,
+        isinstance(document["source"], str) and HOST_ID.match(document["source"]) is not None,
+        isinstance(document["destination"], str)
+        and HOST_ID.match(document["destination"]) is not None,
+        document["source"] != document["destination"],
+        _is_count(document["epoch"]) and document["epoch"] >= 2,
+        isinstance(document["transfer_id"], str)
+        and TRANSFER_ID.match(document["transfer_id"]) is not None,
+        _is_count(document["checkpoint"]),
+        isinstance(document["commit_hash"], str)
+        and HEX_DIGEST.match(document["commit_hash"]) is not None,
+        isinstance(document["digest"], str)
+        and hmac.compare_digest(document["digest"], manifest_digest(document)),
+    )
+    if not all(checks):
+        raise CaptureError("invalid_manifest")
+    return document
+
+
 def _validated_journal(document: Any) -> dict[str, Any]:
     if not isinstance(document, dict) or document.get("schema") != JOURNAL_SCHEMA:
         raise CaptureError("invalid_state")
@@ -202,18 +265,34 @@ def _validated_journal(document: Any) -> dict[str, Any]:
     epoch = document.get("epoch")
     phase = document.get("phase")
     fence = document.get("fence")
+    transfer = document.get("transfer")
     if not isinstance(host_id, str) or HOST_ID.match(host_id) is None:
         raise CaptureError("invalid_state")
-    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
+    if not _is_count(epoch) or phase not in PHASES:
         raise CaptureError("invalid_state")
-    if phase not in PHASES:
+    if phase in OWNER_PHASES and epoch < 1:
         raise CaptureError("invalid_state")
     if phase == "active" and fence is not None:
         raise CaptureError("invalid_state")
-    if phase == "fenced" and not (
+    if phase != "active" and not (
         isinstance(fence, dict) and isinstance(fence.get("stop_preexisting"), bool)
     ):
         raise CaptureError("invalid_state")
+    if transfer is None:
+        if phase in TRANSFER_PHASES:
+            raise CaptureError("invalid_state")
+    else:
+        if phase not in TRANSFER_PHASES + ("active",) or not isinstance(transfer, dict):
+            raise CaptureError("invalid_state")
+        try:
+            validated_manifest(transfer.get("manifest"))
+        except CaptureError:
+            raise CaptureError("invalid_state") from None
+        secret = transfer.get("commit_secret")
+        if phase in ("offered", "transferred") and not (
+            isinstance(secret, str) and HEX_DIGEST.match(secret) is not None
+        ):
+            raise CaptureError("invalid_state")
     return document
 
 
@@ -274,7 +353,7 @@ def _place_stop(paths: StatePaths) -> bool:
     except FileExistsError:
         return True
     try:
-        os.write(descriptor, b"fenced by bot-reader-transfer\n")
+        os.write(descriptor, STOP_MARKER.encode())
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
@@ -294,8 +373,10 @@ def fence(paths: StatePaths) -> dict[str, Any]:
         journal = read_journal(paths)
         if journal is None:
             raise CaptureError("not_enrolled")
+        if journal["phase"] not in OWNER_PHASES:
+            raise CaptureError("not_owner")
         if journal["phase"] == "active":
-            journal = dict(journal, phase="fenced", fence={"stop_preexisting": preexisting})
+            journal = dict(journal, phase="fenced", fence={"stop_preexisting": preexisting}, transfer=None)
             write_journal(paths, journal)
         checkpoint = read_checkpoint(paths.checkpoint, required=True)
         if os.path.lexists(paths.in_flight):
@@ -325,6 +406,12 @@ def status(paths: StatePaths) -> dict[str, Any]:
                 epoch=journal["epoch"],
                 phase=journal["phase"],
             )
+            if journal.get("transfer") is not None:
+                manifest = journal["transfer"]["manifest"]
+                result["transfer"] = {
+                    name: manifest[name]
+                    for name in ("transfer_id", "source", "destination", "epoch", "checkpoint")
+                }
     try:
         result["checkpoint"] = (
             read_checkpoint(paths.checkpoint, required=True)
@@ -334,6 +421,265 @@ def status(paths: StatePaths) -> dict[str, Any]:
     except CaptureError:
         result["checkpoint"] = "invalid"
     return result
+
+
+def resolve_token_file() -> Path:
+    """Return the host's credential file, or the fixture's in isolated tests."""
+    if test_mode():
+        return resolve_state_root().parent / "bot.toml"
+    return Path.home() / ".showroom" / "bot.toml"
+
+
+def bot_identity(token_file: Path) -> str:
+    """Name the bot a credential belongs to without a network call.
+
+    The part of a bot token before its colon is the bot's public identifier;
+    only that part ever leaves this function.
+    """
+    prefix, separator, _ = _read_token(token_file).partition(":")
+    if not separator or BOT_ID.match(prefix) is None:
+        raise CaptureError("credential_failure")
+    return prefix
+
+
+def _test_failpoint() -> str | None:
+    return os.environ.get("COSMON_BOT_READER_TEST_INTERRUPT") if test_mode() else None
+
+
+def _commit_hash(secret: str) -> str:
+    return hashlib.sha256(secret.encode()).hexdigest()
+
+
+def _remove_owned_stop(paths: StatePaths, fence_record: dict[str, Any]) -> None:
+    """Remove the stop file only if a transfer placed it and nobody replaced it."""
+    if fence_record["stop_preexisting"]:
+        return
+    try:
+        if paths.stop.read_text(encoding="utf-8") != STOP_MARKER:
+            return
+    except FileNotFoundError:
+        return
+    except (OSError, UnicodeDecodeError) as error:
+        raise CaptureError("invalid_state") from error
+    paths.stop.unlink(missing_ok=True)
+    _fsync_directory(paths.root)
+
+
+def _inbox_is_empty(paths: StatePaths) -> bool:
+    try:
+        entries = os.listdir(paths.inbox)
+    except FileNotFoundError:
+        return True
+    except OSError as error:
+        raise CaptureError("invalid_state") from error
+    return not [name for name in entries if not name.startswith(".")]
+
+
+def prepare(paths: StatePaths, host_id: str, token_file: Path) -> dict[str, Any]:
+    """Enroll this host as an inactive transfer destination.
+
+    Unlike ``fence`` this reads ownership before touching the stop file, so
+    pointing it at the live reader by mistake refuses without stopping it.
+    """
+    if HOST_ID.match(host_id) is None:
+        raise CaptureError("invalid_host_id")
+    bot_id = bot_identity(token_file)
+    with exclusive_lock(paths):
+        journal = read_journal(paths)
+        if journal is None:
+            preexisting = _place_stop(paths)
+            journal = {
+                "schema": JOURNAL_SCHEMA,
+                "host_id": host_id,
+                "epoch": 0,
+                "phase": "standby",
+                "fence": {"stop_preexisting": preexisting},
+                "transfer": None,
+            }
+            write_journal(paths, journal)
+        elif journal["host_id"] != host_id:
+            raise CaptureError("host_id_mismatch")
+        elif journal["phase"] in OWNER_PHASES:
+            raise CaptureError("destination_not_inactive")
+    return {
+        "outcome": "prepared",
+        "host_id": host_id,
+        "epoch": journal["epoch"],
+        "phase": journal["phase"],
+        "bot_id": bot_id,
+    }
+
+
+def export(paths: StatePaths, destination: str, token_file: Path) -> dict[str, Any]:
+    """Fence and drain this owner, then offer ownership to one destination.
+
+    The offer is durable before the manifest leaves this host, and repeating
+    the call for the same destination returns the same manifest, so a lost
+    reply never produces a second, different offer.
+    """
+    if HOST_ID.match(destination) is None:
+        raise CaptureError("invalid_host_id")
+    preexisting = _place_stop(paths)
+    with exclusive_lock(paths):
+        journal = read_journal(paths)
+        if journal is None:
+            raise CaptureError("not_enrolled")
+        if journal["phase"] in ("offered", "transferred"):
+            manifest = journal["transfer"]["manifest"]
+            if manifest["destination"] != destination:
+                raise CaptureError("offered_elsewhere" if journal["phase"] == "offered" else "not_owner")
+            return {"outcome": journal["phase"], "manifest": manifest}
+        if journal["phase"] not in ("active", "fenced"):
+            raise CaptureError("not_owner")
+        if journal["phase"] == "active":
+            journal = dict(journal, phase="fenced", fence={"stop_preexisting": preexisting}, transfer=None)
+            write_journal(paths, journal)
+        if destination == journal["host_id"]:
+            raise CaptureError("invalid_destination")
+        checkpoint = read_checkpoint(paths.checkpoint, required=True)
+        if os.path.lexists(paths.in_flight):
+            raise CaptureError("indeterminate_in_flight")
+        if not _inbox_is_empty(paths):
+            raise CaptureError("inbox_not_empty")
+        secret = secrets.token_hex(32)
+        manifest: dict[str, Any] = {
+            "version": MANIFEST_VERSION,
+            "bot_id": bot_identity(token_file),
+            "source": journal["host_id"],
+            "destination": destination,
+            "epoch": journal["epoch"] + 1,
+            "transfer_id": secrets.token_hex(8),
+            "checkpoint": checkpoint,
+            "commit_hash": _commit_hash(secret),
+        }
+        manifest["digest"] = manifest_digest(manifest)
+        write_journal(
+            paths,
+            dict(journal, phase="offered", transfer={"manifest": manifest, "commit_secret": secret}),
+        )
+    return {"outcome": "offered", "manifest": manifest}
+
+
+def commit(paths: StatePaths, document: Any) -> dict[str, Any]:
+    """Commit this source's outstanding offer and reveal its receipt.
+
+    Commit and cancel take the same lock and compare the whole manifest, so
+    exactly one of them decides an offer. The receipt carries the secret
+    whose hash the manifest commits to: a manifest alone cannot forge it.
+    """
+    manifest = validated_manifest(document)
+    with exclusive_lock(paths):
+        journal = read_journal(paths)
+        if journal is None:
+            raise CaptureError("not_enrolled")
+        transfer = journal.get("transfer")
+        if journal["phase"] not in ("offered", "transferred") or transfer["manifest"] != manifest:
+            raise CaptureError("offer_mismatch")
+        if journal["phase"] == "offered":
+            write_journal(paths, dict(journal, phase="transferred", epoch=manifest["epoch"]))
+        receipt = {
+            "transfer_id": manifest["transfer_id"],
+            "epoch": manifest["epoch"],
+            "digest": manifest["digest"],
+            "commit_secret": transfer["commit_secret"],
+        }
+        if _test_failpoint() == "after_commit":
+            raise CaptureError("interrupted")
+    return {"outcome": "committed", "receipt": receipt}
+
+
+def cancel(paths: StatePaths, transfer_id: str | None) -> dict[str, Any]:
+    """Withdraw an uncommitted offer, or a bare fence, and resume this owner."""
+    with exclusive_lock(paths):
+        journal = read_journal(paths)
+        if journal is None:
+            raise CaptureError("not_enrolled")
+        if journal["phase"] == "transferred":
+            raise CaptureError("already_committed")
+        if journal["phase"] == "offered":
+            if transfer_id != journal["transfer"]["manifest"]["transfer_id"]:
+                raise CaptureError("offer_mismatch")
+        elif journal["phase"] != "fenced" or transfer_id is not None:
+            raise CaptureError("offer_mismatch" if journal["phase"] == "fenced" else "not_owner")
+        # The stop file goes before the journal flips, so a crash in between
+        # leaves a host the journal still holds stopped.
+        _remove_owned_stop(paths, journal["fence"])
+        write_journal(paths, dict(journal, phase="active", fence=None, transfer=None))
+    return {"outcome": "cancelled", "epoch": journal["epoch"]}
+
+
+def import_manifest(paths: StatePaths, document: Any, token_file: Path) -> dict[str, Any]:
+    """Stage an offer on this destination without admitting any poll.
+
+    The cursor is not written here: a staged host keeps whatever checkpoint
+    it had until a committed receipt activates it.
+    """
+    manifest = validated_manifest(document)
+    with exclusive_lock(paths):
+        journal = read_journal(paths)
+        if journal is None:
+            raise CaptureError("not_prepared")
+        if manifest["destination"] != journal["host_id"]:
+            raise CaptureError("wrong_destination")
+        if bot_identity(token_file) != manifest["bot_id"]:
+            raise CaptureError("wrong_bot")
+        transfer = journal.get("transfer")
+        if (
+            journal["phase"] in ("staged", "active")
+            and transfer is not None
+            and transfer["manifest"] == manifest
+        ):
+            return {"outcome": journal["phase"], "transfer_id": manifest["transfer_id"]}
+        if journal["phase"] not in ("standby", "transferred", "staged"):
+            raise CaptureError("destination_not_inactive")
+        if manifest["epoch"] <= journal["epoch"]:
+            raise CaptureError("stale_epoch")
+        write_journal(paths, dict(journal, phase="staged", transfer={"manifest": manifest}))
+    return {"outcome": "staged", "transfer_id": manifest["transfer_id"]}
+
+
+def _receipt_matches(manifest: dict[str, Any], receipt: Any) -> bool:
+    if not isinstance(receipt, dict) or set(receipt) != {"transfer_id", "epoch", "digest", "commit_secret"}:
+        return False
+    secret = receipt["commit_secret"]
+    if not isinstance(secret, str) or HEX_DIGEST.match(secret) is None:
+        return False
+    return (
+        receipt["transfer_id"] == manifest["transfer_id"]
+        and receipt["epoch"] == manifest["epoch"]
+        and receipt["digest"] == manifest["digest"]
+        and hmac.compare_digest(_commit_hash(secret), manifest["commit_hash"])
+    )
+
+
+def activate(paths: StatePaths, receipt: Any) -> dict[str, Any]:
+    """Make this staged destination the owner, given the source's receipt.
+
+    The checkpoint is written and the transfer's own stop marker removed
+    before the journal flips to active, so a crash at any point leaves a
+    host that still refuses to poll and a retry that completes the step.
+    """
+    with exclusive_lock(paths):
+        journal = read_journal(paths)
+        if journal is None:
+            raise CaptureError("not_prepared")
+        transfer = journal.get("transfer")
+        if transfer is None or not _receipt_matches(transfer["manifest"], receipt):
+            raise CaptureError("receipt_mismatch")
+        manifest = transfer["manifest"]
+        if journal["phase"] == "active":
+            return {"outcome": "activated", "epoch": journal["epoch"], "checkpoint": manifest["checkpoint"]}
+        if journal["phase"] != "staged":
+            raise CaptureError("receipt_mismatch")
+        _atomic_replace_text(paths.checkpoint, f"{manifest['checkpoint']}\n")
+        _remove_owned_stop(paths, journal["fence"])
+        if _test_failpoint() == "activate_before_journal":
+            raise CaptureError("interrupted")
+        write_journal(
+            paths,
+            dict(journal, phase="active", epoch=manifest["epoch"], fence=None, transfer={"manifest": manifest}),
+        )
+    return {"outcome": "activated", "epoch": manifest["epoch"], "checkpoint": manifest["checkpoint"]}
 
 
 def _validated_updates(document: Any) -> list[dict[str, Any]]:
