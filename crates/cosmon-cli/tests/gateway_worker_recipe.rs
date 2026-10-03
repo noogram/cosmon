@@ -175,7 +175,8 @@ fn stop_turn() -> String {
             "index": 0,
             "message": { "role": "assistant", "content": "created gateway-proof.txt" },
             "finish_reason": "stop"
-        }]
+        }],
+        "usage": { "prompt_tokens": 120, "completion_tokens": 7, "total_tokens": 127 }
     })
     .to_string()
 }
@@ -391,6 +392,12 @@ fn recipe_reaches_the_configured_gateway_with_the_configured_model() {
     assert!(
         events.contains("remote_egress_opt_in") && events.contains(host),
         "the egress audit must name the configured gateway host, not the adapter name:\n{events}"
+    );
+    // Issue #151 W7: the usage block the gateway returned reaches the
+    // molecule's event log through `cs tackle`, not only through the provider.
+    assert!(
+        events.contains("usage_observed"),
+        "the gateway's usage block must be recorded as a UsageObserved event:\n{events}"
     );
 }
 
