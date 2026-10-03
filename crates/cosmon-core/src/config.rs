@@ -1968,6 +1968,8 @@ pub enum CodexUpdatePolicy {
 /// [`AdapterEntry::loop_budget`] for the precedence.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+// The `max_*` names are the TOML keys; they mirror `AdapterEntry`.
+#[allow(clippy::struct_field_names)]
 pub struct ModelBudgetEntry {
     /// Turn budget for this model. See [`AdapterEntry::max_turns`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1989,6 +1991,8 @@ pub struct ModelBudgetEntry {
 /// harness default"; a `Some` value is nonzero and, together with the output
 /// bound, fits in `u32`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+// Field names mirror the config keys they were resolved from.
+#[allow(clippy::struct_field_names)]
 pub struct ResolvedLoopBudget {
     /// Turn budget.
     pub max_turns: Option<u32>,
