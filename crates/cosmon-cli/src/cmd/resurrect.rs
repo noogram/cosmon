@@ -286,6 +286,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // latency question is about, and threading a second origin here would
         // add a number nobody has asked a question about yet.
         std::time::Instant::now(),
+        // `cs resurrect` rebuilds a Claude session; it never continues an
+        // in-process attempt (`cs tackle --resume` does).
+        false,
     ) {
         // The spawn we recorded did not happen: undo the ledger entry so the
         // molecule returns to the state the operator can retry from, rather

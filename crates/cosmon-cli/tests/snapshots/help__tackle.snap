@@ -43,6 +43,11 @@ Options:
       --force
           Boolean flag: reclaim the molecule's live tmux session and respawn the worker. Also thaws a frozen molecule, returning it to `running`. A session left behind by a dead worker is reclaimed without this flag
 
+      --resume
+          Continue the molecule's interrupted in-process (`openai` / `anthropic`) attempt from its last complete tool-result checkpoint instead of starting a fresh log. Use with `--force` to thaw a frozen molecule.
+          
+          Continuation reads the durable turn evidence on disk and nothing else. It is refused, with the reason, when the evidence does not prove it safe: a tool with no receipt (its effect is unknown and is never repeated), a request with no outcome (it may have been billed), a shell session whose state no record captures, no complete checkpoint, a changed formula, model, tool registry, briefing, worktree or loop ceiling, a spent wall-clock budget, or damaged evidence. Tool calls and turns already spent stay spent. Without this flag a dispatch starts a fresh attempt, as before.
+
       --name <NAME>
           Override the tmux session name. ASCII alphanumerics and hyphens are kept; everything else is replaced with `-`. Max 50 chars. Default: `{slug}-{shortid}` derived from the molecule topic + id
 

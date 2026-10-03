@@ -19,6 +19,23 @@ check it against a killed process. A future change that lets these records
 drive a transition, such as resuming a molecule from a checkpoint, must revisit
 the TLA+ model before it ships.
 
+## Issue #151 W9: resume reads turn evidence without driving a lifecycle transition
+
+`cs tackle --resume` consumes `harness_turn_recorded` rows, which the W8 entry
+above says must prompt a revisit of the model. The revisit finds no new
+lifecycle state. A continuation is an ordinary dispatch of an already
+admitted molecule: it passes through the same thaw, dispatch commit and
+acceptance as a fresh `cs tackle --force`, and the evidence only decides what
+the in-process loop starts from. It does not change status, worker admission,
+dependency readiness, dispatch ownership or harvest authority, and a refusal
+happens before anything is recorded or sent. The `resumed` record names the
+attempt it continues and is telemetry. Single ownership is an advisory file
+lock held by the loop process, outside the lifecycle model. The safety
+properties are executable: no replay of an unresolved effect or request, no
+refreshed counters, no continuation across a changed pin, and one owner.
+`docs/specs/CosmonRun.tla` gains nothing. A change that lets evidence alone
+thaw or admit a molecule must revisit it.
+
 ## Issue #151 W2: worker acceptance refines the existing step guard
 
 `response_artifact` adds no lifecycle state and no new transition. It supplies

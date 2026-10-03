@@ -42,6 +42,7 @@ use crate::tool::{
     default_registry, default_registry_with_operator_block, ToolCall, ToolDeclaration,
     ToolOutcomeCounts, ToolRegistry,
 };
+use cosmon_core::harness_turn::ResumeRefusal;
 
 /// Provider-reported reason that a turn terminated.
 ///
@@ -647,9 +648,35 @@ pub struct LoopProgress {
     /// the terminal response through it, and stops before the next side effect
     /// if a record is not durable. `None` keeps the loop memory-only.
     pub journal: Option<Arc<TurnJournal>>,
+    /// A checkpoint to continue from instead of starting a fresh log. See
+    /// [`ResumeState`]. Requires a journal: a continuation that cannot record
+    /// that it is one is refused.
+    pub resume: Option<ResumeState>,
+}
+
+/// A proven-safe checkpoint to continue from.
+///
+/// The plan comes from the pure resume rules over the attempt's durable
+/// evidence; `log` is the checkpoint blob, already validated against its
+/// digest. The loop restores the native log from it, resumes the turn and tool
+/// counters where they stood, and refuses to start if the pins or ceilings it
+/// would run under differ from the recorded ones.
+#[derive(Debug, Clone)]
+pub struct ResumeState {
+    /// What the evidence establishes about the continuation.
+    pub plan: cosmon_core::harness_turn::ResumePlan,
+    /// The checkpoint's native log bytes.
+    pub log: Vec<u8>,
 }
 
 impl LoopProgress {
+    /// Continue from a checkpoint.
+    #[must_use]
+    pub fn with_resume(mut self, resume: ResumeState) -> Self {
+        self.resume = Some(resume);
+        self
+    }
+
     /// Attach a durable turn evidence journal.
     #[must_use]
     pub fn with_journal(mut self, journal: Arc<TurnJournal>) -> Self {
@@ -872,28 +899,63 @@ async fn run_loop_with_registry_impl<P: Provider>(
     }
 
     let journal: Option<Arc<TurnJournal>> = progress.as_deref().and_then(|p| p.journal.clone());
+    let resume = progress.as_deref().and_then(|p| p.resume.clone());
+    let mut loop_pins = BTreeMap::new();
+    loop_pins.insert("registry".to_owned(), registry_digest(&registry));
+    loop_pins.insert(
+        "briefing".to_owned(),
+        cosmon_core::harness_turn::BlobDigest::of(effective_briefing.as_bytes())
+            .as_str()
+            .to_owned(),
+    );
+
+    // A continuation restores the recorded log and counters. Everything it
+    // would run under must equal what the attempt recorded. Every refusal
+    // happens before the first record is written, so a refused continuation
+    // leaves the interrupted attempt as the latest one, untouched.
+    let restored = if let Some(resume) = &resume {
+        let Some(journal) = &journal else {
+            return Err(HarnessError::Resume(ResumeRefusal::Corrupt(
+                "a continuation needs a turn journal".to_owned(),
+            )));
+        };
+        resume.plan.check_unchanged(
+            &journal.effective_pins(&loop_pins),
+            cosmon_core::harness_turn::TurnLimits {
+                max_turns: budget.turns.max_turns,
+                max_tool_calls: budget.tools.max_tool_calls,
+                max_input_tokens: budget.context.max_input_tokens,
+            },
+        )?;
+        let log = <P::Log>::decode_checkpoint(&resume.log)
+            .filter(MessageLog::invariant_well_formed)
+            .ok_or(ResumeRefusal::LogNotRestorable)?;
+        Some(log)
+    } else {
+        None
+    };
+
     if let Some(journal) = &journal {
         // The attempt's ceilings and pins are durable before the first
         // request, so a restart can see that budgets are spent, not refreshed.
-        let mut pins = BTreeMap::new();
-        pins.insert("registry".to_owned(), registry_digest(&registry));
-        pins.insert(
-            "briefing".to_owned(),
-            cosmon_core::harness_turn::BlobDigest::of(effective_briefing.as_bytes())
-                .as_str()
-                .to_owned(),
-        );
-        journal.started(budget, pins)?;
+        journal.started(budget, loop_pins)?;
+        if let Some(resume) = &resume {
+            // The record that this attempt continues another is durable before
+            // the first request.
+            journal.resumed(&resume.plan)?;
+        }
     }
 
-    let mut log = <P::Log>::from_briefing(&effective_briefing);
+    let mut log = restored.unwrap_or_else(|| <P::Log>::from_briefing(&effective_briefing));
     let max_turns = budget.turns.max_turns;
     let tool_limit = budget.tools.max_tool_calls;
+    let first_turn = resume.as_ref().map_or(0, |r| r.plan.next_turn);
     // I2 — cumulative tool dispatch counter (delib-20260519-e6db W5 /
     // knuth §K7). Lyapunov-variant `V = (K − turn, J − used_tools)`
     // requires both axes bound; without `used_tools` the worst-case
-    // is 30×64=1920 dispatches before `TurnBudgetExhausted`.
-    let mut used_tools: u32 = 0;
+    // is 30×64=1920 dispatches before `TurnBudgetExhausted`. A continuation
+    // starts at the count already spent, so a restart never refreshes it.
+    let mut used_tools: u32 = resume.as_ref().map_or(0, |r| r.plan.tools_spent);
     let mut tool_outcomes = ToolOutcomeCounts::default();
 
     // C4 mechanism 5 (delib-20260705-7288) — tool-call cycle detection.
@@ -920,7 +982,7 @@ async fn run_loop_with_registry_impl<P: Provider>(
     let compaction_threshold = compaction_policy.threshold_tokens(context_budget);
     let compaction_target = compaction_policy.target_tokens(context_budget);
 
-    for turn_index in 0..max_turns {
+    for turn_index in first_turn..max_turns {
         // I4 self-check — release builds skip this; debug builds
         // catch a per-provider impl that violated well-formedness.
         debug_assert!(

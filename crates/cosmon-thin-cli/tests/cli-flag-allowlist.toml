@@ -536,6 +536,11 @@ reason = "D-AVATAR instance lifecycle — cs-thin only (wire-side); cs CLI does 
 # `flag_only_in_thin` lists the symmetric case. Both sides are
 # necessary — without them the test would either over- or under-fail.
 
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--resume"
+reason = "Resume reads the local molecule directory's turn evidence and restores an in-process loop; cs-thin dispatches remotely and has no local loop to continue."
+
 # Global cs flags absent from cs-thin globals.
 [[flag_only_in_cs]]
 verb = "*"

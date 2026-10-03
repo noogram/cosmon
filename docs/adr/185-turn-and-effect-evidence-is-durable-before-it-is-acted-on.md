@@ -67,3 +67,16 @@ Blobs hold the native conversation, so they inherit the access of the molecule
 directory and are not published. A blob larger than the store's cap is refused
 and stops the loop. The `local` floor's loop has no progress channel and does
 not write turn evidence yet.
+
+## Amendment — unit W9: resume (2026-10-03)
+
+Resume is the first consumer of this evidence. `cs tackle --force --resume`
+continues the latest in-process attempt only from a complete tool-result
+checkpoint with no unresolved effect or request and no completed shell call. A
+continuation writes `attempt_started` and then `resumed` before its first
+request; `resumed` names the attempt and checkpoint it continues and carries the
+spent request count and wall-clock time, so a chain of resumes never refreshes a
+budget. Every pin the attempt recorded, and its ceilings, must be unchanged.
+Refusals are decided before any record is written. One process owns a
+molecule's loop at a time through `harness-turns/owner.lock`. The rules are the
+pure `plan_resume`; the operator guide lists every refusal.

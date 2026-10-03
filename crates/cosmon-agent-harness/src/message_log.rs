@@ -246,4 +246,17 @@ pub trait MessageLog: Sized + Send + Sync {
     fn encode_checkpoint(&self) -> Option<Vec<u8>> {
         None
     }
+
+    /// Rebuild a log from the bytes [`Self::encode_checkpoint`] produced.
+    ///
+    /// The default returns `None`, which makes an attempt on this provider
+    /// unresumable: a log that cannot be restored exactly is never replaced by
+    /// a guess. A production impl returns `None` for bytes it cannot parse and
+    /// for a log that is not well formed, so a damaged checkpoint is refused
+    /// rather than half-restored.
+    #[must_use]
+    fn decode_checkpoint(bytes: &[u8]) -> Option<Self> {
+        let _ = bytes;
+        None
+    }
 }
