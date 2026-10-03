@@ -3,7 +3,7 @@
 //! File-backed [`TurnEvidenceStore`] for the in-process direct arms.
 //!
 //! Records go to the one fleet ledger as
-//! [`EventV2::HarnessTurnRecorded`](cosmon_core::event_v2::EventV2::HarnessTurnRecorded),
+//! [`EventV2::HarnessTurnRecorded`],
 //! so ordering, sequence numbers and the molecule journal projection are the
 //! ledger's. Raw content goes to immutable blobs under
 //! `<molecule dir>/harness-turns/blobs/<hex digest>`, outside the git worktree
