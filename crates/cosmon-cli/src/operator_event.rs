@@ -94,6 +94,35 @@ pub fn emit_operator_present(
     let _ = emit_one(path, event, None);
 }
 
+/// Best-effort emit of [`EventV2::SessionPresence`] to the galaxy ledger at
+/// `state_dir`.
+///
+/// The caller decides whether the state changed; this only writes. Same
+/// no-op conditions as [`emit_operator_present`].
+pub fn emit_session_presence(
+    state_dir: &Path,
+    session: &cosmon_core::id::SessionId,
+    provider: Option<&str>,
+    role: cosmon_core::presence::SessionKind,
+    worker_id: Option<String>,
+    molecule_id: Option<MoleculeId>,
+    state: cosmon_core::presence::SessionState,
+) {
+    if emission_disabled() || !state_dir.exists() {
+        return;
+    }
+    let event = EventV2::SessionPresence {
+        session_id: session.as_str().to_owned(),
+        provider: provider.map(str::to_owned),
+        role,
+        worker_id,
+        molecule_id,
+        state,
+        ts: Utc::now(),
+    };
+    let _ = emit_one(resolve_events_log_path(state_dir), event, None);
+}
+
 /// Best-effort emit of [`EventV2::OperatorSigned`] — record that the
 /// operator authorised a destructive or otherwise authoritative
 /// action (`cs done`, `cs collapse`, `cs purge`, `git push`, `rm`, …).

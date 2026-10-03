@@ -253,6 +253,10 @@ pub struct PingArgs {
     /// epoch is not one.
     #[arg(long, value_name = "N")]
     pub epoch: Option<u64>,
+    /// Lifecycle state reported by the hook. Set in code only, never parsed
+    /// from the command line; a ping that omits it carries the previous one.
+    #[arg(skip)]
+    pub state: Option<cosmon_core::presence::SessionState>,
 }
 
 /// Arguments for `cs presence ls`.
@@ -542,6 +546,7 @@ pub(crate) fn ping(ctx: &Context, args: &PingArgs) -> anyhow::Result<Presence> {
         ),
         mission,
         lease_epoch,
+        state: args.state.or_else(|| prior.as_ref().and_then(|p| p.state)),
         ..Presence::new(
             session_id.clone(),
             args.galaxy.clone(),

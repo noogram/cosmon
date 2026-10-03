@@ -79,6 +79,109 @@ impl PilotRole {
     }
 }
 
+/// Which kind of session emitted a presence record: an interactive pilot, or
+/// a worker dispatched by `cs tackle`.
+///
+/// Typed so a consumer projecting session state does not infer the kind from
+/// the free-text [`Presence::headline`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionKind {
+    /// An interactive pilot session.
+    Pilot,
+    /// A worker session dispatched for a molecule.
+    Worker,
+}
+
+impl SessionKind {
+    /// The snake_case wire name.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pilot => "pilot",
+            Self::Worker => "worker",
+        }
+    }
+}
+
+/// The lifecycle state a session reports at a hook moment.
+///
+/// Carried as a typed field on [`Presence`] and on the `session_presence`
+/// event, so a reader needs no text parsing of [`Presence::headline`].
+///
+/// # Examples
+///
+/// ```
+/// use cosmon_core::presence::SessionState;
+///
+/// assert_eq!(SessionState::WaitingPermission.as_str(), "waiting_permission");
+/// let back: SessionState = serde_json::from_str("\"idle\"").unwrap();
+/// assert_eq!(back, SessionState::Idle);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionState {
+    /// The session has just opened.
+    SessionStart,
+    /// The session is taking a turn.
+    Working,
+    /// The session finished a turn and is idle.
+    Idle,
+    /// The session is blocked on a permission prompt or an idle notification.
+    WaitingPermission,
+    /// The session is asking the user a question.
+    Asking,
+}
+
+impl SessionState {
+    /// The snake_case wire name, the same token the JSON carries.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionStart => "session_start",
+            Self::Working => "working",
+            Self::Idle => "idle",
+            Self::WaitingPermission => "waiting_permission",
+            Self::Asking => "asking",
+        }
+    }
+}
+
+/// The galaxy a state directory belongs to, as a short name.
+///
+/// A galaxy state directory is `<galaxy>/.cosmon/state`; the name is the
+/// galaxy root's directory name. A worker's checkout lives under
+/// `<galaxy>/.worktrees/<id>`, and resolves to the galaxy that owns it rather
+/// than to the molecule id. Returns `None` for a state directory that does not
+/// follow that layout.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+/// use cosmon_core::presence::galaxy_name_from_state_dir;
+///
+/// let name = galaxy_name_from_state_dir(Path::new("/home/me/galaxies/mailroom/.cosmon/state"));
+/// assert_eq!(name.as_deref(), Some("mailroom"));
+/// let wt = galaxy_name_from_state_dir(Path::new("/g/mailroom/.worktrees/task-1/.cosmon/state"));
+/// assert_eq!(wt.as_deref(), Some("mailroom"));
+/// assert_eq!(galaxy_name_from_state_dir(Path::new("/tmp/state")), None);
+/// ```
+#[must_use]
+pub fn galaxy_name_from_state_dir(state_dir: &std::path::Path) -> Option<String> {
+    let cosmon = state_dir.parent()?;
+    if cosmon.file_name()? != ".cosmon" || state_dir.file_name()? != "state" {
+        return None;
+    }
+    let mut root = cosmon.parent()?;
+    if root.parent().and_then(std::path::Path::file_name)
+        == Some(std::ffi::OsStr::new(".worktrees"))
+    {
+        root = root.parent()?.parent()?;
+    }
+    Some(root.file_name()?.to_str()?.to_owned())
+}
+
 /// A heartbeat older than this duration is considered stale. Paired with
 /// a PID-liveness check in [`Presence::is_live`] and the filestore `gc`,
 /// a session that crashes hard (kernel panic, SIGKILL) disappears from
@@ -186,6 +289,11 @@ pub struct Presence {
     /// which is what makes the refusal after a transfer diagnosable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_epoch: Option<LeaseEpoch>,
+    /// The lifecycle state the session last reported, typed alongside the
+    /// free-text [`Self::headline`]. Absent on a snapshot written before the
+    /// field existed, and on a session that has not reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<SessionState>,
 }
 
 impl Presence {
@@ -223,6 +331,7 @@ impl Presence {
             checkpoint_id: None,
             mission: None,
             lease_epoch: None,
+            state: None,
         }
     }
 

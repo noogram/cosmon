@@ -60,6 +60,7 @@ use std::path::PathBuf;
 use chrono::Utc;
 use cosmon_core::copilot_hook::{self, HookEdit, HookEvent, HookProvider, HOOK_TIMEOUT_SECONDS};
 use cosmon_core::id::SessionId;
+use cosmon_core::presence::{SessionKind, SessionState};
 use cosmon_pilot_checkpoint::{CheckpointStore, PilotCheckpoint};
 
 use super::presence;
@@ -571,6 +572,17 @@ fn native_session_id(payload: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// The typed state a hook moment puts the session in.
+fn session_state(event: HookEvent) -> SessionState {
+    match event {
+        HookEvent::SessionStart => SessionState::SessionStart,
+        HookEvent::TurnStart => SessionState::Working,
+        HookEvent::TurnEnd => SessionState::Idle,
+        HookEvent::Waiting => SessionState::WaitingPermission,
+        HookEvent::Asking => SessionState::Asking,
+    }
+}
+
 /// Resolve this session's id and emit its presence heartbeat.
 ///
 /// Returns `None` when no id can be resolved, after saying so on stderr.
@@ -616,6 +628,35 @@ fn beat_presence(
     let headline = worker_molecule
         .as_ref()
         .map(|_| format!("worker: {}", event.as_str()));
+    let state = session_state(event);
+    let kind = if worker_molecule.is_some() {
+        SessionKind::Worker
+    } else {
+        SessionKind::Pilot
+    };
+
+    // The state-change test reads the record the ping is about to overwrite,
+    // so it has to run before the ping.
+    let state_dir = ctx.state_dir();
+    let prior_state = presence::store(ctx)
+        .load(&sid)
+        .ok()
+        .flatten()
+        .and_then(|p| p.state);
+    if prior_state != Some(state) {
+        crate::operator_event::emit_session_presence(
+            &state_dir,
+            &sid,
+            Some(provider.as_str()),
+            kind,
+            std::env::var("COSMON_WORKER_ID")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            worker_molecule.clone(),
+            state,
+        );
+    }
+
     if let Err(e) = presence::ping(
         ctx,
         &presence::PingArgs {
@@ -624,7 +665,9 @@ fn beat_presence(
             native_session_id: native,
             molecule: worker_molecule,
             headline,
-            galaxy: "cosmon".to_owned(),
+            galaxy: cosmon_core::presence::galaxy_name_from_state_dir(&state_dir)
+                .unwrap_or_else(|| "unknown".to_owned()),
+            state: Some(state),
             ..presence::PingArgs::default()
         },
     ) {
