@@ -2984,12 +2984,12 @@ impl EventV2 {
             | Self::PostMergeHook { molecule, .. } => Some(molecule),
             Self::WorkerSpawned { molecule, .. } => molecule.as_ref(),
             Self::InvocationCompleted { molecule_id, .. }
+            | Self::SessionPresence { molecule_id, .. }
             | Self::ChronicleAdded { molecule_id, .. } => molecule_id.as_ref(),
             Self::InputInjected { mol_id, .. }
             | Self::BriefingDelivery { mol_id, .. }
             | Self::OperatorSigned { mol_id, .. } => mol_id.as_ref(),
             Self::OperatorSpark { mol_ref, .. } => mol_ref.as_ref(),
-            Self::SessionPresence { molecule_id, .. } => molecule_id.as_ref(),
             Self::WorkerKilled { .. }
             | Self::WorkerSessionMissing { .. }
             | Self::WorkerHeartbeat { .. }

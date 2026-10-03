@@ -94,7 +94,7 @@ pub enum SessionKind {
 }
 
 impl SessionKind {
-    /// The snake_case wire name.
+    /// The `snake_case` wire name.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -134,7 +134,7 @@ pub enum SessionState {
 }
 
 impl SessionState {
-    /// The snake_case wire name, the same token the JSON carries.
+    /// The `snake_case` wire name, the same token the JSON carries.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
