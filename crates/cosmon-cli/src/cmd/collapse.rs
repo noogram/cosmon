@@ -24,9 +24,17 @@ pub struct Args {
     /// Molecule ID to collapse.
     molecule: String,
 
-    /// Reason for the collapse.
+    /// Reason for the collapse. With `--with-seats` it may be omitted when
+    /// the named molecule is already collapsed: its recorded reason is then
+    /// inherited, suffixed with the seat and work.
+    #[arg(long, required_unless_present = "with_seats")]
+    reason: Option<String>,
+
+    /// Also collapse every other live member of the declared work the
+    /// molecule belongs to (owner or seat), with the same reason. Never
+    /// merges; a completed seat is skipped and `cs done <seat>` is printed.
     #[arg(long)]
-    reason: String,
+    with_seats: bool,
 
     /// Structured cause attribution (ADR-062): `rate_limit`,
     /// `inference_stall`, `manual`, `process_death`, `unknown`. With
@@ -49,7 +57,9 @@ pub struct Args {
     /// Operator-facing collapse classification for `cs errors`
     /// aggregation: one of `worker_crashed`, `gate_failed`,
     /// `blocker_stuck`, `manual_abort`, `resource_exhausted`. Any other
-    /// value lands in [`CollapseReason::Other`] verbatim.
+    /// value lands in [`CollapseReason::Other`] verbatim; by convention
+    /// `verification_blocked` marks work done whose gates were blocked by
+    /// infrastructure — the worker's claim, never merge-safety evidence.
     #[arg(long, value_name = "REASON_KIND")]
     reason_kind: Option<String>,
 
@@ -87,10 +97,102 @@ fn parse_cause(args: &Args) -> anyhow::Result<Option<CollapseCause>> {
     Ok(Some(cause))
 }
 
-/// Execute the `collapse` command.
-#[allow(clippy::too_many_lines)]
+/// Collapse the named molecule and, with `--with-seats`, its whole roster.
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
-    let mol_id = MoleculeId::new(&args.molecule)?;
+    if args.with_seats {
+        return run_with_seats(ctx, args);
+    }
+    let reason = args
+        .reason
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("--reason is required"))?;
+    collapse_molecule(ctx, args, &MoleculeId::new(&args.molecule)?, reason)
+}
+
+/// Fan `cs collapse` out over the declared work of the named molecule.
+///
+/// The roster is read once as a target list; each seat then goes through
+/// [`collapse_molecule`], the same path as a single collapse (lease guard,
+/// archive, events). Nothing is merged. A rerun converges from each
+/// molecule's own state, so no progress record is kept.
+fn run_with_seats(ctx: &Context, args: &Args) -> anyhow::Result<()> {
+    use super::work::resolve_roster;
+
+    let named = MoleculeId::new(&args.molecule)?;
+    let roster = resolve_roster(ctx, &named)?;
+    let ops_dir = cosmon_filestore::resolve_state_dir(args.ops_dir.as_deref());
+    let store = ctx.store_at(&ops_dir);
+    let owner_state = store.load_molecule(&roster.owner)?;
+    let inherited = match (
+        &args.reason,
+        owner_state.status,
+        &owner_state.collapse_reason,
+    ) {
+        (Some(_), _, _) => None,
+        (None, MoleculeStatus::Collapsed, Some(reason)) => Some(reason.clone()),
+        (None, ..) => anyhow::bail!(
+            "--reason is required unless the owner {} is already collapsed with a recorded reason",
+            roster.owner
+        ),
+    };
+    if !ctx.json {
+        println!(
+            "work {} revision {}; {} seats",
+            roster.owner,
+            roster.revision,
+            roster.seats.len()
+        );
+    }
+    // The named molecule first, then the other members in roster order.
+    let mut targets: Vec<_> = roster.seats.iter().collect();
+    targets.sort_by_key(|(_, molecule)| *molecule != named);
+    let mut failed = Vec::new();
+    for (seat, molecule) in targets {
+        let seat_status = store.load_molecule(molecule).map(|data| data.status);
+        if matches!(seat_status, Ok(MoleculeStatus::Completed)) {
+            if ctx.json {
+                println!(
+                    "{}",
+                    serde_json::json!({"molecule": molecule.as_str(), "seat": seat.as_str(), "skipped": "completed", "harvest_command": format!("cs done {molecule}")})
+                );
+            } else {
+                println!("skipped {molecule} (seat {seat}): completed — run `cs done {molecule}`");
+            }
+            continue;
+        }
+        let reason = match (&args.reason, &inherited) {
+            (Some(reason), _) => reason.clone(),
+            (None, Some(owner_reason)) => format!(
+                "{owner_reason} (seat {seat} of work {}@{})",
+                roster.owner, roster.revision
+            ),
+            (None, None) => unreachable!("checked above"),
+        };
+        if let Err(error) = collapse_molecule(ctx, args, molecule, &reason) {
+            eprintln!("failed {molecule} (seat {seat}): {error:#}");
+            failed.push(molecule.to_string());
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "{} seat(s) not collapsed: {} — rerun to retry",
+            failed.len(),
+            failed.join(", ")
+        )
+    }
+}
+
+/// Execute the `collapse` command for one molecule.
+#[allow(clippy::too_many_lines)]
+fn collapse_molecule(
+    ctx: &Context,
+    args: &Args,
+    mol_id: &MoleculeId,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let mol_id = mol_id.clone();
     let cause = parse_cause(args)?;
     let reason_kind = args
         .reason_kind
@@ -158,7 +260,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let mut updated = mol_data;
     updated.status = MoleculeStatus::Collapsed;
-    updated.collapse_reason = Some(args.reason.clone());
+    updated.collapse_reason = Some(reason.to_owned());
     updated.collapse_cause.clone_from(&cause);
     updated.collapse_reason_kind.clone_from(&reason_kind);
     updated.collapsed_step = Some(updated.current_step);
@@ -177,7 +279,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let timestamp = Utc::now().format("%Y-%m-%d %H:%M UTC");
     let log_entry = format!(
         "\n## {timestamp} — Collapsed\n\n{}\n\nCollapsed at step {}/{}.\n",
-        args.reason, updated.current_step, updated.total_steps
+        reason, updated.current_step, updated.total_steps
     );
     let existing_log = fs::read_to_string(&log_path).unwrap_or_default();
     let new_log = if existing_log.is_empty() {
@@ -201,7 +303,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &events_path,
         &Envelope::now(Event::MoleculeCollapsed {
             molecule_id: mol_id.clone(),
-            reason: args.reason.clone(),
+            reason: reason.to_owned(),
         }),
     );
 
@@ -220,7 +322,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &events_path,
         EventV2::MoleculeCollapsed {
             molecule_id: mol_id.clone(),
-            reason: args.reason.clone(),
+            reason: reason.to_owned(),
             kind: reason_kind.clone(),
         },
         status_seq,
@@ -263,7 +365,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             "molecule": mol_id.as_str(),
             "previous_status": prev_status_label,
             "status": "collapsed",
-            "reason": args.reason,
+            "reason": reason,
             "cause": cause.as_ref(),
             "reason_kind": reason_kind.as_ref().map(CollapseReason::as_str),
             "archived": updated.archived,
@@ -285,7 +387,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             mol_id,
             prev_status_label,
             cause_label,
-            args.reason
+            reason
         );
         let fleet = store.load_fleet().unwrap_or_default();
         let location = super::work_location::WorkLocation::from_state(

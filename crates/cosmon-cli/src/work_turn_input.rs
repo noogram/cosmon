@@ -12,7 +12,7 @@ use cosmon_core::advisory_attempt::{
 };
 use cosmon_core::id::MoleculeId;
 use cosmon_core::work_message::{
-    deliverable, fold, render_for_context, AdapterCapability, ContextObservability,
+    deliverable, fold_records, render_for_context, AdapterCapability, ContextObservability,
     ContextObservation, DeliveryAdapter, DeliveryOutcome, LiveInsertion, ObserverId, Receipt,
     SafePoint, Stage, WorkMessageStore, WORK_MESSAGE_SCHEMA_VERSION,
 };
@@ -84,10 +84,9 @@ impl TurnInputSource for WorkTurnInput {
     fn take(&self) -> Result<Vec<TurnInput>, String> {
         self.check_member()?;
         let records = self.store.load_all().map_err(|e| e.to_string())?;
-        let scope = records.scope.ok_or("work scope missing")?;
+        let scope = records.scope.as_ref().ok_or("work scope missing")?;
         let now = Utc::now();
-        let projection =
-            fold(&scope, &records.envelopes, &records.receipts, now).map_err(|e| e.to_string())?;
+        let projection = fold_records(scope, &records, now).map_err(|e| e.to_string())?;
         deliverable(
             &projection,
             &self.reference.seat,

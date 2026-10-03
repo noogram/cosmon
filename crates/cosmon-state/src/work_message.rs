@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use cosmon_core::work_message::{
-    admit, fold, AdapterCapability, Admission, Envelope, MessageKey, ObserverId, PutOutcome,
-    Receipt, ScopeRevision, Stage, Submission, WorkMessageError, WorkMessageStore, WorkProjection,
-    WorkRecords, WorkScope,
+    admit, fold_with_history, AdapterCapability, Admission, Envelope, MessageKey, ObserverId,
+    PutOutcome, Receipt, ScopeRevision, Stage, Submission, WorkMessageError, WorkMessageStore,
+    WorkProjection, WorkRecords, WorkScope,
 };
 use cosmon_hash::Hash;
 use serde::de::DeserializeOwned;
@@ -197,7 +197,13 @@ impl FileWorkMessageStore {
         let result = (|| {
             let records = self.load_all()?;
             let scope = records.scope.ok_or(WorkStoreError::NoScope)?;
-            let projection = fold(&scope, &records.envelopes, &records.receipts, now)?;
+            let projection = fold_with_history(
+                &scope,
+                &records.history,
+                &records.envelopes,
+                &records.receipts,
+                now,
+            )?;
             let decision = admit(&scope, &projection, submission, now)?;
             match &decision {
                 Admission::Admit(envelope) => {
@@ -293,7 +299,15 @@ impl FileWorkMessageStore {
         let projection = records
             .scope
             .as_ref()
-            .map(|scope| fold(scope, &records.envelopes, &records.receipts, now))
+            .map(|scope| {
+                fold_with_history(
+                    scope,
+                    &records.history,
+                    &records.envelopes,
+                    &records.receipts,
+                    now,
+                )
+            })
             .transpose()?;
         let mut findings = Vec::new();
         let mut referenced = BTreeSet::new();
@@ -418,11 +432,16 @@ impl WorkMessageStore for FileWorkMessageStore {
         for path in json_paths(&self.work_dir().join("capabilities"), Some("jsonl"))? {
             capabilities.extend(read_json_lines(&path)?);
         }
+        let history = json_paths(&self.work_dir().join("scopes"), Some("json"))?
+            .into_iter()
+            .map(|path| read_json(&path))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(WorkRecords {
             scope,
             envelopes,
             receipts,
             capabilities,
+            history,
         })
     }
 }

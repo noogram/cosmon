@@ -181,6 +181,58 @@ struct WorkRef {
     seat: AdvisorySeatId,
 }
 
+/// The roster a molecule belongs to, resolved for fan-out verbs.
+pub(crate) struct Roster {
+    /// Owning molecule of the work.
+    pub(crate) owner: MoleculeId,
+    /// Revision of the owner's current scope.
+    pub(crate) revision: cosmon_core::work_message::ScopeRevision,
+    /// Seats whose molecule's `work-ref.json` points back at this work.
+    pub(crate) seats: Vec<(AdvisorySeatId, MoleculeId)>,
+}
+
+/// Resolve the work `molecule` belongs to: its `work-ref.json` (or its own
+/// declared scope when it is an owner without a seat), then the owner's
+/// current scope, keeping each seat whose own `work-ref.json` names this work
+/// and seat. Single membership makes the result unambiguous.
+///
+/// # Errors
+/// Refuses when the molecule is in no declared work or the scope is unreadable.
+pub(crate) fn resolve_roster(ctx: &Context, molecule: &MoleculeId) -> Result<Roster> {
+    let ref_path = molecule_dir(ctx, molecule).join("work-ref.json");
+    let owner = if ref_path.is_file() {
+        serde_json::from_slice::<WorkRef>(&fs::read(&ref_path)?)?.owner_molecule
+    } else {
+        molecule.clone()
+    };
+    let store = FileWorkMessageStore::new(existing_molecule_dir(ctx, &owner)?);
+    let scope = store.load_scope()?.ok_or_else(|| {
+        refuse(format!(
+            "molecule {molecule} is in no declared work (no work-ref.json, no scope of its own)"
+        ))
+    })?;
+    if scope.owner != owner {
+        return Err(refuse("work scope names a different owner"));
+    }
+    let revision = scope
+        .revision()
+        .map_err(|error| refuse(error.to_string()))?;
+    let mut seats = Vec::new();
+    for (seat, decl) in &scope.seats {
+        let path = molecule_dir(ctx, &decl.molecule).join("work-ref.json");
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let reference: WorkRef = serde_json::from_slice(&bytes)?;
+        if reference.owner_molecule == owner && &reference.seat == seat {
+            seats.push((seat.clone(), decl.molecule.clone()));
+        }
+    }
+    Ok(Roster {
+        owner,
+        revision,
+        seats,
+    })
+}
+
 struct Member {
     caller: AdmittedWorkCaller,
     store: FileWorkMessageStore,

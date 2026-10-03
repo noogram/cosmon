@@ -15,7 +15,7 @@ use chrono::Utc;
 use cosmon_core::advisory_attempt::{AdvisoryObservation, AdvisorySeatId};
 use cosmon_core::id::MoleculeId;
 use cosmon_core::work_message::{
-    deliverable, fold, render_for_context, AdapterCapability, ContextObservability,
+    deliverable, fold_records, render_for_context, AdapterCapability, ContextObservability,
     ContextObservation, DeliveryAdapter, DeliveryOutcome, LiveInsertion, ObserverId, Receipt,
     SafePoint, Stage, WorkMessageStore, WORK_MESSAGE_SCHEMA_VERSION,
 };
@@ -146,13 +146,13 @@ fn run(adapter: DeliveryAdapter, output: &mut impl std::io::Write) -> Result<()>
         .context("unreadable work lock")?;
     fs2::FileExt::lock_exclusive(&lock)?;
     let records = store.load_all().context("unreadable work store")?;
-    let scope = records.scope.context("work scope missing")?;
+    let scope = records.scope.as_ref().context("work scope missing")?;
     if scope.owner != reference.owner_molecule || scope.seat_of(&member_id) != Some(&reference.seat)
     {
         bail!("caller is not in the current work roster");
     }
     let now = Utc::now();
-    let projection = fold(&scope, &records.envelopes, &records.receipts, now)?;
+    let projection = fold_records(scope, &records, now)?;
     let pending = deliverable(&projection, &reference.seat, adapter, now);
     let mut blocks = Vec::new();
     for envelope in &pending {

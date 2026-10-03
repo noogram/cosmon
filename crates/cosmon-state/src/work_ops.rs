@@ -12,10 +12,10 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use cosmon_core::advisory_attempt::AdvisorySeatId;
 use cosmon_core::work_message::{
-    accept_consumption, deliverable, fold, Admission, AdmittedWorkCaller, Confidentiality,
-    Consumption, ContextObservation, DeliveryAdapter, DeliveryOutcome, Disposition, Envelope,
-    MessageKey, ObserverId, Receipt, ScopeRevision, Stage, Submission, WorkMessageError,
-    WorkMessageStore, WorkProjection,
+    accept_consumption, deliverable, fold_with_history, Admission, AdmittedWorkCaller,
+    Confidentiality, Consumption, ContextObservation, DeliveryAdapter, DeliveryOutcome,
+    Disposition, Envelope, MessageKey, ObserverId, Receipt, ScopeRevision, Stage, Submission,
+    WorkMessageError, WorkMessageStore, WorkProjection,
 };
 use cosmon_hash::Hash;
 
@@ -311,7 +311,14 @@ impl WorkOperations {
             }
             .into());
         }
-        fold(&scope, &records.envelopes, &records.receipts, now).map_err(Into::into)
+        fold_with_history(
+            &scope,
+            &records.history,
+            &records.envelopes,
+            &records.receipts,
+            now,
+        )
+        .map_err(Into::into)
     }
 
     fn with_lock<T>(

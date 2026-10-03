@@ -387,14 +387,22 @@ SEE ALSO: cs done (merge + teardown), cs evolve (advance one step).
 
 Collapse a molecule — terminate with final state recording
 
-**Usage:** `cs collapse [OPTIONS] --reason <REASON> <MOLECULE>`
+**Usage:** `cs collapse [OPTIONS] <MOLECULE>`
 
 EXAMPLES:
   cs collapse <mol> --reason "superseded by <other>"
+  cs collapse <owner|seat> --with-seats --reason "superseded by <other>"
   cs collapse <mol> --reason "Claude usage limit reached" \
       --cause rate_limit --account default --kind max_rolling_5h
 
 Terminal transition. Use instead of leaving stale pending molecules.
+
+--with-seats (molecule in a declared `cs work` roster): also collapse every
+other live member of the roster, with the same reason. Reads the roster once,
+then runs the ordinary collapse per seat; a completed seat is skipped and
+`cs done <seat>` printed; nothing is merged. --reason may be omitted when the
+named molecule is already collapsed: its recorded reason is inherited with the
+seat and work appended. Exit is non-zero if any seat failed; rerun to retry.
 
 Pass --cause to attribute the failure with a structured tag (ADR-062):
   rate_limit  — quota refused; pair with --account ALIAS --kind CURRENCY
@@ -411,11 +419,12 @@ Pass --cause to attribute the failure with a structured tag (ADR-062):
 
 ###### **Options:**
 
-* `--reason <REASON>` — Reason for the collapse
+* `--reason <REASON>` — Reason for the collapse. With `--with-seats` it may be omitted when the named molecule is already collapsed: its recorded reason is then inherited, suffixed with the seat and work
+* `--with-seats` — Also collapse every other live member of the declared work the molecule belongs to (owner or seat), with the same reason. Never merges; a completed seat is skipped and `cs done <seat>` is printed
 * `--cause <CAUSE>` — Structured cause attribution (ADR-062): `rate_limit`, `inference_stall`, `manual`, `process_death`, `unknown`. With `rate_limit`, pair `--account` and `--kind` for the K3 fixture shape
 * `--account <ALIAS>` — Account alias for `--cause rate_limit` (e.g. `default`)
 * `--kind <KIND>` — Quota currency name for `--cause rate_limit` (e.g. `max_rolling_5h`, `max_weekly`, `api_key_org_monthly`, `financial_usd`, `custody_scoped`). Free-form to remain extensible across providers
-* `--reason-kind <REASON_KIND>` — Operator-facing collapse classification for `cs errors` aggregation: one of `worker_crashed`, `gate_failed`, `blocker_stuck`, `manual_abort`, `resource_exhausted`. Any other value lands in [`CollapseReason::Other`] verbatim
+* `--reason-kind <REASON_KIND>` — Operator-facing collapse classification for `cs errors` aggregation: one of `worker_crashed`, `gate_failed`, `blocker_stuck`, `manual_abort`, `resource_exhausted`. Any other value lands in [`CollapseReason::Other`] verbatim; by convention `verification_blocked` marks work done whose gates were blocked by infrastructure — the worker's claim, never merge-safety evidence
 * `--ops-dir <OPS_DIR>` — Path to the state store root (overrides walk-up discovery)
 
 
