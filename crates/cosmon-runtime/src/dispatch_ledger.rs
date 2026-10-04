@@ -281,7 +281,8 @@ pub fn commit_dispatch(
         record.session_name.to_owned(),
     )
     .with_adapter_name(record.adapter.as_str())
-    .with_model(record.model);
+    .with_model(record.model)
+    .with_worktree_path(record.worktree_path.to_string_lossy());
     updated.bind_process(process);
     updated.mark_tackled(record.tackled_by.clone());
     store.save_molecule(&mol_id, &updated)?;

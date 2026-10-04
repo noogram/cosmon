@@ -55,7 +55,8 @@ Fields by event type:
 | `merge_completed` | `result`, `branch` |
 | `harvested` | `success` |
 | `worker_spawned`, `adapter_selected`, `model_selected`, `model_observed` | `worker_id` or `mol_id`, `adapter_name`, `model` where the type has them |
-| `energy_tick` | `worker_id`, `input_tokens`, `output_tokens`, `cost_usd` |
+| `energy_tick` | `worker_id`, `input_tokens`, `output_tokens`, `cost_usd` (legacy; current writers emit `usage_observed`) |
+| `usage_observed` | `usage` (see below) |
 | `session_presence` | `session_id`, `provider`, `role`, `worker_id`, `molecule_id`, `state`, `ts` |
 
 **Session presence.** `session_presence` is appended to the galaxy's
@@ -67,6 +68,36 @@ is `pilot` or `worker`. `state` is one of `session_start`, `working`, `idle`,
 session. `operator_present` is a different event: it is per `cs` call, not per
 session.
 
+**Usage.** `usage_observed` carries one `usage` object per answered model
+request, with its own `schema_version` (currently `1`) that moves independently
+of the log's. The fields a reader may rely on:
+
+- `usage.subject.worker_id` and `usage.subject.history.id`. The history id
+  names one cumulative counter; `history.kind` is `known` when the id is
+  usable and `legacy_unknown` otherwise.
+- `usage.tokens.{input_tokens, cached_input_tokens, cache_write_tokens,
+  output_tokens, reasoning_output_tokens}`, each `{"status": "measured",
+  "tokens": N}` or `{"status": "unavailable", "reason": ...}`.
+- `usage.tokens.model_segments`, either `{"status": "available", "value":
+  [...]}` or `{"status": "unavailable", ...}`. Each segment has `model` and
+  the same five counters as above, scoped to that model.
+- `usage.api_equivalent` and `usage.plan`, which price and meter the same
+  observation. Both can be `unavailable`.
+
+The counters are cumulative over the history, not deltas. To total a worker's
+usage, keep the last record of each history (the one with the highest `seq`)
+and sum those; adding every record counts the early requests again. The same
+rule per model applies to the segments: take the last record of the history and
+read its segments. A record cannot name a molecule. Resolve `subject.worker_id`
+with the `worker_spawned` event that carries both `worker_id` and `molecule_id`;
+the molecule's own `process` record is cleared when the worker is torn down.
+To fold per molecule, sum over the molecule's workers.
+
+`unavailable` means the source did not report the value, and it is not zero. A
+single request that reports no usage turns every category of its history
+`unavailable` from then on, because the running total can no longer be known.
+A reader must carry that through to its own total and not substitute `0`.
+
 A reader detects log rotation by a size decrease or an inode change.
 
 ## state.json
@@ -75,8 +106,34 @@ Stable keys: `schema_version`, `id`, `status` (`pending`, `running`,
 `completed`, `collapsed`, `frozen`), `variables`, `tags`, `typed_links`
 (`rel`, `source`, `target`), `assigned_worker`, `created_at`, `tackled_at`,
 `updated_at`, `merged_at`, `collapse_reason`, `collapse_reason_kind`,
-`current_step`, `total_steps`, `formula_id`, and `process.adapter_name`,
-`process.model`. Keys may be absent when a molecule has no value for them.
+`current_step`, `total_steps`, `formula_id`, `last_progress_at`,
+`last_output_at`, and `process.adapter_name`, `process.model`,
+`process.worker_id`, `process.worktree_path`. Keys may be absent when a
+molecule has no value for them.
+
+**Liveness.** `last_progress_at` and `last_output_at` are ISO 8601 timestamps
+written by `cs evolve` each time a step completes. `last_progress_at` is also
+advanced by `cs heartbeat --molecule`, so it records that a worker is alive.
+`last_output_at` is never advanced by a heartbeat; it records the last durable
+work product. A worker that is running with a recent `last_progress_at` and an
+old `last_output_at` is alive and has produced nothing lately. Both are absent
+before the first step completes, and a reader then uses `tackled_at` as the
+start of the window.
+
+**Worktree.** `process.worktree_path` is the absolute path of the directory
+the worker was launched in: the molecule's worktree, or the project root when
+the molecule was tackled with `--no-worktree`. It is set by `cs tackle` and
+removed with the rest of `process` when the worker is torn down. A record
+written before this field existed has none, and a reader falls back to
+`<project root>/.worktrees/<id>`.
+
+**Polymer.** There is no polymer field. Membership and order are the
+`typed_links` of `rel` `blocks` (`target`) and `blocked_by` (`source`): the
+two are written on both ends of an edge, so a molecule lists its upstream
+molecules under `blocked_by` and its downstream ones under `blocks`. A polymer
+is the set of molecules connected by those edges, and its order is the
+partial order they define. A `decay_product` or `decayed_from` link records
+lineage and does not order anything.
 
 ## cs ensemble --json
 
@@ -96,4 +153,5 @@ no `schema_version` and follows the same additive rule.
 ## Git conventions
 
 A molecule's branch is `feat/<id>`, and the merge commit subject is
-`Merge branch 'feat/<id>'`. Molecule ids match `[A-Za-z0-9_.:/@+-]{1,128}`.
+`Merge branch 'feat/<id>'`. No state field names the branch; this convention
+is the contract. Molecule ids match `[A-Za-z0-9_.:/@+-]{1,128}`.
