@@ -121,6 +121,15 @@ pub struct MoleculeProcess {
     /// the floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Directory the worker was launched in: the molecule's git worktree,
+    /// or the project root under `--no-worktree`. Written once by
+    /// `cs tackle` and cleared with the rest of the record on teardown.
+    ///
+    /// It exists so an external reader does not have to rebuild the path
+    /// from the `.worktrees/<id>` convention, which `--workdir` overrides.
+    /// `None` for records written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_path: Option<String>,
 }
 
 impl MoleculeProcess {
@@ -137,6 +146,7 @@ impl MoleculeProcess {
             pid_start_time: None,
             adapter_name: None,
             model: None,
+            worktree_path: None,
         }
     }
 
@@ -158,6 +168,13 @@ impl MoleculeProcess {
     #[must_use]
     pub fn with_model(mut self, model: Option<impl Into<String>>) -> Self {
         self.model = model.map(Into::into);
+        self
+    }
+
+    /// Builder: record the directory the worker was launched in.
+    #[must_use]
+    pub fn with_worktree_path(mut self, path: impl Into<String>) -> Self {
+        self.worktree_path = Some(path.into());
         self
     }
 
