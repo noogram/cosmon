@@ -1405,7 +1405,7 @@ mod tests {
             config: Some(dir.path().to_path_buf()),
         };
         run_to_session(&ctx, "self-loop", b"note to self", false).unwrap();
-        let log_path = dir.path().join("presence/self-loop.log");
+        let log_path = dir.path().join("presence/session-self-loop.log");
         let contents = std::fs::read_to_string(&log_path).unwrap();
         assert!(contents.contains("| note to self"));
     }

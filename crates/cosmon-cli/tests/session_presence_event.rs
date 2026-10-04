@@ -139,7 +139,7 @@ fn the_presence_record_carries_a_typed_state_and_the_sessions_galaxy() {
 
     fire(&state, "pilot-a", "waiting", None);
 
-    let file = state.join("presence").join("pilot-a.json");
+    let file = state.join("presence").join("session-pilot-a.json");
     let record: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&file).expect("presence file"))
             .expect("json");
