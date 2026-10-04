@@ -170,4 +170,5 @@
 | 183-work-type-admission-precedes-spore-allocation | [183-work-type-admission-precedes-spore-allocation.md](183-work-type-admission-precedes-spore-allocation.md) |
 | 184-provider-termination-truth | [184-provider-termination-truth.md](184-provider-termination-truth.md) |
 | 185-turn-and-effect-evidence-is-durable-before-it-is-acted-on | [185-turn-and-effect-evidence-is-durable-before-it-is-acted-on.md](185-turn-and-effect-evidence-is-durable-before-it-is-acted-on.md) |
+| 186-linux-user-services | [186-linux-user-services.md](186-linux-user-services.md) |
 
