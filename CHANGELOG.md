@@ -19,13 +19,55 @@ this stage.
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-10-04
+
+### Breaking changes and operator actions on upgrade
+
+- Re-run `tools/cosmon-skill/install.sh` to get pilot presence. It now also
+  registers the presence hook in your own harness settings (append-only and
+  idempotent; `--no-hook` skips it, `--uninstall` removes it). Workers get the
+  hooks through their settings overlay without any action. (#163)
+- `[worker].deny_rules` in `.cosmon/config.toml` is a new key. Each entry is
+  merged into every worker's harness settings as a `permissions.deny` rule.
+  Absent or empty leaves the overlay unchanged. (#163)
+- `[adapters.<name>]` accepts the new budget keys `max_turns`,
+  `max_tool_calls`, `max_input_tokens` and `max_tokens`, with exact-model
+  overrides under `[adapters.<name>.models."<id>"]`. Defaults are unchanged
+  (30 turns, 64 tool calls, 32768 input tokens); zero and overflowing values are
+  now refused at dispatch. (#151)
+- `events.jsonl` records, molecule `state.json` and `cs ensemble --json` now
+  carry `schema_version: 1`. Events that spelled the molecule id `mol_id` or
+  `molecule` also carry `molecule_id`; the original keys are kept for one
+  release, so consumers should move to `molecule_id`. (#164)
+- A formula step whose deliverable is the worker's final text needs a
+  `response_artifact` on the in-process adapters, which now advance only the
+  step they were dispatched for and accept only declared deliverables or fresh
+  declared artifacts. Add one to such steps. (#151)
+- The in-process `exec_command` shell no longer inherits the harness
+  environment. A command that relied on an inherited variable must get it from
+  the reviewed allowlist. (#151)
+
+### Security
+
+- Delivered `cs work` payloads can no longer forge a second message frame. The
+  frame fences carry a prefix of the envelope digest, which payload text cannot
+  contain, and payload lines starting with `---` are escaped. (#160)
+- The in-process `exec_command` shell is spawned with a cleared environment and
+  a reviewed allowlist, so provider credentials and loader variables are not
+  readable by model-issued commands. (#151)
+- Every in-process file tool applies one canonical-containment check.
+  `read_file` used to follow a symlink to a file outside the work root, and a
+  dangling ancestor link counted as missing. (#151)
+- `cs work` delivers an envelope only to the molecule bound to the recipient
+  seat by its scope revision, so re-declaring a seat no longer hands the
+  previous holder's mail to the new molecule. The envelope stays listed with a
+  `recipient_not_bound` finding. (#162)
+
 ### Added
 
 - The pane dialogue classifier treats Claude "extra usage" screens as a money
   stake and adds a `login_required` class for expired-session and login-method
-  screens; neither is ever auto-confirmed. Codex update, restart, reasoning and
-  rate-limit rules now apply to Codex panes only, so a passive restart footer
-  on a Claude pane no longer tags the molecule. (#161)
+  screens; neither is ever auto-confirmed. (#161)
 - `cs collaboration bind | list | show | revoke` provisions, inspects and
   revokes collaboration bindings on the authoritative host. A binding ties one
   exact token identity to one work seat or pilot mission through an attachment
@@ -34,9 +76,73 @@ this stage.
   right, and no network route uses them yet. The four collaboration scopes
   (`cosmon:work:read`, `cosmon:work:write`, `cosmon:sessions:read`,
   `cosmon:sessions:write`) join the RPP scope catalog. (#147)
+- Worker settings overlays register presence hooks (session start, turn start,
+  turn end, waiting, asking) that run `cs sessions hook run`, so a worker's
+  presence is fresh without operator action. (#163)
+- The presence hook appends a typed `session_presence` event to the galaxy
+  ledger on state change only, records a typed state on the presence record and
+  resolves the galaxy from the session's state directory. (#165)
+- `[worker].deny_rules` turns per-project prohibitions, such as "never push",
+  into harness deny rules instead of brief prose. (#163)
+- `cs collapse --with-seats` collapses every live seat of the named
+  molecule's declared work through the ordinary path, skipping completed seats
+  and merging nothing. `cs work help` and the book gain an implementer and
+  reviewer recipe, and `verification_blocked` is documented as a reason-kind
+  convention. (#162)
+- Molecule `state.json` records `process.worktree_path`, so a reader no longer
+  rebuilds the path from the `.worktrees/<id>` convention. (#167)
+- `molecule_step_completed.evidence` and `molecule_completed.summary` are
+  carried as event fields, so consumers no longer parse markdown. (#164)
+- The in-process harness turn, tool-call and input-token budgets are
+  configurable per adapter and per model, and `max_tokens` is sent on both
+  native request bodies. When `max_input_tokens` is set, the serialized request
+  is measured before each call and refused without being sent. (#151)
+- The in-process arms persist typed turn and effect evidence (attempt start,
+  request intent, assistant envelope, tool intent and receipt, checkpoints,
+  terminal response) as ledger rows plus digest-named blobs under the molecule
+  directory. A killed attempt can be rebuilt from disk with the unresolved
+  effects, possibly billed requests and damaged blobs reported. Only
+  checkpoints proven safe are resumed. (#151)
+- Per-request usage on the in-process arms is decoded at both wire seams and
+  written to the galaxy ledger as `usage_observed` records, deduplicated by
+  response id. (#151)
+- The messages arm of the in-process harness delivers `cs work` turn input and
+  molecule context, as the other arm already did. (#151)
+- A formula step may set `response_artifact`: the in-process worker's final
+  text is published atomically at that path under the molecule directory before
+  the transition is recorded. Non-normal termination never advances a step.
+  (#151)
+- An identical-task evaluation harness for the in-process arms: a frozen
+  six-task corpus with independent acceptance scripts, a runner with
+  deterministic mock arms and a validator. Live arms stay inert until an
+  operator passes `--live` and a spend cap. (#151)
+- The local chat-bot reader can be fenced and drained
+  (`scripts/bot-reader-transfer.py` `enroll`, `fence`, `status`), and its
+  ownership can be transferred to another host with a bound checkpoint
+  (`prepare`, `export`, `import`, `commit`, `activate`, `cancel`). Nothing
+  unfences the source or promotes the destination on its own. (#146)
+
+### Changed
+
+- The in-process arms keep the provider's termination reason instead of
+  reporting a generic outcome. (#151)
+- `cs work` hook rollouts are resolved from the molecule home rather than from
+  the reader's environment. (#158)
 
 ### Fixed
 
+- `cs peek` no longer shows a false red `!` on Claude workers when the
+  transcript contains record types that carry no model field. Unknown future
+  record types are still counted as unclassified. (#157)
+- Usage and model evidence for Codex workers launched with a `cs work` hook is
+  read from the per-molecule Codex home. (#158)
+- Claude turns running longer than a minute are classified as working, not
+  ready. The readiness check now recognises the `1m 12s` and `1h 0m 17s`
+  spinner clocks, so `cs wait` no longer returns before a long turn ends. (#159)
+- Codex update, restart, reasoning and rate-limit dialog rules apply to Codex
+  panes only, so a passive restart footer on a Claude pane no longer tags the
+  molecule. (#161)
+- The bot listener checkpoint is durable. (#146)
 - `cs whisper` on a molecule whose recorded tmux session does not exist now
   refuses with `session not found` (exit code 6, JSON `session_not_found`)
   instead of `pane_current_command=<missing>`. (#155)
@@ -49,6 +155,18 @@ this stage.
   the recorded session name, so teardown looked for the molecule id and missed
   functionally named sessions; it now falls back to the preserved worker id.
   (#155)
+
+### Documentation
+
+- The cross-machine collaboration contract is frozen: exposure and custody
+  decisions, scopes, routes with CLI counterparts, limits, retry rules, refused
+  operations, error codes and phased rollout, with a checker wired into
+  `just quick`. (#147)
+- The book has a read-contracts page listing the stable fields of events,
+  `state.json` and `cs ensemble --json`, the additive and deprecation rules,
+  `usage_observed` folding, liveness timestamps, worktree and branch, and
+  polymer membership through typed links. (#164, #167)
+- `cs whisper` exit code 6 (session not found) is documented. (#155)
 
 ## [0.7.1] — 2026-10-02
 
@@ -4285,7 +4403,8 @@ release **is**, not how it was built.
   `#![deny(missing_docs)]` on the core, and CI gates on build, test, clippy,
   and fmt.
 
-[Unreleased]: https://github.com/noogram/cosmon/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/noogram/cosmon/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/noogram/cosmon/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/noogram/cosmon/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/noogram/cosmon/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/noogram/cosmon/releases/tag/v0.6.0
