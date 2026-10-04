@@ -256,6 +256,7 @@ quick:
     ./scripts/no-pilot-env.sh ./scripts/curate-all-galaxies.test.sh
     ./scripts/no-pilot-env.sh ./scripts/install-hooks.test.sh
     ./scripts/no-pilot-env.sh ./scripts/install-daemon-supervisor.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/install-scheduler.test.sh
     ./scripts/no-pilot-env.sh ./tools/cosmon-skill/install.test.sh
     ./scripts/no-pilot-env.sh ./scripts/check-fixture-independence.sh
     ./scripts/no-pilot-env.sh ./scripts/check-fixture-independence.test.sh

@@ -54,10 +54,9 @@ cosmon_require_user_manager() {
 }
 
 cosmon_validate_unit() {
-    local staged="$1"
     command -v systemd-analyze >/dev/null 2>&1 || {
         echo "install-user-service: systemd-analyze is required to validate the unit" >&2
         return 1
     }
-    systemd-analyze --user verify "$staged"
+    systemd-analyze --user verify "$@"
 }

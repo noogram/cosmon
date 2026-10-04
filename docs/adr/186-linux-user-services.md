@@ -8,7 +8,7 @@
 [ADR-053](053-cosmon-daemon-supervisor.md), and
 [ADR-095](095-resident-runtime-ifbdd-path.md).
 
-**Tracks:** issue #143, unit W1.
+**Tracks:** issue #143, units W1 and W2.
 
 ## Context
 
@@ -29,10 +29,23 @@ the application config and staged unit before replacing the installed unit.
 Uninstall removes only the owned unit and retains config, logs, state, other
 units, and the account's linger policy.
 
-The scheduler remains a one-shot process fired by an external timer. Its later
-unit may use the narrow main-process-only cleanup exception needed for detached
-patrol parity. Stopping the timer prevents future dispatch; it does not cancel
-already detached work. That exception does not apply to the supervisor.
+The scheduler remains a one-shot process fired by an external timer. Its
+service uses `Type=oneshot` and the narrow `KillMode=process` cleanup exception
+needed for detached patrol parity. The timer fires after sixty seconds and then
+sixty seconds after each activation, with one-second accuracy, no randomized
+delay, and no persistent catch-up. A running tick is not activated a second
+time. Stopping the timer prevents future dispatch; it does not cancel already
+detached work. Stopping the service terminates a running wait-mode tick but,
+by design, leaves detached patrols with the user manager as their owner. This
+exception does not apply to the supervisor.
+
+Measured on the first supported host, a delayed detached child survived its
+tick and overlapped later timer activations. The same child under the default
+control-group cleanup did not reach its delayed marker. Three timer firings
+were observed without simultaneous scheduler main processes; a slow wait-mode
+tick suppressed overlapping activation. Reload and uninstall stopped future
+timer firings while an already detached child completed, and scheduler config,
+state, and unrelated units remained present.
 
 The shared boundary is a small shell helper for unit quoting, validation, and
 user-manager reachability. It is not a new installation framework. Paths are
