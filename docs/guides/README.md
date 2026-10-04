@@ -3,6 +3,7 @@
 One-line map of the how-to guides in `docs/guides/`. These are goal-oriented recipes, cross-linked from [CLAUDE.md](../../CLAUDE.md), `cs help`, and the top-level [docs/INDEX.md](../INDEX.md). Maintained alphabetically from each guide's H1 title.
 
 - [Execution-adapter parity bar](adapter-parity-bar.md)
+- [External CLI workers through an OpenAI-compatible gateway](external-cli-gateway-workers.md)
 - [API ↔ CLI coverage audit](api-cli-coverage.md)
 - [Guide — the artifact map (ADR-057)](artifact-map.md)
 - [Birthing a galaxy — operator guide](birthing-a-galaxy.md)

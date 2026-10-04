@@ -105,6 +105,10 @@ pub struct OpencodeSessionConfig {
     pub telemetry: Option<AdapterTelemetry>,
     /// Optional pre-existing worker the spawn path detected.
     pub pre_existing_worker: Option<WorkerId>,
+    /// Environment entries injected into this tmux session with
+    /// `new-session -e`. The inline provider configuration and its referenced
+    /// credential are per worker and never need a global `OpenCode` file.
+    pub environment: Vec<(String, String)>,
 }
 
 /// Spawn an opencode session in a tmux window.
@@ -139,7 +143,12 @@ pub fn spawn_opencode_session(config: &OpencodeSessionConfig) -> Result<(), Open
 
     let backend = TmuxBackend::new(&config.socket);
     backend
-        .spawn_worker(&config.session_name, &config.work_dir, &cmd)
+        .spawn_worker_with_env(
+            &config.session_name,
+            &config.work_dir,
+            &cmd,
+            &config.environment,
+        )
         .map_err(|e| OpencodeError::SpawnFailed(e.to_string()))
 }
 
@@ -358,6 +367,7 @@ mod tests {
             model: None,
             telemetry: None,
             pre_existing_worker: None,
+            environment: Vec::new(),
         };
         let c = cfg.clone();
         assert_eq!(c.session_name, "polecat-opencode");
@@ -374,6 +384,7 @@ mod tests {
             model: model.map(str::to_owned),
             telemetry: None,
             pre_existing_worker: None,
+            environment: Vec::new(),
         }
     }
 

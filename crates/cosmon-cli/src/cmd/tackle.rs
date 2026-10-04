@@ -4738,7 +4738,7 @@ pub(super) fn spawn_and_prompt(
             session_name,
             worktree_path,
             prompt,
-            mol,
+            adapter_entry,
             preferred_model,
         )
         .map(|()| SpawnOutcome::default()),
@@ -6683,6 +6683,127 @@ fn resolve_codex_pass_api_key(adapter_entry: Option<&AdapterEntry>, warn: impl F
     pass_api_key
 }
 
+const EXTERNAL_GATEWAY_PROVIDER: &str = "cosmon_gateway";
+const OPENCODE_GATEWAY_PROVIDER: &str = "cosmon-gateway";
+
+/// Native launch material for an external CLI pointed at an
+/// OpenAI-compatible gateway.
+///
+/// Credential values are deliberately separated from argv/config bytes. The
+/// transport injects `environment` through tmux's per-session
+/// environment channel, so state and pane logs can record the configuration
+/// without recording the key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalGatewayLaunch {
+    model: String,
+    harness_args: Vec<String>,
+    environment: Vec<(String, String)>,
+}
+
+/// Resolve one external-harness gateway row without reading global harness
+/// configuration.
+///
+/// A `base_url` opts into this path. It requires an explicit credential
+/// variable and model because falling through to a harness default would make
+/// the selected endpoint and model disagree. `lookup` is the I/O port:
+/// production supplies the process environment; tests supply a map.
+fn external_gateway_launch_from(
+    adapter: &str,
+    adapter_entry: Option<&AdapterEntry>,
+    preferred_model: Option<&str>,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<Option<ExternalGatewayLaunch>> {
+    let Some(entry) = adapter_entry else {
+        return Ok(None);
+    };
+    let Some(base_url) = entry.base_url.as_deref().filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let key_env = entry
+        .api_key_env
+        .as_deref()
+        .filter(|value| is_environment_name(value))
+        .ok_or_else(|| {
+            anyhow::anyhow!("cs tackle: [adapters.{adapter}].base_url requires a valid api_key_env")
+        })?;
+    let key = lookup(key_env)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("cs tackle: {adapter} gateway requires {key_env}"))?;
+    let model = preferred_model
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            entry
+                .default_model
+                .clone()
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cs tackle: [adapters.{adapter}].base_url requires default_model or --model"
+            )
+        })?;
+
+    let mut environment = vec![(key_env.to_owned(), key)];
+    let (model, harness_args) = match adapter {
+        "codex" => (
+            model,
+            vec![
+                "-c".to_owned(),
+                format!("model_provider={EXTERNAL_GATEWAY_PROVIDER}"),
+                "-c".to_owned(),
+                format!("model_providers.{EXTERNAL_GATEWAY_PROVIDER}.name=cosmon-gateway"),
+                "-c".to_owned(),
+                format!("model_providers.{EXTERNAL_GATEWAY_PROVIDER}.base_url={base_url}"),
+                "-c".to_owned(),
+                format!("model_providers.{EXTERNAL_GATEWAY_PROVIDER}.env_key={key_env}"),
+                "-c".to_owned(),
+                format!("model_providers.{EXTERNAL_GATEWAY_PROVIDER}.wire_api=responses"),
+                "-c".to_owned(),
+                format!("model_providers.{EXTERNAL_GATEWAY_PROVIDER}.requires_openai_auth=false"),
+                "-c".to_owned(),
+                format!("model_providers.{EXTERNAL_GATEWAY_PROVIDER}.supports_websockets=false"),
+            ],
+        ),
+        "opencode" => {
+            let models = std::collections::BTreeMap::from([(
+                model.clone(),
+                serde_json::json!({ "name": model.clone() }),
+            )]);
+            let inline = serde_json::json!({
+                "provider": {
+                    OPENCODE_GATEWAY_PROVIDER: {
+                        "npm": "@ai-sdk/openai-compatible",
+                        "name": "cosmon gateway",
+                        "options": {
+                            "baseURL": base_url,
+                            "apiKey": format!("{{env:{key_env}}}"),
+                        },
+                        "models": models,
+                    },
+                },
+            })
+            .to_string();
+            environment.push(("OPENCODE_CONFIG_CONTENT".to_owned(), inline));
+            (format!("{OPENCODE_GATEWAY_PROVIDER}/{model}"), Vec::new())
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(ExternalGatewayLaunch {
+        model,
+        harness_args,
+        environment,
+    }))
+}
+
+fn is_environment_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
 /// Production `warn` callback for [`resolve_codex_pass_api_key`].
 fn warn_codex_api_key_stripped(var: &str) {
     eprintln!(
@@ -6829,10 +6950,22 @@ fn spawn_codex_and_prompt(
         .into_iter()
         .collect::<Vec<_>>();
 
-    // Codex-worker API-key posture (observed 2026-09-26): `false` unless the
-    // operator opted in via `[adapters.codex].pass_api_key = true`.
+    // A gateway row becomes Codex's native provider overrides. Generated
+    // defaults precede the operator's opaque `--harness` pairs, so an explicit
+    // per-dispatch choice remains the last (winning) occurrence.
+    let gateway = external_gateway_launch_from("codex", adapter_entry, preferred_model, |name| {
+        std::env::var(name).ok()
+    })?;
+    let effective_model = gateway.as_ref().map_or_else(
+        || preferred_model.map(str::to_owned),
+        |value| Some(value.model.clone()),
+    );
+    let mut gateway_harness_args = gateway
+        .as_ref()
+        .map_or_else(Vec::new, |value| value.harness_args.clone());
+    gateway_harness_args.extend_from_slice(harness_args);
     let launch_harness_args =
-        codex_update_launch_args(harness_args, update_policy, &prelaunch_update);
+        codex_update_launch_args(&gateway_harness_args, update_policy, &prelaunch_update);
     let config = codex::CodexSessionConfig {
         socket: backend.socket().to_owned(),
         session_name: session_name.to_owned(),
@@ -6840,10 +6973,11 @@ fn spawn_codex_and_prompt(
         binary: std::path::PathBuf::from("codex"),
         prompt: Some(prompt.to_owned()),
         mode,
-        model: preferred_model.map(str::to_owned),
+        model: effective_model,
         extra_args,
         telemetry: None,
         pre_existing_worker: None,
+        environment: gateway.map_or_else(Vec::new, |value| value.environment),
         git_identity,
         writable_roots,
         harness_args: launch_harness_args,
@@ -7218,6 +7352,7 @@ fn opencode_session_config(
     session_name: &str,
     worktree_path: &std::path::Path,
     prompt: &str,
+    environment: Vec<(String, String)>,
     preferred_model: Option<&str>,
 ) -> cosmon_transport::opencode::OpencodeSessionConfig {
     cosmon_transport::opencode::OpencodeSessionConfig {
@@ -7229,6 +7364,7 @@ fn opencode_session_config(
         model: preferred_model.map(str::to_owned),
         telemetry: None,
         pre_existing_worker: None,
+        environment,
     }
 }
 
@@ -7260,18 +7396,28 @@ fn spawn_opencode_and_prompt(
     session_name: &str,
     worktree_path: &std::path::Path,
     prompt: &str,
-    _mol: &MoleculeData,
+    adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
 ) -> anyhow::Result<()> {
     use cosmon_transport::opencode;
     use cosmon_transport::readiness::LiveProbe as _;
 
+    let gateway =
+        external_gateway_launch_from("opencode", adapter_entry, preferred_model, |name| {
+            std::env::var(name).ok()
+        })?;
+    let effective_model = gateway.as_ref().map_or_else(
+        || preferred_model.map(str::to_owned),
+        |value| Some(value.model.clone()),
+    );
+    let environment = gateway.map_or_else(Vec::new, |value| value.environment);
     let config = opencode_session_config(
         backend.socket(),
         session_name,
         worktree_path,
         prompt,
-        preferred_model,
+        environment,
+        effective_model.as_deref(),
     );
 
     opencode::spawn_opencode_session(&config)
@@ -15333,6 +15479,7 @@ needs = ["answer"]
             "polecat-opencode",
             std::path::Path::new("/tmp/wt"),
             "go",
+            Vec::new(),
             Some("openai/gpt-5.2"),
         );
         let cmd = cosmon_transport::opencode::build_opencode_command(&config);
@@ -15350,11 +15497,57 @@ needs = ["answer"]
             "polecat-opencode",
             std::path::Path::new("/tmp/wt"),
             "go",
+            Vec::new(),
             None,
         );
         let cmd = cosmon_transport::opencode::build_opencode_command(&config);
         assert!(!cmd.contains("--model"), "no pin must add no flag: {cmd}");
         assert!(!cmd.contains(" -m "), "no pin must add no flag: {cmd}");
+    }
+
+    /// Issue #168 RED: an external harness gateway row must become native
+    /// per-process configuration rather than depending on either harness's
+    /// machine-wide settings.
+    #[test]
+    fn external_harness_gateway_rows_build_isolated_launches() {
+        let entry = AdapterEntry {
+            base_url: Some("http://127.0.0.1:43123/v1".to_owned()),
+            api_key_env: Some("PERSON_GATEWAY_KEY".to_owned()),
+            default_model: Some("publisher/model-a".to_owned()),
+            ..AdapterEntry::default()
+        };
+        let lookup = |name: &str| (name == "PERSON_GATEWAY_KEY").then(|| "fixture-key".to_owned());
+
+        let codex = external_gateway_launch_from("codex", Some(&entry), None, lookup)
+            .expect("configured codex gateway")
+            .expect("gateway launch");
+        assert_eq!(codex.model, "publisher/model-a");
+        assert!(codex
+            .harness_args
+            .iter()
+            .any(|arg| arg == "model_provider=cosmon_gateway"));
+        assert!(codex
+            .harness_args
+            .iter()
+            .any(|arg| arg == "model_providers.cosmon_gateway.base_url=http://127.0.0.1:43123/v1"));
+        assert_eq!(
+            codex.environment,
+            vec![("PERSON_GATEWAY_KEY".to_owned(), "fixture-key".to_owned())]
+        );
+
+        let opencode = external_gateway_launch_from("opencode", Some(&entry), None, lookup)
+            .expect("configured opencode gateway")
+            .expect("gateway launch");
+        assert_eq!(opencode.model, "cosmon-gateway/publisher/model-a");
+        let inline = opencode
+            .environment
+            .iter()
+            .find(|(name, _)| name == "OPENCODE_CONFIG_CONTENT")
+            .map(|(_, value)| value.as_str())
+            .expect("inline opencode config");
+        assert!(inline.contains("http://127.0.0.1:43123/v1"));
+        assert!(inline.contains("{env:PERSON_GATEWAY_KEY}"));
+        assert!(!inline.contains("fixture-key"));
     }
 
     #[test]

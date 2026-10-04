@@ -2101,6 +2101,10 @@ pub struct AdapterEntry {
     /// (`OPENAI_API_KEY`, `XAI_API_KEY`, `MOONSHOT_API_KEY`,
     /// `ANTHROPIC_API_KEY`).
     ///
+    /// External `codex` and `opencode` adapters require this field when
+    /// `base_url` selects gateway mode. The value is injected into that
+    /// worker's tmux session; only this variable name is persisted.
+    ///
     /// The structural reason this exists: a free-rider build (one
     /// `openai`-named Adapter aimed at xAI / Moonshot / `DeepSeek` via
     /// `base_url` override) used to depend on the operator manually
@@ -2114,17 +2118,16 @@ pub struct AdapterEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_env: Option<String>,
 
-    /// Base URL the Adapter POSTs against. Overrides the in-code
-    /// `DEFAULT_BASE_URL` for the matching provider. Use cases: xAI
-    /// (`https://api.x.ai`), Moonshot (`https://api.moonshot.ai`),
-    /// a local proxy, or a test double. Empty / absent means
-    /// "use the provider's compile-time default".
+    /// Base URL the Adapter POSTs against. For `codex` and `opencode`, its
+    /// presence selects a per-process compatible-gateway provider without
+    /// writing global harness configuration. For Direct-API adapters it
+    /// overrides the in-code `DEFAULT_BASE_URL`. Empty / absent means "use
+    /// the provider or harness default".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
 
-    /// Default model identifier the Adapter passes to the provider's
-    /// chat-completions endpoint when no explicit `--model` flag is in
-    /// scope. Overrides the per-provider compile-time default
+    /// Default model identifier the Adapter passes to the provider when no
+    /// explicit `--model` flag is in scope. Overrides the per-provider compile-time default
     /// (`gpt-4o-mini` for `OpenAI`, `claude-opus-4-7` for Anthropic) and
     /// the legacy env-var path (`OPENAI_MODEL` / `ANTHROPIC_MODEL`).
     /// Absent means "use the provider's vendor default".

@@ -609,9 +609,10 @@ impl TmuxBackend {
     /// shell's current env. So any variable a caller exports
     /// immediately before `cs tackle` (e.g. `CLAUDE_CONFIG_DIR` for
     /// `claude-account` multi-forfait routing) is **silently dropped**
-    /// unless it is folded into `cmd` itself as a `VAR=value …` prefix.
-    /// Callers that need per-invocation env propagation must build that
-    /// prefix; see
+    /// unless it is folded into `cmd` itself as a `VAR=value …` prefix or
+    /// supplied through [`Self::spawn_worker_with_env`]. Public credentials
+    /// may use a command prefix; secret values belong in the per-session
+    /// environment so they do not enter the pane command. See
     /// [`cosmon_cli::tackle_env::build_claude_command`](../cosmon_cli/tackle_env/fn.build_claude_command.html)
     /// for the canonical pattern.
     ///
@@ -638,17 +639,50 @@ impl TmuxBackend {
         work_dir: &str,
         cmd: &str,
     ) -> Result<(), TransportError> {
+        self.spawn_worker_with_env(session_name, work_dir, cmd, &[])
+    }
+
+    /// Spawn a worker with environment entries scoped to the new tmux
+    /// session rather than inherited from the long-lived tmux server.
+    ///
+    /// This is the credential-safe counterpart to embedding `NAME=value` in
+    /// `cmd`: values travel through tmux's `new-session -e` channel and do not
+    /// become part of the pane command captured by logs or state receipts.
+    /// It also avoids the stale-server-environment problem documented on
+    /// [`Self::spawn_worker`]. Names and values are passed as argument bytes;
+    /// no shell parses them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::SpawnFailed`] if the tmux session cannot be
+    /// created.
+    pub fn spawn_worker_with_env(
+        &self,
+        session_name: &str,
+        work_dir: &str,
+        cmd: &str,
+        environment: &[(String, String)],
+    ) -> Result<(), TransportError> {
         let cmd = crate::locale::with_utf8_floor_from_env(cmd);
-        self.tmux_cmd(&[
-            "new-session",
-            "-d",
-            "-s",
-            session_name,
-            "-c",
-            work_dir,
-            &cmd,
-        ])
-        .map_err(|e| TransportError::SpawnFailed(format!("tmux new-session failed: {e}")))?;
+        let assignments = environment
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>();
+        let mut args = vec![
+            "new-session".to_owned(),
+            "-d".to_owned(),
+            "-s".to_owned(),
+            session_name.to_owned(),
+            "-c".to_owned(),
+            work_dir.to_owned(),
+        ];
+        for assignment in &assignments {
+            args.push("-e".to_owned());
+            args.push(assignment.clone());
+        }
+        args.push(cmd);
+        self.tmux_cmd(&args.iter().map(String::as_str).collect::<Vec<_>>())
+            .map_err(|e| TransportError::SpawnFailed(format!("tmux new-session failed: {e}")))?;
         Ok(())
     }
 
@@ -2001,6 +2035,49 @@ mod tests {
             observed, expected,
             "the pane's cwd must be the one the caller stated"
         );
+    }
+
+    /// Session-scoped environment reaches the child without becoming part of
+    /// the pane command that observation and diagnostics can capture.
+    #[test]
+    fn spawn_worker_with_env_keeps_value_out_of_pane_command() {
+        let sock = format!("cosmon-test-session-env-{}", std::process::id());
+        cleanup(&sock);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let probe = dir.path().join("gateway-env-probe.txt");
+        let secret = "fixture-loopback-key";
+        let command = format!(
+            "printf %s \"$FIXTURE_GATEWAY_KEY\" > {} && sleep 300",
+            TmuxBackend::shell_quote(&probe.to_string_lossy())
+        );
+        let backend = TmuxBackend::new(&sock);
+        backend
+            .spawn_worker_with_env(
+                "session-env-agent",
+                &dir.path().to_string_lossy(),
+                &command,
+                &[("FIXTURE_GATEWAY_KEY".to_owned(), secret.to_owned())],
+            )
+            .expect("spawn worker with scoped environment");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let observed = std::fs::read_to_string(&probe).expect("read environment probe");
+        let pane_command = backend
+            .tmux_cmd(&[
+                "display-message",
+                "-p",
+                "-t",
+                "session-env-agent",
+                "#{pane_start_command}",
+            ])
+            .expect("read pane command");
+
+        let _ = backend.terminate_session("session-env-agent");
+        cleanup(&sock);
+
+        assert_eq!(observed, secret);
+        assert!(!pane_command.contains(secret));
     }
 
     #[test]
