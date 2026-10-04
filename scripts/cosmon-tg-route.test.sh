@@ -110,22 +110,32 @@ grep -q -- "--to-session session-bbbb2222 -m standup in 5" "$CSLOG" \
   || fail "T5 broadcast missed bbbb2222; log:$(cat "$CSLOG")"
 pass "T5 @all → broadcast to all fresh sessions"
 
-# ── T6: unaddressed with NO fresh session → cs drop ──────────────────────────
+# T6: legacy raw-id snapshot remains routable during transition.
 : > "$CSLOG"
-rm -f "$STATE"/presence/session-*.json     # no sessions at all
-mk_inbox "20260101T000005Z-5" "nobody home"
+raw_sid="0199aabb-ccdd-7000-8000-112233445566"
+mk_session "$raw_sid" "$(now_iso)"
+mk_inbox "20260101T000005Z-5" "@11223344: reach the hook session"
+run_router
+grep -q -- "--to-session $raw_sid -m reach the hook session" "$CSLOG" \
+  || fail "T6 legacy raw-id presence was not routable; log:$(cat "$CSLOG")"
+pass "T6 legacy raw-id presence remains routable"
+
+# ── T7: unaddressed with NO fresh session → cs drop ──────────────────────────
+: > "$CSLOG"
+rm -f "$STATE"/presence/*.json     # no sessions at all
+mk_inbox "20260101T000006Z-6" "nobody home"
 run_router
 grep -q -- "drop --config $STATE --tag source:telegram nobody home" "$CSLOG" \
-  || fail "T6 no-session fallback did not cs drop; log:$(cat "$CSLOG")"
-pass "T6 unaddressed + no session → cs drop fallback"
+  || fail "T7 no-session fallback did not cs drop; log:$(cat "$CSLOG")"
+pass "T7 unaddressed + no session → cs drop fallback"
 
-# ── T7: --dry-run does NOT advance the marker (repeatable) ────────────────────
+# ── T8: --dry-run does NOT advance the marker (repeatable) ────────────────────
 : > "$CSLOG"
 rm -f "$MARKER"
 mk_session "session-cccc3333" "$(now_iso)"
-mk_inbox "20260101T000006Z-6" "dry probe"
+mk_inbox "20260101T000007Z-7" "dry probe"
 run_router --dry-run
-[ -f "$MARKER" ] && fail "T7 dry-run advanced the marker"
-pass "T7 dry-run leaves marker untouched"
+[ -f "$MARKER" ] && fail "T8 dry-run advanced the marker"
+pass "T8 dry-run leaves marker untouched"
 
 echo "ALL PASS"

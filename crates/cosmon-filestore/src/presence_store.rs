@@ -3,12 +3,14 @@
 //! Filesystem backend for the presence registry (C-PRESENCE-CORE).
 //!
 //! Each live session owns exactly one file:
-//! `<state_root>/presence/<session_id>.json`. Writes are atomic via a
+//! `<state_root>/presence/session-<session_id>.json`. Writes are atomic via a
 //! `.tmp` sibling + rename, so a reader scanning mid-write either sees
 //! the previous snapshot or the new one — never a partial file.
+//! Readers accept the former unprefixed shape during migration; a subsequent
+//! write moves the session onto the canonical name.
 //!
-//! The accompanying `<session_id>.log` file (whisper pull-channel) and
-//! `<session_id>.seek` pointer are owned by the whisper/presence-poll
+//! The accompanying `session-<session_id>.log` file (whisper pull-channel) and
+//! `session-<session_id>.seek` pointer are owned by the whisper/presence-poll
 //! path; this module only knows about the `.json` snapshot. Naming lives
 //! in `log_path` so both sides share a typed path helper (closing the
 //! string-level contract flagged in `cmd/presence.rs`).
@@ -30,8 +32,9 @@ const PRESENCE_DIR: &str = "presence";
 /// File-backed presence registry. Stateless; every call is a pure
 /// function of the on-disk layout.
 ///
-/// All three presence path families (`<sid>.json` snapshot, `<sid>.log`
-/// whisper channel, `<sid>.seek` pointer) are **decoded** from
+/// All three presence path families (`session-<sid>.json` snapshot,
+/// `session-<sid>.log` whisper channel, `session-<sid>.seek` pointer) are
+/// **decoded** from
 /// [`CosmonPath`] rather than hand-joined,
 /// so this store and the write-path taxonomy cannot drift.
 #[derive(Debug, Clone)]
@@ -90,6 +93,73 @@ impl PresenceStore {
             .join(CosmonPath::PresenceSeek { session: sid }.rel())
     }
 
+    fn legacy_path(&self, sid: &SessionId, extension: &str) -> Option<PathBuf> {
+        let legacy = self.root.join(format!("{}.{extension}", sid.as_str()));
+        let canonical = match extension {
+            "json" => self.snapshot_path(sid),
+            "log" => self.log_path(sid),
+            "seek" => self.seek_path(sid),
+            _ => return None,
+        };
+        (legacy != canonical).then_some(legacy)
+    }
+
+    /// Return the readable whisper log path for a session.
+    ///
+    /// New writes use [`Self::log_path`]. During the filename transition this
+    /// reader falls back to the old unprefixed sibling when the canonical log
+    /// does not exist.
+    #[must_use]
+    pub fn readable_log_path(&self, sid: &SessionId) -> PathBuf {
+        let canonical = self.log_path(sid);
+        if canonical.exists() {
+            canonical
+        } else {
+            self.legacy_path(sid, "log").unwrap_or(canonical)
+        }
+    }
+
+    /// Return the seek pointer paired with [`Self::readable_log_path`].
+    #[must_use]
+    pub fn readable_seek_path(&self, sid: &SessionId) -> PathBuf {
+        if self.log_path(sid).exists() {
+            self.seek_path(sid)
+        } else {
+            self.legacy_path(sid, "seek")
+                .unwrap_or_else(|| self.seek_path(sid))
+        }
+    }
+
+    /// Move an unprefixed whisper log and seek pointer to their canonical
+    /// names before the next write.
+    ///
+    /// Existing canonical files always win. The transition is best-effort for
+    /// absent legacy siblings and returns an error only when a legacy file was
+    /// present but could not be renamed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CosmonError::StateStore`] when a legacy channel file exists
+    /// but cannot be moved to its canonical name.
+    pub fn migrate_legacy_channel(&self, sid: &SessionId) -> Result<(), CosmonError> {
+        for (extension, canonical) in [("log", self.log_path(sid)), ("seek", self.seek_path(sid))] {
+            let Some(legacy) = self.legacy_path(sid, extension) else {
+                continue;
+            };
+            if canonical.exists() || !legacy.exists() {
+                continue;
+            }
+            fs::rename(&legacy, &canonical).map_err(|e| CosmonError::StateStore {
+                reason: format!(
+                    "failed to migrate presence channel {} to {}: {e}",
+                    legacy.display(),
+                    canonical.display()
+                ),
+            })?;
+        }
+        Ok(())
+    }
+
     /// Atomically write (or overwrite) the presence file for the
     /// session identified by `presence.session_id`.
     ///
@@ -104,7 +174,11 @@ impl PresenceStore {
             reason: format!("failed to serialise presence: {e}"),
         })?;
         let path = self.snapshot_path(&presence.session_id);
-        atomic_write(&path, json.as_bytes())
+        atomic_write(&path, json.as_bytes())?;
+        if let Some(legacy) = self.legacy_path(&presence.session_id, "json") {
+            let _ = fs::remove_file(legacy);
+        }
+        Ok(())
     }
 
     /// Read one session's snapshot, by id.
@@ -126,7 +200,18 @@ impl PresenceStore {
         let path = self.snapshot_path(sid);
         match fs::read_to_string(&path) {
             Ok(data) => Ok(serde_json::from_str::<Presence>(&data).ok()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let Some(legacy) = self.legacy_path(sid, "json") else {
+                    return Ok(None);
+                };
+                match fs::read_to_string(&legacy) {
+                    Ok(data) => Ok(serde_json::from_str::<Presence>(&data).ok()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(CosmonError::StateStore {
+                        reason: format!("failed to read presence {}: {e}", legacy.display()),
+                    }),
+                }
+            }
             Err(e) => Err(CosmonError::StateStore {
                 reason: format!("failed to read presence {}: {e}", path.display()),
             }),
@@ -169,6 +254,11 @@ impl PresenceStore {
                 continue;
             };
             if let Ok(p) = serde_json::from_str::<Presence>(&data) {
+                if path != self.snapshot_path(&p.session_id)
+                    && self.snapshot_path(&p.session_id).exists()
+                {
+                    continue;
+                }
                 out.push(p);
             }
         }
@@ -200,7 +290,11 @@ impl PresenceStore {
         for p in presences {
             if !p.is_live(now) && !pid_is_alive(p.pid) {
                 let snap = self.snapshot_path(&p.session_id);
-                if fs::remove_file(&snap).is_ok() {
+                let removed_canonical = fs::remove_file(&snap).is_ok();
+                let removed_legacy = self
+                    .legacy_path(&p.session_id, "json")
+                    .is_some_and(|path| fs::remove_file(path).is_ok());
+                if removed_canonical || removed_legacy {
                     removed += 1;
                 }
                 // Best-effort: unlink the companion log + seek so the
@@ -209,6 +303,12 @@ impl PresenceStore {
                 let seek = self.seek_path(&p.session_id);
                 let _ = fs::remove_file(&log);
                 let _ = fs::remove_file(&seek);
+                if let Some(path) = self.legacy_path(&p.session_id, "log") {
+                    let _ = fs::remove_file(path);
+                }
+                if let Some(path) = self.legacy_path(&p.session_id, "seek") {
+                    let _ = fs::remove_file(path);
+                }
                 // …and the pilot mailbox pair. A dead session's inbox is not
                 // a backlog to preserve: nobody will ever acknowledge it, so
                 // keeping it would make `pending` grow without bound.
@@ -277,6 +377,57 @@ mod tests {
 
         let absent = SessionId::new("sid-nobody").unwrap();
         assert_eq!(store.load(&absent).unwrap(), None);
+    }
+
+    #[test]
+    fn raw_hook_session_id_uses_the_canonical_prefixed_snapshot_name() {
+        let (_tmp, store) = make_store();
+        let sid = "0199aabb-ccdd-7000-8000-112233445566";
+        let p = sample(sid, Utc::now(), std::process::id());
+
+        store.upsert(&p).unwrap();
+
+        assert_eq!(
+            store.snapshot_path(&p.session_id).file_name().unwrap(),
+            "session-0199aabb-ccdd-7000-8000-112233445566.json"
+        );
+        assert!(store.snapshot_path(&p.session_id).exists());
+    }
+
+    #[test]
+    fn load_accepts_a_legacy_unprefixed_snapshot() {
+        let (_tmp, store) = make_store();
+        let sid = "0199aabb-ccdd-7000-8000-112233445566";
+        let p = sample(sid, Utc::now(), std::process::id());
+        fs::create_dir_all(store.dir()).unwrap();
+        fs::write(
+            store.dir().join(format!("{sid}.json")),
+            serde_json::to_vec_pretty(&p).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(store.load(&p.session_id).unwrap().as_ref(), Some(&p));
+    }
+
+    #[test]
+    fn legacy_whisper_channel_is_migrated_without_losing_content() {
+        let (_tmp, store) = make_store();
+        let sid = SessionId::new("0199aabb-ccdd-7000-8000-112233445566").unwrap();
+        fs::create_dir_all(store.dir()).unwrap();
+        let legacy_log = store.dir().join(format!("{}.log", sid.as_str()));
+        let legacy_seek = store.dir().join(format!("{}.seek", sid.as_str()));
+        fs::write(&legacy_log, "before\n").unwrap();
+        fs::write(&legacy_seek, "3").unwrap();
+
+        store.migrate_legacy_channel(&sid).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(store.log_path(&sid)).unwrap(),
+            "before\n"
+        );
+        assert_eq!(fs::read_to_string(store.seek_path(&sid)).unwrap(), "3");
+        assert!(!legacy_log.exists());
+        assert!(!legacy_seek.exists());
     }
 
     #[test]

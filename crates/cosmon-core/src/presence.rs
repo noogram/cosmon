@@ -4,9 +4,10 @@
 //!
 //! Presence is the single on-disk primitive that makes N Claude (or any
 //! other) sessions visible to each other. Each running session writes a
-//! single JSON file under `.cosmon/state/presence/<sid>.json` and
+//! single JSON file under `.cosmon/state/presence/session-<sid>.json` and
 //! refreshes its `heartbeat_at` periodically. Peers discover live sessions
-//! by a directory scan — no broker, no mailbox, no daemon.
+//! by a directory scan — no broker, no mailbox, no daemon. Readers also
+//! accept the former unprefixed `<sid>.json` shape during migration.
 //!
 //! # Lifetime
 //!
@@ -189,7 +190,7 @@ pub fn galaxy_name_from_state_dir(state_dir: &std::path::Path) -> Option<String>
 pub const STALE_AFTER: Duration = Duration::minutes(3);
 
 /// Chalk-mark left by a live session under
-/// `.cosmon/state/presence/<session_id>.json`.
+/// `.cosmon/state/presence/session-<session_id>.json`.
 ///
 /// Fields are intentionally small and self-describing — any cosmon CLI
 /// (or external tool) can read this file without loading the whole state

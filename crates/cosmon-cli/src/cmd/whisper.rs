@@ -843,14 +843,6 @@ pub fn run_to_session(
         .map_err(|e| anyhow::anyhow!("invalid session id {sid:?}: {e}"))?;
     let store = cosmon_filestore::PresenceStore::new(&state_dir);
     let presence_dir = store.dir().to_path_buf();
-    let log_path = store.log_path(&session_id);
-
-    let ts = Utc::now();
-    let sender = std::env::var("COSMON_SESSION_ID").unwrap_or_else(|_| detect_pilot());
-    let line = format!("{} | from:{} | {}\n", ts.to_rfc3339(), sender, one_line);
-
-    let stale = !log_path.exists();
-
     if !dry_run {
         fs::create_dir_all(&presence_dir).map_err(|e| {
             anyhow::anyhow!(
@@ -858,6 +850,17 @@ pub fn run_to_session(
                 presence_dir.display()
             )
         })?;
+        store.migrate_legacy_channel(&session_id)?;
+    }
+    let log_path = store.log_path(&session_id);
+
+    let ts = Utc::now();
+    let sender = std::env::var("COSMON_SESSION_ID").unwrap_or_else(|_| detect_pilot());
+    let line = format!("{} | from:{} | {}\n", ts.to_rfc3339(), sender, one_line);
+
+    let stale = store.load(&session_id)?.is_none();
+
+    if !dry_run {
         let mut f = fs::OpenOptions::new()
             .create(true)
             .append(true)

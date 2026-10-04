@@ -112,7 +112,7 @@ fn a_simulated_worker_hook_run_writes_a_fresh_presence_record() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let store = cosmon_filestore::presence_store::PresenceStore::new(state);
+    let store = cosmon_filestore::presence_store::PresenceStore::new(&state);
     let rows = store.scan().expect("scan");
     assert_eq!(rows.len(), 1, "one record for one session: {rows:?}");
     let record = &rows[0];
@@ -125,6 +125,35 @@ fn a_simulated_worker_hook_run_writes_a_fresh_presence_record() {
     );
     assert_eq!(record.headline, "worker: turn-start");
     assert!(!record.role.is_primary(), "a hook never claims a seat");
+
+    let canonical_snapshot = state.join("presence/session-native-worker-1.json");
+    assert!(
+        canonical_snapshot.exists(),
+        "the hook must use the shared canonical filename"
+    );
+
+    let whisper = Command::new(cs_bin())
+        .args(["--config"])
+        .arg(&state)
+        .args([
+            "--json",
+            "whisper",
+            "--to-session",
+            "native-worker-1",
+            "--message",
+            "hello",
+        ])
+        .output()
+        .expect("whisper");
+    assert!(
+        whisper.status.success(),
+        "{}",
+        String::from_utf8_lossy(&whisper.stderr)
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&whisper.stdout).expect("whisper receipt");
+    assert_eq!(receipt["stale_session"], false);
+    assert!(state.join("presence/session-native-worker-1.log").exists());
 }
 
 #[test]

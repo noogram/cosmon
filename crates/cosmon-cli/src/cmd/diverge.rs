@@ -48,7 +48,6 @@ use std::process::Command;
 
 use colored::Colorize;
 use cosmon_core::id::{MoleculeId, SessionId};
-use cosmon_core::presence::Presence;
 use cosmon_filestore::PresenceStore;
 use cosmon_state::MoleculeData;
 use serde::Serialize;
@@ -453,10 +452,7 @@ fn resolve_session(ctx: &Context, s: &str) -> anyhow::Result<Session> {
     //    the layout, so this reader cannot drift from the writer again.
     let self_state_dir = ctx.config.clone().unwrap_or_else(super::default_state_dir);
     if let Ok(sid) = SessionId::new(s) {
-        let presence_path = PresenceStore::new(&self_state_dir).snapshot_path(&sid);
-        if presence_path.exists() {
-            let bytes = std::fs::read(&presence_path)?;
-            let presence: Presence = serde_json::from_slice(&bytes)?;
+        if let Some(presence) = PresenceStore::new(&self_state_dir).load(&sid)? {
             return Ok(Session {
                 label: s.to_owned(),
                 state_dir: presence.cwd.join(".cosmon").join("state"),
