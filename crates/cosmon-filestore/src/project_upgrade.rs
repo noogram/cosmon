@@ -583,6 +583,13 @@ pub fn generate_config_toml(
         Some(t) => format!("noyau = \"{t}\"\n"),
         None => String::new(),
     };
+    let trunk_line = cosmon_dir
+        .parent()
+        .and_then(detect_unambiguous_non_main_trunk)
+        .map_or_else(String::new, |branch| {
+            let quoted = toml_edit::Value::from(branch).to_string();
+            format!("trunk_branch = {quoted}\n")
+        });
 
     let toml = format!(
         "# Cosmon project configuration.\n\
@@ -595,6 +602,7 @@ pub fn generate_config_toml(
          [project]\n\
          project_id = \"{project_id}\"\n\
          {noyau_line}\
+         {trunk_line}\
          #\n\
          # The git repository this galaxy's work lands in. Left unset, it is\n\
          # whichever repository contains the directory `cs` was fired from —\n\
@@ -692,6 +700,53 @@ pub fn generate_config_toml(
 
     fs::write(&config_path, toml)?;
     Ok(())
+}
+
+/// Return the checked-out branch when it is the repository's only possible
+/// local trunk and its name is not cosmon's built-in `main` default.
+///
+/// An unborn repository has no `refs/heads/*` yet, so its symbolic `HEAD` is
+/// the only evidence available and is unambiguous. Once commits exist, the
+/// checked-out branch is accepted only when it is the sole local branch. This
+/// avoids turning an arbitrary feature branch into the integration trunk when
+/// `cs init` is run in an established repository. Git or discovery failures
+/// return `None`; initialization remains usable outside a repository.
+fn detect_unambiguous_non_main_trunk(project_root: &Path) -> Option<String> {
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !head.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8(head.stdout).ok()?.trim().to_owned();
+    if branch.is_empty() || branch == "main" {
+        return None;
+    }
+
+    let refs = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+        .output()
+        .ok()?;
+    if !refs.status.success() {
+        return None;
+    }
+    let refs_stdout = String::from_utf8(refs.stdout).ok()?;
+    let local_branches: Vec<_> = refs_stdout
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+
+    if local_branches.is_empty() || (local_branches.len() == 1 && local_branches[0] == branch) {
+        Some(branch)
+    } else {
+        None
+    }
 }
 /// Walk upward from `start` looking for an ancestor `.git` entry. Returns
 /// the first match or `None` if no repository contains the path.

@@ -1058,6 +1058,49 @@ mod tests {
         );
     }
 
+    /// A repository born on a non-default trunk must retain that integration
+    /// line across the first `cs init` → `cs done` cycle. With no remote to
+    /// discover, leaving `trunk_branch` absent makes harvest fall back to
+    /// `main` and refuse from the repository's actual trunk (issue #169).
+    #[test]
+    fn init_records_a_non_main_repository_trunk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(tmp.path())
+            .args(["init", "-q", "-b", "master"])
+            .status()
+            .expect("git init must run");
+        assert!(status.success(), "scratch repository must initialize");
+
+        let ctx = Context {
+            verbose: false,
+            json: true,
+            config: None,
+        };
+        let args = Args {
+            path: tmp.path().to_path_buf(),
+            upgrade: false,
+            soft: false,
+            template: ProjectTemplate::Generic,
+            no_git: true,
+            yes: false,
+            tenant: None,
+        };
+
+        run(&ctx, &args).expect("cs init must succeed on a non-main trunk");
+
+        let content = fs::read_to_string(tmp.path().join(".cosmon/config.toml"))
+            .expect("config.toml must exist");
+        let config =
+            cosmon_core::config::ProjectConfig::parse(&content).expect("config.toml must parse");
+        assert_eq!(
+            config.project.trunk_branch.as_deref(),
+            Some("master"),
+            "cs init must record the repository's actual trunk so cs done does not fall back to main",
+        );
+    }
+
     /// `cs init --tenant <noyau>` must record the tenant label in
     /// `config.toml` (ADR-063 layer-3 / ADR-080 §8.1) and provision the
     /// `state/nucleons/` directory where ADR-080 OIDC identity mappings
