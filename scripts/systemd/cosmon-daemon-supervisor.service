@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=Cosmon daemon supervisor
+StartLimitIntervalSec=60
+StartLimitBurst=20
+
+[Service]
+Type=simple
+ExecStart=__EXEC_START__
+Environment=__ENVIRONMENT_PATH__
+WorkingDirectory=%h
+Restart=always
+RestartSec=5s
+KillMode=mixed
+TimeoutStopSec=15s
+
+[Install]
+WantedBy=default.target
