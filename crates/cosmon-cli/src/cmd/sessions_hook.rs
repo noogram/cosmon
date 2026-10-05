@@ -697,8 +697,10 @@ fn beat_presence(
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
             worker_molecule.clone(),
-            state,
-            detail.clone(),
+            crate::operator_event::SessionPresenceObservation {
+                state,
+                detail: detail.clone(),
+            },
         );
     }
 
@@ -713,7 +715,7 @@ fn beat_presence(
             galaxy: cosmon_core::presence::galaxy_name_from_state_dir(&state_dir)
                 .unwrap_or_else(|| "unknown".to_owned()),
             state: Some(state),
-            detail: Some(detail),
+            detail: presence::PresenceDetailUpdate::Replace(detail),
             ..presence::PingArgs::default()
         },
     ) {
