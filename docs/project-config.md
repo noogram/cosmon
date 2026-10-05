@@ -23,7 +23,7 @@ configuration surface without reading cosmon source code.
 | `[hooks]` | Lifecycle hook commands | no |
 | `[gates]` | Verification gate commands (language-agnostic) | no |
 | `[archive]` | Durable proof-of-work archive: on/off and retention | no |
-| `[adapters.codex]` | Codex launch and update policy for this galaxy | no |
+| `[adapters.codex]` / `[adapters.opencode]` | External CLI launch policy and optional gateway binding | no |
 
 All sections except `[project]` are optional and default to sensible
 values. Missing sections never produce an error.
@@ -61,6 +61,15 @@ failure is recorded and does not prevent launch on the installed version.
 and selects Skip if the menu nevertheless appears. `operator` leaves the
 menu untouched and keeps the existing alert behavior. None of these settings
 writes the operator's codex configuration file.
+
+## External CLI gateway binding
+
+Both `[adapters.codex]` and `[adapters.opencode]` read `base_url`,
+`api_key_env`, and `default_model` as one gateway binding. The key field names
+an environment variable; its value is injected into the worker's tmux session
+and is not persisted. See the
+[external CLI gateway guide](guides/external-cli-gateway-workers.md) for the
+native provider mapping, protocol limits, and usage-accounting differences.
 
 ### Retired sections
 

@@ -456,6 +456,10 @@ pub struct CodexSessionConfig {
     pub telemetry: Option<AdapterTelemetry>,
     /// Optional pre-existing worker the spawn path detected.
     pub pre_existing_worker: Option<WorkerId>,
+    /// Environment entries injected into this tmux session with
+    /// `new-session -e`. Gateway credentials belong here so they never appear
+    /// in the pane command, molecule events, or logs.
+    pub environment: Vec<(String, String)>,
     /// Optional operator git identity to pin on the codex worker
     /// (delib-20260717-194b, F3 — the codex belt-and-suspenders).
     ///
@@ -674,7 +678,7 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
         let _ = write!(env_prefix, "COSMON_PARENT_MOL_ID={} ", shell_escape(id));
     }
     let cmd = format!("{env_prefix}{cmd}");
-    let cmd = push_api_key_strip(cmd, config.pass_api_key);
+    let cmd = push_api_key_strip(cmd, config.pass_api_key, &config.environment);
     prefix_git_identity_env(config.git_identity.as_ref(), cmd)
 }
 
@@ -683,7 +687,9 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
 const API_KEY_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "CODEX_API_KEY"];
 
 /// Prepend `env -u OPENAI_API_KEY -u CODEX_API_KEY` onto `cmd` unless
-/// `pass_api_key` opts back into inheriting them.
+/// `pass_api_key` opts back into inheriting them. A variable explicitly
+/// supplied through the session-scoped `environment` channel is preserved:
+/// it is intentional configuration, not ambient inheritance.
 ///
 /// `env -u NAME` unsets `NAME` for the child it execs, which is what
 /// actually matters here: the tmux **server** froze `OPENAI_API_KEY` into
@@ -699,16 +705,23 @@ const API_KEY_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "CODEX_API_KEY"];
 /// `pass_api_key = true` (the absence-default is `false`) leaves `cmd`
 /// byte-identical — the escape hatch for an installation that
 /// intentionally bills codex by API key.
-fn push_api_key_strip(cmd: String, pass_api_key: bool) -> String {
+fn push_api_key_strip(cmd: String, pass_api_key: bool, environment: &[(String, String)]) -> String {
     if pass_api_key {
         return cmd;
     }
     let mut prefix = "env".to_owned();
-    for var in API_KEY_ENV_VARS {
+    for var in API_KEY_ENV_VARS
+        .iter()
+        .filter(|var| !environment.iter().any(|(name, _)| name == **var))
+    {
         prefix.push_str(" -u ");
         prefix.push_str(var);
     }
-    format!("{prefix} {cmd}")
+    if prefix == "env" {
+        cmd
+    } else {
+        format!("{prefix} {cmd}")
+    }
 }
 
 /// Append one structural `--add-dir <root>` flag per extra writable root
@@ -996,7 +1009,12 @@ pub fn spawn_codex_session(config: &CodexSessionConfig) -> Result<(), CodexError
 
     let backend = TmuxBackend::new(&config.socket);
     backend
-        .spawn_worker(&config.session_name, &config.work_dir, &cmd)
+        .spawn_worker_with_env(
+            &config.session_name,
+            &config.work_dir,
+            &cmd,
+            &config.environment,
+        )
         .map_err(|e| CodexError::SpawnFailed(e.to_string()))
 }
 
@@ -1376,6 +1394,7 @@ mod tests {
             extra_args,
             telemetry: None,
             pre_existing_worker: None,
+            environment: Vec::new(),
             git_identity: None,
             writable_roots: vec![],
             harness_args: vec![],
@@ -1476,6 +1495,21 @@ mod tests {
         assert!(!cmd.contains("-u OPENAI_API_KEY"));
         assert!(!cmd.contains("-u CODEX_API_KEY"));
         assert!(cmd.starts_with("RUST_LOG="));
+    }
+
+    /// A gateway key deliberately injected through tmux's per-session
+    /// environment must survive the ambient-key strip, while the other
+    /// credential name remains denied. Its value never enters the pane command.
+    #[test]
+    fn explicit_gateway_key_environment_survives_default_strip() {
+        let mut c = cfg(CodexMode::Interactive, None, vec![]);
+        c.environment = vec![("OPENAI_API_KEY".to_owned(), "fixture-key".to_owned())];
+
+        let cmd = build_codex_command(&c);
+
+        assert!(!cmd.contains("-u OPENAI_API_KEY"));
+        assert!(cmd.starts_with("env -u CODEX_API_KEY RUST_LOG="));
+        assert!(!cmd.contains("fixture-key"));
     }
 
     /// The strip sits between the git-identity prefix and the base command —

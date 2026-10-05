@@ -204,6 +204,7 @@ It is scoped to the patrol dead-worker policy; it is not a full command inventor
 |---|---|---|---|
 | Configure the grace before a patrol dead-worker verdict | `cs patrol --dead-worker-grace-secs <seconds>`; default 120 | No control found in the native apps | No equivalent action found |
 | Resolve a codex update menu and restart after installation | `[adapters.codex].update = "auto"` (default) accepts the update and re-tackles in place after the success notice; `skip` declines it; `operator` pages without a key | No update-policy control audited in the native apps | No equivalent action found |
+| Dispatch an external CLI worker through a per-galaxy compatible gateway | `[adapters.codex]` and `[adapters.opencode]` carry `base_url`, `api_key_env`, and `default_model`; `cs tackle` injects native per-process provider configuration without writing either harness's global config | No gateway editor audited in the native apps | Status surfaces show the selected adapter/model; credential values remain absent |
 | Scan live panes for blocking dialogues | Every `cs patrol` run scans by default; `--auto-confirm-safe` remains opt-in | No dialogue scan control found in the native apps | No equivalent action found |
 
 The dead-worker policy and dialogue scan are applied by the patrol command.

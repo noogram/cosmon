@@ -60,6 +60,7 @@ fn codex_config(harness_args: Vec<String>) -> CodexSessionConfig {
         extra_args: vec![],
         telemetry: None,
         pre_existing_worker: None,
+        environment: Vec::new(),
         git_identity: None,
         writable_roots: vec![],
         harness_args,

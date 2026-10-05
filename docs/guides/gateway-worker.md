@@ -12,6 +12,9 @@ against a loopback responder and never touches the network.
 This is the metered path. Subscription (account-login) access is a different
 mechanism and is not covered here.
 
+To keep the agent loop in an external CLI, use the sibling
+[Codex and OpenCode gateway guide](external-cli-gateway-workers.md).
+
 ## Configure
 
 `.cosmon/config.toml`:
