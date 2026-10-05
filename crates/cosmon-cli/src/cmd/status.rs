@@ -2353,7 +2353,7 @@ mod tests {
     #[test]
     fn dead_ghost_needs_a_running_molecule_without_a_session() {
         use super::super::ensemble::{is_dead_ghost, molecule_ghost};
-        use cosmon_core::reconcile::TransportState;
+        use cosmon_core::worker::TransportState;
         use cosmon_transport::registry::SupervisionMode;
 
         let tmux = SupervisionMode::TmuxPane;
