@@ -128,12 +128,36 @@ jobs:
             --shell /bin/bash cosmon-services-ci
           uid="$(id -u cosmon-services-ci)"
           sudo loginctl enable-linger cosmon-services-ci
-          sudo systemctl start "user@${uid}.service"
-          for _ in {1..50}; do
-            test -S "/run/user/${uid}/bus" && break
+          rt="/run/user/${uid}"
+          diagnose() {
+            echo "::error::user manager for uid ${uid} is unreachable: $1"
+            sudo systemctl status "user@${uid}" --no-pager || true
+            ls -la "${rt}" || true
+            sudo journalctl -u "user@${uid}" --no-pager -n 50 || true
+          }
+          sudo systemctl start "user@${uid}.service" || {
+            diagnose "systemctl start failed"
+            exit 1
+          }
+          # The harnesses reach the manager through $XDG_RUNTIME_DIR/systemd/private,
+          # so that socket, not the D-Bus one, is what has to appear.
+          for _ in {1..100}; do
+            test -S "${rt}/systemd/private" && break
             sleep 0.1
           done
-          test -S "/run/user/${uid}/bus"
+          test -S "${rt}/systemd/private" || {
+            diagnose "${rt}/systemd/private did not appear within 10 s"
+            exit 1
+          }
+          state="$(sudo -u cosmon-services-ci env XDG_RUNTIME_DIR="${rt}" \
+            systemctl --user is-system-running --wait || true)"
+          case "${state}" in
+            running|degraded) ;;
+            *)
+              diagnose "is-system-running reported '${state}'"
+              exit 1
+              ;;
+          esac
           echo "COSMON_TEST_UID=${uid}" >> "$GITHUB_ENV"
       - name: Run real-manager service conformance
         run: |
