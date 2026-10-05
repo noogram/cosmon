@@ -193,7 +193,8 @@ fn tool_call_turn(model: &str) -> String {
                 }]
             },
             "finish_reason": "tool_calls"
-        }]
+        }],
+        "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
     })
     .to_string()
 }
@@ -219,7 +220,8 @@ fn stop_turn(model: &str, request_body: &str) -> String {
             "index": 0,
             "message": { "role": "assistant", "content": content },
             "finish_reason": "stop"
-        }]
+        }],
+        "usage": { "prompt_tokens": 20, "completion_tokens": 6, "total_tokens": 26 }
     })
     .to_string()
 }
@@ -846,4 +848,53 @@ fn config_selected_model_reaches_the_provider_request() {
              request body:\n{body}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Usage accounting — the local arm writes to the galaxy ledger
+// ---------------------------------------------------------------------------
+
+/// `UsageObserved` records in one `events.jsonl`; empty when the file is absent.
+fn usage_records_in(log: &Path) -> usize {
+    cosmon_state::event_log::read_all(log)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|env| {
+            matches!(
+                env.event,
+                cosmon_core::event_v2::EventV2::UsageObserved { .. }
+            )
+        })
+        .count()
+}
+
+/// The local harness arm records usage in the galaxy ledger, like the openai
+/// and anthropic arms, and not in the molecule's own log.
+///
+/// Red before the fix: the local arm handed the usage sink the molecule
+/// directory, so every `UsageObserved` record landed in
+/// `<molecule>/events.jsonl` and the galaxy ledger stayed empty.
+#[test]
+fn local_arm_usage_lands_in_the_galaxy_ledger() {
+    let mock = MockOllama::start(MOCK_MODEL);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project = tmp.path();
+    setup_project(project);
+    install_one_step_task_formula(project);
+    let mol_id = nucleate(project, &mock);
+    let mol_dir = tackle_and_wait(project, &mock, &mol_id);
+
+    let galaxy_log = project.join(".cosmon/state/events.jsonl");
+    let local_log = mol_dir.join("events.jsonl");
+    assert!(
+        usage_records_in(&galaxy_log) >= 1,
+        "no UsageObserved record in the galaxy ledger {}; the molecule log holds {}",
+        galaxy_log.display(),
+        usage_records_in(&local_log),
+    );
+    assert_eq!(
+        usage_records_in(&local_log),
+        0,
+        "usage records must not stay in the molecule's own log",
+    );
 }
