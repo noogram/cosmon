@@ -73,7 +73,7 @@ stale="${tmp}/served-stale-no-connector.sh"
 # plausible-looking one that actually shipped.
 # shellcheck disable=SC2016  # ${tmp}/${dir}/$HOME are literal text in the
 # sed patterns below — they match install.sh's own source, not this shell's vars.
-sed -e '/if \[ -f "${tmp}\/cosmon-remote" \]; then/,/^    fi$/d' \
+sed -e '/if \[ -f "${tmp}\/client\/cosmon-remote" \]; then/,/^    fi$/d' \
     -e '/if \[ -x "${dir}\/cosmon-remote" \]; then/,/^    fi$/d' \
     -e '/cosmon-remote/d' \
     "$CANONICAL" > "$stale"
