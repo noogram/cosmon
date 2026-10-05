@@ -19,6 +19,31 @@ this stage.
 
 ## [Unreleased]
 
+### Added
+
+- **EXPERIMENTAL: Linux and WSL2 as a supported host.** The public installer
+  gains an opt-in `--with-services`. It downloads and verifies a separate
+  service archive, installs `cosmon-daemon-supervisor` and `cosmon-scheduler`
+  next to `cs` (in `--dir`), creates minimal valid supervisor and scheduler
+  configurations only when they are absent (existing files are left untouched),
+  and activates the services through the systemd user-service and user-timer
+  scripts. A default install stays client-only. (#143)
+- A "Linux evidence" CI lane runs the real systemd user-manager harnesses in an
+  isolated account on Ubuntu 24.04. It is Linux evidence, not WSL evidence.
+  (#143)
+- `scripts/verify-wsl2-host.sh`, a resumable phase-by-phase host witness, with
+  the procedure in `docs/guides/wsl2-host-validation.md` and the results in
+  `docs/measurements/wsl2-host-validation.md`. (#143)
+
+  Limits of the evidence. It was measured on one WSL2 x86_64 Ubuntu 24.04 host
+  with candidate binaries, not yet with a published release. It covers install,
+  one tackle-to-done lifecycle, supervisor and child crash recovery, and timer
+  firing. Last-shell logout, distribution shutdown and relaunch, host reboot
+  and sleep/resume are not yet recorded as measured. Other distributions,
+  architectures and filesystems are not claimed. WSL does not start itself when
+  Windows boots; the services restart on the next distribution start (ADR-186).
+  (#143)
+
 ### Fixed
 
 - `cs status` no longer counts a dead worker as alive or reports the galaxy
