@@ -579,11 +579,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             // the ghost in that case rather than dressing the row in
             // a costume the operator must mentally subtract.
             let ghost = mol_lookup.and_then(|ml| {
-                if matches!(ml.supervision, SupervisionMode::InProcess) {
-                    return None;
-                }
-                let rs = project_run_state(ml.status, transport, ml.merged_at, chrono::Utc::now());
-                rs.ghost(chrono::Utc::now(), GHOST_PROBE_TTL)
+                molecule_ghost(ml.status, ml.merged_at, ml.supervision, transport)
                     .map(|g| g.as_str().to_owned())
             });
 
@@ -1351,6 +1347,41 @@ fn observe_transport(
     }
     // No backend found it alive.
     (TransportState::Dead, None)
+}
+
+/// ADR-052 ghost classification of one molecule, given its transport probe.
+///
+/// The single definition behind the ensemble's `ghost` column and the dead
+/// count in `cs status` (issue #172): both project the same
+/// `(status, transport, merged_at)` triple through [`project_run_state`], so
+/// the two commands cannot disagree about which molecules are ghosts.
+/// In-process adapters have no pane by design and never ghost.
+pub(super) fn molecule_ghost(
+    status: MoleculeStatus,
+    merged_at: Option<DateTime<Utc>>,
+    supervision: SupervisionMode,
+    transport: TransportState,
+) -> Option<cosmon_core::run_state::GhostKind> {
+    if matches!(supervision, SupervisionMode::InProcess) {
+        return None;
+    }
+    let now = chrono::Utc::now();
+    project_run_state(status, transport, merged_at, now).ghost(now, GHOST_PROBE_TTL)
+}
+
+/// Whether a ghost verdict means the worker's session is gone
+/// ([`cosmon_core::run_state::GhostKind::DeadPane`] or `VanishedWorker`).
+pub(super) fn is_dead_ghost(ghost: Option<cosmon_core::run_state::GhostKind>) -> bool {
+    use cosmon_core::run_state::GhostKind;
+    matches!(ghost, Some(GhostKind::DeadPane | GhostKind::VanishedWorker))
+}
+
+/// Probe `worker_id` across the fleet's tmux backends.
+pub(super) fn probe_transport(
+    backends: &[cosmon_transport::TmuxBackend],
+    worker_id: &cosmon_core::id::WorkerId,
+) -> TransportState {
+    observe_transport(backends, worker_id).0
 }
 
 /// Observe cognitive state from the agent's self-declaration file.

@@ -39,6 +39,17 @@
 //! gains `molecules.alive_excluding_leases`, `molecules.leases` and the
 //! `backlog` block: an existing key never changes under a caller.
 //!
+//! # A dead worker is not alive
+//!
+//! A `Running` molecule whose worker session is gone is residue, not work in
+//! progress. The classification is [`super::ensemble::molecule_ghost`], the
+//! function behind `cs ensemble`'s ghost column, so the two commands cannot
+//! disagree. The headline shows `N 💀 dead` instead of counting the molecule
+//! among the alive, names it with `cs purge <worker-id>`, and `clean` is false
+//! while one exists. `--json` keeps `molecules.alive` and adds
+//! `molecules.alive_healthy`, `molecules.dead_workers`, `molecules.dead` and
+//! `hygiene.dead_workers`.
+//!
 //! # `cs status <id>` — one molecule
 //!
 //! With a molecule id, `status` answers about *that* molecule instead of the
@@ -153,14 +164,19 @@ fn render_kill_switch_line(active: &[KillSwitch]) -> Option<String> {
     Some(format!("kill-switch: {} — {note}", files.join(", ")))
 }
 
-/// Whether `cs status` is clean, as defined by issue #97: no zombie session,
-/// no un-harvested `Completed` molecule, and no unresolved molecule branch.
+/// Whether `cs status` is clean, as defined by issue #97 and #172: no zombie
+/// session, no dead worker, no un-harvested `Completed` molecule, and no
+/// unresolved molecule branch.
 /// Active work and branches retained with a recorded disposition remain
 /// visible without being mislabeled as residue.
 #[derive(serde::Serialize)]
 struct HygieneInfo {
     clean: bool,
     zombie_sessions: usize,
+    /// Issue #172 — `Running` molecules whose worker session is gone. A dead
+    /// worker is residue: nothing is working, and nothing will until it is
+    /// reclaimed with `cs purge`.
+    dead_workers: usize,
     harvestable: usize,
     /// Backward-compatible key: now counts unresolved branches, rather than
     /// every live or deliberately retained molecule branch.
@@ -173,14 +189,19 @@ impl HygieneInfo {
     /// Build the single clean predicate from unresolved residue only.
     fn new(
         zombie_sessions: usize,
+        dead_workers: usize,
         harvestable: usize,
         unmerged_branches: usize,
         active_branches: usize,
         retained_audited_branches: usize,
     ) -> Self {
         Self {
-            clean: zombie_sessions == 0 && harvestable == 0 && unmerged_branches == 0,
+            clean: zombie_sessions == 0
+                && dead_workers == 0
+                && harvestable == 0
+                && unmerged_branches == 0,
             zombie_sessions,
+            dead_workers,
             harvestable,
             unmerged_branches,
             active_branches,
@@ -213,10 +234,27 @@ struct MoleculeCounts {
     alive_excluding_leases: usize,
     /// Non-terminal molecules named by the pilot-lease ledger.
     leases: usize,
+    /// Issue #172 — `alive_excluding_leases` minus the dead workers: the
+    /// molecules a live session is actually carrying. `alive` is unchanged.
+    alive_healthy: usize,
+    /// Issue #172 — `Running` molecules whose worker session is gone, from
+    /// the same ghost classification `cs ensemble` uses.
+    dead_workers: usize,
+    /// The dead workers by name, with their reclaim gesture's target.
+    dead: Vec<DeadWorker>,
     completed: usize,
     collapsed: usize,
     by_kind: HashMap<String, usize>,
     by_status: HashMap<String, usize>,
+}
+
+/// A worker whose session is gone while its molecule still reads `Running`
+/// (issue #172): a [`cosmon_core::run_state::GhostKind::DeadPane`] or
+/// `VanishedWorker`, classified by the same function `cs ensemble` uses.
+#[derive(serde::Serialize, Clone)]
+struct DeadWorker {
+    worker: String,
+    molecule: String,
 }
 
 /// Backlog age, as `cs status --json` emits it.
@@ -497,6 +535,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
+    // --- Dead workers (issue #172) — a Running molecule whose session is
+    // gone. Classified by `ensemble::molecule_ghost`, the function behind the
+    // ensemble's ghost column, so the two commands cannot disagree.
+    let dead_workers = dead_workers(&fleet, &molecules, &backends);
+
     // --- Contributions (git branches) ---
     let contributions = discover_contributions(&molecules);
     let unmerged = sample_unmerged_gauge(&state_dir, &contributions);
@@ -537,6 +580,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .count();
     let hygiene = HygieneInfo::new(
         zombie_sessions.len(),
+        dead_workers.len(),
         harvestable.count,
         unmerged.branches,
         active_branches,
@@ -553,6 +597,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 alive,
                 alive_excluding_leases,
                 leases: lease_alive,
+                alive_healthy: alive_excluding_leases.saturating_sub(dead_workers.len()),
+                dead_workers: dead_workers.len(),
+                dead: dead_workers.clone(),
                 completed,
                 collapsed,
                 by_kind: by_kind.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
@@ -590,7 +637,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 
     let pulse = Pulse {
-        alive: alive_excluding_leases,
+        alive: alive_excluding_leases.saturating_sub(dead_workers.len()),
+        dead_workers: &dead_workers,
         lease_alive,
         completed,
         collapsed,
@@ -711,8 +759,11 @@ fn release_guidance(
 /// differ in layout, not in inputs, and a shared bundle is what keeps them
 /// from drifting into showing different facts.
 struct Pulse<'a> {
-    /// Alive molecules, leases already removed.
+    /// Alive molecules a live session carries: leases and dead workers
+    /// already removed.
     alive: usize,
+    /// Issue #172 — workers whose session is gone.
+    dead_workers: &'a [DeadWorker],
     /// Alive lease missions, reported separately.
     lease_alive: usize,
     completed: usize,
@@ -898,6 +949,16 @@ fn render_compact(p: &Pulse) {
         parts.push(age);
     }
 
+    // Dead workers (issue #172) — never counted among the alive.
+    if !p.dead_workers.is_empty() {
+        parts.push(
+            format!("{}\u{1F480} dead", p.dead_workers.len())
+                .red()
+                .bold()
+                .to_string(),
+        );
+    }
+
     // Sessions
     if !p.active_sessions.is_empty() {
         parts.push(format!(
@@ -983,6 +1044,19 @@ fn render_compact(p: &Pulse) {
 
 /// Name every non-summary hygiene item beneath the compact pulse.
 fn render_branch_and_zombie_lines(p: &Pulse<'_>) {
+    for d in p.dead_workers {
+        println!(
+            "{}",
+            format!(
+                "  {} dead worker {} ({}) — run `cs purge {}`",
+                "Resolve".bold(),
+                d.worker,
+                d.molecule,
+                d.worker
+            )
+            .red()
+        );
+    }
     for s in p.zombie_sessions {
         println!(
             "{}",
@@ -1138,9 +1212,10 @@ fn render_verbose(p: &Pulse) {
         println!("  {}: {}", "Hygiene".bold(), "clean".green());
     } else {
         println!(
-            "  {}: {} zombie session(s), {} un-harvested, {} unresolved branch(es)",
+            "  {}: {} zombie session(s), {} dead worker(s), {} un-harvested, {} unresolved branch(es)",
             "Hygiene".bold(),
             p.hygiene.zombie_sessions,
+            p.hygiene.dead_workers,
             p.hygiene.harvestable,
             p.hygiene.unmerged_branches
         );
@@ -1647,6 +1722,47 @@ fn neurion_db_path() -> anyhow::Result<std::path::PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("cannot determine data directory"))?
         .join("neurion");
     Ok(dir.join("neurion.db"))
+}
+
+/// Workers whose session is gone while their molecule is still `Running`.
+///
+/// One probe per worker bound to a non-terminal molecule, classified by
+/// [`super::ensemble::molecule_ghost`] — the function behind the ensemble's
+/// ghost column — so `cs status` and `cs ensemble` agree by construction.
+fn dead_workers(
+    fleet: &cosmon_state::Fleet,
+    molecules: &[cosmon_state::MoleculeData],
+    backends: &[cosmon_transport::TmuxBackend],
+) -> Vec<DeadWorker> {
+    let mut dead: Vec<DeadWorker> = fleet
+        .workers
+        .values()
+        .filter_map(|w| {
+            let mol = molecules
+                .iter()
+                .find(|m| Some(&m.id) == w.current_molecule.as_ref())?;
+            if !mol.status.is_alive() {
+                return None;
+            }
+            let supervision = mol
+                .process
+                .as_ref()
+                .and_then(|pr| pr.adapter_name.as_deref())
+                .map_or(
+                    cosmon_transport::registry::SupervisionMode::TmuxPane,
+                    cosmon_transport::registry::supervision_mode_for,
+                );
+            let transport = super::ensemble::probe_transport(backends, &w.id);
+            let ghost =
+                super::ensemble::molecule_ghost(mol.status, mol.merged_at, supervision, transport);
+            super::ensemble::is_dead_ghost(ghost).then(|| DeadWorker {
+                worker: w.id.to_string(),
+                molecule: mol.id.to_string(),
+            })
+        })
+        .collect();
+    dead.sort_by(|a, b| a.worker.cmp(&b.worker));
+    dead
 }
 
 /// Discover all fleet-scoped tmux backends (same as ensemble.rs).
@@ -2208,18 +2324,46 @@ mod tests {
     /// branch each independently make it `false` (issue #97).
     #[test]
     fn hygiene_is_clean_only_with_no_residue() {
-        assert!(HygieneInfo::new(0, 0, 0, 2, 3).clean);
+        assert!(HygieneInfo::new(0, 0, 0, 0, 2, 3).clean);
         assert!(
-            !HygieneInfo::new(1, 0, 0, 0, 0).clean,
+            !HygieneInfo::new(1, 0, 0, 0, 0, 0).clean,
             "a zombie session is residue"
         );
         assert!(
-            !HygieneInfo::new(0, 1, 0, 0, 0).clean,
+            !HygieneInfo::new(0, 0, 1, 0, 0, 0).clean,
             "an un-harvested molecule is residue"
         );
         assert!(
-            !HygieneInfo::new(0, 0, 1, 0, 0).clean,
+            !HygieneInfo::new(0, 0, 0, 1, 0, 0).clean,
             "an unmerged molecule branch is residue"
+        );
+        assert!(
+            !HygieneInfo::new(0, 1, 0, 0, 0, 0).clean,
+            "a dead worker is residue (issue #172)"
+        );
+    }
+
+    /// Issue #172 — the classification `cs status` counts from is the one
+    /// `cs ensemble` renders: a `Running` molecule whose session is gone is a
+    /// dead ghost, while the same molecule under a live session is not.
+    #[test]
+    fn dead_ghost_needs_a_running_molecule_without_a_session() {
+        use super::super::ensemble::{is_dead_ghost, molecule_ghost};
+        use cosmon_core::reconcile::TransportState;
+        use cosmon_transport::registry::SupervisionMode;
+
+        let tmux = SupervisionMode::TmuxPane;
+        let ghost = |t| molecule_ghost(MoleculeStatus::Running, None, tmux, t);
+        assert!(is_dead_ghost(ghost(TransportState::Dead)));
+        assert!(!is_dead_ghost(ghost(TransportState::Alive)));
+        assert!(
+            !is_dead_ghost(molecule_ghost(
+                MoleculeStatus::Running,
+                None,
+                SupervisionMode::InProcess,
+                TransportState::Dead
+            )),
+            "an in-process loop has no pane by design"
         );
     }
 

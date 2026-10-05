@@ -354,10 +354,10 @@ alias will be removed after one release cycle.
 SEE ALSO: cs project (canonical).";
 
 pub const STATUS: &str = "EXAMPLES:
-  cs status                   # pulse + staleness: age, reconcile, unmerged growth
+  cs status                   # pulse + staleness: age, reconcile, unmerged growth; a dead worker is named, never counted alive
   cs status --verbose         # the same, as a dashboard with a Backlog section
   cs status --fleet research
-  cs status --json            # adds `backlog`, `unmerged`, `galaxies`, `hygiene`, `missing_blockers`
+  cs status --json            # adds `backlog`, `unmerged`, `galaxies`, `hygiene`, `missing_blockers`; `molecules.dead_workers` / `alive_healthy`
   cs status task-20260907-b25f        # one molecule: status/phase/updated_at/terminal
   cs status task-20260907-b25f --json # same four fields, machine-readable
 
