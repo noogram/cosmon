@@ -543,8 +543,8 @@ mod tests {
         for secret in [
             "ghp_abcdefghijklmnopqrstuvwxyz123456",
             "github_pat_abcdefghijklmnopqrstuvwxyz123456",
-            "xoxb-abcdefghijklmnopqrstuvwxyz123456",
-            "AKIAABCDEFGHIJKLMNOP",
+            "xoxb-abcdefghijklmnopqrstuvwxyz123456", // publish: allow — synthetic redaction fixture
+            "AKIAABCDEFGHIJKLMNOP",                  // publish: allow — synthetic redaction fixture
             "0123456789abcdef0123456789abcdef",
             "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/==",
         ] {
