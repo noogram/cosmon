@@ -4,9 +4,9 @@
 //!
 //! The presence registry (ADR-038 follow-up) lives on disk under
 //! `.cosmon/state/presence/`.
-//! Each live session owns one `<sid>.json` snapshot that advertises the
+//! Each live session owns one `session-<sid>.json` snapshot that advertises the
 //! session's galaxy, cwd, pid, current molecule, and a free-form
-//! headline — plus a `<sid>.log` / `<sid>.seek` pair carrying the
+//! headline — plus a `session-<sid>.log` / `session-<sid>.seek` pair carrying the
 //! whisper pull channel.
 //!
 //! Seven subcommands ship together:
@@ -636,8 +636,8 @@ fn run_gc(ctx: &Context) -> anyhow::Result<()> {
 fn run_poll(ctx: &Context, args: &PollArgs) -> anyhow::Result<()> {
     let sid = resolve_sid_for_poll(args)?;
     let store = store(ctx);
-    let log_path = store.log_path(&sid);
-    let seek_path = store.seek_path(&sid);
+    let log_path = store.readable_log_path(&sid);
+    let seek_path = store.readable_seek_path(&sid);
 
     let content = fs::read_to_string(&log_path).unwrap_or_default();
     let end = content.len();
@@ -1546,9 +1546,7 @@ fn boot_epoch_seconds() -> Option<u64> {
 // ---------------------------------------------------------------------------
 
 fn load_prior(store: &PresenceStore, sid: &SessionId) -> Option<Presence> {
-    let path = store.snapshot_path(sid);
-    let data = fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&data).ok()
+    store.load(sid).ok().flatten()
 }
 
 fn read_seek(path: &Path) -> usize {

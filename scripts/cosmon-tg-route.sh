@@ -76,8 +76,8 @@ from datetime import datetime, timezone
 mode = sys.argv[1]
 
 def load_sessions(presence_dir):
-    out = []
-    for p in glob.glob(os.path.join(presence_dir, "session-*.json")):
+    by_sid = {}
+    for p in glob.glob(os.path.join(presence_dir, "*.json")):
         try:
             with open(p, encoding="utf-8") as f:
                 d = json.load(f)
@@ -93,8 +93,11 @@ def load_sessions(presence_dir):
                 ts = ts.replace(tzinfo=timezone.utc)
         except Exception:
             continue
-        out.append((sid, ts))
+        previous = by_sid.get(sid)
+        if previous is None or ts > previous:
+            by_sid[sid] = ts
     # freshest first
+    out = list(by_sid.items())
     out.sort(key=lambda x: x[1], reverse=True)
     return out
 

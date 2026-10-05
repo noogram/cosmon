@@ -61,6 +61,15 @@ use strum::{EnumIter, IntoEnumIterator};
 use crate::cas::ContentHash;
 use crate::id::{FleetId, MoleculeId, SessionId};
 
+fn presence_file_stem(session: &SessionId) -> String {
+    let raw = session.as_str();
+    if raw.starts_with("session-") {
+        raw.to_owned()
+    } else {
+        format!("session-{raw}")
+    }
+}
+
 /// The **kind** of a write-path: the taxonomy of where cosmon writes,
 /// independent of any concrete molecule/session/hash.
 ///
@@ -416,13 +425,13 @@ impl CosmonPath<'_> {
                 .join(id.as_str())
                 .join("state.json"),
             Self::PresenceSnapshot { session } => {
-                PathBuf::from("presence").join(format!("{}.json", session.as_str()))
+                PathBuf::from("presence").join(format!("{}.json", presence_file_stem(session)))
             }
             Self::PresenceLog { session } => {
-                PathBuf::from("presence").join(format!("{}.log", session.as_str()))
+                PathBuf::from("presence").join(format!("{}.log", presence_file_stem(session)))
             }
             Self::PresenceSeek { session } => {
-                PathBuf::from("presence").join(format!("{}.seek", session.as_str()))
+                PathBuf::from("presence").join(format!("{}.seek", presence_file_stem(session)))
             }
             Self::PresenceInbox { session } => {
                 PathBuf::from("presence").join(format!("{}.inbox.jsonl", session.as_str()))
