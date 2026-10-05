@@ -36,8 +36,9 @@ curl -fsSL https://noogram.org/cosmon/install.sh | sh -s -- --with-services
 ```
 
 The service option requires a working user service manager. It creates only
-missing configuration files under `~/.config/cosmon`, preserves existing
-configuration and state, and prints the exact status and uninstall commands.
+missing, valid empty supervisor and scheduler configuration files under
+`~/.config/cosmon`, preserves existing configuration and state byte-for-byte,
+and prints the exact status and uninstall commands.
 `--dir` also controls where the two service binaries are installed.
 
 The installer writes to `~/.local/bin`, which is **not** on the default `PATH` on

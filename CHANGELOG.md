@@ -21,6 +21,13 @@ this stage.
 
 ### Fixed
 
+- `cs status` no longer counts a dead worker as alive or reports the galaxy
+  `clean`. A `Running` molecule whose worker session is gone is classified by
+  the same ghost function `cs ensemble` uses, counted separately (`N 💀 dead`),
+  named with its reclaim gesture (`cs purge <worker-id>`), and makes `hygiene.clean`
+  false. `--json` gains `molecules.dead_workers`, `molecules.dead`,
+  `molecules.alive_healthy` and `hygiene.dead_workers`; `molecules.alive` keeps
+  its meaning. (#172)
 - Session presence can now carry an optional, redacted `detail` for Claude
   `Notification` moments, so a dashboard can explain a waiting state without
   storing tool input, question text or transcript content. Details are limited

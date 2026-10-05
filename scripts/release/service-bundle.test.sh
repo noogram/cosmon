@@ -151,4 +151,28 @@ cmp "$WORK/daemons.before" "$home/.config/cosmon/daemons.toml"
 cmp "$WORK/patrols.before" "$home/.config/cosmon/patrols.toml"
 cmp "$WORK/state.before" "$home/.cosmon/state/sentinel"
 
+# A fresh service install must create configs accepted by the exact preflights
+# used during real activation. The fixture binaries above deliberately isolate
+# archive and installation mechanics; use host-built product binaries here so
+# comment-only placeholders cannot masquerade as valid service configuration.
+rm -rf "$home"; mkdir -p "$home"
+make_fixture "$release"
+PATH="$mock:$PATH" run_install "$home" "$release" --with-services \
+    >/dev/null 2>&1
+
+real_bin_dir="${COSMON_REAL_SERVICE_BIN_DIR:-$ROOT/target/debug}"
+if [ ! -x "$real_bin_dir/cosmon-daemon-supervisor" ] || \
+    [ ! -x "$real_bin_dir/cosmon-scheduler" ]; then
+    "$ROOT/scripts/no-pilot-env.sh" cargo build --locked \
+        --manifest-path "$ROOT/Cargo.toml" \
+        -p cosmon-daemon-supervisor -p cosmon-scheduler
+fi
+
+HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+    COSMON_SUPERVISOR_BIN_DIR="$real_bin_dir" PATH="$mock:$PATH" \
+    "$home/.local/libexec/cosmon/install-daemon-supervisor.sh" install
+HOME="$home" XDG_CONFIG_HOME="$home/.config" \
+    COSMON_SCHEDULER_BIN_DIR="$real_bin_dir" PATH="$mock:$PATH" \
+    "$home/.local/libexec/cosmon/install-scheduler.sh" install
+
 echo "service-bundle.test: opt-in service distribution contract passed"
