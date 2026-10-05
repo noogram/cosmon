@@ -282,6 +282,28 @@ fn turn_end_has_no_detail() {
 }
 
 #[test]
+fn an_asking_tool_call_never_carries_a_detail() {
+    // `asking` is also reached from the tool-call moment, whose payload is
+    // conversation content. Only a Notification moment may fill `detail`.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = galaxy(tmp.path());
+    fire_with(
+        &state,
+        "worker-a",
+        "asking",
+        None,
+        r#"{"session_id":"native-1","message":"must not cross"}"#,
+    );
+
+    let rows = presence_rows(&state);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["state"], "asking");
+    assert!(rows[0].get("detail").is_none(), "{}", rows[0]);
+    let record = presence_record(&state, "worker-a");
+    assert!(record.get("detail").is_none(), "{record}");
+}
+
+#[test]
 fn detail_changes_update_presence_without_emitting_an_unchanged_state() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = galaxy(tmp.path());
