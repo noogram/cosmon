@@ -165,13 +165,28 @@ jobs:
       - name: Run real-manager service conformance
         run: |
           set -euo pipefail
+          # The checkout lives under /home/runner, which the test user cannot
+          # traverse. Give it a copy of exactly what the harnesses read (the
+          # two installers, their shared lib, the unit templates and the three
+          # harness scripts) rather than loosening the runner's home.
+          copy=/tmp/cosmon-services-ci-home/cosmon-copy
+          sudo mkdir -p "${copy}/scripts" "${copy}/tests/harness"
+          sudo cp -a "$GITHUB_WORKSPACE/scripts/install-daemon-supervisor.sh" \
+            "$GITHUB_WORKSPACE/scripts/install-scheduler.sh" \
+            "$GITHUB_WORKSPACE/scripts/lib" \
+            "$GITHUB_WORKSPACE/scripts/systemd" "${copy}/scripts/"
+          sudo cp -a "$GITHUB_WORKSPACE/tests/harness/linux-user-services-test.sh" \
+            "$GITHUB_WORKSPACE/tests/harness/systemd-supervisor-test.sh" \
+            "$GITHUB_WORKSPACE/tests/harness/systemd-scheduler-test.sh" \
+            "${copy}/tests/harness/"
+          sudo chown -R cosmon-services-ci: "${copy}"
           sudo -u cosmon-services-ci env \
             HOME=/tmp/cosmon-services-ci-home \
             XDG_RUNTIME_DIR="/run/user/${COSMON_TEST_UID}" \
             DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${COSMON_TEST_UID}/bus" \
             COSMON_SYSTEMD_TEST_ISOLATED=1 \
             COSMON_SYSTEMD_TEST_TMPDIR=/tmp \
-            timeout 240 "$GITHUB_WORKSPACE/tests/harness/linux-user-services-test.sh"
+            timeout 240 "${copy}/tests/harness/linux-user-services-test.sh"
       - name: Remove the isolated user manager
         if: always()
         run: |
