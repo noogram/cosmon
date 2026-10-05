@@ -5,8 +5,10 @@
 //! `events.jsonl` is the **source of truth** for cognitive history (append-only,
 //! durable, seal-carrying). `state.json` is a **derivable cache** — the live
 //! hot view the CLI reads on every invocation. When the cache is missing,
-//! stale, or corrupt, [`project_molecules_from_events`] reconstructs every
-//! molecule's state by folding the event stream.
+//! [`project_molecules_from_events`] reconstructs every molecule's state by
+//! folding the event stream. An existing cache that cannot be parsed is
+//! refused without modification: a projection cannot safely preserve its
+//! operator-authored fields.
 //!
 //! # Why rebuild exists
 //!
@@ -76,9 +78,6 @@ use crate::MoleculeData;
 pub enum RebuildOutcome {
     /// The cache was absent; a fresh file was written from events.
     CreatedFromEvents,
-    /// The cache was corrupt (non-UTF-8 or invalid JSON); the bad file
-    /// was archived as `state.json.broken` and a fresh file was written.
-    RecoveredFromCorruption,
     /// The cache was valid and consistent with the event log — no write.
     UpToDate,
     /// No molecule directory was found to seed the rebuild (empty galaxy,
@@ -124,7 +123,7 @@ pub fn project_molecules_from_events(envelopes: &[Envelope]) -> HashMap<Molecule
 /// The contract is therefore strict:
 ///
 /// 1. `Missing` cache → write a fresh projection.
-/// 2. `Corrupt` cache → archive as `state.json.broken`, write a fresh projection.
+/// 2. Unparseable cache → return [`CosmonError::StateParse`], no write.
 /// 3. `Valid` cache → return [`RebuildOutcome::UpToDate`], no I/O.
 ///
 /// Detection of cache↔events drift on a valid cache is a separate concern —
@@ -146,7 +145,7 @@ pub fn rebuild_molecule_state(
     molecule_id: &MoleculeId,
     state_path: &Path,
 ) -> Result<RebuildOutcome, CosmonError> {
-    let outcome = classify_cache(state_path);
+    let outcome = classify_cache(state_path)?;
 
     match outcome {
         CacheState::Valid(_data) => {
@@ -165,32 +164,6 @@ pub fn rebuild_molecule_state(
             if let Some(projected) = project_single(molecule_id, &envelopes) {
                 write_state(state_path, &projected)?;
                 Ok(RebuildOutcome::CreatedFromEvents)
-            } else {
-                Ok(RebuildOutcome::NoEventsForMolecule)
-            }
-        }
-        CacheState::Corrupt => {
-            // Read the corrupt bytes *before* archiving so we can salvage the
-            // operator-set fields the event log cannot project (`variables`,
-            // `tags`, `assigned_worker`, …). A cache is "corrupt" when the
-            // strict `MoleculeData` deserialize fails — but that often means a
-            // single field drifted while the rest of the JSON is intact. A
-            // lenient `Value` parse recovers the survivors, so a transient
-            // corruption next to a *running* molecule no longer wipes its
-            // variables and worker assignment (the data-loss reported by
-            // `delib-20260509-39ad`). See [`salvage_non_projectable`].
-            let corrupt_bytes = std::fs::read(state_path).ok();
-            archive_corrupt(state_path)?;
-            if !events_path.exists() {
-                return Ok(RebuildOutcome::NoEventsForMolecule);
-            }
-            let envelopes = load_envelopes(events_path)?;
-            if let Some(mut projected) = project_single(molecule_id, &envelopes) {
-                if let Some(bytes) = &corrupt_bytes {
-                    salvage_non_projectable(bytes, &mut projected);
-                }
-                write_state(state_path, &projected)?;
-                Ok(RebuildOutcome::RecoveredFromCorruption)
             } else {
                 Ok(RebuildOutcome::NoEventsForMolecule)
             }
@@ -254,30 +227,20 @@ pub fn rebuild_all_missing(
 enum CacheState {
     Valid(Box<MoleculeData>),
     Missing,
-    Corrupt,
 }
 
-fn classify_cache(state_path: &Path) -> CacheState {
+fn classify_cache(state_path: &Path) -> Result<CacheState, CosmonError> {
     if !state_path.exists() {
-        return CacheState::Missing;
+        return Ok(CacheState::Missing);
     }
-    let Ok(bytes) = std::fs::read(state_path) else {
-        return CacheState::Corrupt;
-    };
+    let bytes = std::fs::read(state_path)?;
     match serde_json::from_slice::<MoleculeData>(&bytes) {
-        Ok(data) => CacheState::Valid(Box::new(data)),
-        Err(_) => CacheState::Corrupt,
+        Ok(data) => Ok(CacheState::Valid(Box::new(data))),
+        Err(error) => Err(CosmonError::StateParse {
+            path: state_path.display().to_string(),
+            reason: error.to_string(),
+        }),
     }
-}
-
-fn archive_corrupt(state_path: &Path) -> Result<(), CosmonError> {
-    let broken = state_path.with_extension("json.broken");
-    std::fs::rename(state_path, &broken).map_err(|e| CosmonError::StateStore {
-        reason: format!(
-            "failed to archive corrupt cache to {}: {e}",
-            broken.display()
-        ),
-    })
 }
 
 fn load_envelopes(events_path: &Path) -> Result<Vec<Envelope>, CosmonError> {
@@ -300,76 +263,6 @@ fn write_state(state_path: &Path, data: &MoleculeData) -> Result<(), CosmonError
 fn project_single(id: &MoleculeId, envelopes: &[Envelope]) -> Option<MoleculeData> {
     let mut projection = project_molecules_from_events(envelopes);
     projection.remove(id)
-}
-
-/// Best-effort recovery of the operator-set fields that no event carries.
-///
-/// The event log can project `status`, step counters, seals, and typed links,
-/// but **not** `variables`, `tags`, `assigned_worker`, `assigned_role`,
-/// `kind`, `class`, `session_name`, `originating_branch`, `base_branch`,
-/// `protected_paths`, `project_id`, `expires_at`, or `expiry_policy` (see the module table). When a `state.json`
-/// is classified `Corrupt`, the strict `MoleculeData` deserialize failed — but
-/// the JSON is frequently *mostly* intact (one field drifted, a trailing
-/// truncation, a type that no longer matches). A lenient `serde_json::Value`
-/// parse recovers whatever survived, and we graft those fields onto the
-/// freshly projected molecule so a corrupt cache next to a live worker does
-/// not silently lose its variables and worker assignment.
-///
-/// Every field is copied only when (a) the lenient parse yields a value of the
-/// right shape and (b) it is non-empty — so an absent or unreadable field
-/// leaves the projection's default in place. The function never fails: an
-/// unparseable blob simply salvages nothing, matching the pre-salvage
-/// behaviour.
-fn salvage_non_projectable(corrupt_bytes: &[u8], projected: &mut MoleculeData) {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(corrupt_bytes) else {
-        return;
-    };
-    let Some(obj) = value.as_object() else {
-        return;
-    };
-
-    // Helper: deserialize a named field into the target type, if present.
-    // The target type is inferred from the assignment site, so no extra
-    // imports are needed.
-    macro_rules! salvage {
-        ($key:literal => $target:expr) => {
-            if let Some(v) = obj.get($key) {
-                if let Ok(parsed) = serde_json::from_value(v.clone()) {
-                    $target = parsed;
-                }
-            }
-        };
-        ($key:literal => $target:expr, non_empty: $is_empty:expr) => {
-            if let Some(v) = obj.get($key) {
-                if let Ok(parsed) = serde_json::from_value(v.clone()) {
-                    if !$is_empty(&parsed) {
-                        $target = parsed;
-                    }
-                }
-            }
-        };
-    }
-
-    salvage!("variables" => projected.variables, non_empty: |m: &std::collections::HashMap<String, String>| m.is_empty());
-    salvage!("tags" => projected.tags, non_empty: |t: &std::collections::BTreeSet<_>| t.is_empty());
-    salvage!("assigned_worker" => projected.assigned_worker, non_empty: |o: &Option<_>| o.is_none());
-    salvage!("assigned_role" => projected.assigned_role, non_empty: |o: &Option<_>| o.is_none());
-    salvage!("kind" => projected.kind, non_empty: |o: &Option<_>| o.is_none());
-    salvage!("class" => projected.class);
-    salvage!("session_name" => projected.session_name, non_empty: |o: &Option<_>| o.is_none());
-    salvage!("originating_branch" => projected.originating_branch, non_empty: |o: &Option<_>| o.is_none());
-    // The molecule's own integration base (`cs tackle --base`). No event
-    // carries it, and losing it would silently demote `cs done` back to the
-    // ambient `COSMON_BASE_BRANCH`/`origin/HEAD`/`main` chain — i.e. merge the
-    // worker's branch onto the wrong trunk after a reconcile.
-    salvage!("base_branch" => projected.base_branch, non_empty: |o: &Option<_>| o.is_none());
-    // Protected reference inputs (`cs nucleate --protect`, issue #94). No
-    // event carries them either, and losing them would silently disarm the
-    // `cs done` gate on exactly the molecule that asked for it.
-    salvage!("protected_paths" => projected.protected_paths, non_empty: |v: &Vec<String>| v.is_empty());
-    salvage!("project_id" => projected.project_id, non_empty: |o: &Option<_>| o.is_none());
-    salvage!("expires_at" => projected.expires_at, non_empty: |o: &Option<_>| o.is_none());
-    salvage!("expiry_policy" => projected.expiry_policy, non_empty: |o: &Option<_>| o.is_none());
 }
 
 /// "Consistent" here means: the status, step counter, seals, and `merged_at`
@@ -852,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_archives_corrupt_cache() {
+    fn rebuild_refuses_unparseable_cache_without_modifying_it() {
         let dir = tempdir().unwrap();
         let events_path = dir.path().join("events.jsonl");
         let id = mid("task-20260420-0006");
@@ -868,113 +761,26 @@ mod tests {
         let mol_dir = dir.path().join("mol");
         std::fs::create_dir_all(&mol_dir).unwrap();
         let state_path = mol_dir.join("state.json");
-        std::fs::write(&state_path, b"not json {{{{").unwrap();
+        let legacy = br#"{"id":"task-20260420-0006"}"#;
+        std::fs::write(&state_path, legacy).unwrap();
 
-        let outcome = rebuild_molecule_state(&events_path, &id, &state_path).unwrap();
-        assert_eq!(outcome, RebuildOutcome::RecoveredFromCorruption);
-        let broken = state_path.with_extension("json.broken");
-        assert!(broken.exists(), "corrupt cache archived as .broken");
-        let data: MoleculeData =
-            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
-        assert_eq!(data.id, id);
+        let error = rebuild_molecule_state(&events_path, &id, &state_path).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("state.json"), "{message}");
+        assert!(message.contains("missing field"), "{message}");
+        assert!(message.contains("nothing was modified"), "{message}");
+        assert_eq!(std::fs::read(&state_path).unwrap(), legacy);
+        assert!(
+            !state_path.with_extension("json.broken").exists(),
+            "refusal must not archive or replace the legacy file"
+        );
     }
 
-    /// Recovering a *corrupt* cache must not silently wipe the operator-set
-    /// fields the event log cannot project (`variables`, `tags`,
-    /// `session_name`, …). A cache is "corrupt" the moment a single field
-    /// drifts — here `total_steps` is poisoned to a string — but the rest of
-    /// the JSON is intact, so a lenient salvage recovers the survivors. This
-    /// is the anti-regression for that class of data loss: a transient
-    /// corruption next to a running molecule keeps its variables and
-    /// worker assignment.
     #[test]
-    fn rebuild_salvages_non_projectable_fields_from_corrupt_cache() {
+    fn rebuild_all_missing_refuses_legacy_state_without_rewriting_it() {
         let dir = tempdir().unwrap();
         let events_path = dir.path().join("events.jsonl");
         let id = mid("task-20260509-d0d0");
-        write_log(
-            &events_path,
-            vec![
-                EventV2::MoleculeNucleated {
-                    molecule_id: id.clone(),
-                    formula_id: "task-work".into(),
-                    parent_id: None,
-                    blocks: vec![],
-                },
-                EventV2::MoleculeStatusChanged {
-                    molecule_id: id.clone(),
-                    from: "pending".into(),
-                    to: "running".into(),
-                },
-            ],
-        );
-
-        // Build a *healthy* cache from events, then enrich it with the
-        // operator fields no event carries.
-        let envs = read_all(&events_path).unwrap();
-        let mut healthy = project_molecules_from_events(&envs).remove(&id).unwrap();
-        healthy
-            .variables
-            .insert("topic".into(), "fix-the-bug".into());
-        healthy
-            .variables
-            .insert("surface_path".into(), "STATUS.md".into());
-        healthy.session_name = Some("fix-bug-d0d0".into());
-        healthy.originating_branch = Some("feat/task-20260509-d0d0".into());
-        healthy.protected_paths = vec!["ref".into()];
-
-        // Poison one field's type so the strict `MoleculeData` deserialize
-        // fails (→ classified Corrupt) while the rest stays salvageable.
-        let mut value = serde_json::to_value(&healthy).unwrap();
-        value["total_steps"] = serde_json::Value::String("not-a-number".into());
-        let corrupt = serde_json::to_string_pretty(&value).unwrap();
-        assert!(
-            serde_json::from_str::<MoleculeData>(&corrupt).is_err(),
-            "the poisoned cache must fail strict deserialize"
-        );
-
-        let mol_dir = dir.path().join("mol");
-        std::fs::create_dir_all(&mol_dir).unwrap();
-        let state_path = mol_dir.join("state.json");
-        std::fs::write(&state_path, &corrupt).unwrap();
-
-        let outcome = rebuild_molecule_state(&events_path, &id, &state_path).unwrap();
-        assert_eq!(outcome, RebuildOutcome::RecoveredFromCorruption);
-
-        let data: MoleculeData =
-            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
-        // Operator fields salvaged from the corrupt blob.
-        assert_eq!(
-            data.variables.get("topic"),
-            Some(&"fix-the-bug".to_owned()),
-            "variables must survive corrupt-cache recovery"
-        );
-        assert_eq!(
-            data.variables.get("surface_path"),
-            Some(&"STATUS.md".to_owned())
-        );
-        assert_eq!(data.session_name.as_deref(), Some("fix-bug-d0d0"));
-        assert_eq!(
-            data.originating_branch.as_deref(),
-            Some("feat/task-20260509-d0d0")
-        );
-        assert_eq!(
-            data.protected_paths,
-            vec!["ref".to_owned()],
-            "a rebuild must not disarm the protected-path gate (issue #94)"
-        );
-        // Status is re-projected from events — the running molecule stays running.
-        assert_eq!(data.status, MoleculeStatus::Running);
-    }
-
-    /// When the corrupt blob is total garbage (not even valid JSON), salvage
-    /// recovers nothing — matching the pre-salvage behaviour. The molecule is
-    /// still rebuilt from events; only the non-projectable fields default.
-    #[test]
-    fn rebuild_salvage_is_noop_on_unparseable_corrupt_cache() {
-        let dir = tempdir().unwrap();
-        let events_path = dir.path().join("events.jsonl");
-        let id = mid("task-20260509-d0d1");
         write_log(
             &events_path,
             vec![EventV2::MoleculeNucleated {
@@ -984,18 +790,18 @@ mod tests {
                 blocks: vec![],
             }],
         );
-        let mol_dir = dir.path().join("mol");
+        let mol_dir = dir
+            .path()
+            .join("fleets/default/molecules")
+            .join(id.as_str());
         std::fs::create_dir_all(&mol_dir).unwrap();
         let state_path = mol_dir.join("state.json");
-        std::fs::write(&state_path, b"\x00\x01 not json at all {{{").unwrap();
+        let legacy = br#"{"id":"task-20260509-d0d0"}"#;
+        std::fs::write(&state_path, legacy).unwrap();
 
-        let outcome = rebuild_molecule_state(&events_path, &id, &state_path).unwrap();
-        assert_eq!(outcome, RebuildOutcome::RecoveredFromCorruption);
-        let data: MoleculeData =
-            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
-        assert_eq!(data.id, id);
-        assert!(data.variables.is_empty());
-        assert!(data.session_name.is_none());
+        let error = rebuild_all_missing(&events_path, &dir.path().join("fleets")).unwrap_err();
+        assert!(error.to_string().contains("nothing was modified"));
+        assert_eq!(std::fs::read(&state_path).unwrap(), legacy);
     }
 
     #[test]

@@ -96,6 +96,15 @@ pub enum CosmonError {
         reason: String,
     },
 
+    /// A persisted molecule state cannot be read without risking a rewrite.
+    #[error("state file {path} could not be parsed: {reason}; nothing was modified")]
+    StateParse {
+        /// Path to the state file that was refused.
+        path: String,
+        /// The parser's precise reason, such as a missing required field.
+        reason: String,
+    },
+
     /// The signal bus backend encountered an error.
     #[error("signal bus error: {reason}")]
     SignalBus {
