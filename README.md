@@ -123,7 +123,8 @@ cs --version
 
 On Linux, add `--with-services` to install and activate the scheduler and
 daemon supervisor as user services. The default command above remains a
-client-only install:
+client-only install. The service route creates valid empty supervisor and
+scheduler configurations when they are absent and preserves existing files:
 
 ```bash
 curl -fsSL https://noogram.org/cosmon/install.sh | sh -s -- --with-services

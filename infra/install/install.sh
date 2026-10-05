@@ -45,7 +45,7 @@
 # FLAGS:
 #   --version <tag>   same as COSMON_VERSION
 #   --dir <path>      same as COSMON_INSTALL_DIR
-#   --with-services   also install the scheduler and daemon supervisor (Linux)
+#   --with-services   install Linux services; create valid empty configs if absent
 #   --self-test       run the platform-detection table and exit (no network)
 #   --print-target    print the resolved release target for THIS host and exit
 #   -h | --help       usage
@@ -88,7 +88,7 @@ cosmon installer — installs the `cs` binary from cosmon releases.
 Options:
   --version <tag>   pin a release (e.g. v0.1.0); default: latest
   --dir <path>      install directory; default: ~/.local/bin (fallback /usr/local/bin)
-  --with-services   also install and activate Linux user services
+  --with-services   install Linux user services; create valid empty configs if absent
   --self-test       run the platform-detection self-test and exit
   --print-target    print the release target for this host and exit
   -h, --help        show this help
@@ -353,10 +353,25 @@ main() {
         config_dir="${HOME}/.config/cosmon"
         mkdir -p "$config_dir"
         if [ ! -e "${config_dir}/daemons.toml" ]; then
-            printf '# Add daemon entries here.\n' >"${config_dir}/daemons.toml"
+            cat >"${config_dir}/daemons.toml" <<'EOF'
+[supervisor]
+state_file = "~/.cosmon/daemon-supervisor.state.json"
+log_file = "~/.cosmon/daemon-supervisor.log"
+kill_switch = "~/.cosmon/stand-down.lock"
+
+# Add [[daemon]] entries here.
+EOF
         fi
         if [ ! -e "${config_dir}/patrols.toml" ]; then
-            printf '# Add patrol entries here.\n' >"${config_dir}/patrols.toml"
+            cat >"${config_dir}/patrols.toml" <<'EOF'
+[scheduler]
+state_file = "~/.cosmon/scheduler.state.json"
+log_file = "~/.cosmon/scheduler.log"
+kill_switch = "~/.cosmon/stand-down.lock"
+tick_interval_seconds = 60
+
+# Add [[patrol]] entries here.
+EOF
         fi
 
         COSMON_SUPERVISOR_BIN_DIR="$dir" \
