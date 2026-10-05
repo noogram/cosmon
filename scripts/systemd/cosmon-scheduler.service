@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=Cosmon patrol scheduler tick
+
+[Service]
+Type=oneshot
+ExecStart=__EXEC_START__
+Environment=__ENVIRONMENT_PATH__
+WorkingDirectory=%h
+KillMode=process

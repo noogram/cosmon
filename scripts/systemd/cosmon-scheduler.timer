@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=Run the Cosmon patrol scheduler every minute
+
+[Timer]
+OnActiveSec=60s
+OnUnitActiveSec=60s
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=false
+Unit=cosmon-scheduler.service
+
+[Install]
+WantedBy=timers.target
