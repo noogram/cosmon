@@ -643,15 +643,13 @@ fn report_cache_rebuild(
             "{}",
             serde_json::to_string_pretty(&payload).unwrap_or_default()
         );
-    } else {
-        if !created.is_empty() {
-            println!(
-                "Rebuilt {} missing state.json from events.jsonl:",
-                created.len()
-            );
-            for id in &created {
-                println!("  🧬 {id}");
-            }
+    } else if !created.is_empty() {
+        println!(
+            "Rebuilt {} missing state.json from events.jsonl:",
+            created.len()
+        );
+        for id in &created {
+            println!("  🧬 {id}");
         }
     }
 }
