@@ -157,7 +157,11 @@ fn compact_headline_names_the_dead_worker_and_its_reclaim_gesture() {
 
     let text = run_status(tmp.path(), &state_dir, false);
 
-    assert!(text.contains("dead"), "headline must say dead: {text}");
+    let headline = text.lines().next().unwrap_or_default();
+    assert!(
+        headline.contains("1\u{1F480} dead"),
+        "the first line must count the dead worker: {text}"
+    );
     assert!(text.contains(WORKER), "names the worker: {text}");
     assert!(
         text.contains(&format!("cs purge {WORKER}")),
