@@ -8,7 +8,7 @@ service="$unit_dir/cosmon-scheduler.service"
 timer="$unit_dir/cosmon-scheduler.timer"
 negative="$unit_dir/cosmon-scheduler-negative.service"
 unrelated="$unit_dir/cosmon-w2-unrelated.service"
-work="$(mktemp -d "$HOME/cosmon-w2-green.XXXXXX")"
+work="$(mktemp -d "${COSMON_SYSTEMD_TEST_TMPDIR:-${TMPDIR:-/tmp}}/cosmon-w2-green.XXXXXX")"
 original_service=
 original_timer=
 child_pids="$work/child.pids"
@@ -38,7 +38,7 @@ cleanup() {
     if [[ -f "$child_pids" ]]; then
         while read -r pid; do kill "$pid" >/dev/null 2>&1 || true; done < "$child_pids"
     fi
-    rm -rf "$work"
+    find "$work" -depth -delete
 }
 trap cleanup EXIT
 
@@ -94,6 +94,13 @@ export COSMON_SCHEDULER_CONFIG="$work/config/patrols.toml"
 "$repo/scripts/install-scheduler.sh" install
 systemctl --user is-enabled --quiet cosmon-scheduler.timer || fail "timer is not enabled"
 systemctl --user is-active --quiet cosmon-scheduler.timer || fail "timer is not active"
+
+# Exercise the installed reload path against the real manager before replacing
+# the timer cadence for the bounded harness run.
+printf 'fixture=reloaded\n' > "$work/config/patrols.toml"
+"$repo/scripts/install-scheduler.sh" reload
+systemctl --user is-enabled --quiet cosmon-scheduler.timer || fail "timer is not enabled after reload"
+systemctl --user is-active --quiet cosmon-scheduler.timer || fail "timer is not active after reload"
 
 systemctl --user show cosmon-scheduler.service -p Type -p KillMode -p FragmentPath --no-pager
 systemctl --user show cosmon-scheduler.timer -p ActiveState -p SubState -p UnitFileState \
