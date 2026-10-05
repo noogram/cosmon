@@ -131,7 +131,23 @@ jobs:
           rt="/run/user/${uid}"
           # ${rt} is mode 0700 and owned by the test user: the runner account
           # cannot stat or list it, so every read of it goes through this.
-          as_user() { sudo -u cosmon-services-ci "$@"; }
+          # `sudo -u` alone keeps the runner's environment on this image, so
+          # the command runs as the test user with the runner's HOME and XDG_*
+          # variables. Start from an empty environment instead and name every
+          # variable the command may read, with the test user's own values.
+          home=/tmp/cosmon-services-ci-home
+          as_user() {
+            sudo -H -u cosmon-services-ci env -i -C "${home}" \
+              HOME="${home}" USER=cosmon-services-ci LOGNAME=cosmon-services-ci \
+              SHELL=/bin/bash LANG=C.UTF-8 \
+              PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin \
+              TMPDIR=/tmp \
+              XDG_CONFIG_HOME="${home}/.config" XDG_DATA_HOME="${home}/.local/share" \
+              XDG_STATE_HOME="${home}/.local/state" XDG_CACHE_HOME="${home}/.cache" \
+              XDG_RUNTIME_DIR="${rt}" \
+              DBUS_SESSION_BUS_ADDRESS="unix:path=${rt}/bus" \
+              "$@"
+          }
           diagnose() {
             echo "::error::user manager for uid ${uid} is unreachable: $1"
             sudo systemctl status "user@${uid}" --no-pager || true
@@ -152,8 +168,7 @@ jobs:
             diagnose "${rt}/systemd/private did not appear within 10 s"
             exit 1
           }
-          state="$(as_user env XDG_RUNTIME_DIR="${rt}" \
-            systemctl --user is-system-running --wait || true)"
+          state="$(as_user systemctl --user is-system-running --wait || true)"
           case "${state}" in
             running|degraded) ;;
             *)
@@ -180,10 +195,22 @@ jobs:
             "$GITHUB_WORKSPACE/tests/harness/systemd-scheduler-test.sh" \
             "${copy}/tests/harness/"
           sudo chown -R cosmon-services-ci: "${copy}"
-          sudo -u cosmon-services-ci env \
-            HOME=/tmp/cosmon-services-ci-home \
-            XDG_RUNTIME_DIR="/run/user/${COSMON_TEST_UID}" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${COSMON_TEST_UID}/bus" \
+          # Same clean environment as the manager step: the harnesses read
+          # HOME (unit directory, config), XDG_CONFIG_HOME (installers),
+          # XDG_RUNTIME_DIR and the bus address (systemctl --user), TMPDIR and
+          # PATH (systemd-analyze, timeout), and the working directory.
+          # `-C` starts them in the copy, which the test user can read.
+          home=/tmp/cosmon-services-ci-home
+          rt="/run/user/${COSMON_TEST_UID}"
+          sudo -H -u cosmon-services-ci env -i -C "${copy}" \
+            HOME="${home}" USER=cosmon-services-ci LOGNAME=cosmon-services-ci \
+            SHELL=/bin/bash LANG=C.UTF-8 \
+            PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin \
+            TMPDIR=/tmp \
+            XDG_CONFIG_HOME="${home}/.config" XDG_DATA_HOME="${home}/.local/share" \
+            XDG_STATE_HOME="${home}/.local/state" XDG_CACHE_HOME="${home}/.cache" \
+            XDG_RUNTIME_DIR="${rt}" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=${rt}/bus" \
             COSMON_SYSTEMD_TEST_ISOLATED=1 \
             COSMON_SYSTEMD_TEST_TMPDIR=/tmp \
             timeout 240 "${copy}/tests/harness/linux-user-services-test.sh"
