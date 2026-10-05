@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-daemon-supervisor"
-version = "0.1.0"
+version = "0.7.2"
 dependencies = [
  "blake3",
  "chrono",
@@ -1534,7 +1534,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-scheduler"
-version = "0.1.0"
+version = "0.7.2"
 dependencies = [
  "chrono",
  "clap",

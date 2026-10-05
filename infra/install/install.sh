@@ -20,6 +20,8 @@
 #   5. unpack, `chmod +x`, install `cs` into ~/.local/bin (fallback
 #      /usr/local/bin) — plus `cosmon-remote` (the remote-service connector)
 #      when the tarball carries it — and print the PATH hint + next steps.
+#      With `--with-services`, also verify the matching service archive before
+#      changing anything, then install and activate the Linux user services.
 #
 # It carries NO secret and needs NO privilege beyond writing to the install
 # dir. Everything it downloads is a signed, publicly auditable release asset
@@ -43,6 +45,7 @@
 # FLAGS:
 #   --version <tag>   same as COSMON_VERSION
 #   --dir <path>      same as COSMON_INSTALL_DIR
+#   --with-services   also install the scheduler and daemon supervisor (Linux)
 #   --self-test       run the platform-detection table and exit (no network)
 #   --print-target    print the resolved release target for THIS host and exit
 #   -h | --help       usage
@@ -61,6 +64,7 @@ REPO="${COSMON_INSTALL_REPO:-noogram/cosmon}"
 VERSION="${COSMON_VERSION:-}"        # empty ⇒ latest
 INSTALL_DIR="${COSMON_INSTALL_DIR:-}" # empty ⇒ resolved after arg parse
 BASE_URL="${COSMON_RELEASE_BASE_URL:-}" # empty ⇒ github.com/<repo>/releases/...
+WITH_SERVICES=0
 
 # ── pretty output (fall back to plain if not a tty / no color) ───────────────
 if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -77,13 +81,14 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 usage() {
     cat >&2 <<'USAGE'
-cosmon installer — installs the `cs` binary from GitHub Releases.
+cosmon installer — installs the `cs` binary from cosmon releases.
 
   curl -fsSL https://noogram.org/cosmon/install.sh | sh
 
 Options:
   --version <tag>   pin a release (e.g. v0.1.0); default: latest
   --dir <path>      install directory; default: ~/.local/bin (fallback /usr/local/bin)
+  --with-services   also install and activate Linux user services
   --self-test       run the platform-detection self-test and exit
   --print-target    print the release target for this host and exit
   -h, --help        show this help
@@ -185,6 +190,10 @@ verify_sha256() { # verify_sha256 <file> <expected-hex>
 main() {
     target="$(detect_target)"
 
+    if [ "$WITH_SERVICES" -eq 1 ] && [ "${target#*-}" != "unknown-linux-musl" ]; then
+        die "--with-services currently requires Linux with a user service manager"
+    fi
+
     # Release base URL. An explicit COSMON_RELEASE_BASE_URL wins (private mirror
     # or a `file://` fixture); otherwise `latest/download/<asset>` resolves the
     # newest release and a pinned version uses the tag path. GitHub redirects
@@ -221,6 +230,16 @@ main() {
     want_sha="$(printf '%s' "$line" | awk '{print $1}')"
     asset="$(printf '%s' "$line" | awk '{print $2}')"
 
+    service_asset=''
+    service_want_sha=''
+    if [ "$WITH_SERVICES" -eq 1 ]; then
+        service_line="$(grep -E "  cosmon-service-[0-9][^ ]*-${target}\.tar\.gz\$" "${tmp}/SHA256SUMS" \
+            | head -1 || true)"
+        [ -n "$service_line" ] || die "this release does not contain the service bundle required by --with-services"
+        service_want_sha="$(printf '%s' "$service_line" | awk '{print $1}')"
+        service_asset="$(printf '%s' "$service_line" | awk '{print $2}')"
+    fi
+
     say "Downloading ${asset}"
     fetch "${base}/${asset}" "${tmp}/${asset}" \
         || die "failed to download ${asset}"
@@ -229,10 +248,52 @@ main() {
     verify_sha256 "${tmp}/${asset}" "$want_sha"
     ok "checksum ok"
 
+    if [ "$WITH_SERVICES" -eq 1 ]; then
+        say "Downloading ${service_asset}"
+        fetch "${base}/${service_asset}" "${tmp}/${service_asset}" \
+            || die "failed to download ${service_asset}"
+        say "Verifying service bundle checksum"
+        verify_sha256 "${tmp}/${service_asset}" "$service_want_sha"
+        ok "service bundle checksum ok"
+    fi
+
     say "Unpacking"
-    ( cd "$tmp" && tar -xzf "$asset" ) || die "failed to unpack ${asset}"
-    [ -f "${tmp}/cs" ] || die "tarball did not contain the cs binary"
-    chmod +x "${tmp}/cs"
+    mkdir -p "${tmp}/client"
+    tar -xzf "${tmp}/${asset}" -C "${tmp}/client" || die "failed to unpack ${asset}"
+    if [ "$WITH_SERVICES" -eq 1 ]; then
+        mkdir -p "${tmp}/service"
+        tar -xzf "${tmp}/${service_asset}" -C "${tmp}/service" \
+            || die "failed to unpack ${service_asset}"
+    fi
+    [ -f "${tmp}/client/cs" ] || die "tarball did not contain the cs binary"
+    chmod +x "${tmp}/client/cs"
+
+    if [ "$WITH_SERVICES" -eq 1 ]; then
+        for required in \
+            cosmon-daemon-supervisor \
+            cosmon-scheduler \
+            scripts/install-daemon-supervisor.sh \
+            scripts/install-scheduler.sh \
+            scripts/lib/install-user-service.sh \
+            scripts/systemd/cosmon-daemon-supervisor.service \
+            scripts/systemd/cosmon-scheduler.service \
+            scripts/systemd/cosmon-scheduler.timer
+        do
+            [ -f "${tmp}/service/${required}" ] \
+                || die "service bundle is incomplete: missing ${required}; nothing was installed"
+        done
+        chmod +x "${tmp}/service/cosmon-daemon-supervisor" \
+            "${tmp}/service/cosmon-scheduler" \
+            "${tmp}/service/scripts/install-daemon-supervisor.sh" \
+            "${tmp}/service/scripts/install-scheduler.sh"
+        release_version="${asset#cosmon-}"
+        release_version="${release_version%-"${target}".tar.gz}"
+        for service_binary in cosmon-daemon-supervisor cosmon-scheduler; do
+            announced="$("${tmp}/service/${service_binary}" --version 2>/dev/null | awk '{print $2}')"
+            [ "$announced" = "$release_version" ] \
+                || die "${service_binary} reports version ${announced:-unknown}, expected ${release_version}; nothing was installed"
+        done
+    fi
 
     # Resolve install dir now (after flags/env). Prefer ~/.local/bin; if the
     # user pointed elsewhere, honor it. Create it if missing.
@@ -248,7 +309,7 @@ main() {
         fi
     fi
 
-    mv "${tmp}/cs" "${dir}/cs" || die "failed to move cs into ${dir}"
+    mv "${tmp}/client/cs" "${dir}/cs" || die "failed to move cs into ${dir}"
     ok "installed cs → ${dir}/cs"
 
     # The client tarball also carries `cosmon-remote` — the thin connector the
@@ -258,14 +319,57 @@ main() {
     # It is OPTIONAL on purpose — this installer must still succeed against an
     # older release whose tarball predates the connector (backward-compatible),
     # so a missing cosmon-remote is a note, never a `die`.
-    if [ -f "${tmp}/cosmon-remote" ]; then
-        chmod +x "${tmp}/cosmon-remote"
-        mv "${tmp}/cosmon-remote" "${dir}/cosmon-remote" \
+    if [ -f "${tmp}/client/cosmon-remote" ]; then
+        chmod +x "${tmp}/client/cosmon-remote"
+        mv "${tmp}/client/cosmon-remote" "${dir}/cosmon-remote" \
             || die "failed to move cosmon-remote into ${dir}"
         ok "installed cosmon-remote → ${dir}/cosmon-remote"
     else
         warn "tarball did not contain cosmon-remote — installing cs only"
         warn "(older release? the connector ships with cosmon >= 0.3)"
+    fi
+
+    if [ "$WITH_SERVICES" -eq 1 ]; then
+        mv "${tmp}/service/cosmon-daemon-supervisor" "${dir}/cosmon-daemon-supervisor" \
+            || die "failed to install cosmon-daemon-supervisor into ${dir}"
+        mv "${tmp}/service/cosmon-scheduler" "${dir}/cosmon-scheduler" \
+            || die "failed to install cosmon-scheduler into ${dir}"
+        ok "installed cosmon user-service binaries → ${dir}"
+
+        libexec="${HOME}/.local/libexec/cosmon"
+        mkdir -p "${libexec}/lib" "${libexec}/systemd" "${libexec}/launchd"
+        cp "${tmp}/service/scripts/install-daemon-supervisor.sh" \
+            "${tmp}/service/scripts/install-scheduler.sh" "$libexec/" \
+            || die "failed to install service scripts"
+        cp "${tmp}/service/scripts/lib/install-user-service.sh" "${libexec}/lib/" \
+            || die "failed to install service helper"
+        cp "${tmp}/service/scripts/systemd/"* "${libexec}/systemd/" \
+            || die "failed to install service unit templates"
+        if [ -d "${tmp}/service/scripts/launchd" ]; then
+            cp "${tmp}/service/scripts/launchd/"* "${libexec}/launchd/" 2>/dev/null || true
+        fi
+        chmod +x "${libexec}/install-daemon-supervisor.sh" "${libexec}/install-scheduler.sh"
+
+        config_dir="${HOME}/.config/cosmon"
+        mkdir -p "$config_dir"
+        if [ ! -e "${config_dir}/daemons.toml" ]; then
+            printf '# Add daemon entries here.\n' >"${config_dir}/daemons.toml"
+        fi
+        if [ ! -e "${config_dir}/patrols.toml" ]; then
+            printf '# Add patrol entries here.\n' >"${config_dir}/patrols.toml"
+        fi
+
+        COSMON_SUPERVISOR_BIN_DIR="$dir" \
+            "${libexec}/install-daemon-supervisor.sh" install \
+            || die "daemon supervisor activation failed; inspect its diagnostic above"
+        COSMON_SCHEDULER_BIN_DIR="$dir" \
+            "${libexec}/install-scheduler.sh" install \
+            || die "scheduler activation failed; the supervisor may already be active"
+        ok "installed and activated cosmon user services"
+        printf '    %s/install-daemon-supervisor.sh status\n' "$libexec" >&2
+        printf '    %s/install-scheduler.sh status\n' "$libexec" >&2
+        printf '    %s/install-daemon-supervisor.sh uninstall\n' "$libexec" >&2
+        printf '    %s/install-scheduler.sh uninstall\n' "$libexec" >&2
     fi
 
     # PATH hint — only if the dir isn't already on PATH.
@@ -295,6 +399,7 @@ while [ $# -gt 0 ]; do
         --version=*)    VERSION="${1#*=}"; shift ;;
         --dir)          INSTALL_DIR="${2:?--dir needs a path}"; shift 2 ;;
         --dir=*)        INSTALL_DIR="${1#*=}"; shift ;;
+        --with-services) WITH_SERVICES=1; shift ;;
         --self-test)    self_test; exit 0 ;;
         --print-target) detect_target; printf '\n'; exit 0 ;;
         -h|--help)      usage; exit 0 ;;

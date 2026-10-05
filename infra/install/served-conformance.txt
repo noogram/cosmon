@@ -23,7 +23,7 @@
 
 # ── the connector must be placed, not silently dropped (incident 2) ──────────
 cosmon-remote
-${tmp}/cosmon-remote
+${tmp}/client/cosmon-remote
 
 # ── static-musl Linux targets, not glibc (incident 1) ────────────────────────
 x86_64-unknown-linux-musl
@@ -32,3 +32,8 @@ aarch64-unknown-linux-musl
 # ── the non-negotiable installer spine ───────────────────────────────────────
 detect_target
 SHA256SUMS
+
+# ── opt-in Linux user services ──────────────────────────────────────────────
+--with-services
+cosmon-daemon-supervisor
+cosmon-scheduler

@@ -61,6 +61,12 @@ on:
       # rendering, install-drift, docs publication) live here and are exercised
       # by the `triples` job — editing them must reach their own tests.
       - "scripts/release/**"
+      - "scripts/install-daemon-supervisor.sh"
+      - "scripts/install-scheduler.sh"
+      - "scripts/lib/install-user-service.sh"
+      - "scripts/systemd/**"
+      - "scripts/launchd/com.cosmon.daemon-supervisor.plist"
+      - "scripts/launchd/com.cosmon.scheduler.plist"
   pull_request:
     paths:
       - "infra/install/**"
@@ -68,6 +74,12 @@ on:
       - ".github/workflows/release.yml"
       - "packaging/**"
       - "scripts/release/**"
+      - "scripts/install-daemon-supervisor.sh"
+      - "scripts/install-scheduler.sh"
+      - "scripts/lib/install-user-service.sh"
+      - "scripts/systemd/**"
+      - "scripts/launchd/com.cosmon.daemon-supervisor.plist"
+      - "scripts/launchd/com.cosmon.scheduler.plist"
   # Manual trigger — chiefly to run the hosted-`endpoint` smoke on demand once
   # the operator flips the Worker live.
   workflow_dispatch:
@@ -92,6 +104,8 @@ jobs:
         run: shellcheck -s sh infra/install/install.sh
       - name: Platform-detection self-test
         run: sh infra/install/install.sh --self-test
+      - name: Opt-in service bundle contract
+        run: scripts/release/service-bundle.test.sh
 
   worker:
     name: worker — typecheck + dry-run bundle

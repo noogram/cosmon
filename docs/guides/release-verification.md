@@ -36,6 +36,7 @@ For each platform target (`aarch64-apple-darwin`, `x86_64-apple-darwin`,
 | `cosmon-<v>-<target>.sig` / `.pem`  | cosign signature + cert over the raw binary |
 | `cosmon-remote-<v>-<target>`        | the raw `cosmon-remote` connector binary (verify the client too) |
 | `cosmon-remote-<v>-<target>.sig` / `.pem` | cosign signature + cert over the raw connector binary |
+| `cosmon-service-<v>-<target>.tar.gz` | host binaries plus the scheduler, daemon supervisor, and their user-service assets |
 | `cosmon-<v>-<target>.spdx.json`     | SPDX SBOM (dependency closure) |
 | `SHA256SUMS`                        | one digest per shipped artifact |
 

@@ -31,3 +31,5 @@ cs                  cosmon-cli           client
 cosmon-remote       cosmon-remote        client
 cosmon-rpp-adapter  cosmon-rpp-adapter   service
 cs-oidc-mock        cosmon-oidc-testkit  service
+cosmon-daemon-supervisor cosmon-daemon-supervisor service
+cosmon-scheduler    cosmon-scheduler     service

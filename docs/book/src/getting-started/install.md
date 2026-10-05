@@ -27,6 +27,19 @@ Works on macOS and Linux, on arm64 and x86_64:
 curl -fsSL https://noogram.org/cosmon/install.sh | sh
 ```
 
+On Linux, add `--with-services` to install and activate the scheduler and
+daemon supervisor as user services. This is opt-in; the command above remains
+a client-only install:
+
+```sh
+curl -fsSL https://noogram.org/cosmon/install.sh | sh -s -- --with-services
+```
+
+The service option requires a working user service manager. It creates only
+missing configuration files under `~/.config/cosmon`, preserves existing
+configuration and state, and prints the exact status and uninstall commands.
+`--dir` also controls where the two service binaries are installed.
+
 The installer writes to `~/.local/bin`, which is **not** on the default `PATH` on
 a fresh macOS or Linux account. When it is not, the installer says so and prints
 the line to add. Add it before you check the version, and the check succeeds the

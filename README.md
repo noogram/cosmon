@@ -121,6 +121,14 @@ export PATH="$HOME/.local/bin:$PATH"   # skip if the installer did not ask for i
 cs --version
 ```
 
+On Linux, add `--with-services` to install and activate the scheduler and
+daemon supervisor as user services. The default command above remains a
+client-only install:
+
+```bash
+curl -fsSL https://noogram.org/cosmon/install.sh | sh -s -- --with-services
+```
+
 `~/.local/bin` is not on the default `PATH` on a fresh macOS or Linux account.
 The installer detects that and prints the `export` line; without it `cs --version`
 exits 127. Add the same line to your shell profile so the next terminal finds it.

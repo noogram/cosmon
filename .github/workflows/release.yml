@@ -181,7 +181,7 @@ jobs:
           # this leg (task-20260718-ff92) adds cosmon-remote so a user can also
           # CONNECT to one — previously the how-to told users to run cosmon-remote
           # but no release, tarball, or install.sh ever placed it.
-          BINS="--bin cs --bin cosmon-remote --bin cosmon-rpp-adapter --bin cs-oidc-mock"
+          BINS="--bin cs --bin cosmon-remote --bin cosmon-rpp-adapter --bin cs-oidc-mock --bin cosmon-daemon-supervisor --bin cosmon-scheduler"
           if [ "${{ runner.os }}" = "Linux" ]; then
             cargo zigbuild --release --locked $BINS --target ${{ matrix.target }}
           else
@@ -228,6 +228,16 @@ jobs:
           cp "${bindir}/cosmon-remote" "dist/cosmon-remote"
           cp "${bindir}/cosmon-rpp-adapter" "dist/cosmon-rpp-adapter"
           cp "${bindir}/cs-oidc-mock" "dist/cs-oidc-mock"
+          cp "${bindir}/cosmon-daemon-supervisor" "dist/cosmon-daemon-supervisor"
+          cp "${bindir}/cosmon-scheduler" "dist/cosmon-scheduler"
+          mkdir -p dist/scripts/lib dist/scripts/systemd dist/scripts/launchd
+          cp scripts/install-daemon-supervisor.sh scripts/install-scheduler.sh dist/scripts/
+          cp scripts/lib/install-user-service.sh dist/scripts/lib/
+          cp scripts/systemd/cosmon-daemon-supervisor.service \
+             scripts/systemd/cosmon-scheduler.service \
+             scripts/systemd/cosmon-scheduler.timer dist/scripts/systemd/
+          cp scripts/launchd/com.cosmon.daemon-supervisor.plist \
+             scripts/launchd/com.cosmon.scheduler.plist dist/scripts/launchd/
           # Deterministic tarball: pinned mtime (SOURCE_DATE_EPOCH), sorted
           # entries, no owner/group metadata, GNU format.
           # The deterministic flags (--sort/--owner/--group/--numeric-owner/
@@ -252,7 +262,8 @@ jobs:
             --mtime="@${SOURCE_DATE_EPOCH}" \
             --owner=0 --group=0 --numeric-owner \
             --format=gnu \
-            -C dist -czf "dist/${svc_stem}.tar.gz" cosmon-rpp-adapter cs-oidc-mock
+            -C dist -czf "dist/${svc_stem}.tar.gz" \
+            cosmon-daemon-supervisor cosmon-rpp-adapter cosmon-scheduler cs-oidc-mock scripts
 
           cd dist
           # sha256 over the tarballs (what brew / a self-hoster pins) and the
