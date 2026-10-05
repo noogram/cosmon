@@ -116,6 +116,7 @@ impl SessionKind {
 /// use cosmon_core::presence::SessionState;
 ///
 /// assert_eq!(SessionState::WaitingPermission.as_str(), "waiting_permission");
+/// assert_eq!(SessionState::IdleInput.as_str(), "idle_input");
 /// let back: SessionState = serde_json::from_str("\"idle\"").unwrap();
 /// assert_eq!(back, SessionState::Idle);
 /// ```
@@ -128,8 +129,18 @@ pub enum SessionState {
     Working,
     /// The session finished a turn and is idle.
     Idle,
-    /// The session is blocked on a permission prompt or an idle notification.
+    /// The session is blocked on a permission prompt the pilot has to answer.
+    ///
+    /// Also the conservative reading of a provider notification whose kind the
+    /// hook does not recognise or cannot read.
     WaitingPermission,
+    /// The session is idle at its prompt and has been reminded of it.
+    ///
+    /// Claude Code's idle reminder fires after about a minute without input.
+    /// It means nobody is typing, not that the session is blocked, so a worker
+    /// running without permission prompts is never counted as waiting on the
+    /// pilot while it sits here.
+    IdleInput,
     /// The session is asking the user a question.
     Asking,
 }
@@ -143,6 +154,7 @@ impl SessionState {
             Self::Working => "working",
             Self::Idle => "idle",
             Self::WaitingPermission => "waiting_permission",
+            Self::IdleInput => "idle_input",
             Self::Asking => "asking",
         }
     }

@@ -63,9 +63,11 @@ Fields by event type:
 `events.jsonl` by `cs sessions hook run`, once per change of session state; a
 hook that reports the state the session already holds appends nothing. `role`
 is `pilot` or `worker`. `state` is one of `session_start`, `working`, `idle`,
-`waiting_permission`, `asking`. `provider` (`claude`, `codex`), `worker_id` and
-`molecule_id` are absent when unknown; `molecule_id` is set for a worker
-session. `operator_present` is a different event: it is per `cs` call, not per
+`waiting_permission`, `idle_input`, `asking`. `idle_input` (an additive value)
+is a session idle at its prompt after Claude's idle reminder, as opposed to
+`waiting_permission`, a real permission prompt. `provider` (`claude`, `codex`),
+`worker_id` and `molecule_id` are absent when unknown; `molecule_id` is set for
+a worker session. `operator_present` is a different event: it is per `cs` call, not per
 session.
 
 **Usage.** `usage_observed` carries one `usage` object per answered model

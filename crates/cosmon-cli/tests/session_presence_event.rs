@@ -21,6 +21,23 @@ fn galaxy(tmp: &Path) -> PathBuf {
 
 /// Fire `cs sessions hook run --event <event>` as a provider would.
 fn fire(state: &Path, session: &str, event: &str, worker_molecule: Option<&str>) {
+    fire_with(
+        state,
+        session,
+        event,
+        worker_molecule,
+        r#"{"session_id":"native-1"}"#,
+    );
+}
+
+/// Like [`fire`], with the provider's JSON payload given explicitly.
+fn fire_with(
+    state: &Path,
+    session: &str,
+    event: &str,
+    worker_molecule: Option<&str>,
+    payload: &str,
+) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
     cmd.arg("--config")
         .arg(state)
@@ -42,7 +59,7 @@ fn fire(state: &Path, session: &str, event: &str, worker_molecule: Option<&str>)
     {
         use std::io::Write as _;
         let mut pipe = child.stdin.take().expect("stdin");
-        let _ = pipe.write_all(br#"{"session_id":"native-1"}"#);
+        let _ = pipe.write_all(payload.as_bytes());
     }
     let out = child.wait_with_output().expect("cs exits");
     assert_eq!(
@@ -145,4 +162,51 @@ fn the_presence_record_carries_a_typed_state_and_the_sessions_galaxy() {
             .expect("json");
     assert_eq!(record["state"], "waiting_permission");
     assert_eq!(record["galaxy"], "orchard");
+}
+
+/// Fire a `waiting` hook whose payload is Claude's `Notification` of the given
+/// `notification_type` (none when `None`), and return the recorded state.
+fn state_after_notification(notification_type: Option<&str>) -> String {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = galaxy(tmp.path());
+    let payload = match notification_type {
+        Some(t) => {
+            format!(r#"{{"session_id":"native-1","notification_type":"{t}","message":"not read"}}"#)
+        }
+        None => r#"{"session_id":"native-1"}"#.to_owned(),
+    };
+    fire_with(&state, "worker-a", "waiting", None, &payload);
+    let rows = presence_rows(&state);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    rows[0]["state"].as_str().unwrap_or_default().to_owned()
+}
+
+#[test]
+fn a_permission_prompt_notification_is_waiting_permission() {
+    assert_eq!(
+        state_after_notification(Some("permission_prompt")),
+        "waiting_permission"
+    );
+}
+
+#[test]
+fn an_idle_prompt_notification_is_idle_input_not_a_blocked_worker() {
+    assert_eq!(state_after_notification(Some("idle_prompt")), "idle_input");
+}
+
+#[test]
+fn an_elicitation_dialog_notification_is_asking() {
+    assert_eq!(
+        state_after_notification(Some("elicitation_dialog")),
+        "asking"
+    );
+}
+
+#[test]
+fn an_unknown_or_absent_notification_type_stays_waiting_permission() {
+    assert_eq!(
+        state_after_notification(Some("auth_success")),
+        "waiting_permission"
+    );
+    assert_eq!(state_after_notification(None), "waiting_permission");
 }
