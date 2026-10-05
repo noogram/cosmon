@@ -19,7 +19,7 @@ this stage.
 
 ## [Unreleased]
 
-## [0.7.2] — 2026-10-04
+## [0.7.2] — 2026-10-05
 
 ### Breaking changes and operator actions on upgrade
 
@@ -122,6 +122,16 @@ this stage.
   (`prepare`, `export`, `import`, `commit`, `activate`, `cancel`). Nothing
   unfences the source or promotes the destination on its own. (#146)
 
+- The `codex` and `opencode` adapters can run against an OpenAI-compatible
+  gateway declared in `[adapters.<name>]` (`base_url`, `api_key_env`,
+  `default_model`). `cs tackle` renders each harness's native per-process
+  provider settings, puts the key only in that worker's tmux session
+  environment and keeps it out of molecule state, the event log and the pane
+  command. Global harness configuration is not touched. (#168)
+- On Linux, `scripts/install-daemon-supervisor.sh` installs the daemon
+  supervisor as a systemd user service and `scripts/install-scheduler.sh`
+  installs the scheduler as a systemd user timer (ADR-186). (#143)
+
 ### Changed
 
 - The in-process arms keep the provider's termination reason instead of
@@ -155,6 +165,14 @@ this stage.
   the recorded session name, so teardown looked for the molecule id and missed
   functionally named sessions; it now falls back to the preserved worker id.
   (#155)
+
+- `cs init` in a repository whose only trunk is not `main` (for example
+  `master`) records that branch as `trunk_branch`, so `cs done` no longer
+  refuses on first contact. (#169)
+- Every presence writer and reader uses one filename rule
+  (`presence/session-<id>.json`), so `cs whisper --to-session` and the chat
+  routing helper find sessions registered by the presence hook. Files written
+  under the old uuid-only name are still read. (#170)
 
 ### Documentation
 
