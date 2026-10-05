@@ -1337,6 +1337,9 @@ pub enum EventV2 {
         molecule_id: Option<MoleculeId>,
         /// The state the session moved into.
         state: crate::presence::SessionState,
+        /// Bounded, redacted context for an admitted notification moment.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
         /// Wall-clock time (UTC) of the transition.
         ts: DateTime<Utc>,
     },
@@ -4291,6 +4294,7 @@ mod tests {
                 worker_id: None,
                 molecule_id: Some(mid("task-20260731-9cf4")),
                 state: crate::presence::SessionState::WaitingPermission,
+                detail: Some("Permission required".to_owned()),
                 ts: DateTime::parse_from_rfc3339("2026-05-09T10:00:00Z")
                     .unwrap()
                     .with_timezone(&Utc),
@@ -5008,6 +5012,7 @@ mod tests {
             worker_id: None,
             molecule_id: None,
             state: crate::presence::SessionState::Idle,
+            detail: None,
             ts: Utc::now(),
         };
         let env = Envelope::new(Seq(1), None, evt);
@@ -5018,6 +5023,7 @@ mod tests {
         assert_eq!(value["state"], "idle");
         assert_eq!(value["provider"], "codex");
         assert!(value.get("molecule_id").is_none());
+        assert!(value.get("detail").is_none());
     }
 
     #[test]

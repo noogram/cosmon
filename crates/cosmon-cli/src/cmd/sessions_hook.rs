@@ -563,8 +563,9 @@ fn read_payload(args: &RunArgs) -> String {
 /// What the payload tells us about the session it came from.
 ///
 /// The native session id is half the canonical selector and is not conversation
-/// content; see [`notification_type`] for the one other field read. This is
-/// the confidentiality ceiling ADR-168 set for the whole mission.
+/// content; see [`notification_type`] and [`notification_message`] for the two
+/// other admitted fields. This is the confidentiality ceiling ADR-168 sets for
+/// the whole mission.
 fn native_session_id(payload: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
     v.get("session_id")
@@ -574,12 +575,22 @@ fn native_session_id(payload: &str) -> Option<String> {
 
 /// The `notification_type` string of a Claude `Notification` payload.
 ///
-/// The only other field read from a payload besides `session_id`: a short
-/// enumerated kind, never the message text or any tool input (ADR-168
-/// confidentiality ceiling).
+/// A short enumerated kind admitted alongside `session_id` and the redacted
+/// notification message (ADR-168 confidentiality ceiling).
 fn notification_type(payload: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
     v.get("notification_type")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+/// The provider-authored `message` of a Claude `Notification` payload.
+///
+/// Callers admit this field only for the `waiting` hook moment and pass it
+/// through the core redactor before storage. No other payload content is read.
+fn notification_message(payload: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    v.get("message")
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
 }
@@ -650,6 +661,18 @@ fn beat_presence(
         .as_ref()
         .map(|_| format!("worker: {}", event.as_str()));
     let state = session_state(event, notification_type(payload).as_deref());
+    let detail = if matches!(provider, HookProvider::Claude)
+        && matches!(event, HookEvent::Waiting)
+        && matches!(
+            state,
+            SessionState::WaitingPermission | SessionState::IdleInput | SessionState::Asking
+        ) {
+        notification_message(payload)
+            .as_deref()
+            .and_then(cosmon_core::presence::redact_presence_detail)
+    } else {
+        None
+    };
     let kind = if worker_molecule.is_some() {
         SessionKind::Worker
     } else {
@@ -675,6 +698,7 @@ fn beat_presence(
                 .filter(|v| !v.trim().is_empty()),
             worker_molecule.clone(),
             state,
+            detail.clone(),
         );
     }
 
@@ -689,6 +713,7 @@ fn beat_presence(
             galaxy: cosmon_core::presence::galaxy_name_from_state_dir(&state_dir)
                 .unwrap_or_else(|| "unknown".to_owned()),
             state: Some(state),
+            detail: Some(detail),
             ..presence::PingArgs::default()
         },
     ) {

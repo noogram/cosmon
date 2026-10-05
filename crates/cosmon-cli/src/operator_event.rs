@@ -107,6 +107,7 @@ pub fn emit_session_presence(
     worker_id: Option<String>,
     molecule_id: Option<MoleculeId>,
     state: cosmon_core::presence::SessionState,
+    detail: Option<String>,
 ) {
     if emission_disabled() || !state_dir.exists() {
         return;
@@ -118,6 +119,7 @@ pub fn emit_session_presence(
         worker_id,
         molecule_id,
         state,
+        detail,
         ts: Utc::now(),
     };
     let _ = emit_one(resolve_events_log_path(state_dir), event, None);

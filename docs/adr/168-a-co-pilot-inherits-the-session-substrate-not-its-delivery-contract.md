@@ -426,3 +426,20 @@ carries pilot notes, presence and checkpoints only, as listed in
 It does not carry delivery into a model's context, a lease or a signed grant;
 those stay host-local, and a remote acknowledgment reports only the stage the
 host or the client actually observed.
+
+## Amendment of 2026-10-05 (issue #165 follow-up)
+
+The confidentiality ceiling admits exactly one additional payload field for a
+Claude `Notification` hook moment: its `message` string. This is
+harness-authored status text, such as a notice that permission is required; it
+is not tool input, question text or transcript content. No field from any other
+hook moment is admitted.
+
+Before storage, cosmon keeps only the first line, collapses whitespace, replaces
+credential-shaped values and absolute paths, and caps the result at 160
+characters. An empty result is omitted. The redacted value may appear as the
+optional `detail` of the current presence record and of a `session_presence`
+state-change event. A change to `detail` alone does not append an event.
+
+This narrow exception lets a dashboard explain what a waiting session is
+waiting on without copying the conversation or provider inputs into cosmon.

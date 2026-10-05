@@ -1124,6 +1124,7 @@ fn run_attach(ctx: &Context, args: &AttachArgs) -> anyhow::Result<()> {
         mission: args.mission.clone(),
         epoch: args.epoch,
         state: None,
+        detail: None,
     };
     let presence = presence::ping(ctx, &ping_args)?;
 

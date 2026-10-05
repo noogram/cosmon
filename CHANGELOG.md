@@ -21,6 +21,11 @@ this stage.
 
 ### Fixed
 
+- Session presence can now carry an optional, redacted `detail` for Claude
+  `Notification` moments, so a dashboard can explain a waiting state without
+  storing tool input, question text or transcript content. Details are limited
+  to one line and 160 characters; credential-shaped values and absolute paths
+  are replaced before the presence record or state-change event is written.
 - `session_presence` no longer reports an idle Claude session as
   `waiting_permission`. The `Notification` hook now reads `notification_type`:
   `idle_prompt` gives the new `idle_input` state, `elicitation_dialog` gives

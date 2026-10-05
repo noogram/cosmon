@@ -257,6 +257,11 @@ pub struct PingArgs {
     /// from the command line; a ping that omits it carries the previous one.
     #[arg(skip)]
     pub state: Option<cosmon_core::presence::SessionState>,
+    /// Replacement for the redacted notification detail. The outer option
+    /// distinguishes a non-hook ping (carry the prior value) from a hook
+    /// moment that explicitly clears it.
+    #[arg(skip)]
+    pub detail: Option<Option<String>>,
 }
 
 /// Arguments for `cs presence ls`.
@@ -547,6 +552,10 @@ pub(crate) fn ping(ctx: &Context, args: &PingArgs) -> anyhow::Result<Presence> {
         mission,
         lease_epoch,
         state: args.state.or_else(|| prior.as_ref().and_then(|p| p.state)),
+        detail: match &args.detail {
+            Some(detail) => detail.clone(),
+            None => prior.as_ref().and_then(|p| p.detail.clone()),
+        },
         ..Presence::new(
             session_id.clone(),
             args.galaxy.clone(),
