@@ -175,6 +175,13 @@ pub struct Args {
     heal_invariants: bool,
 }
 
+impl Args {
+    /// Whether this invocation only inspects projected surfaces.
+    pub(crate) fn is_check(&self) -> bool {
+        self.check
+    }
+}
+
 /// Classified surface with all the inputs needed to apply the decision
 /// downstream (write the file, record a conflict, or escalate).
 ///
@@ -457,15 +464,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // Cache-rebuild pass (ADR-052 R4): before projecting surfaces, ensure
     // every molecule's `state.json` is present and parsable. The events.jsonl
     // log is the source of truth; state.json is a derivable hot cache.
-    // Missing / corrupt caches are rebuilt from the log in place. Up-to-date
-    // caches are left alone so a healthy galaxy sees no write churn.
+    // Missing caches are rebuilt from the log in place. An unparseable cache
+    // is refused without modification so this projection never launders a
+    // legacy state into a partial replacement.
     let events_path = state_dir.join("events.jsonl");
     let fleets_root = state_dir.join("fleets");
-    let rebuild_results = cosmon_state::rebuild_all_missing(&events_path, &fleets_root)
-        .unwrap_or_else(|e| {
-            eprintln!("  ⚠ state.json cache-rebuild skipped: {e}");
-            Vec::new()
-        });
+    let rebuild_results = cosmon_state::rebuild_all_missing(&events_path, &fleets_root)?;
     report_cache_rebuild(ctx, &rebuild_results);
 
     let fleet = store.load_fleet()?;
@@ -606,9 +610,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 /// Print a short human / JSON-friendly summary of the cache-rebuild pass.
 ///
 /// Up-to-date molecules are counted but not listed — the noise-to-signal on
-/// a healthy galaxy would be high. Anything that required a write (missing
-/// or corrupt cache) is named explicitly so operators see the recovery
-/// happen.
+/// a healthy galaxy would be high. Missing caches are named explicitly so
+/// operators see the recovery happen.
 fn report_cache_rebuild(
     ctx: &Context,
     results: &[(cosmon_core::id::MoleculeId, cosmon_state::RebuildOutcome)],
@@ -617,26 +620,21 @@ fn report_cache_rebuild(
         return;
     }
     let mut created = Vec::new();
-    let mut recovered = Vec::new();
     let mut ok = 0usize;
     for (id, outcome) in results {
         match outcome {
             cosmon_state::RebuildOutcome::CreatedFromEvents => created.push(id.as_str().to_owned()),
-            cosmon_state::RebuildOutcome::RecoveredFromCorruption => {
-                recovered.push(id.as_str().to_owned());
-            }
             cosmon_state::RebuildOutcome::UpToDate
             | cosmon_state::RebuildOutcome::NoEventsForMolecule => ok += 1,
         }
     }
-    if created.is_empty() && recovered.is_empty() {
+    if created.is_empty() {
         return;
     }
     if ctx.json {
         let payload = serde_json::json!({
             "cache_rebuild": {
                 "created": created,
-                "recovered": recovered,
                 "up_to_date": ok,
             }
         });
@@ -653,15 +651,6 @@ fn report_cache_rebuild(
             );
             for id in &created {
                 println!("  🧬 {id}");
-            }
-        }
-        if !recovered.is_empty() {
-            println!(
-                "Recovered {} corrupt state.json (archived as .broken):",
-                recovered.len()
-            );
-            for id in &recovered {
-                println!("  🩹 {id}");
             }
         }
     }
