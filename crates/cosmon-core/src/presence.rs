@@ -27,6 +27,7 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::id::{MoleculeId, SessionId};
@@ -201,6 +202,55 @@ pub fn galaxy_name_from_state_dir(state_dir: &std::path::Path) -> Option<String>
 /// the scan within one heartbeat window.
 pub const STALE_AFTER: Duration = Duration::minutes(3);
 
+/// Maximum number of Unicode scalar values in a session-presence detail.
+pub const PRESENCE_DETAIL_MAX_CHARS: usize = 160;
+
+/// Reduce a provider-authored notification to a bounded, redacted detail.
+///
+/// Only the first line is considered. Whitespace is collapsed, credential-
+/// shaped values and absolute paths are replaced, and the result is capped at
+/// [`PRESENCE_DETAIL_MAX_CHARS`] characters including the trailing ellipsis.
+/// Empty input returns `None`, so callers can omit the field on the wire.
+///
+/// This function is deliberately pure: hook adapters decide whether a payload
+/// field may cross the confidentiality boundary, while the I/O-free core owns
+/// the transformation applied before that value is persisted.
+#[must_use]
+pub fn redact_presence_detail(input: &str) -> Option<String> {
+    let first_line = input.split(['\r', '\n']).next().unwrap_or_default();
+    let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+
+    // These expressions are literals covered by the tests below. Returning
+    // `None` on an impossible compile failure remains fail-closed: no
+    // unredacted detail is ever persisted.
+    let secrets = Regex::new(
+        r"(?i)\bbearer\s+[a-z0-9._~+/=-]+|\bsk-[a-z0-9_-]+|\bghp_[a-z0-9_]+|\bgithub_pat_[a-z0-9_]+|\bxox[a-z0-9]*-[a-z0-9-]+|\bAKIA[A-Z0-9]+\b|\b[a-f0-9]{32,}\b|[a-z0-9+/]{32,}={0,2}",
+    )
+    .ok()?;
+    let paths = Regex::new(r"(?:~(?:/[^\s/]+)+|(?:/[^\s/]+){2,})").ok()?;
+    let redacted = secrets.replace_all(&collapsed, "[redacted]");
+    let redacted = paths.replace_all(&redacted, "[path]");
+    let clean = redacted.trim();
+    if clean.is_empty() {
+        return None;
+    }
+
+    let mut chars = clean.chars();
+    let prefix: String = chars.by_ref().take(PRESENCE_DETAIL_MAX_CHARS).collect();
+    if chars.next().is_none() {
+        return Some(prefix);
+    }
+    let mut capped: String = prefix
+        .chars()
+        .take(PRESENCE_DETAIL_MAX_CHARS.saturating_sub(1))
+        .collect();
+    capped.push('…');
+    Some(capped)
+}
+
 /// Chalk-mark left by a live session under
 /// `.cosmon/state/presence/session-<session_id>.json`.
 ///
@@ -307,6 +357,12 @@ pub struct Presence {
     /// field existed, and on a session that has not reported one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<SessionState>,
+    /// Redacted provider-authored context for the current notification state.
+    ///
+    /// Present only for an admitted notification moment, bounded by
+    /// [`PRESENCE_DETAIL_MAX_CHARS`], and absent from all other moments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl Presence {
@@ -345,6 +401,7 @@ impl Presence {
             mission: None,
             lease_epoch: None,
             state: None,
+            detail: None,
         }
     }
 
@@ -460,6 +517,51 @@ mod tests {
             !json.contains("\"current_molecule\""),
             "current_molecule should be skipped: {json}"
         );
+        assert!(
+            !json.contains("\"detail\""),
+            "detail should be skipped: {json}"
+        );
+    }
+
+    #[test]
+    fn presence_detail_keeps_one_collapsed_line() {
+        assert_eq!(
+            redact_presence_detail("  Waiting\tfor   approval  \nprivate second line"),
+            Some("Waiting for approval".to_owned())
+        );
+        assert_eq!(redact_presence_detail(" \t\r\n"), None);
+    }
+
+    #[test]
+    fn presence_detail_redacts_credentials_and_paths() {
+        let detail = redact_presence_detail(
+            "Use sk-exampletoken123 and Bearer abcdefghijklmnop at /srv/cosmon/private.txt or ~/secrets/key",
+        )
+        .unwrap();
+        assert_eq!(detail, "Use [redacted] and [redacted] at [path] or [path]");
+
+        for secret in [
+            "ghp_abcdefghijklmnopqrstuvwxyz123456",
+            "github_pat_abcdefghijklmnopqrstuvwxyz123456",
+            "xoxb-abcdefghijklmnopqrstuvwxyz123456", // publish: allow — synthetic redaction fixture
+            "AKIAABCDEFGHIJKLMNOP",                  // publish: allow — synthetic redaction fixture
+            "0123456789abcdef0123456789abcdef",
+            "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/==",
+        ] {
+            assert_eq!(
+                redact_presence_detail(secret).as_deref(),
+                Some("[redacted]")
+            );
+        }
+    }
+
+    #[test]
+    fn presence_detail_caps_unicode_with_ellipsis_inside_the_limit() {
+        let input = "mot é ".repeat(80);
+        let detail = redact_presence_detail(&input).unwrap();
+        assert_eq!(detail.chars().count(), PRESENCE_DETAIL_MAX_CHARS);
+        assert!(detail.ends_with('…'));
+        assert!(detail.is_char_boundary(detail.len()));
     }
 
     // A snapshot written by a `cs` that predates M2 has none of the six

@@ -57,7 +57,7 @@ Fields by event type:
 | `worker_spawned`, `adapter_selected`, `model_selected`, `model_observed` | `worker_id` or `mol_id`, `adapter_name`, `model` where the type has them |
 | `energy_tick` | `worker_id`, `input_tokens`, `output_tokens`, `cost_usd` (legacy; current writers emit `usage_observed`) |
 | `usage_observed` | `usage` (see below) |
-| `session_presence` | `session_id`, `provider`, `role`, `worker_id`, `molecule_id`, `state`, `ts` |
+| `session_presence` | `session_id`, `provider`, `role`, `worker_id`, `molecule_id`, `state`, `detail`, `ts` |
 
 **Session presence.** `session_presence` is appended to the galaxy's
 `events.jsonl` by `cs sessions hook run`, once per change of session state; a
@@ -67,8 +67,10 @@ is `pilot` or `worker`. `state` is one of `session_start`, `working`, `idle`,
 is a session idle at its prompt after Claude's idle reminder, as opposed to
 `waiting_permission`, a real permission prompt. `provider` (`claude`, `codex`),
 `worker_id` and `molecule_id` are absent when unknown; `molecule_id` is set for
-a worker session. `operator_present` is a different event: it is per `cs` call, not per
-session.
+a worker session. `detail` is optional, redacted, at most 160 characters and
+present only for a Claude `Notification` moment; a detail-only change does not
+append another event. `operator_present` is a different event: it is per `cs`
+call, not per session.
 
 **Usage.** `usage_observed` carries one `usage` object per answered model
 request, with its own `schema_version` (currently `1`) that moves independently
@@ -149,8 +151,10 @@ session. Besides `session_id`, `galaxy`, `heartbeat_at` and `headline`, it
 carries `state` with the same values as `session_presence.state`; the key is
 absent for a session that has not reported one. `galaxy` is the name of the
 session's galaxy (the directory that holds `.cosmon/`). `headline` stays free
-text, and a reader should use `state` instead of parsing it. The file carries
-no `schema_version` and follows the same additive rule.
+text, and a reader should use `state` instead of parsing it. `detail` is absent
+except for the latest Claude `Notification` moment; when present it is redacted
+and no longer than 160 characters. The file carries no `schema_version` and
+follows the same additive rule.
 
 ## Git conventions
 

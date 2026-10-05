@@ -205,6 +205,16 @@ pub struct LeaseCheckArgs {
     pub epoch: Option<u64>,
 }
 
+/// How an internal caller updates the notification detail during a ping.
+#[derive(Default)]
+pub(crate) enum PresenceDetailUpdate {
+    /// This is not a hook heartbeat, so retain the existing detail.
+    #[default]
+    Preserve,
+    /// This is a hook moment: replace the detail, including clearing it.
+    Replace(Option<String>),
+}
+
 /// Arguments for `cs presence ping`.
 #[derive(clap::Args, Default)]
 pub struct PingArgs {
@@ -257,6 +267,9 @@ pub struct PingArgs {
     /// from the command line; a ping that omits it carries the previous one.
     #[arg(skip)]
     pub state: Option<cosmon_core::presence::SessionState>,
+    /// Whether to preserve or replace the redacted notification detail.
+    #[arg(skip)]
+    pub(crate) detail: PresenceDetailUpdate,
 }
 
 /// Arguments for `cs presence ls`.
@@ -547,6 +560,10 @@ pub(crate) fn ping(ctx: &Context, args: &PingArgs) -> anyhow::Result<Presence> {
         mission,
         lease_epoch,
         state: args.state.or_else(|| prior.as_ref().and_then(|p| p.state)),
+        detail: match &args.detail {
+            PresenceDetailUpdate::Replace(detail) => detail.clone(),
+            PresenceDetailUpdate::Preserve => prior.as_ref().and_then(|p| p.detail.clone()),
+        },
         ..Presence::new(
             session_id.clone(),
             args.galaxy.clone(),
