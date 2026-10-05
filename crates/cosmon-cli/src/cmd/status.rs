@@ -477,13 +477,24 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         items,
     };
 
+    let project_socket = super::tmux_socket_name(ctx);
+    let backends = discover_fleet_backends(&state_dir, &project_socket);
+
+    // --- Dead workers (issue #172) — a Running molecule whose session is
+    // gone. Classified by `ensemble::molecule_ghost`, the function behind the
+    // ensemble's ghost column, so the two commands cannot disagree.
+    let dead_workers = dead_workers(&fleet, &molecules, &backends);
+
     // Leases are left out of the kind breakdown for the same reason they are
     // left out of the alive count it sits beside: the two must add up, and a
     // lease is not one of the things the reader is being asked to drain.
     let mut by_kind: HashMap<MoleculeKind, usize> = HashMap::new();
     for mol in &molecules {
         let kind = mol.kind.unwrap_or(MoleculeKind::Task);
-        if mol.status.is_alive() && !leases.contains(&mol.id) {
+        if mol.status.is_alive()
+            && !leases.contains(&mol.id)
+            && !dead_workers.iter().any(|d| d.molecule == mol.id.as_str())
+        {
             *by_kind.entry(kind).or_default() += 1;
         }
     }
@@ -494,8 +505,6 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 
     // --- Sessions (tmux) ---
-    let project_socket = super::tmux_socket_name(ctx);
-    let backends = discover_fleet_backends(&state_dir, &project_socket);
     let live_sessions = discover_live_sessions(&backends);
 
     let mut active_sessions: Vec<SessionInfo> = Vec::new();
@@ -534,11 +543,6 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             active_sessions.push(info);
         }
     }
-
-    // --- Dead workers (issue #172) — a Running molecule whose session is
-    // gone. Classified by `ensemble::molecule_ghost`, the function behind the
-    // ensemble's ghost column, so the two commands cannot disagree.
-    let dead_workers = dead_workers(&fleet, &molecules, &backends);
 
     // --- Contributions (git branches) ---
     let contributions = discover_contributions(&molecules);
