@@ -4,10 +4,12 @@ set -euo pipefail
 
 repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 unit="$HOME/.config/systemd/user/cosmon-daemon-supervisor.service"
-fixture_root="$HOME/.cosmon systemd-%-\$-quote\"-slash\\"
+fixture_root="${COSMON_SYSTEMD_TEST_TMPDIR:-${TMPDIR:-/tmp}}/cosmon systemd-%-\$-quote\"-slash\\"
 mkdir -p "$fixture_root"
 work="$(mktemp -d "$fixture_root/run.XXXXXX")"
 original=
+TEST_CHILD_PID="$work/child.pid"
+TEST_SUPERVISOR_PID="$work/supervisor.pid"
 
 fail() {
     echo "systemd-supervisor-test: $*" >&2
@@ -23,7 +25,12 @@ cleanup() {
         rm -f "$unit"
     fi
     systemctl --user daemon-reload >/dev/null 2>&1 || true
-    rm -rf "$work"
+    for pid_file in "$TEST_CHILD_PID" "$TEST_SUPERVISOR_PID"; do
+        if [[ -s "$pid_file" ]]; then
+            kill "$(<"$pid_file")" >/dev/null 2>&1 || true
+        fi
+    done
+    find "$work" -depth -delete
     rmdir "$fixture_root" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -63,8 +70,6 @@ EOF
 chmod +x "$work/bin/child" "$work/bin/cosmon-daemon-supervisor"
 printf 'fixture=true\n' > "$work/config/daemons.toml"
 
-TEST_CHILD_PID="$work/child.pid"
-TEST_SUPERVISOR_PID="$work/supervisor.pid"
 export COSMON_SUPERVISOR_BIN_DIR="$work/bin"
 export COSMON_SUPERVISOR_CONFIG="$work/config/daemons.toml"
 
@@ -77,6 +82,26 @@ for _ in {1..50}; do
     sleep 0.1
 done
 [[ -s "$TEST_SUPERVISOR_PID" && -s "$TEST_CHILD_PID" ]] || fail "service PIDs were not recorded"
+
+# Reload is a real-manager replacement, not only a renderer assertion. A
+# changed config must be revalidated, the previous cgroup must be cleaned, and
+# exactly one replacement must become the service main process.
+pre_reload_supervisor="$(<"$TEST_SUPERVISOR_PID")"
+pre_reload_child="$(<"$TEST_CHILD_PID")"
+printf 'fixture=reloaded\n' > "$work/config/daemons.toml"
+"$repo/scripts/install-daemon-supervisor.sh" reload
+for _ in {1..50}; do
+    reload_supervisor="$(cat "$TEST_SUPERVISOR_PID" 2>/dev/null || true)"
+    reload_child="$(cat "$TEST_CHILD_PID" 2>/dev/null || true)"
+    [[ -n "$reload_supervisor" && "$reload_supervisor" != "$pre_reload_supervisor" ]] && break
+    sleep 0.1
+done
+[[ "$reload_supervisor" != "$pre_reload_supervisor" ]] || fail "reload did not replace the supervisor"
+kill -0 "$pre_reload_supervisor" 2>/dev/null && fail "pre-reload supervisor survived replacement"
+kill -0 "$pre_reload_child" 2>/dev/null && fail "pre-reload descendant survived cgroup cleanup"
+kill -0 "$reload_supervisor" 2>/dev/null || fail "reloaded supervisor is absent"
+kill -0 "$reload_child" 2>/dev/null || fail "reloaded child is absent"
+
 old_supervisor="$(<"$TEST_SUPERVISOR_PID")"
 old_child="$(<"$TEST_CHILD_PID")"
 kill -KILL "$old_supervisor"

@@ -34,6 +34,8 @@ name: Install lint
 #   8. the hosted `curl https://noogram.org/cosmon/install.sh | sh` endpoint
 #      actually serves a runnable installer once it is live — `endpoint`
 #      (schedule / manual only; self-skips while the Worker serves coming-soon).
+#   9. the Linux service units run against an isolated per-user manager, with
+#      their process-lifetime mutations required to fail — `linux-user-services`.
 #      Note this asks only "does it RUN?" — `served-drift` asks "is it the SAME
 #      script?", which is the question both incidents needed asked.
 #
@@ -67,6 +69,9 @@ on:
       - "scripts/systemd/**"
       - "scripts/launchd/com.cosmon.daemon-supervisor.plist"
       - "scripts/launchd/com.cosmon.scheduler.plist"
+      - "tests/harness/systemd-supervisor-test.sh"
+      - "tests/harness/systemd-scheduler-test.sh"
+      - "tests/harness/linux-user-services-test.sh"
   pull_request:
     paths:
       - "infra/install/**"
@@ -80,6 +85,9 @@ on:
       - "scripts/systemd/**"
       - "scripts/launchd/com.cosmon.daemon-supervisor.plist"
       - "scripts/launchd/com.cosmon.scheduler.plist"
+      - "tests/harness/systemd-supervisor-test.sh"
+      - "tests/harness/systemd-scheduler-test.sh"
+      - "tests/harness/linux-user-services-test.sh"
   # Manual trigger — chiefly to run the hosted-`endpoint` smoke on demand once
   # the operator flips the Worker live.
   workflow_dispatch:
@@ -106,6 +114,46 @@ jobs:
         run: sh infra/install/install.sh --self-test
       - name: Opt-in service bundle contract
         run: scripts/release/service-bundle.test.sh
+
+  linux-user-services:
+    name: Linux evidence — isolated user-service manager
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Start an isolated user manager
+        run: |
+          set -euo pipefail
+          test "$(ps -p 1 -o comm=)" = systemd
+          sudo useradd --create-home --home-dir /tmp/cosmon-services-ci-home \
+            --shell /bin/bash cosmon-services-ci
+          uid="$(id -u cosmon-services-ci)"
+          sudo loginctl enable-linger cosmon-services-ci
+          sudo systemctl start "user@${uid}.service"
+          for _ in {1..50}; do
+            test -S "/run/user/${uid}/bus" && break
+            sleep 0.1
+          done
+          test -S "/run/user/${uid}/bus"
+          echo "COSMON_TEST_UID=${uid}" >> "$GITHUB_ENV"
+      - name: Run real-manager service conformance
+        run: |
+          set -euo pipefail
+          sudo -u cosmon-services-ci env \
+            HOME=/tmp/cosmon-services-ci-home \
+            XDG_RUNTIME_DIR="/run/user/${COSMON_TEST_UID}" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${COSMON_TEST_UID}/bus" \
+            COSMON_SYSTEMD_TEST_ISOLATED=1 \
+            COSMON_SYSTEMD_TEST_TMPDIR=/tmp \
+            timeout 240 "$GITHUB_WORKSPACE/tests/harness/linux-user-services-test.sh"
+      - name: Remove the isolated user manager
+        if: always()
+        run: |
+          set -euo pipefail
+          if id cosmon-services-ci >/dev/null 2>&1; then
+            sudo loginctl disable-linger cosmon-services-ci || true
+            sudo systemctl stop "user@$(id -u cosmon-services-ci).service" || true
+            sudo userdel --remove cosmon-services-ci
+          fi
 
   worker:
     name: worker — typecheck + dry-run bundle
