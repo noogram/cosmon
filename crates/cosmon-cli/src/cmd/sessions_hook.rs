@@ -562,8 +562,8 @@ fn read_payload(args: &RunArgs) -> String {
 
 /// What the payload tells us about the session it came from.
 ///
-/// Only two fields are read, and neither is conversation content: the native
-/// session id, which is half the canonical selector, and nothing else. This is
+/// The native session id is half the canonical selector and is not conversation
+/// content; see [`notification_type`] for the one other field read. This is
 /// the confidentiality ceiling ADR-168 set for the whole mission.
 fn native_session_id(payload: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
@@ -572,13 +572,34 @@ fn native_session_id(payload: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// The `notification_type` string of a Claude `Notification` payload.
+///
+/// The only other field read from a payload besides `session_id`: a short
+/// enumerated kind, never the message text or any tool input (ADR-168
+/// confidentiality ceiling).
+fn notification_type(payload: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    v.get("notification_type")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
 /// The typed state a hook moment puts the session in.
-fn session_state(event: HookEvent) -> SessionState {
+///
+/// Claude fires `Notification` both for a permission prompt and for the idle
+/// reminder, so `Waiting` is split on `notification_type`. Any other value, or
+/// none, keeps `WaitingPermission`: an unrecognised notification is reported as
+/// the more urgent reading rather than hidden as idleness.
+fn session_state(event: HookEvent, notification_type: Option<&str>) -> SessionState {
     match event {
         HookEvent::SessionStart => SessionState::SessionStart,
         HookEvent::TurnStart => SessionState::Working,
         HookEvent::TurnEnd => SessionState::Idle,
-        HookEvent::Waiting => SessionState::WaitingPermission,
+        HookEvent::Waiting => match notification_type {
+            Some("idle_prompt") => SessionState::IdleInput,
+            Some("elicitation_dialog") => SessionState::Asking,
+            _ => SessionState::WaitingPermission,
+        },
         HookEvent::Asking => SessionState::Asking,
     }
 }
@@ -628,7 +649,7 @@ fn beat_presence(
     let headline = worker_molecule
         .as_ref()
         .map(|_| format!("worker: {}", event.as_str()));
-    let state = session_state(event);
+    let state = session_state(event, notification_type(payload).as_deref());
     let kind = if worker_molecule.is_some() {
         SessionKind::Worker
     } else {

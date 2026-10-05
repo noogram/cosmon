@@ -19,6 +19,14 @@ this stage.
 
 ## [Unreleased]
 
+### Fixed
+
+- `session_presence` no longer reports an idle Claude session as
+  `waiting_permission`. The `Notification` hook now reads `notification_type`:
+  `idle_prompt` gives the new `idle_input` state, `elicitation_dialog` gives
+  `asking`, and `permission_prompt` or any other value keeps
+  `waiting_permission`. `idle_input` is an additive value of the `state` enum.
+
 ## [0.7.2] — 2026-10-05
 
 ### Breaking changes and operator actions on upgrade
