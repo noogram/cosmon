@@ -1154,6 +1154,7 @@ fn collapse_body(body: &CollapseJson, location: WorkLocation) -> Value {
 }
 
 /// `POST /v1/molecules/:id/collapse` — V1 mutation cut (T-CST-EXPAND).
+#[allow(clippy::too_many_lines)] // Explicit response mapping stays auditable in one handler.
 pub async fn collapse_molecule(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2115,6 +2116,7 @@ fn trace_tackle_dispatch_rejection(spark: &Spark, molecule_id: &str, err: &Tackl
 /// - **403** — missing `cosmon:molecule:write` or
 ///   `cosmon:worker:spawn` (same composed grid as tackle: a drain
 ///   spawns workers, i.e. burns Anthropic credit).
+#[allow(clippy::too_many_lines)] // Explicit response mapping stays auditable in one handler.
 pub async fn run_molecule(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
