@@ -66,6 +66,22 @@ cs scheduler status         # last-known state of every patrol
 `cs scheduler` is a **read-only** view onto the scheduler's state; adding or
 editing a patrol is a `patrols.toml` edit, validated with the command above.
 
+On Linux, v0.7.3 can install this scheduler as an opt-in user timer through the
+public installer's `--with-services` flag. The timer starts sixty seconds after
+activation and again sixty seconds after each completed activation. It does not
+perform persistent catch-up. A running wait-mode tick suppresses another main
+tick; detached work can outlive the one-shot scheduler process. Stopping the
+timer prevents later dispatch but does not cancel already detached work.
+
+```sh
+$HOME/.local/libexec/cosmon/install-scheduler.sh status
+$HOME/.local/libexec/cosmon/install-scheduler.sh uninstall
+```
+
+The service requires a reachable per-user manager. See
+[Run cosmon services under WSL2](./wsl2.md) for linger, restart, filesystem,
+and power behavior.
+
 ## Keeping projected surfaces fresh
 
 Any batch of molecule changes can leave cosmon's projected surfaces

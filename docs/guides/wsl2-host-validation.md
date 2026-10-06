@@ -111,15 +111,30 @@ Host reboot and explicit distribution launch:
 
 ```sh
 bash "$verify" before-reboot
-# External driver reboots the host and explicitly launches the distribution.
+# External driver uses Restart, not Shut down, and explicitly launches the
+# distribution. Shut down with Fast Startup can retain the old host boot time.
 bash "$verify" after-reboot
 ```
+
+The script reads the host boot epoch through `powershell.exe` interop. When
+interop is unavailable, the external driver must pass the observed epoch in
+`COSMON_WSL2_WINDOWS_BOOT_EPOCH` separately for both phases:
+
+```sh
+COSMON_WSL2_WINDOWS_BOOT_EPOCH=<before-epoch> bash "$verify" before-reboot
+# Restart the host and launch the distribution.
+COSMON_WSL2_WINDOWS_BOOT_EPOCH=<after-epoch> bash "$verify" after-reboot
+```
+
+`after-reboot` refuses an equal or earlier value. WSL2 does not start with the
+host; explicit distribution launch is part of the phase.
 
 Host sleep and resume with a patrol in flight:
 
 ```sh
 bash "$verify" before-sleep
-# External driver sleeps and resumes the host.
+# Keep a WSL client attached while the external driver sleeps and resumes the
+# host. An idle distribution without a client can stop before sleep.
 bash "$verify" after-sleep
 ```
 
@@ -131,16 +146,26 @@ bash "$verify" final
 
 The `after-*` phases require a fresh supervised-child heartbeat, exactly one
 expected child, readable JSON state, active services, and the recorded native
-manager properties. `after-sleep` additionally requires the in-flight detached
-patrol to finish. The timer phase allows 90 seconds for the next one-minute
+manager properties. Each phase records `uptime -s` before and after the
+boundary and reports `SURVIVED` only when the distribution boot time is
+unchanged; otherwise it reports `RESTARTED`. `after-sleep` refuses a changed
+distribution boot time with `distribution stopped before or during sleep` and
+requires the in-flight detached patrol to finish within 150 seconds of the
+probe start. The timer phase allows 90 seconds for the next one-minute
 activation and reports observed load or suspend delays instead of weakening the
 assertion.
+
+For remote access to the disposable host, do not bind the remote shell server
+only to an address that appears after a network overlay starts. That ordering
+can prevent the server from starting at boot even when cosmon's units are
+healthy. Bind normally and enforce the access restriction in the host firewall.
 
 ## Interpretation
 
 A checkpoint proves only its named phase. Missing checkpoints are pending, not
-passes. An unreachable host, unfinished lifecycle, or power action not yet run
-must remain explicit in the measurement report. Candidate success establishes
-candidate behavior at the recorded revision and hashes; release support still
-depends on rerunning the same procedure against the next published assets and
-served installer.
+passes. `final` refuses until all four external `after-*` checkpoints exist and
+lists every missing checkpoint. An unreachable host, unfinished lifecycle, or
+power action not yet run must remain explicit in the measurement report.
+Candidate success establishes candidate behavior at the recorded revision and
+hashes; release support still depends on rerunning the same procedure against
+the exact published assets and served installer.

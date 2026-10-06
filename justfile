@@ -235,8 +235,8 @@ quick:
     # green locally, because that script (like ~20 others below) ran only
     # from .github/workflows/*.yml. Every check added here is pure
     # bash/python over the tracked tree: no network, no container, no
-    # secret, no PR-event context, each measured well under a second on
-    # this machine. See AGENTS.md §Verification for the full CI-vs-local
+    # secret, no PR-event context. Most are well under a second; process-bound
+    # checks name their measurements inline. See AGENTS.md §Verification for the full CI-vs-local
     # inventory and the reasons the remaining ~20 checks stay CI-only.
     ./scripts/no-pilot-env.sh ./scripts/sovereignty-gate.sh
     ./scripts/no-pilot-env.sh ./scripts/confidentiality-banlist.sh
@@ -257,6 +257,7 @@ quick:
     ./scripts/no-pilot-env.sh ./scripts/install-hooks.test.sh
     ./scripts/no-pilot-env.sh ./scripts/install-daemon-supervisor.test.sh
     ./scripts/no-pilot-env.sh ./scripts/install-scheduler.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/verify-wsl2-host.test.sh # ~17 s: separate phase processes
     ./scripts/no-pilot-env.sh ./tests/harness/linux-user-services-test.sh --offline-check
     ./scripts/no-pilot-env.sh ./tools/cosmon-skill/install.test.sh
     ./scripts/no-pilot-env.sh ./scripts/check-fixture-independence.sh

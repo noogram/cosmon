@@ -27,6 +27,7 @@
 - [Pilot cosmon in natural language](./how-to/pilot-in-natural-language.md)
 - [Pair an implementer with a cross-vendor reviewer](./how-to/pair-implementer-and-reviewer.md)
 - [Wire cosmon into an external scheduler](./how-to/external-scheduler.md)
+- [Run cosmon services under WSL2](./how-to/wsl2.md)
 - [Run cosmon as a remote service](./how-to/deploy-remote-service.md)
 
 # Reference

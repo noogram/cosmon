@@ -43,6 +43,19 @@ lifting the switch. The supervisor sees the save, hot-reloads, starts
    runtime runs).
 4. **`~/.cosmon/logs/` exists.** `mkdir -p ~/.cosmon/logs` if not.
 
+On Linux v0.7.3, the public installer provides the supervisor without a source
+checkout:
+
+```sh
+curl -fsSL https://noogram.org/cosmon/install.sh | sh -s -- --with-services
+$HOME/.local/libexec/cosmon/install-daemon-supervisor.sh status
+```
+
+The installer seeds `~/.config/cosmon/daemons.toml` only when it is absent.
+Append the runtime declaration below to that file. The user service owns the
+supervisor process; the TOML entry remains the only owner of the resident
+runtime child.
+
 ## The canonical `[[daemon]]` block
 
 Append this block to `~/.config/cosmon/daemons.toml`, in the same
@@ -193,6 +206,15 @@ procedure (reboot → wait → re-run the check). See
 [task-20260608-1c59](../../.cosmon/state/fleets/default/molecules/task-20260608-1c59/)
 for the rationale (the runtime was "dead all night" partly because
 nobody had promoted reboot-survival from a claim to a check).
+
+On Linux, the corresponding authority is
+`cosmon-daemon-supervisor.service`. It starts when the distribution and user
+manager start, reads the same `daemons.toml`, and starts each enabled child.
+Lingering can keep the user manager active after logout, but neither the unit
+nor the resident runtime can launch a stopped distribution or keep the host
+awake. The WSL2 candidate measured recovery after distribution restart and
+real host reboot; the published v0.7.3 host rerun remains pending. See the
+[WSL2 service guide](../book/src/how-to/wsl2.md) for setup and reversal.
 
 ## The self-hosting loop is a different thing
 

@@ -127,6 +127,13 @@ is inert until you point it at a remote. No manual page is installed, so
 `cs help guide`, and the [CLI overview](../reference/overview.md), which is
 generated from the tool itself.
 
+On Linux, the optional `--with-services` install also activates the user-level
+supervisor and scheduler timer. It does not install `git`, `tmux`, or an
+execution adapter, and it does not enable lingering. Use the client-only route
+above for an inert setup. If you want services, follow the status, reversal,
+user-manager, and power-boundary steps in
+[Run cosmon services under WSL2](../how-to/wsl2.md).
+
 ## Step 4: Initialise a project
 
 Pick any repository you want cosmon to track (a Rust crate, a research repo, a

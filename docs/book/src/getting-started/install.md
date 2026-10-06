@@ -1,7 +1,8 @@
 # Install cosmon
 
-Cosmon is **one command**, `cs`. There is no daemon to run, no service to
-register, no account to create: you put it on your `PATH` and you are done.
+Cosmon's transactional interface is **one command**, `cs`. A client-only
+install needs no daemon, service, or account. Linux users can separately opt
+into the shipped supervisor and scheduler user services.
 
 Every route installs two files: `cs` *and* `cosmon-remote`,
 the connector for driving a remote cosmon service, side by side in the same
@@ -40,6 +41,24 @@ missing, valid empty supervisor and scheduler configuration files under
 `~/.config/cosmon`, preserves existing configuration and state byte-for-byte,
 and prints the exact status and uninstall commands.
 `--dir` also controls where the two service binaries are installed.
+
+The service bundle was first released in v0.7.3. It requires `git`, `tmux`, and
+a configured execution adapter for real worker dispatch. Its helpers and unit
+templates live under `~/.local/libexec/cosmon`; configuration lives under
+`~/.config/cosmon`; units live under `~/.config/systemd/user`; application
+state and default logs remain under `~/.cosmon`. Inspect or reverse the install
+with the commands printed by the installer:
+
+```sh
+$HOME/.local/libexec/cosmon/install-daemon-supervisor.sh status
+$HOME/.local/libexec/cosmon/install-scheduler.sh status
+$HOME/.local/libexec/cosmon/install-daemon-supervisor.sh uninstall
+$HOME/.local/libexec/cosmon/install-scheduler.sh uninstall
+```
+
+Uninstall removes the owned units but retains configuration, logs, state, and
+linger policy. For the measured filesystem, startup, logout, reboot, and power
+limits, read [Run cosmon services under WSL2](../how-to/wsl2.md).
 
 The installer writes to `~/.local/bin`, which is **not** on the default `PATH` on
 a fresh macOS or Linux account. When it is not, the installer says so and prints
