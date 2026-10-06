@@ -14,8 +14,8 @@ internal and versioned independently; they carry no public API guarantee at
 this stage.
 
 > The commit-by-commit development history before `0.1.0` is preserved in the
-> git log and in [`docs/lore/CHRONICLES.md`](docs/lore/CHRONICLES.md). This
-> file starts its curated, public-facing record at the first tagged release.
+> git log. This file starts its curated, public-facing record at the first
+> tagged release.
 
 ## [Unreleased]
 
@@ -44,6 +44,13 @@ this stage.
   Windows boots; the services restart on the next distribution start (ADR-186).
   (#143)
 
+### Changed
+
+- `cosmon-daemon-supervisor` and `cosmon-scheduler` are now listed as shipped
+  service binaries in `packaging/shipped-binaries.txt`, and each release
+  carries a `cosmon-service-<version>-<target>.tar.gz` archive with them and
+  their user-service assets. (#143)
+
 ### Fixed
 
 - `cs status` no longer counts a dead worker as alive or reports the galaxy
@@ -63,6 +70,18 @@ this stage.
   `idle_prompt` gives the new `idle_input` state, `elicitation_dialog` gives
   `asking`, and `permission_prompt` or any other value keeps
   `waiting_permission`. `idle_input` is an additive value of the `state` enum.
+- The local harness arm now records per-request usage in the galaxy ledger,
+  like the other in-process arms, instead of in the molecule's own
+  `events.jsonl`.
+
+### Documentation
+
+- ADR-168 is amended for the presence `detail` field, and
+  `docs/book/src/reference/read-contracts.md` documents `idle_input`, `detail`
+  and the `session_presence` fields. `cs status` help describes the dead-worker
+  count. (#165, #172)
+- `docs/guides/release-verification.md` lists the service archive among the
+  release artifacts. (#143)
 
 ## [0.7.2] — 2026-10-05
 
