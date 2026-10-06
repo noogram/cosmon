@@ -82,6 +82,9 @@ use cosmon_state::MoleculeFilter;
 use super::Context;
 
 /// Arguments for the `status` subcommand.
+///
+/// A molecule whose `state.json` cannot be parsed is skipped and named
+/// (path and reason); the command then exits 3 after printing.
 #[derive(clap::Args)]
 pub struct Args {
     // One-paragraph doc on purpose: a second one flips clap's whole page
