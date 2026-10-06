@@ -10,7 +10,7 @@ Arguments:
   <SELECTOR>  The canonical selector, `<provider>:<native-session-id>`
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --tail <N>       Print the last N normalised events (kinds and sizes — never content) [default: 0]
       --no-read        Skip reading the log; show only what discovery already knows
   -v, --verbose        Enable verbose output

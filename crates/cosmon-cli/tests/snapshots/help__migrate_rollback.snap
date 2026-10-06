@@ -7,7 +7,7 @@ Roll back the last migration by re-materializing `state.prev/`
 Usage: cs migrate rollback [OPTIONS]
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --dry-run        Preview which rename would run without touching disk
   -v, --verbose        Enable verbose output
       --json           Output in JSON format

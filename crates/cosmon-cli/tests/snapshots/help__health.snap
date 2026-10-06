@@ -8,7 +8,7 @@ Usage: cs health [OPTIONS]
 
 Options:
       --all            Scan every `.cosmon/state/` below the configured cluster root, the way `cs peek --all` aggregates. Without it, only the current galaxy's state store is scanned
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --no-tmux        Skip the tmux liveness probe (state-only mode, for tests / headless). Session liveness is reported as `unknown`, so session-dependent classes (A1/A4/A5/A9) are conservatively not flagged
   -v, --verbose        Enable verbose output
       --json           Output in JSON format

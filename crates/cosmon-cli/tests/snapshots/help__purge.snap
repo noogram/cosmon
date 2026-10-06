@@ -14,7 +14,7 @@ Arguments:
 
 Options:
       --config <PATH>
-          Path to configuration file
+          Path to the state directory (default: the galaxy's .cosmon/state/)
 
       --force
           In targeted mode, SIGKILL the tmux session before removing the fleet entry. Ignored in sweep mode. Supersedes the stand-alone `cs kill` verb (ADR-052 §D3)

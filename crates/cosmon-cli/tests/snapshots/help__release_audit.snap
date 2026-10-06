@@ -7,7 +7,7 @@ expression: stdout
 Usage: cs release-audit [OPTIONS]
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --dry-run        Simulate the `release-resync` transformation chain against the live working tree (no scratch clone) and report regressions. This is currently the only mode; the flag is accepted so the documented invocation `cs release-audit --dry-run` is exact
       --repo <PATH>    Repository root to audit. Defaults to the toplevel discovered by `git rev-parse --show-toplevel` from the current directory
   -v, --verbose        Enable verbose output

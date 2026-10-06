@@ -7,7 +7,7 @@ Pilot — interactive cognitive pilot REPL over a client-side model (--experimen
 Usage: cs pilot [OPTIONS]
 
 Options:
-      --config <PATH>      Path to configuration file
+      --config <PATH>      Path to the state directory (default: the galaxy's .cosmon/state/)
       --experimental       Enable the experimental verb. While the interactive loop matures, `cs pilot` without this flag prints a safety notice and does nothing — no REPL, no model call, no side effects (mirrors `cs ask`, ADR-071)
       --model <TAG>        Ollama model tag to drive the loop (default: `llama3.2`). Falls back to the `COSMON_PILOT_MODEL` environment variable when the flag is omitted
   -v, --verbose            Enable verbose output

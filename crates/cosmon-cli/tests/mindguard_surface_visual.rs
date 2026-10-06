@@ -62,6 +62,12 @@ fn setup_surface_touched_project() -> (tempfile::TempDir, PathBuf, String) {
     let formulas_dir = project.join(".cosmon").join("formulas");
     fs::create_dir_all(&state_dir).unwrap();
     fs::create_dir_all(&formulas_dir).unwrap();
+    // A galaxy, not a bare state dir: the gate only guards a derived project root.
+    fs::write(
+        project.join(".cosmon").join("config.toml"),
+        "[project]\nproject_id = \"fixture-ab12\"\n",
+    )
+    .unwrap();
 
     let formula_toml = r#"
 formula = "surface-touching"

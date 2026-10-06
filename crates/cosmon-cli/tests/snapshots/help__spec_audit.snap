@@ -8,7 +8,7 @@ Usage: cs spec-audit [OPTIONS]
 
 Options:
       --config <PATH>
-          Path to configuration file
+          Path to the state directory (default: the galaxy's .cosmon/state/)
 
       --fleet <FLEET>
           Fleet id whose ledger should be audited. Defaults to the fleet resolved from the walk-up config (`default` for single-fleet projects). The fleet id is **advisory** today — the canonical `events.jsonl` lives at `.cosmon/state/events.jsonl` regardless of fleet — but the flag is accepted so future multi-ledger layouts stay backward-compatible

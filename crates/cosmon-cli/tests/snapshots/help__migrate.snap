@@ -13,7 +13,7 @@ Commands:
   genre     Apply a residence to every tracked path classified under a single genre (ADR-057 artifact-map). Composes artifact-map + git-side migration
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --dry-run        Legacy mode: preview what would be migrated without moving anything
       --cleanup        Legacy mode: remove the legacy `ops/molecules/` directory after migration
   -v, --verbose        Enable verbose output

@@ -7,7 +7,7 @@ Trust — grant this repository permission to run its own formulas/hooks (the `d
 Usage: cs trust [OPTIONS]
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --status         Report the current trust status without changing anything
       --revoke         Revoke this repository's trust grant
   -v, --verbose        Enable verbose output

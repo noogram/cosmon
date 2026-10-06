@@ -7,7 +7,7 @@ Show the last-known state of every patrol the scheduler has observed
 Usage: cs scheduler status [OPTIONS]
 
 Options:
-      --config <PATH>      Path to configuration file
+      --config <PATH>      Path to the state directory (default: the galaxy's .cosmon/state/)
       --state-file <PATH>  Path to the scheduler state file
       --log-file <PATH>    Path to the aggregate scheduler log
   -v, --verbose            Enable verbose output

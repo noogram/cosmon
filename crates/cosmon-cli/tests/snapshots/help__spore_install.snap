@@ -10,7 +10,7 @@ Arguments:
   <SOURCE>  Where the bundle comes from: a local path, `github:owner/repo[/dir][@ref]`, a GitHub tree/blob URL, or any other git remote
 
 Options:
-      --config <PATH>         Path to configuration file
+      --config <PATH>         Path to the state directory (default: the galaxy's .cosmon/state/)
       --dest <DIR>            Where to place the bundle. Defaults to `<project>/spores/<spore-name>/`
       --git-ref <REF>         Branch, tag, or commit to fetch. Overrides a ref encoded in the source
   -v, --verbose               Enable verbose output

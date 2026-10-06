@@ -10,7 +10,7 @@ Arguments:
   <MOLECULE_ID>  Molecule ID whose worker is blocking
 
 Options:
-      --config <PATH>    Path to configuration file
+      --config <PATH>    Path to the state directory (default: the galaxy's .cosmon/state/)
       --question <TEXT>  A decision the operator is being asked to make (repeatable). At least one is required
   -v, --verbose          Enable verbose output
       --json             Output in JSON format

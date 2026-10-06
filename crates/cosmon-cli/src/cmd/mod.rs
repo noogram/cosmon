@@ -5,7 +5,7 @@
 //! Each submodule corresponds to one CLI verb. All handlers receive a
 //! [`Context`] carrying the global flags.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub mod apps;
 pub mod archive;
@@ -156,6 +156,33 @@ pub struct Context {
 /// for the full precedence chain.
 pub(crate) fn default_state_dir() -> PathBuf {
     cosmon_filestore::resolve_state_dir(None)
+}
+
+/// Refuse a resolved state path that exists but is not a directory.
+///
+/// `--config` used to be documented as a configuration *file*, so a caller
+/// who passed one got it read as a state directory: the fleet loaded as
+/// empty and a projection rewrote tracked surfaces from that empty fleet
+/// before the first write failed. Runs at `Context` construction, before any
+/// I/O, and names the source of the path so the caller knows which flag or
+/// variable to correct. A path that does not exist yet is accepted: commands
+/// such as `cs init` create their state directory.
+pub(crate) fn reject_non_directory_state_dir(
+    state_dir: &Path,
+    origin: cosmon_filestore::StateDirOrigin,
+) -> anyhow::Result<()> {
+    if !state_dir.exists() || state_dir.is_dir() {
+        return Ok(());
+    }
+    let source = match origin {
+        cosmon_filestore::StateDirOrigin::Explicit => "--config",
+        cosmon_filestore::StateDirOrigin::Env => "COSMON_STATE_DIR",
+        _ => "the resolved state path",
+    };
+    anyhow::bail!(
+        "{source} must name a state directory (e.g. .cosmon/state), but {} is not a directory;          nothing was read or modified",
+        state_dir.display()
+    )
 }
 
 impl Context {

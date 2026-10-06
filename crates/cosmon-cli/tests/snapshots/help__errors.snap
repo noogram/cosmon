@@ -7,7 +7,7 @@ Errors — aggregate molecule-collapse events into one failure overview: what is
 Usage: cs errors [OPTIONS]
 
 Options:
-      --config <PATH>      Path to configuration file
+      --config <PATH>      Path to the state directory (default: the galaxy's .cosmon/state/)
       --since <SINCE>      Time window — accepts a relative duration (`<N>d`, `<N>h`, `<N>m`, `<N>s`) or an RFC-3339 absolute timestamp. Defaults to 7 days [default: 7d]
       --kind <VARIANT>     Filter to one `CollapseReason` variant. Accepts the on-wire strings: `worker_crashed`, `gate_failed`, `blocker_stuck`, `manual_abort`, `resource_exhausted`. Any other value is treated as a substring match on the free-form `Other` payload
   -v, --verbose            Enable verbose output

@@ -7,7 +7,7 @@ Write one message to another session. Delivered, and consumed, once
 Usage: cs sessions send [OPTIONS] --to <SID_OR_SELECTOR> --message <TEXT>
 
 Options:
-      --config <PATH>         Path to configuration file
+      --config <PATH>         Path to the state directory (default: the galaxy's .cosmon/state/)
       --to <SID_OR_SELECTOR>  Destination — a cosmon session id, or a selector a live pilot advertises
       --message <TEXT>        The message. Stored content-addressed; the envelope carries its hash
   -v, --verbose               Enable verbose output

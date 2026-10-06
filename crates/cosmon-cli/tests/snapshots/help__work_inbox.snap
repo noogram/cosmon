@@ -7,7 +7,7 @@ Pull messages addressed to this member at a safe point
 Usage: cs work inbox [OPTIONS]
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --peek           Show deliverable messages without recording a delivery attempt
   -v, --verbose        Enable verbose output
       --json           Output in JSON format

@@ -117,7 +117,7 @@ Tools:
   whisper              Whisper — advise a live worker; refuse unsafe pane dialogues
 
 Global options:
-  --config <PATH>      Path to configuration file
+  --config <PATH>      Path to the state directory (default: the galaxy's .cosmon/state/)
   --verbose, -v        Enable verbose output
   --json               Output in JSON format
 

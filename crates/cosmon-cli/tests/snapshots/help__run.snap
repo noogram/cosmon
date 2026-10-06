@@ -16,7 +16,7 @@ Arguments:
 
 Options:
       --config <PATH>
-          Path to configuration file
+          Path to the state directory (default: the galaxy's .cosmon/state/)
 
       --policy <POLICY>
           Scheduling policy to use

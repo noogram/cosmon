@@ -7,7 +7,7 @@ Wire this pilot's provider to run the co-pilotage hook
 Usage: cs sessions hook install [OPTIONS] --provider <NAME>
 
 Options:
-      --config <PATH>    Path to configuration file
+      --config <PATH>    Path to the state directory (default: the galaxy's .cosmon/state/)
       --provider <NAME>  The pilot whose configuration to wire: `claude` or `codex`
       --settings <PATH>  The settings file to edit. Defaults to the provider's own — for Claude `.claude/settings.local.json` beside the current directory, for Codex `$CODEX_HOME/config.toml` or `~/.codex/config.toml`
   -v, --verbose          Enable verbose output

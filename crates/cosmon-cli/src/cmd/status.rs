@@ -1455,12 +1455,14 @@ fn check_surfaces(state_dir: &std::path::Path) -> SurfaceStatus {
     let last_reconcile = newest.map(format_duration);
 
     // Count stale surfaces by checking if files on disk still match snapshot hashes
+    let project_root = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| cosmon_filestore::resolve_project_root(&cwd, state_dir));
     let mut stale_count = 0;
     for (surface_path, snap) in &snapshot.surfaces {
-        // Try to read the surface file relative to the project root
-        // State dir is typically .cosmon/state/, project root is two levels up
-        let project_root = state_dir.parent().and_then(|p| p.parent());
-        if let Some(root) = project_root {
+        // Surfaces live relative to the galaxy root, which walk-up decides
+        // (an override state dir does not move the galaxy's tracked files).
+        if let Some(root) = project_root.as_deref() {
             let full_path = root.join(surface_path);
             if let Ok(content) = std::fs::read_to_string(&full_path) {
                 let hash = sha256_hex(&content);

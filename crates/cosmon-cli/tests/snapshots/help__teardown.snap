@@ -10,7 +10,7 @@ Arguments:
   <FLEET>  Name of the fleet to tear down (matches fleet.toml `fleet = "..."` name)
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --force          Force-kill instead of graceful quench
       --no-tmux        Skip tmux interaction (state-only, for testing)
   -v, --verbose        Enable verbose output
