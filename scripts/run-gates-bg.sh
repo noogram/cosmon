@@ -109,8 +109,12 @@ disown "$child" 2>/dev/null || true
 # tree the moment the command returns kills it inside that window: no
 # gates.exit is ever written (noogram/cosmon#176, observed under `codex
 # exec`). So do not return before the child has published its pid from
-# inside the new session. 15 s bound; 0.05 s steps.
-for _ in $(seq 1 300); do
+# inside the new session. The wait ends early only if the child died
+# (`kill -0` fails). The 120 s bound is a backstop for a child that is alive
+# but never gets there: interpreter start-up was measured at 3-7 s under a
+# load average near 400 (pyenv shim, 16 cores), and the 15 s bound this
+# replaces turned a slow start into a false failure. 0.05 s steps.
+for _ in $(seq 1 2400); do
     [[ -s "$pidfile" ]] && break
     kill -0 "$child" 2>/dev/null || break
     sleep 0.05

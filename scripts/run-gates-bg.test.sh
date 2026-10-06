@@ -26,17 +26,19 @@ echo "── run-gates-bg.sh ─────────────────
 
 # ── 1. returns immediately instead of blocking for the command's duration ──
 dir1="$tmp/immediate"; mkdir -p "$dir1"
-start=$(date +%s)
-COSMON_RUN_GATES_BG_DIR="$dir1" "$SCRIPT" sleep 0.8 >/dev/null
-elapsed=$(( $(date +%s) - start ))
-[ "$elapsed" -lt 2 ] \
-    && ok "launch returns at once, not after the command finishes" \
-    || ko "launch returns at once" "took ${elapsed}s for a 3s command"
+# The command outlasts any plausible launcher wait (interpreter start-up alone
+# takes seconds under load), so the property is "the launcher returned while
+# the command was still running", not a wall-clock threshold.
+COSMON_RUN_GATES_BG_DIR="$dir1" "$SCRIPT" sleep 120 >/dev/null
+[ ! -f "$dir1/gates.exit" ] \
+    && ok "launch returns before the command finishes" \
+    || ko "launch returns before the command finishes" "gates.exit already present"
 [ -f "$dir1/gates.pid" ] \
     && ok "pid file is written before the launcher returns" \
     || ko "pid file is written before the launcher returns" "missing"
-# drain: don't leave a dangling sleep past this test's own window
-for _ in $(seq 1 20); do [ -f "$dir1/gates.exit" ] && break; sleep 0.1; done
+# drain: end the long sleep (the pid is the session leader; its group holds it)
+kill -TERM -- "-$(cat "$dir1/gates.pid")" 2>/dev/null || true
+for _ in $(seq 1 100); do [ -f "$dir1/gates.exit" ] && break; sleep 0.1; done
 
 # ── 2. survives the LAUNCHER's entire process group being killed ───────────
 #
@@ -53,7 +55,7 @@ os.setsid()
 subprocess.call(["bash", "-c", sys.argv[1]])
 ' "
     COSMON_RUN_GATES_BG_DIR='$dir2' '$SCRIPT' sleep 5
-    sleep 3
+    sleep 60
 " &
 launcher_pid=$!
 # give run-gates-bg.sh time to fork its own detached child and return
