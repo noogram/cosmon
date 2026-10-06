@@ -26,6 +26,8 @@ Dry run only: parse (N2) + expand (N3), print the ordered
 'cs nucleate ... --blocked-by ...' call list, germinate nothing. The seal
 is reported but never gated here; use it to inspect what 'cs spore run'
 would create. Each --var is coerced into its declared ParamSchema type
-before expansion; a list<string> param splits on commas.
+before expansion; a list<string> param splits on commas. Every formula file a
+node references must exist next to the manifest; a missing one fails, naming
+the node and the file.
 
 SEE ALSO: cs spore run, cs spore export, ADR-140 D3.
