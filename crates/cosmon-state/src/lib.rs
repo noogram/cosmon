@@ -1162,6 +1162,30 @@ pub struct MoleculeFilter {
     pub tag_globs: Vec<String>,
 }
 
+/// A molecule directory whose `state.json` could not be read or parsed.
+///
+/// Exists so a listing can name what it skipped (path and reason) instead of
+/// aborting; the id is the directory name, the only identity left.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UnreadableMolecule {
+    /// Molecule directory name.
+    pub id: String,
+    /// Path of the `state.json` that failed.
+    pub path: String,
+    /// Why it failed (I/O or parse error).
+    pub reason: String,
+}
+
+/// Result of [`StateStore::list_molecules_report`].
+#[derive(Debug, Clone, Default)]
+pub struct MoleculeListing {
+    /// Molecules that parsed and matched the filter.
+    pub molecules: Vec<MoleculeData>,
+    /// Molecules that exist on disk but could not be read. Never absent:
+    /// anything depending on one of these must treat it as blocking.
+    pub unreadable: Vec<UnreadableMolecule>,
+}
+
 // ---------------------------------------------------------------------------
 // EnergyTracker — hexagonal port for energy persistence
 // ---------------------------------------------------------------------------
@@ -1262,6 +1286,28 @@ pub trait StateStore {
     /// # Errors
     /// Returns [`CosmonError::StateStore`] on I/O failure.
     fn list_molecules(&self, filter: &MoleculeFilter) -> Result<Vec<MoleculeData>, CosmonError>;
+
+    /// List molecules and also report the ones that exist but could not be
+    /// read.
+    ///
+    /// One damaged or foreign `state.json` must not hide the rest of the
+    /// fleet, yet it must not vanish silently either: callers that render or
+    /// reason over the fleet use this to name what was skipped. The default
+    /// wraps [`list_molecules`](Self::list_molecules) for adapters that
+    /// cannot encounter an unreadable record.
+    ///
+    /// # Errors
+    /// Returns [`CosmonError::StateStore`] on I/O failure of the listing
+    /// itself (not of an individual molecule record).
+    fn list_molecules_report(
+        &self,
+        filter: &MoleculeFilter,
+    ) -> Result<MoleculeListing, CosmonError> {
+        Ok(MoleculeListing {
+            molecules: self.list_molecules(filter)?,
+            unreadable: Vec::new(),
+        })
+    }
 
     /// Resolve the directory holding a molecule's durable artifacts
     /// (`log.md`, `briefing.md`, `responses/`, …).

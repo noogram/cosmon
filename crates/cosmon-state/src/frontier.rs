@@ -143,6 +143,18 @@ impl Frontier {
 /// serialization.
 #[must_use]
 pub fn compute_from_molecules(molecules: &[crate::MoleculeData]) -> Vec<MoleculeId> {
+    compute_from_molecules_with_unreadable(molecules, &[])
+}
+
+/// Like [`compute_from_molecules`], for a store that also reported molecules
+/// it could not read. An unreadable molecule is never "absent": a dependent
+/// of one stays blocked, including through a `DecayedFrom` edge (where an
+/// absent parent would otherwise count as cleared).
+#[must_use]
+pub fn compute_from_molecules_with_unreadable(
+    molecules: &[crate::MoleculeData],
+    unreadable: &[crate::UnreadableMolecule],
+) -> Vec<MoleculeId> {
     let by_id: std::collections::HashMap<&MoleculeId, &crate::MoleculeData> =
         molecules.iter().map(|m| (&m.id, m)).collect();
 
@@ -163,6 +175,9 @@ pub fn compute_from_molecules(molecules: &[crate::MoleculeData]) -> Vec<Molecule
     };
 
     let decayed_parent_cleared = |id: &MoleculeId| -> bool {
+        if unreadable.iter().any(|u| u.id == id.as_str()) {
+            return false;
+        }
         by_id.get(id).is_none_or(|parent| match parent.status {
             MoleculeStatus::Collapsed => true,
             MoleculeStatus::Frozen => parent.stuck_at.is_none(),
@@ -203,8 +218,8 @@ pub fn compute_from_molecules(molecules: &[crate::MoleculeData]) -> Vec<Molecule
 ///
 /// Propagates [`CosmonError::StateStore`] from [`StateStore::list_molecules`].
 pub fn compute(store: &dyn StateStore) -> Result<Frontier, CosmonError> {
-    let molecules = store.list_molecules(&MoleculeFilter::default())?;
-    let ready = compute_from_molecules(&molecules);
+    let listing = store.list_molecules_report(&MoleculeFilter::default())?;
+    let ready = compute_from_molecules_with_unreadable(&listing.molecules, &listing.unreadable);
     Ok(Frontier {
         version: FRONTIER_SCHEMA_VERSION,
         computed_at: Utc::now(),
@@ -504,6 +519,31 @@ mod tests {
         );
         let ready = compute_from_molecules(&[parent, product.clone(), blocked]);
         assert_eq!(ready, vec![product.id]);
+    }
+
+    #[test]
+    fn unreadable_decay_parent_blocks_instead_of_counting_as_absent() {
+        let product = mk(
+            "task-20260928-bbbb",
+            MoleculeStatus::Pending,
+            vec![MoleculeLink::DecayedFrom {
+                id: MoleculeId::new("task-20260928-aaaa").unwrap(),
+            }],
+        );
+        let unreadable = [crate::UnreadableMolecule {
+            id: "task-20260928-aaaa".to_owned(),
+            path: "x/state.json".to_owned(),
+            reason: "parse".to_owned(),
+        }];
+        assert_eq!(
+            compute_from_molecules(std::slice::from_ref(&product)),
+            vec![product.id.clone()],
+            "an absent parent still counts as cleared"
+        );
+        assert!(
+            compute_from_molecules_with_unreadable(&[product], &unreadable).is_empty(),
+            "an unreadable parent must block"
+        );
     }
 
     #[test]
