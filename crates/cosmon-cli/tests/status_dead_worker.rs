@@ -170,3 +170,69 @@ fn compact_headline_names_the_dead_worker_and_its_reclaim_gesture() {
     assert!(!text.contains("clean"), "must not print clean: {text}");
     assert!(!text.contains("0 dead"), "{text}");
 }
+
+/// Issue #175 — a pane that is alive but whose pasted brief was never
+/// submitted is not a dead worker. `cs purge` on it would destroy a live,
+/// recoverable session.
+mod unsubmitted_brief {
+    use super::*;
+
+    struct Tmux {
+        socket: String,
+    }
+
+    impl Tmux {
+        fn run(&self, args: &[&str]) -> std::process::Output {
+            Command::new("tmux")
+                .args(["-L", &self.socket])
+                .args(args)
+                .output()
+                .expect("run tmux")
+        }
+    }
+
+    impl Drop for Tmux {
+        fn drop(&mut self) {
+            let _ = self.run(&["kill-server"]);
+        }
+    }
+
+    /// Start a live session named after the worker and paste a brief into
+    /// its composer without the submitting Enter.
+    fn live_pane_with_unsubmitted_brief(state_dir: &Path) -> Tmux {
+        let socket = format!("cosmon-175-{}", std::process::id());
+        let fleets = state_dir.join("fleets");
+        std::fs::create_dir_all(&fleets).expect("fleets dir");
+        std::fs::write(
+            fleets.join("default.json"),
+            serde_json::json!({ "name": socket }).to_string(),
+        )
+        .expect("fleet spec");
+        let tmux = Tmux { socket };
+        let started = tmux.run(&["new-session", "-d", "-s", WORKER, "cat"]);
+        assert!(started.status.success(), "tmux new-session failed");
+        // Literal text, no Enter: the brief sits in the composer.
+        tmux.run(&["send-keys", "-t", WORKER, "-l", "# Autonomous work mode"]);
+        let has = tmux.run(&["has-session", "-t", &format!("={WORKER}")]);
+        assert!(has.status.success(), "fixture: the session must be alive");
+        tmux
+    }
+
+    #[test]
+    fn live_session_with_unsubmitted_brief_is_not_reported_dead() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        seed_dead_worker(&state_dir);
+        let _tmux = live_pane_with_unsubmitted_brief(&state_dir);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&run_status(tmp.path(), &state_dir, true)).expect("status JSON");
+        assert_eq!(value["molecules"]["dead_workers"], 0, "{value}");
+
+        let text = run_status(tmp.path(), &state_dir, false);
+        assert!(
+            !text.contains(&format!("cs purge {WORKER}")),
+            "never advise purging a live worker: {text}"
+        );
+    }
+}
