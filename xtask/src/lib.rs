@@ -52,6 +52,7 @@ pub fn family(path: &str) -> Result<&'static str, String> {
         "/v1/avatar/converse" | "/v1/avatar/perceive" => return Ok("avatar-canal"),
         "/v1/auth/me"
         | "/v1/events"
+        | "/v1/ledger"
         | "/v1/quota"
         | "/v1/noyaux"
         | "/v1/vitals"
@@ -360,6 +361,7 @@ mod tests {
         assert_eq!(family("/v1/auth/claude/start").unwrap(), "auth-claude");
         assert_eq!(family("/v1/auth/me").unwrap(), "observ.");
         assert_eq!(family("/v1/vitals").unwrap(), "observ.");
+        assert_eq!(family("/v1/ledger").unwrap(), "observ.");
         assert_eq!(family("/v1/molecules/{id}/logs").unwrap(), "observ.");
         assert_eq!(family("/v1/avatar/converse").unwrap(), "avatar-canal");
         assert_eq!(family("/v1/admin/habilitations").unwrap(), "admin");

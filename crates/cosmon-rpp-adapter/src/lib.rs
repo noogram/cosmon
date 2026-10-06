@@ -645,6 +645,11 @@ pub fn router(state: AppState) -> Router {
         // is exempt from the §8p bijection check via the `/v1/events`
         // path filter in `tests/api_surface_freeze.rs`.
         .route("/v1/events", get(routes::events_stream::events_stream))
+        // Replay-then-live stream over the tenant's durable ledger with
+        // an opaque resume cursor (issue #184). Adapter-only like
+        // `/v1/events`, which stays untouched: that one is a live tail of
+        // an in-process bus, this one reads the log workers write to.
+        .route("/v1/ledger", get(routes::ledger_stream::ledger_stream))
         // Server-Sent Events stream of per-molecule worker tmux
         // output (task-20260523-ad25, workflow d of the gap-report
         // ae3d). Adapter-only — there is no `cs logs stream` verb;

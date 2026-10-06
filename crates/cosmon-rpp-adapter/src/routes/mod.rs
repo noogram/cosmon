@@ -23,6 +23,7 @@ pub mod avatar;
 pub mod dist;
 pub mod events_stream;
 pub mod harvest_authority;
+pub mod ledger_stream;
 pub mod logs_stream;
 pub mod mcp;
 pub mod molecules;

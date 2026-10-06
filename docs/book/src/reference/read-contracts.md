@@ -49,6 +49,9 @@ Fields by event type:
 |---|---|
 | `molecule_nucleated` | `formula_id`, `blocks` |
 | `molecule_status_changed` | `from`, `to` |
+| `molecule_transitioned` | `from`, `to` |
+| `molecule_evolved` | `step`, `total` |
+| `molecule_frozen`, `molecule_thawed` | none |
 | `molecule_step_completed` | `step`, `total`, `evidence` |
 | `molecule_completed` | `reason`, `summary` |
 | `molecule_collapsed` | `reason`, `kind` |
@@ -103,6 +106,42 @@ single request that reports no usage turns every category of its history
 A reader must carry that through to its own total and not substitute `0`.
 
 A reader detects log rotation by a size decrease or an inode change.
+
+## Reading the ledger over HTTP
+
+`GET /v1/ledger` serves `events.jsonl` to a program that cannot read the file,
+as a Server-Sent Events stream: it replays from a cursor and then follows the
+log, from one reader over one file, so no line is missed or delivered twice at
+the point where replay ends and live begins. It needs the scopes
+`cosmon:events:subscribe` and `cosmon:molecule:read`, because
+`molecule_step_completed.evidence` is free text a worker wrote.
+
+**Cursor.** The `id` of each data frame is the resume cursor. It is opaque:
+echo it back verbatim in `Last-Event-ID` or `?after=` (the header wins when
+both are sent) and never parse it. It is not `seq`, which is absent on
+lifecycle lines written by the file store and is not monotone where present.
+Without a cursor the stream starts at the beginning of the log.
+
+**Frames.** `ledger.epoch` comes first and names the log the cursors refer to.
+`ledger.reset` means the log was replaced or shortened, or that a supplied
+cursor could not be honoured (`reason`: `epoch_changed`, `truncated`,
+`cursor_invalid`); the stream then replays from the start of the current log
+and the reader must discard what it folded. Every other frame is one line of
+the log: `event` is its type, and `data` holds `schema_version` (the line's own;
+`1` for a line that carries none), `type`, `molecule_id`, `timestamp`, `seq` and
+`mol_seq` where the line has them, and the stable fields of its type from the
+table above. Unknown event names are to be ignored.
+
+**What is not served.** Only the types in the table above, and only lines that
+name a molecule (so not `operator_present` or `operator_signed`, which name
+none). A line is never passed through verbatim. A type that is not in the table
+is not served until it is added to it. `session_presence.session_id` is replaced
+by `session_digest`, a stable digest that tells sessions apart. Worktree paths,
+shell commands and harness-turn text are in no projection. `usage_observed` and
+`energy_tick` name no molecule and are not served.
+
+**Bounds.** A connection ends after 5,000 frames; reconnect with the last `id`.
+A principal holds one ledger stream at a time.
 
 ## state.json
 

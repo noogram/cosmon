@@ -157,6 +157,7 @@ pub static ROUTES_USED: &[&CanonRoute] = &[
     GET_V1_AUTH_ME,
     // Streams, discovery, observability.
     GET_V1_EVENTS,
+    GET_V1_LEDGER,
     GET_V1_QUOTA,
     GET_V1_NOYAUX,
     GET_V1_WORKERS,
