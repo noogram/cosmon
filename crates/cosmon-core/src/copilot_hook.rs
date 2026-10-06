@@ -121,32 +121,35 @@ pub enum HookEvent {
     TurnEnd,
     /// The session is blocked on a human: a permission prompt or an idle
     /// notification. Claude's `Notification` hook.
+    ///
+    /// Claude fires nothing when the user denies the prompt (measured on
+    /// 2.1.291: no `Stop`, `PostToolUse`, `PostToolUseFailure` or
+    /// `PermissionDenied`, for at least 80 s), so a denial cannot move the
+    /// state; the next `UserPromptSubmit` does.
     Waiting,
     /// The session is asking a question through the provider's ask-the-user
-    /// tool. Wired only by the worker overlay, which can scope it with a tool
-    /// matcher; the pilot installer has no matcher support and so leaves it out
-    /// of [`HookEvent::ALL`].
+    /// tool. Scoped to that tool by [`HookEvent::matcher`].
     Asking,
+    /// The question was answered and the turn continues. Claude fires no
+    /// `Notification` for this, and the `Notification` that accompanies the
+    /// question dialog is held as [`HookEvent::Asking`] until this moment.
+    Answered,
 }
 
 impl HookEvent {
     /// Every moment, in the order a session meets them.
-    pub const ALL: [Self; 4] = [
-        Self::SessionStart,
-        Self::TurnStart,
-        Self::TurnEnd,
-        Self::Waiting,
-    ];
-
-    /// Every token `cs sessions hook run --event` accepts: [`Self::ALL`] plus
-    /// the events only the worker overlay wires.
-    pub const ACCEPTED: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::SessionStart,
         Self::TurnStart,
         Self::TurnEnd,
         Self::Waiting,
         Self::Asking,
+        Self::Answered,
     ];
+
+    /// Every token `cs sessions hook run --event` accepts. The pilot installer
+    /// and the worker overlay wire the same set, so this is [`Self::ALL`].
+    pub const ACCEPTED: [Self; 6] = Self::ALL;
 
     /// The token an operator types after `--event`.
     #[must_use]
@@ -157,6 +160,7 @@ impl HookEvent {
             Self::TurnEnd => "turn-end",
             Self::Waiting => "waiting",
             Self::Asking => "asking",
+            Self::Answered => "answered",
         }
     }
 
@@ -195,8 +199,21 @@ impl HookEvent {
             (HookProvider::Claude, Self::TurnEnd) => Some("Stop"),
             (HookProvider::Claude, Self::Waiting) => Some("Notification"),
             (HookProvider::Claude, Self::Asking) => Some("PreToolUse"),
+            (HookProvider::Claude, Self::Answered) => Some("PostToolUse"),
             (HookProvider::Codex, Self::TurnEnd) => Some("notify"),
             (HookProvider::Codex, _) => None,
+        }
+    }
+
+    /// The tool name the provider's hook entry is scoped to, when the moment is
+    /// a tool call rather than a turn boundary.
+    ///
+    /// Without it `PreToolUse` and `PostToolUse` would run on every tool call.
+    #[must_use]
+    pub const fn matcher(self) -> Option<&'static str> {
+        match self {
+            Self::Asking | Self::Answered => Some("AskUserQuestion"),
+            _ => None,
         }
     }
 
@@ -319,7 +336,7 @@ pub fn install_claude(
             continue;
         };
         let command = hook_command(cs_bin, event);
-        upsert_claude_event(&mut doc, name, &command);
+        upsert_claude_event(&mut doc, name, event.matcher(), &command);
         wired.push(event);
     }
 
@@ -419,7 +436,7 @@ fn entry_is_ours(entry: &Value) -> bool {
         .is_some_and(|hooks| hooks.iter().any(hook_is_ours))
 }
 
-fn upsert_claude_event(doc: &mut Value, name: &str, command: &str) {
+fn upsert_claude_event(doc: &mut Value, name: &str, matcher: Option<&str>, command: &str) {
     let entries = doc
         .as_object_mut()
         .expect("read_json guarantees an object")
@@ -457,13 +474,17 @@ fn upsert_claude_event(doc: &mut Value, name: &str, command: &str) {
         return;
     }
 
-    list.push(serde_json::json!({
+    let mut entry = serde_json::json!({
         "hooks": [{
             "type": "command",
             "command": command,
             "timeout": HOOK_TIMEOUT_SECONDS,
         }]
-    }));
+    });
+    if let Some(matcher) = matcher {
+        entry["matcher"] = Value::from(matcher);
+    }
+    list.push(entry);
 }
 
 /// How long a provider waits for the hook before giving up on it.

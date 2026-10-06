@@ -519,13 +519,23 @@ pub fn write_settings_overlay_for_work(
     });
     add_presence_hooks(&mut doc, cs_bin);
     if work_member {
-        doc["hooks"]["PostToolUse"] = serde_json::json!([{
-            "hooks": [{
-                "type": "command",
-                "command": format!("{} work-hook claude", shell_quote(&cs_bin.to_string_lossy())),
-                "timeout": 5
-            }]
-        }]);
+        // First in the list, beside the presence hook that already sits under
+        // `PostToolUse`.
+        if let Some(post) = doc["hooks"]["PostToolUse"].as_array_mut() {
+            post.insert(
+                0,
+                serde_json::json!({
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!(
+                            "{} work-hook claude",
+                            shell_quote(&cs_bin.to_string_lossy())
+                        ),
+                        "timeout": 5
+                    }]
+                }),
+            );
+        }
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -592,8 +602,8 @@ fn add_presence_hooks(doc: &mut serde_json::Value, cs_bin: &Path) {
                 "timeout": 5,
             }]
         });
-        if event == HookEvent::Asking {
-            entry["matcher"] = serde_json::json!("AskUserQuestion");
+        if let Some(matcher) = event.matcher() {
+            entry["matcher"] = serde_json::json!(matcher);
         }
         let list = &mut doc["hooks"][name];
         if !list.is_array() {
