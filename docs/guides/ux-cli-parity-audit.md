@@ -133,6 +133,8 @@ private signing key enters the service or a worker through these commands.
 The dirty-path list is a checkout observation at the failure report. It may
 include state written while recording that failure.
 
+`GET /v1/ledger` (issue #184) is an adapter-only remote read of the tenant's event log, resumable from an opaque cursor. It adds no `cs` verb and no `cosmon-remote` subcommand: the CLI reads `events.jsonl` locally, and the thin client gains a `Client::ledger_stream` library method only. No native UI counterpart is shipped.
+
 ## RPP identity discovery and quota (issue #45)
 
 | Capability | CLI | Native UI | Remote service |

@@ -917,6 +917,335 @@ fn file_identity(meta: &std::fs::Metadata) -> (u64, u64) {
     }
 }
 
+/// Epoch of a ledger that does not exist yet.
+const LEDGER_EPOCH_ABSENT: &str = "0";
+
+/// Bytes pulled from the log per read while looking for a line end.
+const LEDGER_READ_CHUNK: usize = 1024 * 1024;
+
+/// A resume position in the ledger: `<epoch>.<byte-offset>`.
+///
+/// The cursor is what an external reader keeps between connections. It is
+/// deliberately not the envelope `seq`: lifecycle lines appended by the
+/// file store carry no `seq`, and where `seq` exists it is not monotone, so
+/// a `seq` cursor would drop events without saying so. The byte offset names
+/// a line boundary in one particular file, and the epoch names that file.
+/// Callers treat the encoded form as opaque.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerCursor {
+    /// Digest of the identity of the file the offset refers to.
+    pub epoch: String,
+    /// Offset of the first byte not yet delivered; always a line start.
+    pub offset: u64,
+}
+
+impl LedgerCursor {
+    /// Parse the wire form. `None` for anything that is not
+    /// `<epoch>.<decimal offset>`; the caller decides what that means.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        let (epoch, offset) = raw.trim().split_once('.')?;
+        if epoch.is_empty() || !epoch.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(Self {
+            epoch: epoch.to_owned(),
+            offset: offset.parse().ok()?,
+        })
+    }
+}
+
+impl std::fmt::Display for LedgerCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.epoch, self.offset)
+    }
+}
+
+/// Why a [`LedgerReader`] went back to the start of the log instead of
+/// continuing from where it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerResetReason {
+    /// The log is a different file from the one the position refers to
+    /// (rotation, archive, replacement).
+    EpochChanged,
+    /// The log is shorter than the position: it was truncated or rewritten.
+    Truncated,
+    /// A supplied cursor is malformed, points past the end, or does not sit
+    /// on a line boundary.
+    CursorInvalid,
+}
+
+impl LedgerResetReason {
+    /// Stable wire name.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EpochChanged => "epoch_changed",
+            Self::Truncated => "truncated",
+            Self::CursorInvalid => "cursor_invalid",
+        }
+    }
+}
+
+/// What a [`LedgerReader::read_batch`] call hands back, in log order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LedgerRead {
+    /// The reader went back to byte 0 of the (new) log: everything the
+    /// consumer folded from the previous position is stale. Lines of the
+    /// new log follow.
+    Reset {
+        /// Why the position was abandoned.
+        reason: LedgerResetReason,
+        /// The position the reader now holds.
+        cursor: LedgerCursor,
+    },
+    /// One complete line, verbatim, and the position just after it.
+    Line {
+        /// The raw JSON text of the line, without its newline.
+        raw: String,
+        /// Resume position that delivers every line after this one.
+        cursor: LedgerCursor,
+    },
+}
+
+/// A resumable reader over `events.jsonl` for readers outside the process
+/// that writes it.
+///
+/// One reader over one file serves both halves of "replay, then live": it
+/// reads to end of file and then keeps following the same position, so there
+/// is no seam at which a line can be missed or delivered twice. Unlike
+/// [`EventLogTail`] it hands out the raw line and the position after it, so
+/// a consumer can persist a cursor that survives a restart of the reader.
+///
+/// A line still being written (no `\n` yet) is left for the next call, and a
+/// line that is not valid UTF-8 or is blank is skipped with the position
+/// advancing past it.
+#[derive(Debug)]
+pub struct LedgerReader {
+    path: PathBuf,
+    epoch: String,
+    offset: u64,
+}
+
+/// Epoch string of the file `meta` describes: a digest of `(device, inode)`.
+fn ledger_epoch_of(meta: &std::fs::Metadata) -> String {
+    let (dev, ino) = file_identity(meta);
+    let digest = Sha256::digest(format!("{dev}:{ino}").as_bytes());
+    digest.iter().take(6).fold(String::new(), |mut acc, b| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
+}
+
+impl LedgerReader {
+    /// Open a reader on `path`, positioned at `after` when that cursor
+    /// still names a line boundary of this very file, and at byte 0
+    /// otherwise.
+    ///
+    /// The second value is `Some` when a cursor was supplied but could not
+    /// be honoured; the caller must tell its consumer, never fall back
+    /// silently. With `after == None` the reader starts at byte 0 and no
+    /// reset is reported.
+    ///
+    /// # Errors
+    ///
+    /// Returns `std::io::Error` when the log exists but cannot be inspected.
+    /// A missing log is not an error: it reads as an empty ledger.
+    pub fn open(
+        path: impl Into<PathBuf>,
+        after: Option<&str>,
+    ) -> std::io::Result<(Self, Option<LedgerResetReason>)> {
+        let path = path.into();
+        let (epoch, len) = match std::fs::metadata(&path) {
+            Ok(meta) => (ledger_epoch_of(&meta), meta.len()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                (LEDGER_EPOCH_ABSENT.to_owned(), 0)
+            }
+            Err(e) => return Err(e),
+        };
+        let mut reader = Self {
+            path,
+            epoch,
+            offset: 0,
+        };
+        let Some(raw) = after else {
+            return Ok((reader, None));
+        };
+        let Some(cursor) = LedgerCursor::parse(raw) else {
+            return Ok((reader, Some(LedgerResetReason::CursorInvalid)));
+        };
+        if cursor.epoch != reader.epoch {
+            return Ok((reader, Some(LedgerResetReason::EpochChanged)));
+        }
+        if cursor.offset > len || !reader.is_line_start(cursor.offset)? {
+            return Ok((reader, Some(LedgerResetReason::CursorInvalid)));
+        }
+        reader.offset = cursor.offset;
+        Ok((reader, None))
+    }
+
+    /// Whether `offset` is the start of a line: 0, or just after a `\n`.
+    fn is_line_start(&self, offset: u64) -> std::io::Result<bool> {
+        if offset == 0 {
+            return Ok(true);
+        }
+        let mut file = File::open(&self.path)?;
+        file.seek(SeekFrom::Start(offset - 1))?;
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte)?;
+        Ok(byte[0] == b'\n')
+    }
+
+    /// The position the reader holds now.
+    #[must_use]
+    pub fn cursor(&self) -> LedgerCursor {
+        LedgerCursor {
+            epoch: self.epoch.clone(),
+            offset: self.offset,
+        }
+    }
+
+    /// Return the log's current end as a cursor: opening a reader there
+    /// delivers only what is appended afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns `std::io::Error` when the log exists but cannot be inspected.
+    pub fn head(path: impl AsRef<Path>) -> std::io::Result<LedgerCursor> {
+        match std::fs::metadata(path.as_ref()) {
+            Ok(meta) => {
+                // A torn last line is not delivered yet, so the head is the
+                // end of the last complete line.
+                let offset = last_line_boundary(path.as_ref(), meta.len())?;
+                Ok(LedgerCursor {
+                    epoch: ledger_epoch_of(&meta),
+                    offset,
+                })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LedgerCursor {
+                epoch: LEDGER_EPOCH_ABSENT.to_owned(),
+                offset: 0,
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Deliver up to `max_lines` complete lines from the held position,
+    /// preceded by a [`LedgerRead::Reset`] when the log changed identity or
+    /// shrank since the last call. An empty result means the reader is at
+    /// the end of the log.
+    ///
+    /// # Errors
+    ///
+    /// Returns `std::io::Error` when the log cannot be read. Lines delivered
+    /// by earlier calls stay consumed.
+    pub fn read_batch(&mut self, max_lines: usize) -> std::io::Result<Vec<LedgerRead>> {
+        let mut out = Vec::new();
+        let mut file = match File::open(&self.path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if self.epoch != LEDGER_EPOCH_ABSENT {
+                    LEDGER_EPOCH_ABSENT.clone_into(&mut self.epoch);
+                    self.offset = 0;
+                    out.push(LedgerRead::Reset {
+                        reason: LedgerResetReason::EpochChanged,
+                        cursor: self.cursor(),
+                    });
+                }
+                return Ok(out);
+            }
+            Err(e) => return Err(e),
+        };
+        let meta = file.metadata()?;
+        let epoch = ledger_epoch_of(&meta);
+        if epoch != self.epoch {
+            let first_appearance = self.epoch == LEDGER_EPOCH_ABSENT && self.offset == 0;
+            self.epoch = epoch;
+            self.offset = 0;
+            if !first_appearance {
+                out.push(LedgerRead::Reset {
+                    reason: LedgerResetReason::EpochChanged,
+                    cursor: self.cursor(),
+                });
+            }
+        } else if meta.len() < self.offset {
+            self.offset = 0;
+            out.push(LedgerRead::Reset {
+                reason: LedgerResetReason::Truncated,
+                cursor: self.cursor(),
+            });
+        }
+        if meta.len() == self.offset || max_lines == 0 {
+            return Ok(out);
+        }
+
+        file.seek(SeekFrom::Start(self.offset))?;
+        let mut remaining = meta.len() - self.offset;
+        let mut buf: Vec<u8> = Vec::new();
+        // Read until the buffer holds `max_lines` lines or the file is
+        // exhausted; a line longer than one chunk simply takes more reads.
+        let mut newlines = 0usize;
+        while remaining > 0 && newlines < max_lines {
+            let want = usize::try_from(remaining)
+                .unwrap_or(LEDGER_READ_CHUNK)
+                .min(LEDGER_READ_CHUNK);
+            let start = buf.len();
+            buf.resize(start + want, 0);
+            let got = file.read(&mut buf[start..])?;
+            buf.truncate(start + got);
+            if got == 0 {
+                break;
+            }
+            newlines += buf[start..]
+                .iter()
+                .fold(0, |n, b| n + usize::from(*b == b'\n'));
+            remaining -= got as u64;
+        }
+
+        let mut consumed = 0usize;
+        let mut delivered = 0usize;
+        while delivered < max_lines {
+            let Some(rel) = buf[consumed..].iter().position(|b| *b == b'\n') else {
+                break;
+            };
+            let line = &buf[consumed..consumed + rel];
+            consumed += rel + 1;
+            delivered += 1;
+            self.offset += rel as u64 + 1;
+            let Ok(text) = std::str::from_utf8(line) else {
+                continue;
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            out.push(LedgerRead::Line {
+                raw: text.to_owned(),
+                cursor: self.cursor(),
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// Offset just after the last `\n` among the first `len` bytes of `path`.
+fn last_line_boundary(path: &Path, len: u64) -> std::io::Result<u64> {
+    let mut file = File::open(path)?;
+    let mut end = len;
+    let mut chunk = vec![0u8; 8192];
+    while end > 0 {
+        let start = end.saturating_sub(chunk.len() as u64);
+        let span = usize::try_from(end - start).unwrap_or(chunk.len());
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut chunk[..span])?;
+        if let Some(pos) = chunk[..span].iter().rposition(|b| *b == b'\n') {
+            return Ok(start + pos as u64 + 1);
+        }
+        end = start;
+    }
+    Ok(0)
+}
+
 /// Acquire `flock(LOCK_EX)` on `file`, fast-path non-blocking, fall through
 /// to a blocking wait if the lock is contended.
 ///
@@ -1722,5 +2051,187 @@ mod tests {
             Seq(10),
             "the delta past the checkpoint must still be folded in"
         );
+    }
+
+    // ── LedgerReader ──────────────────────────────────────────────────
+
+    fn append_raw(path: &Path, lines: &[&str]) {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        for line in lines {
+            writeln!(file, "{line}").unwrap();
+        }
+    }
+
+    fn raws(batch: &[LedgerRead]) -> Vec<&str> {
+        batch
+            .iter()
+            .filter_map(|r| match r {
+                LedgerRead::Line { raw, .. } => Some(raw.as_str()),
+                LedgerRead::Reset { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Lines with and without `seq`, in the order they were appended, come
+    /// back once each; a reader reopened on the cursor of line `k` delivers
+    /// exactly the lines after `k`.
+    #[test]
+    fn ledger_reader_resumes_after_a_cursor_over_mixed_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let lines = [
+            r#"{"seq":1,"type":"molecule_nucleated","molecule_id":"m-1"}"#,
+            r#"{"kind":"molecule_evolved","molecule_id":"m-1","step":0,"total":2}"#,
+            r#"{"seq":2,"type":"molecule_completed","molecule_id":"m-1"}"#,
+            r#"{"kind":"molecule_collapsed","molecule_id":"m-2"}"#,
+        ];
+        append_raw(&path, &lines);
+
+        let (mut full, reset) = LedgerReader::open(&path, None).unwrap();
+        assert!(reset.is_none());
+        let batch = full.read_batch(100).unwrap();
+        assert_eq!(raws(&batch), lines);
+
+        let LedgerRead::Line { cursor, .. } = &batch[1] else {
+            panic!("second item is a line");
+        };
+        let (mut resumed, reset) = LedgerReader::open(&path, Some(&cursor.to_string())).unwrap();
+        assert!(reset.is_none(), "a cursor of this very file is honoured");
+        assert_eq!(raws(&resumed.read_batch(100).unwrap()), &lines[2..]);
+    }
+
+    /// Replay and live are one reader: lines appended after the first
+    /// drain are delivered by the next call, once, in order.
+    #[test]
+    fn ledger_reader_follows_appends_without_gap_or_duplicate() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        append_raw(&path, &[r#"{"type":"a","molecule_id":"m"}"#]);
+        let (mut reader, _) = LedgerReader::open(&path, None).unwrap();
+        assert_eq!(reader.read_batch(10).unwrap().len(), 1);
+        assert!(reader.read_batch(10).unwrap().is_empty());
+        append_raw(
+            &path,
+            &[
+                r#"{"type":"b","molecule_id":"m"}"#,
+                r#"{"type":"c","molecule_id":"m"}"#,
+            ],
+        );
+        let more = reader.read_batch(10).unwrap();
+        assert_eq!(
+            raws(&more),
+            [
+                r#"{"type":"b","molecule_id":"m"}"#,
+                r#"{"type":"c","molecule_id":"m"}"#
+            ]
+        );
+        assert!(reader.read_batch(10).unwrap().is_empty());
+    }
+
+    /// `max_lines` bounds one call and the next call picks up exactly where
+    /// it stopped.
+    #[test]
+    fn ledger_reader_batches_do_not_skip_or_repeat() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let owned: Vec<String> = (0..7)
+            .map(|i| format!(r#"{{"type":"t","n":{i}}}"#))
+            .collect();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        append_raw(&path, &refs);
+        let (mut reader, _) = LedgerReader::open(&path, None).unwrap();
+        let mut seen = Vec::new();
+        loop {
+            let batch = reader.read_batch(3).unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            assert!(batch.len() <= 3);
+            seen.extend(raws(&batch).into_iter().map(str::to_owned));
+        }
+        assert_eq!(seen, owned);
+    }
+
+    /// A line without its newline is not delivered until it is complete.
+    #[test]
+    fn ledger_reader_leaves_a_torn_line_for_later() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, "{\"type\":\"a\"}\n{\"type\":\"b").unwrap();
+        let (mut reader, _) = LedgerReader::open(&path, None).unwrap();
+        assert_eq!(raws(&reader.read_batch(10).unwrap()), [r#"{"type":"a"}"#]);
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "\"}}").unwrap();
+        assert_eq!(raws(&reader.read_batch(10).unwrap()), [r#"{"type":"b"}"#]);
+    }
+
+    /// A replaced log is reported, never read as a continuation.
+    #[test]
+    fn ledger_reader_reports_a_replaced_log() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        append_raw(&path, &[r#"{"type":"old"}"#]);
+        let (mut reader, _) = LedgerReader::open(&path, None).unwrap();
+        let old_cursor = {
+            let batch = reader.read_batch(10).unwrap();
+            let LedgerRead::Line { cursor, .. } = &batch[0] else {
+                panic!("line expected");
+            };
+            cursor.clone()
+        };
+
+        std::fs::rename(&path, dir.path().join("events.jsonl.1")).unwrap();
+        append_raw(&path, &[r#"{"type":"new"}"#]);
+
+        let batch = reader.read_batch(10).unwrap();
+        assert!(
+            matches!(
+                batch[0],
+                LedgerRead::Reset {
+                    reason: LedgerResetReason::EpochChanged,
+                    ..
+                }
+            ),
+            "got {batch:?}"
+        );
+        assert_eq!(raws(&batch), [r#"{"type":"new"}"#]);
+
+        // The same fact seen from a fresh connection with the old cursor.
+        let (_, reset) = LedgerReader::open(&path, Some(&old_cursor.to_string())).unwrap();
+        assert_eq!(reset, Some(LedgerResetReason::EpochChanged));
+    }
+
+    /// A malformed, misaligned or out-of-range cursor is refused loudly.
+    #[test]
+    fn ledger_reader_refuses_a_bad_cursor() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        append_raw(&path, &[r#"{"type":"a"}"#, r#"{"type":"b"}"#]);
+        let head = LedgerReader::head(&path).unwrap();
+        for bad in [
+            "garbage".to_owned(),
+            format!("{}.3", head.epoch),
+            format!("{}.{}", head.epoch, head.offset + 1),
+        ] {
+            let (_, reset) = LedgerReader::open(&path, Some(&bad)).unwrap();
+            assert_eq!(reset, Some(LedgerResetReason::CursorInvalid), "{bad}");
+        }
+    }
+
+    /// `head` is the cursor from which only later appends are delivered.
+    #[test]
+    fn ledger_head_delivers_only_what_follows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        append_raw(&path, &[r#"{"type":"a"}"#]);
+        let head = LedgerReader::head(&path).unwrap();
+        append_raw(&path, &[r#"{"type":"b"}"#]);
+        let (mut reader, reset) = LedgerReader::open(&path, Some(&head.to_string())).unwrap();
+        assert!(reset.is_none());
+        assert_eq!(raws(&reader.read_batch(10).unwrap()), [r#"{"type":"b"}"#]);
     }
 }

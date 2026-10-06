@@ -278,7 +278,11 @@ of live route are outside it, both deliberately:
 
 - **`adapter-only` routes** — artifact I/O, the Claude PKCE flow, the
   SSE streams, noyau/worker discovery, the operator admin plane, and
-  `GET /v1/vitals`. Vitals is the per-tenant molecule-keyed fleet view
+  `GET /v1/vitals` and `GET /v1/ledger`. The ledger stream (issue #184) is
+  the replayable counterpart of `GET /v1/events`: it reads the tenant's
+  durable event log from an opaque cursor, so a consumer that was
+  disconnected loses nothing; it carries no `cs` verb because `cs` reads
+  the same file locally. Vitals is the per-tenant molecule-keyed fleet view
   from issue #78 / ADR-180: stored lifecycle status stays separate from
   observed worker health, and no operator-wide `cs peek` sensorium crosses
   the tenant boundary. These routes

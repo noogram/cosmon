@@ -1452,6 +1452,124 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+  /v1/ledger:
+    get:
+      operationId: streamLedger
+      summary: |
+        Replay, then live, over the tenant's durable event log, resumable
+        from an opaque cursor (issue #184).
+      description: |
+        Long-lived `text/event-stream` response over the tenant's ledger.
+        One reader reads the log to its end and then keeps following the
+        same position, so replay and live share one position: no line falls
+        between them and none is delivered twice. Lines appended by workers
+        are in the ledger and therefore on this stream, unlike
+        `GET /v1/events`, which only carries what the adapter's own
+        handlers publish and replays nothing.
+
+        ## Required scope
+
+        Both `cosmon:events:subscribe` and `cosmon:molecule:read`. The
+        second is required because `molecule_step_completed.evidence` is
+        free text a worker wrote, which no other event stream serves.
+
+        ## Cursor
+
+        The SSE `id` of every data frame is the resume cursor: an opaque
+        token, to be echoed back verbatim. It is not the envelope `seq`,
+        which lifecycle lines written by the file store do not carry. Resume
+        with `Last-Event-ID` (what a reconnecting `EventSource` sends) or
+        `after`; the header wins when both are present. With neither, the
+        stream starts at the beginning of the ledger.
+
+        ## Frames
+
+        - `ledger.epoch` — always first. `{"epoch", "cursor"}` names the
+          log the cursors of this connection refer to.
+        - `ledger.reset` — the consumer's folded state is stale and the
+          stream replays from the start of the log named by `cursor`.
+          `{"reason", "epoch", "cursor"}`; `reason` is `epoch_changed`
+          (another file: rotation or replacement, also sent when a
+          supplied cursor names a different file), `truncated` (the file
+          shrank) or `cursor_invalid` (malformed, past the end, or not on
+          a line boundary). Never silent.
+        - one frame per served ledger line, `event` = the line's type and
+          `data` a projection of its documented fields:
+          `schema_version` (the line's own, `1` when the line carries
+          none), `type`, `molecule_id`, `timestamp`, `seq` and `mol_seq`
+          when the line has them (information only), and the fields listed
+          for the type in `docs/book/src/reference/read-contracts.md`.
+          Types outside that table, lines naming no molecule
+          (`operator_present`, `operator_signed`), worktree paths, shell
+          commands and harness-turn text are never served; `session_id`
+          is replaced by `session_digest`. The set of types is additive:
+          ignore unknown event names.
+
+        ## Bounds
+
+        A connection delivers at most 5,000 frames, then closes cleanly;
+        reconnect with the last `id`. At most one ledger stream per
+        principal is open at a time (a second is refused with 429). One
+        rate-limit token is charged per connection. Admission is rechecked
+        every second, as on the other streams.
+      tags: [events]
+      parameters:
+        - in: query
+          name: after
+          required: false
+          schema:
+            type: string
+          description: |
+            Resume cursor: the `id` of the last frame received. Overridden
+            by `Last-Event-ID` when both are sent.
+        - in: header
+          name: Last-Event-ID
+          required: false
+          schema:
+            type: string
+          description: Resume cursor, verbatim from the last frame's `id`.
+      responses:
+        "200":
+          description: |
+            SSE stream; closes after at most 5,000 frames, or when the
+            client disconnects or admission ends.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE-encoded frames (see description).
+        "401":
+          description: Missing or invalid JWT or tenant admission failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing `cosmon:events:subscribe` or `cosmon:molecule:read`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: The caller's tenant has no galaxy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: |
+            `rate_limited`, `noyau_budget_exhausted`, or
+            `ledger_stream_open` (this principal already holds a stream).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: The ledger cannot be read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   # ── Operational endpoints (outside /v1/, no JWT gate, excluded
   # from the §8p frozen surface). Documented here for completeness so
   # a dashboard tenant can render the adapter health page without

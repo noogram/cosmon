@@ -1619,13 +1619,11 @@ impl Client {
         &self,
         molecule_id: Option<&str>,
         last_event_id: Option<u64>,
-        mut on_event: F,
+        on_event: F,
     ) -> Result<()>
     where
         F: FnMut(SseEvent),
     {
-        use futures_util::StreamExt;
-
         let mut url = self.url(canon::GET_V1_EVENTS.path);
         if let Some(m) = molecule_id {
             // Hand-rolled, single param; full-fat query encoding would
@@ -1640,67 +1638,46 @@ impl Client {
             rb = rb.header("Last-Event-ID", id.to_string());
         }
         let resp = self.send(rb).await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let body_json = serde_json::from_str::<serde_json::Value>(&body)
-                .unwrap_or(serde_json::Value::String(body));
-            return Err(Error::Api {
-                status: status.as_u16(),
-                body: body_json,
-            });
+        let resp = ensure_stream_success(resp).await?;
+        read_sse(resp, on_event).await
+    }
+
+    /// `GET /v1/ledger` — replay, then live, over the tenant's durable
+    /// event log. Invokes `on_event` for every frame until the server
+    /// closes the connection (it does so after a bounded number of frames)
+    /// or an I/O error occurs, and returns the cursor of the last frame
+    /// received, or `after` unchanged when none arrived.
+    ///
+    /// `after` is an opaque cursor: the `id` of a frame this method
+    /// delivered earlier. Pass the returned value to the next call to
+    /// resume with no gap and no duplicate; `None` starts at the beginning
+    /// of the ledger. The `ledger.epoch` and `ledger.reset` frames are
+    /// delivered like any other: on a reset the caller must discard what it
+    /// folded so far.
+    pub async fn ledger_stream<F>(
+        &self,
+        after: Option<&str>,
+        mut on_event: F,
+    ) -> Result<Option<String>>
+    where
+        F: FnMut(SseEvent),
+    {
+        let mut rb = self.req_url(Method::GET, &self.url(canon::GET_V1_LEDGER.path));
+        rb = rb.header(reqwest::header::ACCEPT, "text/event-stream");
+        if let Some(cursor) = after {
+            rb = rb.header("Last-Event-ID", cursor);
         }
-        let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
-        let mut current = SseEvent::default();
-        while let Some(chunk) = stream.next().await {
-            let bytes = chunk.map_err(Error::Http)?;
-            // SSE chunks are valid UTF-8 by spec.
-            let Ok(text) = std::str::from_utf8(&bytes) else {
-                continue;
-            };
-            buf.push_str(text);
-            // Process full lines; keep any trailing partial line in
-            // `buf` for the next chunk.
-            while let Some(nl) = buf.find('\n') {
-                let line: String = buf.drain(..=nl).collect();
-                let line = line.trim_end_matches(['\r', '\n']);
-                if line.is_empty() {
-                    // End of one event — dispatch and reset.
-                    if !current.is_empty() {
-                        on_event(std::mem::take(&mut current));
-                    }
-                    continue;
-                }
-                if let Some(rest) = line.strip_prefix(':') {
-                    // Comment / keep-alive — ignore but useful for
-                    // operators tailing the stream in debug mode.
-                    tracing::trace!(target: "cosmon_remote::sse", comment = rest);
-                    continue;
-                }
-                let (field, value) = match line.split_once(':') {
-                    Some((f, v)) => (f, v.strip_prefix(' ').unwrap_or(v)),
-                    None => (line, ""),
-                };
-                // Match the W3C SSE field set; everything else
-                // (including `retry`, which V0 ignores — durable
-                // reconnect-delay is a v2 concern) is a silent
-                // no-op so a forward-compatible server can grow
-                // new fields without breaking us.
-                match field {
-                    "id" => current.id = Some(value.to_owned()),
-                    "event" => value.clone_into(&mut current.event),
-                    "data" => {
-                        if !current.data.is_empty() {
-                            current.data.push('\n');
-                        }
-                        current.data.push_str(value);
-                    }
-                    _ => {}
-                }
+        let resp = self.send(rb).await?;
+        let resp = ensure_stream_success(resp).await?;
+        let mut last = after.map(str::to_owned);
+        read_sse(resp, |event| {
+            if let Some(id) = &event.id {
+                last = Some(id.clone());
             }
-        }
-        Ok(())
+            on_event(event);
+        })
+        .await?;
+        Ok(last)
     }
 
     /// Build a request against an absolute URL we already constructed
@@ -1714,6 +1691,81 @@ impl Client {
         }
         rb
     }
+}
+
+/// Turn a non-2xx streaming response into [`Error::Api`].
+async fn ensure_stream_success(resp: reqwest::Response) -> Result<reqwest::Response> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let body_json =
+        serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::Value::String(body));
+    Err(Error::Api {
+        status: status.as_u16(),
+        body: body_json,
+    })
+}
+
+/// Parse a `text/event-stream` body and hand each event to `on_event`.
+async fn read_sse<F>(resp: reqwest::Response, mut on_event: F) -> Result<()>
+where
+    F: FnMut(SseEvent),
+{
+    use futures_util::StreamExt;
+
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+    let mut current = SseEvent::default();
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(Error::Http)?;
+        // SSE chunks are valid UTF-8 by spec.
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        buf.push_str(text);
+        // Process full lines; keep any trailing partial line in
+        // `buf` for the next chunk.
+        while let Some(nl) = buf.find('\n') {
+            let line: String = buf.drain(..=nl).collect();
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.is_empty() {
+                // End of one event — dispatch and reset.
+                if !current.is_empty() {
+                    on_event(std::mem::take(&mut current));
+                }
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix(':') {
+                // Comment / keep-alive — ignore but useful for
+                // operators tailing the stream in debug mode.
+                tracing::trace!(target: "cosmon_remote::sse", comment = rest);
+                continue;
+            }
+            let (field, value) = match line.split_once(':') {
+                Some((f, v)) => (f, v.strip_prefix(' ').unwrap_or(v)),
+                None => (line, ""),
+            };
+            // Match the W3C SSE field set; everything else
+            // (including `retry`, which V0 ignores — durable
+            // reconnect-delay is a v2 concern) is a silent
+            // no-op so a forward-compatible server can grow
+            // new fields without breaking us.
+            match field {
+                "id" => current.id = Some(value.to_owned()),
+                "event" => value.clone_into(&mut current.event),
+                "data" => {
+                    if !current.data.is_empty() {
+                        current.data.push('\n');
+                    }
+                    current.data.push_str(value);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Minimal percent-encoder for a query parameter value — covers the
