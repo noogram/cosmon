@@ -141,7 +141,11 @@ pub struct Context {
     pub verbose: bool,
     /// Whether `--json` was passed (NDJSON output mode).
     pub json: bool,
-    /// Optional path to a configuration file.
+    /// State directory selected for this invocation.
+    ///
+    /// The CLI resolves the global override and environment only once before
+    /// constructing this context. Tests may still provide a fixture path or
+    /// leave this absent to exercise the fallback resolver.
     pub config: Option<PathBuf>,
 }
 
@@ -157,11 +161,18 @@ pub(crate) fn default_state_dir() -> PathBuf {
 impl Context {
     /// Resolve the state directory honored by this invocation.
     ///
-    /// The global `--config` flag (`ctx.config`) overrides walk-up
-    /// discovery; otherwise [`default_state_dir`] is used. This is the
-    /// canonical resolution shared by every handler.
+    /// The CLI stores its one process-level resolution in `ctx.config` before
+    /// dispatch; direct test contexts retain the fallback for fixture setup.
     pub(crate) fn state_dir(&self) -> PathBuf {
         self.config.clone().unwrap_or_else(default_state_dir)
+    }
+
+    /// Resolve the galaxy `config.toml` for this invocation.
+    ///
+    /// `ctx.config` holds a state directory, never a config file, so it must
+    /// not be passed to `resolve_config_path` as an explicit file.
+    pub(crate) fn config_path(&self) -> PathBuf {
+        cosmon_filestore::resolve_config_path_for_state_dir(&self.state_dir())
     }
 
     /// Obtain the hexagonal state-store adapter rooted at the resolved

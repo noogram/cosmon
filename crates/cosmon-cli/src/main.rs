@@ -706,7 +706,7 @@ fn main() {
     let ctx = cmd::Context {
         verbose: cli.verbose,
         json: cli.json,
-        config: cli.config,
+        config: Some(cosmon_filestore::resolve_state_dir(cli.config.as_deref())),
     };
     let record_operator_presence = records_operator_presence(&cli.command);
 

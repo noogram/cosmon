@@ -247,7 +247,7 @@ fn registry_projection(adapters_cfg: Option<&AdaptersConfig>) -> Vec<AdapterList
 }
 
 fn run_list_adapters(ctx: &Context) -> Result<()> {
-    let config_path = cosmon_filestore::resolve_config_path(ctx.config.as_deref());
+    let config_path = ctx.config_path();
     let project_config = cosmon_filestore::load_project_config(&config_path).unwrap_or_default();
     let rows = registry_projection(project_config.adapters.as_ref());
 
@@ -280,7 +280,7 @@ fn run_show_adapters(ctx: &Context) -> Result<()> {
     // Same load path as `cs tackle` (resolve_config_path + load_project_config);
     // an absent or unparseable file is silently treated as "no config", so
     // this command still works on a fresh galaxy.
-    let config_path = cosmon_filestore::resolve_config_path(ctx.config.as_deref());
+    let config_path = ctx.config_path();
     let project_config = cosmon_filestore::load_project_config(&config_path).unwrap_or_default();
     let adapters_cfg = project_config.adapters.as_ref();
 
