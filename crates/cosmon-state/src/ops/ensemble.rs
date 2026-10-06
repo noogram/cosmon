@@ -151,9 +151,14 @@ pub fn ensemble(
         filter.fleet = Some(parsed);
     }
 
-    let molecules = store
+    let mut molecules = store
         .list_molecules(&filter)
         .map_err(|e| EnsembleError::StoreUnavailable(format_cosmon(&e)))?;
+    molecules.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+    });
 
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     emit_authz_decision(
@@ -188,11 +193,10 @@ fn derive_subject_kind(subject: &Subject) -> String {
 /// JSON body emitted by `cs --json ensemble`-equivalent flow and
 /// `GET /v1/molecules`. One entry per matching molecule.
 ///
-/// Slim by design: just `id`, `formula`, `status`, `current_step`,
-/// `total_steps`, `worker`, `tags`, `created_at`. Callers that need the
-/// full molecule projection (coupling report, ghost, energy) reach for
-/// `observe :id` per molecule — `ensemble` is the index, `observe` is
-/// the page.
+/// Slim by design: lifecycle, scheduling, and integration facts that are
+/// available directly from `state.json`. Expensive folds such as token,
+/// model, and energy attribution stay on `observe :id` — `ensemble` is the
+/// index, `observe` is the page.
 #[derive(Debug, Clone, Serialize)]
 pub struct EnsembleEntryJson {
     /// Molecule id.
@@ -201,6 +205,15 @@ pub struct EnsembleEntryJson {
     pub formula: String,
     /// Lifecycle status string.
     pub status: String,
+    /// Operator-facing phase derived from the lifecycle status.
+    pub phase: String,
+    /// Last state write, as RFC3339.
+    pub updated_at: String,
+    /// Cognitive molecule kind, when recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Fleet containing the molecule.
+    pub fleet: String,
     /// Current step index.
     pub current_step: usize,
     /// Total number of steps.
@@ -212,6 +225,20 @@ pub struct EnsembleEntryJson {
     pub tags: Vec<String>,
     /// Created-at RFC3339.
     pub created_at: String,
+    /// Typed graph edges carried by the molecule.
+    pub typed_links: Vec<cosmon_core::interaction::MoleculeLink>,
+    /// Successful integration timestamp, when the branch landed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<String>,
+    /// Durable reason the molecule is not integrated, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub non_integration: Option<crate::NonIntegration>,
+    /// Most recent worker progress timestamp, when observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_progress_at: Option<String>,
+    /// Integration base pinned on this molecule, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
 }
 
 impl EnsembleEntryJson {
@@ -222,11 +249,20 @@ impl EnsembleEntryJson {
             id: mol.id.to_string(),
             formula: mol.formula_id.to_string(),
             status: mol.status.to_string(),
+            phase: mol.status.phase().as_str().to_owned(),
+            updated_at: mol.updated_at.to_rfc3339(),
+            kind: mol.kind.map(|kind| kind.to_string()),
+            fleet: mol.fleet_id.to_string(),
             current_step: mol.current_step,
             total_steps: mol.total_steps,
             worker: mol.assigned_worker.as_ref().map(ToString::to_string),
             tags: mol.tags.iter().map(ToString::to_string).collect(),
             created_at: mol.created_at.to_rfc3339(),
+            typed_links: mol.typed_links.clone(),
+            merged_at: mol.merged_at.map(|at| at.to_rfc3339()),
+            non_integration: mol.non_integration.clone(),
+            last_progress_at: mol.last_progress_at.map(|at| at.to_rfc3339()),
+            base_branch: mol.base_branch.clone(),
         }
     }
 }
@@ -242,6 +278,12 @@ pub struct EnsembleJson {
     /// Total number of matching molecules — duplicates `molecules.len()`
     /// for clients that want a quick summary without parsing the array.
     pub total: usize,
+    /// Opaque id of the final row when another page exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Durable ledger head observed before this collection snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ledger_cursor: Option<String>,
 }
 
 impl EnsembleJson {
@@ -254,7 +296,12 @@ impl EnsembleJson {
             .map(EnsembleEntryJson::from_data)
             .collect();
         let total = molecules.len();
-        Self { molecules, total }
+        Self {
+            molecules,
+            total,
+            next_cursor: None,
+            ledger_cursor: None,
+        }
     }
 }
 

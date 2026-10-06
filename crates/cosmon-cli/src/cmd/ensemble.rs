@@ -109,6 +109,12 @@ pub(crate) struct MoleculeStateEntry {
     pub(crate) id: String,
     /// `snake_case` molecule status (matches `MoleculeStatus`'s serde repr).
     pub(crate) status: String,
+    /// Operator-facing phase derived from the lifecycle status.
+    pub(crate) phase: String,
+    /// Fleet containing this molecule.
+    pub(crate) fleet: String,
+    /// Last state write.
+    pub(crate) updated_at: chrono::DateTime<chrono::Utc>,
     /// Cognitive kind, when the molecule has one. The resident runtime uses
     /// this to reserve decisions for a human unless they explicitly opt in.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -121,6 +127,8 @@ pub(crate) struct MoleculeStateEntry {
     /// so two adjacent invocations produce byte-identical JSON when nothing
     /// has changed (downstream readers cache on this).
     pub(crate) blocked_by: Vec<String>,
+    /// Full typed edge projection for graph-aware readers.
+    pub(crate) typed_links: Vec<cosmon_core::interaction::MoleculeLink>,
     /// Merge stamp for a `Completed` predecessor — the merge-before-dispatch
     /// discriminant. A machine reader (the resident runtime's
     /// `ReadyFrontierScheduler`) must NOT release a completed blocker's
@@ -129,6 +137,12 @@ pub(crate) struct MoleculeStateEntry {
     /// Absent (skipped) when the molecule has not merged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) merged_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Durable reason the molecule is not integrated, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) non_integration: Option<cosmon_state::NonIntegration>,
+    /// Most recent worker progress timestamp, when observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_progress_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Stuck stamp for a `Frozen` predecessor. A `cs stuck` freeze carries
     /// `Some(_)` ("do not execute — hold dependents"). Absent (skipped) when
     /// the molecule is not stuck.
@@ -175,10 +189,16 @@ pub(crate) fn build_molecule_states(
             MoleculeStateEntry {
                 id: m.id.to_string(),
                 status: m.status.to_string(),
+                phase: m.status.phase().as_str().to_owned(),
+                fleet: m.fleet_id.to_string(),
+                updated_at: m.updated_at,
                 kind: m.kind.map(|kind| kind.to_string()),
                 tags: m.tags.iter().map(ToString::to_string).collect(),
                 blocked_by,
+                typed_links: m.typed_links.clone(),
                 merged_at: m.merged_at,
+                non_integration: m.non_integration.clone(),
+                last_progress_at: m.last_progress_at,
                 stuck_at: m.stuck_at,
                 freeze_on_last_step: m.freeze_on_last_step,
                 // Prefer the durable per-molecule pin
