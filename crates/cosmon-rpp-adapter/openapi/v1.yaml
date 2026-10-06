@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Cosmon Remote Pilot Port (RPP) — V0+V1
-  version: "0.6.0"
+  version: "1.0.0"
   description: |
     Hand-curated tenant client contract for the Remote Pilot Port. Requests
     execute through the admission boundary and injectable library ports.
@@ -1570,6 +1570,11 @@ paths:
               schema:
                 type: string
                 description: SSE-encoded frames (see description).
+                x-sse-data-schema:
+                  oneOf:
+                    - $ref: "#/components/schemas/LedgerEpochFrame"
+                    - $ref: "#/components/schemas/LedgerResetFrame"
+                    - $ref: "#/components/schemas/LedgerEventFrame"
         "401":
           description: Missing or invalid JWT or tenant admission failure.
           content:
@@ -3084,6 +3089,7 @@ components:
   schemas:
     StatusEnvelope:
       type: "object"
+      additionalProperties: true
       required: ["request_id", "molecule_id", "status", "phase", "updated_at", "terminal"]
       properties:
         request_id:
@@ -3463,6 +3469,7 @@ components:
 
     EnsembleEnvelope:
       type: object
+      additionalProperties: true
       required: [request_id, ensemble]
       properties:
         request_id:
@@ -3767,27 +3774,50 @@ components:
     MoleculeView:
       type: object
       description: |
-        Public projection of a molecule. The exact field set is
-        intentionally lenient — additional fields may appear without
-        bumping the API version, but the contract is that `id`,
-        `kind`, `status`, and `branch` are always present.
+        Public projection of a molecule. Additional fields may appear in a
+        minor contract version. The required set below is validated against
+        real handler output; it deliberately excludes the adapter-local
+        `molecule_dir` path from the nucleation response.
       additionalProperties: true
-      required: [id, kind, status, branch]
+      required:
+        [id, formula, status, current_step, total_steps, completed_steps,
+         worker, variables, links, tags, created_at, updated_at,
+         collapse_reason, collapsed_step, poll_count, transitions, branch]
       properties:
         id:
           type: string
           description: Molecule identifier.
-        kind:
-          type: string
-          description: |
-            Molecule kind — one of `idea`, `task`, `decision`,
-            `issue`, `signal`, `deliberation`. Encoded as a string
-            for forward compatibility.
+        formula: { type: string }
         status:
           type: string
           description: |
             Lifecycle status — `pending`, `active`, `running`,
             `completed`, `collapsed`, `frozen`, etc.
+        current_step: { type: integer, minimum: 0 }
+        total_steps: { type: integer, minimum: 0 }
+        completed_steps:
+          type: array
+          items: { type: string }
+        worker:
+          type: [string, "null"]
+        variables:
+          type: object
+          additionalProperties: { type: string }
+        links:
+          type: array
+          items: { type: string }
+        typed_links:
+          type: array
+          items: { type: object, additionalProperties: true }
+        tags:
+          type: array
+          items: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        collapse_reason: { type: [string, "null"] }
+        collapsed_step: { type: [integer, "null"], minimum: 0 }
+        poll_count: { type: integer, minimum: 0 }
+        transitions: { type: integer, minimum: 0 }
         base_branch:
           type: string
           description: |
@@ -3906,7 +3936,10 @@ components:
 
     AuthMeResponse:
       type: object
-      required: [sub, aud, scopes, noyau, expires_at, issuer]
+      additionalProperties: true
+      required:
+        [sub, aud, scopes, noyau, expires_at, issuer, version,
+         api_surface_version, api_contract_version]
       description: |
         Whoami envelope for `GET /v1/auth/me` (task-20260522-560a).
         Echoes only what the server already trusts after JWT
@@ -4010,6 +4043,45 @@ components:
             compiled-in count and emit an informative note on
             mismatch — never blocking, never a `/v2/`. Additive field
             (delib-20260610-9a0c, tolnay).
+        api_contract_version:
+          type: string
+          pattern: '^1\\.[0-9]+\\.[0-9]+$'
+          description: |
+            Semantic version of this hand-written `/v1` response contract,
+            derived from `info.version` at build time. Additive fields bump
+            the minor version; removing or renaming a required field needs a
+            new major contract.
+
+    LedgerEpochFrame:
+      type: object
+      additionalProperties: true
+      required: [epoch, cursor]
+      properties:
+        epoch: { type: string }
+        cursor: { type: string }
+
+    LedgerResetFrame:
+      type: object
+      additionalProperties: true
+      required: [reason, epoch, cursor]
+      properties:
+        reason:
+          type: string
+          enum: [epoch_changed, truncated, cursor_invalid]
+        epoch: { type: string }
+        cursor: { type: string }
+
+    LedgerEventFrame:
+      type: object
+      additionalProperties: true
+      required: [schema_version, type, molecule_id]
+      properties:
+        schema_version: { type: integer, minimum: 1 }
+        type: { type: string }
+        molecule_id: { type: string }
+        timestamp: { type: string, format: date-time }
+        seq: { type: integer, minimum: 0 }
+        mol_seq: { type: integer, minimum: 0 }
 
     ApiError:
       type: object

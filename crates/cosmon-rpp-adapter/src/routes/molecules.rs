@@ -481,7 +481,13 @@ pub async fn post_molecule(
         model: None,
     };
     let body = ObserveJson::from_view(&observe_view, view.molecule_dir.to_string_lossy().as_ref());
-    let body_value = serde_json::to_value(&body).unwrap_or(Value::Null);
+    let mut body_value = serde_json::to_value(&body).unwrap_or(Value::Null);
+    // `molecule_dir` is a local adapter path used by the CLI projection. It
+    // is not part of the tenant response contract and must not cross the RPP
+    // boundary on nucleation.
+    if let Some(object) = body_value.as_object_mut() {
+        object.remove("molecule_dir");
+    }
 
     let molecule_id = view.data.id.as_str().to_owned();
 

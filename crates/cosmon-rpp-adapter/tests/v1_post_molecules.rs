@@ -160,6 +160,10 @@ async fn happy_path_post_returns_201_with_id() {
     let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.get("request_id").is_some(), "missing request_id");
+    assert!(
+        body["molecule"].get("molecule_dir").is_none(),
+        "the RPP response must not expose an adapter-local path"
+    );
     let id = body["molecule"]["id"]
         .as_str()
         .expect("molecule.id missing or not a string");

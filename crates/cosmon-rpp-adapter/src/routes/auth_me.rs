@@ -136,6 +136,10 @@ pub struct AuthMeResponse {
     /// informative stderr note on mismatch; never blocking, never
     /// `/v2/`.
     pub api_surface_version: usize,
+    /// Semantic version of the hand-written `/v1` response contract.
+    /// Derived from `openapi/v1.yaml` by the build script so the served
+    /// value cannot drift from the checked-in contract.
+    pub api_contract_version: String,
 }
 
 /// `GET /v1/auth/me`. See module docs for the pipeline.
@@ -217,6 +221,7 @@ pub async fn get_auth_me(
         claude_credentials_status,
         version: env!("CARGO_PKG_VERSION").to_owned(),
         api_surface_version: crate::surface_events::SURFACE_EVENTS.len(),
+        api_contract_version: env!("COSMON_API_CONTRACT_VERSION").to_owned(),
     };
     let value = serde_json::to_value(&body)
         .map_err(|_| ApiError::internal("auth_me_serialization_failed"))?;

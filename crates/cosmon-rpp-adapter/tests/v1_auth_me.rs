@@ -168,6 +168,7 @@ async fn valid_jwt_returns_200_with_whoami_payload() {
         body["api_surface_version"],
         serde_json::json!(cosmon_rpp_adapter::surface_events::SURFACE_EVENTS.len())
     );
+    assert_eq!(body["api_contract_version"], "1.0.0");
 }
 
 #[tokio::test]

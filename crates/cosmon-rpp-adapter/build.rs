@@ -33,9 +33,11 @@ use cosmon_surface_canon::{fold_live, parse_canon, CanonEvent};
 
 const DATA_FILE: &str = "data/surface_events.txt";
 const GENERATED_FILE: &str = "surface_events_generated.rs";
+const OPENAPI_FILE: &str = "openapi/v1.yaml";
 
 fn main() {
     println!("cargo:rerun-if-changed={DATA_FILE}");
+    println!("cargo:rerun-if-changed={OPENAPI_FILE}");
     println!("cargo:rerun-if-changed=build.rs");
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
@@ -57,6 +59,40 @@ fn main() {
     let out_path = out_dir.join(GENERATED_FILE);
     fs::write(&out_path, render(&events))
         .unwrap_or_else(|err| panic!("failed to write {}: {err}", out_path.display()));
+
+    let openapi_path = manifest_dir.join(OPENAPI_FILE);
+    let openapi = fs::read_to_string(&openapi_path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", openapi_path.display()));
+    let contract_version =
+        api_contract_version(&openapi).unwrap_or_else(|err| panic!("{OPENAPI_FILE}: {err}"));
+    println!("cargo:rustc-env=COSMON_API_CONTRACT_VERSION={contract_version}");
+}
+
+fn api_contract_version(openapi: &str) -> Result<&str, &'static str> {
+    let mut in_info = false;
+    for line in openapi.lines() {
+        if !line.starts_with(' ') {
+            in_info = line.trim() == "info:";
+            continue;
+        }
+        if in_info && line.starts_with("  version:") {
+            let version = line
+                .trim_start_matches("  version:")
+                .trim()
+                .trim_matches('"');
+            let parts: Vec<_> = version.split('.').collect();
+            if parts.len() == 3
+                && parts
+                    .iter()
+                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+                && parts[0] == "1"
+            {
+                return Ok(version);
+            }
+            return Err("info.version must be a major-1 semantic version");
+        }
+    }
+    Err("info.version is missing")
 }
 
 fn render(events: &[CanonEvent]) -> String {
