@@ -7,7 +7,7 @@ Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
 Usage: cs inbox [OPTIONS]
 
 Options:
-      --config <PATH>            Path to configuration file
+      --config <PATH>            Path to the state directory (default: the galaxy's .cosmon/state/)
       --refresh-ms <REFRESH_MS>  Refresh cadence in milliseconds. Inbox reloads the stack on each tick or on `r`/`R`. Default: 2000ms (gentler than peek's 250ms — inbox is a decision surface, not a watchdog) [default: 2000]
       --json                     Print the inbox contents as NDJSON and exit (agent-first). Skips the TUI entirely. One JSON object per actionable row plus one session envelope when an unsealed session exists
   -v, --verbose                  Enable verbose output

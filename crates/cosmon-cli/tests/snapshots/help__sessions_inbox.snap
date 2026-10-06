@@ -7,7 +7,7 @@ Read the messages addressed to this session (`--peek` to look without consuming 
 Usage: cs sessions inbox [OPTIONS]
 
 Options:
-      --config <PATH>       Path to configuration file
+      --config <PATH>       Path to the state directory (default: the galaxy's .cosmon/state/)
       --session <SID>       Mailbox to read. Defaults to `$COSMON_SESSION_ID`
       --peek                Show pending envelopes without acknowledging them
   -v, --verbose             Enable verbose output

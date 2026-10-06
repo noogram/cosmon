@@ -7,7 +7,7 @@ Which agent conversations exist on this machine, and the exact name to refer to 
 Usage: cs sessions discover [OPTIONS]
 
 Options:
-      --config <PATH>    Path to configuration file
+      --config <PATH>    Path to the state directory (default: the galaxy's .cosmon/state/)
       --repo <PATH>      Repository whose sessions to show. Defaults to the repository the current directory is in. Resolved to an exact checkout — a worktree is never its canonical checkout (REPO-EXACT)
       --cwd <PATH>       Show sessions whose recorded working directory is exactly this path
   -v, --verbose          Enable verbose output

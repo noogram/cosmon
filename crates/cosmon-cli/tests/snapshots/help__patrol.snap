@@ -8,7 +8,7 @@ Usage: cs patrol [OPTIONS]
 
 Options:
       --config <PATH>
-          Path to configuration file
+          Path to the state directory (default: the galaxy's .cosmon/state/)
       --respawn
           Auto-respawn: restart dead workers by re-creating tmux sessions
       --no-tmux

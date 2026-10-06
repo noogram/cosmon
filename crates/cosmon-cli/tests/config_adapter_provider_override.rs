@@ -136,3 +136,30 @@ fn config_show_adapters_anthropic_defaults_when_unset() {
     assert_eq!(anthropic["default_model"], "claude-opus-4-7");
     assert_eq!(anthropic["default_model_source"], "default");
 }
+
+/// An explicit `--config` pointing at a galaxy's own `.cosmon/state` keeps
+/// reading that galaxy's `config.toml` when the cwd is outside any galaxy.
+#[test]
+fn explicit_state_dir_reads_its_own_galaxy_config() {
+    let tmp = setup_project_with_xai_openai();
+    let outside = tempfile::tempdir().unwrap();
+    let state = tmp.path().join(".cosmon").join("state");
+    fs::create_dir_all(&state).unwrap();
+    let output = cosmon_bin_in(outside.path())
+        .env("XAI_API_KEY", "xai-real-key")
+        .arg("--config")
+        .arg(&state)
+        .args(["--json", "config", "show", "adapters"])
+        .output()
+        .expect("cs config show adapters failed to spawn");
+    assert!(output.status.success());
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    let openai = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["adapter"] == "openai")
+        .expect("openai row present");
+    assert_eq!(openai["api_key_env"], "XAI_API_KEY", "{openai}");
+}

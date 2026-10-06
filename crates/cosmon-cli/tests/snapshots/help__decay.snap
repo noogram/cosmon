@@ -10,7 +10,7 @@ Arguments:
   <SOURCE>  Source molecule ID to decay
 
 Options:
-      --config <PATH>                Path to configuration file
+      --config <PATH>                Path to the state directory (default: the galaxy's .cosmon/state/)
       --formula <FORMULA>            Formula for the product molecules
       --count <COUNT>                Number of products to create (or provide --product-vars multiple times) [default: 1]
   -v, --verbose                      Enable verbose output

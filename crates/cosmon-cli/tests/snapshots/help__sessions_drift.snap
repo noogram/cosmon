@@ -11,7 +11,7 @@ Arguments:
   <SESSION_B>  The second session
 
 Options:
-      --config <PATH>          Path to configuration file
+      --config <PATH>          Path to the state directory (default: the galaxy's .cosmon/state/)
       --mission <MOLECULE_ID>  The mission both sides checkpointed
       --checkpoint <latest>    Which checkpoint of each session to compare. Only `latest` is a selector; name an exact record with `--checkpoint-a` / `--checkpoint-b` [default: latest]
   -v, --verbose                Enable verbose output

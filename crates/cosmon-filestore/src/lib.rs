@@ -60,9 +60,10 @@ use std::path::{Path, PathBuf};
 
 // Re-export the resolution function for convenience.
 pub use resolve::{
-    resolve_cluster_config_path, resolve_config_path, resolve_config_path_from,
-    resolve_formulas_dir, resolve_formulas_dir_from, resolve_state_dir, resolve_state_dir_from,
-    resolve_state_dir_with_origin, walk_up_find_cosmon_dir_from, StateDirOrigin,
+    resolve_cluster_config_path, resolve_config_path, resolve_config_path_for_state_dir,
+    resolve_config_path_from, resolve_formulas_dir, resolve_formulas_dir_from,
+    resolve_project_root, resolve_state_dir, resolve_state_dir_from, resolve_state_dir_with_origin,
+    walk_up_find_cosmon_dir_from, StateDirOrigin,
 };
 
 use cosmon_core::config::ProjectConfig;
@@ -105,14 +106,20 @@ impl FileStore {
     ///
     /// The state directory is `.cosmon/state/`, so the project root is two
     /// levels up. Returns `None` if the ancestry chain is too short (e.g.,
-    /// in test environments with a flat temp directory).
+    /// in test environments with a flat temp directory) or if the derived
+    /// directory is not a galaxy (`.cosmon/config.toml` absent): an override
+    /// state directory outside any galaxy has no project root to derive, and
+    /// naming an arbitrary grandparent would aim galaxy-file reads and
+    /// worktree lookups at the wrong tree.
     #[must_use]
     pub fn project_root(&self) -> Option<PathBuf> {
         // .cosmon/state/ → .cosmon/ → project root
-        self.root
-            .parent()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
+        let derived = self.root.parent().and_then(Path::parent)?;
+        derived
+            .join(".cosmon")
+            .join("config.toml")
+            .is_file()
+            .then(|| derived.to_path_buf())
     }
 
     fn fleet_path(&self) -> PathBuf {
@@ -1538,10 +1545,27 @@ mod tests {
         let cosmon_dir = tmp.path().join(".cosmon");
         let state_dir = cosmon_dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            cosmon_dir.join("config.toml"),
+            "[project]\nproject_id = \"proj-ab12\"\n",
+        )
+        .unwrap();
 
         let store = FileStore::new(&state_dir);
         let root = store.project_root();
         assert_eq!(root.as_deref(), Some(tmp.path()));
+    }
+
+    #[test]
+    fn test_project_root_is_none_when_the_derived_dir_is_not_a_galaxy() {
+        // An override state dir whose grandparent carries no
+        // `.cosmon/config.toml` has no project root: naming one would aim
+        // galaxy-file reads at an arbitrary directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join("a").join("b");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        assert_eq!(FileStore::new(&state_dir).project_root(), None);
     }
 
     #[test]

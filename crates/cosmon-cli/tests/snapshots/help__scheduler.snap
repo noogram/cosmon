@@ -11,7 +11,7 @@ Commands:
   validate  Lint `patrols.toml` without firing anything — the safe pre-flight when adding or editing a patrol (success criterion (i) of the autopilot primitive). Zero side-effects: no state read, no dispatch, no kill-switch touch. Exits 0 when the file parses and validates, 1 otherwise — so it doubles as a CI gate. Mirrors `cosmon-scheduler validate`
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
   -v, --verbose        Enable verbose output
       --json           Output in JSON format
   -h, --help           Print help

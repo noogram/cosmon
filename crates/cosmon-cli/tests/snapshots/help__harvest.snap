@@ -8,7 +8,7 @@ Usage: cs harvest [OPTIONS] --molecule <MOLECULE>
 
 Options:
       --config <PATH>
-          Path to configuration file
+          Path to the state directory (default: the galaxy's .cosmon/state/)
 
       --molecule <MOLECULE>
           Molecule to harvest. Required — `cs harvest` operates on one molecule per invocation. Use `cs patrol --harvest` for the sweep variant

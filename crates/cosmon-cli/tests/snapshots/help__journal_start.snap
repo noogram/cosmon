@@ -7,7 +7,7 @@ Open a journal — every note you take lands in it until you end it
 Usage: cs journal start [OPTIONS]
 
 Options:
-      --config <PATH>    Path to configuration file
+      --config <PATH>    Path to the state directory (default: the galaxy's .cosmon/state/)
       --galaxy <GALAXY>  Galaxy this session belongs to (free-form label)
       --root <MOL_ID>    Root molecule(s) this session is anchored on (repeatable)
   -v, --verbose          Enable verbose output

@@ -7,7 +7,7 @@ Print a canonical v1 grant and its exact bytes for an external signer
 Usage: cs harvest-authority challenge [OPTIONS]
 
 Options:
-      --config <PATH>            Path to configuration file
+      --config <PATH>            Path to the state directory (default: the galaxy's .cosmon/state/)
       --molecule <MOLECULE>      Grant for exactly this molecule
       --mission <MISSION>        Grant for a mission rooted here
   -v, --verbose                  Enable verbose output

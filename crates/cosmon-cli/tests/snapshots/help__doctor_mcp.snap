@@ -8,7 +8,7 @@ Usage: cs doctor mcp [OPTIONS]
 
 Options:
       --config <PATH>
-          Path to configuration file
+          Path to the state directory (default: the galaxy's .cosmon/state/)
 
       --registry <REGISTRY>
           Override the path to the service registry database.

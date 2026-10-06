@@ -110,7 +110,14 @@ if [ "$#" -ge 2 ]; then
     base="$1"
     head="$2"
 elif [ -n "${GITHUB_BASE_REF:-}" ] && [ -n "${COSMON_PROVENANCE_HEAD:-}${GITHUB_SHA:-}" ]; then
-    git fetch --no-tags --depth=200 origin "$GITHUB_BASE_REF" 2>/dev/null || true
+    # Fetch the base only as deep as the clone already is: `--depth` on a
+    # full clone turns it shallow, and every later walk of this checkout
+    # (the self-tests replay history since 2020) silently stops at the cut.
+    if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+        git fetch --no-tags --depth=200 origin "$GITHUB_BASE_REF" 2>/dev/null || true
+    else
+        git fetch --no-tags origin "$GITHUB_BASE_REF" 2>/dev/null || true
+    fi
     base="origin/$GITHUB_BASE_REF"
     # On pull_request events GITHUB_SHA is the synthetic test-merge commit
     # GitHub fabricates for the PR ("Merge <head> into <base>"). Cosmon did

@@ -10,7 +10,7 @@ Usage: cs peek [OPTIONS]
 
 Options:
       --config <PATH>
-          Path to configuration file
+          Path to the state directory (default: the galaxy's .cosmon/state/)
 
       --no-tui
           Disable the TUI and render plaintext events to stdout. Required until the Phase 1 ratatui TUI lands

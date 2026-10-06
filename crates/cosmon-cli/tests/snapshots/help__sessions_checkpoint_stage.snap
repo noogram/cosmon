@@ -7,7 +7,7 @@ Write the same record as a draft, for the hook to publish at the next natural tr
 Usage: cs sessions checkpoint stage [OPTIONS] --mission <MOLECULE_ID>
 
 Options:
-      --config <PATH>                  Path to configuration file
+      --config <PATH>                  Path to the state directory (default: the galaxy's .cosmon/state/)
       --mission <MOLECULE_ID>          The mission being flown
       --session <SID>                  Publishing session. Defaults to `$COSMON_SESSION_ID`
   -v, --verbose                        Enable verbose output

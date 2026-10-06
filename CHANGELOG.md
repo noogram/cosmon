@@ -53,6 +53,17 @@ this stage.
 
 ### Fixed
 
+- An intentional `COSMON_STATE_DIR` override can be declared with
+  `<state-dir>/galaxy.toml` (`project_id = "<the galaxy's project_id>"`); the
+  shadowing warning is then silent, and otherwise printed once per command with
+  that remedy. Galaxy-level files (`config.toml`, `surfaces.toml`, surfaces)
+  resolve from the walk-up galaxy, not from `state_dir/../..`, so `cs project`,
+  `cs thaw`, `cs status` and `cs spore` work under the override. Read-only
+  commands (`status`, `observe`, `peek`, `project --check`) no longer append
+  `operator_present` events. A `state.json` that does not parse is refused
+  with the file and reason named, never rewritten. `--config` pointing at a
+  file is refused before any I/O, and `cs project` checks its frontier and
+  snapshot writes before touching tracked surfaces. (#171)
 - `cs status` no longer counts a dead worker as alive or reports the galaxy
   `clean`. A `Running` molecule whose worker session is gone is classified by
   the same ghost function `cs ensemble` uses, counted separately (`N 💀 dead`),

@@ -132,7 +132,7 @@ fn run_health(ctx: &Context, args: &HealthArgs) -> Result<()> {
     // Same load path as `cs config show adapters` + `cs tackle`.
     // A missing or unparseable file is silently treated as
     // "no config" — health probes must work on a fresh galaxy.
-    let config_path = cosmon_filestore::resolve_config_path(ctx.config.as_deref());
+    let config_path = ctx.config_path();
     let project_config = cosmon_filestore::load_project_config(&config_path).unwrap_or_default();
     let adapters_cfg = project_config.adapters.as_ref();
 

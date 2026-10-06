@@ -11,7 +11,7 @@ Arguments:
 
 Options:
       --batch <BATCH>...               Complete multiple molecules at once
-      --config <PATH>                  Path to configuration file
+      --config <PATH>                  Path to the state directory (default: the galaxy's .cosmon/state/)
       --reason <REASON>                Reason for completion (recorded in the log) [default: "completed via cs complete"]
   -v, --verbose                        Enable verbose output
       --json                           Output in JSON format

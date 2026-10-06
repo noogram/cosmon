@@ -49,7 +49,7 @@ use cosmon_cli::sensorium;
     disable_help_subcommand = true
 )]
 struct Cli {
-    /// Path to configuration file
+    /// Path to the state directory (default: the galaxy's .cosmon/state/)
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
 
@@ -537,6 +537,56 @@ enum Command {
     BuildTree,
 }
 
+/// Whether a command is allowed to add an operator-presence event.
+///
+/// Presence is itself a state write, so observation commands must never gain a
+/// side effect merely by being dispatched. The list is intentionally a narrow
+/// allow-list of lifecycle commands that already mutate their resolved store;
+/// new commands are silent until their own write contract explicitly admits
+/// presence telemetry.
+fn records_operator_presence(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Nucleate(_)
+            | Command::Evolve(_)
+            | Command::Collapse(_)
+            | Command::Complete(_)
+            | Command::Decay(_)
+            | Command::Merge(_)
+            | Command::Transform(_)
+            | Command::Init(_)
+            | Command::Spark(_)
+            | Command::Drop(_)
+            | Command::Kill(_)
+            | Command::Quench(_)
+            | Command::Freeze(_)
+            | Command::Thaw(_)
+            | Command::Resume(_)
+            | Command::Resurrect(_)
+            | Command::Teardown(_)
+            | Command::Purge(_)
+            | Command::Migrate(_)
+            | Command::Tackle(_)
+            | Command::LocalWorker(_)
+            | Command::Claim(_)
+            | Command::Release(_)
+            | Command::Tag(_)
+            | Command::Note(_)
+            | Command::Done(_)
+            | Command::Harvest(_)
+            | Command::Stitch(_)
+            | Command::Stuck(_)
+            | Command::AwaitOperator(_)
+            | Command::Heartbeat(_)
+            | Command::Sync(_)
+            | Command::Run(_)
+            | Command::Presence(_)
+            | Command::Archive(_)
+            | Command::Notarize(_)
+            | Command::Notify(_)
+    ) || matches!(command, Command::Project(args) | Command::Reconcile(args) if !args.is_check())
+}
+
 /// Install the process-wide `tracing` subscriber that carries `cs`'s own
 /// warnings to the operator (COSMON #26).
 ///
@@ -653,18 +703,27 @@ fn main() {
     // instead of the floor.
     install_tracing(cli.verbose);
 
+    let (resolved_state_dir, state_dir_origin) =
+        cosmon_filestore::resolve_state_dir_with_origin(cli.config.as_deref());
+    // Before any I/O: a state path that exists as a file would otherwise be
+    // read as an empty fleet and projected over tracked surfaces.
+    if let Err(e) = cmd::reject_non_directory_state_dir(&resolved_state_dir, state_dir_origin) {
+        if cli.json {
+            eprintln!("{}", serde_json::json!({"error": format!("{e:#}")}));
+        } else {
+            eprintln!("cs: {e:#}");
+        }
+        std::process::exit(1);
+    }
     let ctx = cmd::Context {
         verbose: cli.verbose,
         json: cli.json,
-        config: cli.config,
+        config: Some(resolved_state_dir),
     };
+    let record_operator_presence = records_operator_presence(&cli.command);
 
-    // STREAM half of layer B compromise (delib-20260509-18df §D-B,
-    // task-20260509-9f78). Emit `operator.present` once per
-    // interactive invocation so the `operator-attention-patrol` proxy
-    // has a foundational signal — last-touch timestamp per session.
-    // Best-effort: no-op when the state dir does not exist yet, and
-    // any error is swallowed so the hot path proceeds.
+    // Operator-signature telemetry is intentionally recorded before dispatch:
+    // unlike presence, it captures an attempted destructive gesture.
     {
         // Honour the same state dir the command itself will act on. This
         // used to hard-code `None`, which ignored `--config` and sent the
@@ -673,26 +732,6 @@ fn main() {
         // ambient one, and could not opt out of its cost
         // (task-20260727-0510).
         let state_dir = ctx.state_dir();
-        let sid = operator_event::current_session_id();
-        let nucleon_id = operator_event::current_nucleon_id();
-        let orbitale_id = operator_event::current_orbitale_id();
-        // Work messages are evidence under ADR-182, not fleet events. A
-        // member's send/inbox/ack (and a pilot's declaration or list) must
-        // leave events.jsonl byte-identical for the lifecycle witness.
-        if !matches!(&cli.command, Command::Work(_)) {
-            operator_event::emit_operator_present(
-                &state_dir,
-                &sid,
-                nucleon_id.as_deref(),
-                orbitale_id.as_deref(),
-                // V0: Internal — cosmon writes the substrate, no-cloning
-                // theorem prevents downstream destructive-action gating
-                // from trusting this. A follow-up molecule wires the
-                // exogenous IoregSensor poll into this emission point.
-                cosmon_core::presence_sensor::PresenceSource::Internal,
-            );
-        }
-
         // OperatorSigned — record destructive verbs *before* dispatch
         // so the trace captures the gesture even if the action errors
         // out. V0 records the gesture; gating is deferred until the
@@ -828,6 +867,23 @@ fn main() {
             Ok(())
         }
     };
+
+    // `operator_present` is a write in its own right. Emit it only after a
+    // command on the writer allow-list has completed successfully, which
+    // establishes that the resolved state directory loaded successfully.
+    if result.is_ok() && record_operator_presence {
+        let state_dir = ctx.state_dir();
+        let sid = operator_event::current_session_id();
+        let nucleon_id = operator_event::current_nucleon_id();
+        let orbitale_id = operator_event::current_orbitale_id();
+        operator_event::emit_operator_present(
+            &state_dir,
+            &sid,
+            nucleon_id.as_deref(),
+            orbitale_id.as_deref(),
+            cosmon_core::presence_sensor::PresenceSource::Internal,
+        );
+    }
 
     if let Err(e) = result {
         if ctx.json {

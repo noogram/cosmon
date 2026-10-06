@@ -10,7 +10,7 @@ Arguments:
   [OWNER]  Owner molecule; defaults to the caller's declared work
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --pending        Only envelopes still pending for a recipient
       --open           Only envelopes without a consumption report
   -v, --verbose        Enable verbose output

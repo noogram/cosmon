@@ -183,9 +183,10 @@ fn two_rebuilds_produce_identical_bytes() {
     assert_eq!(bytes_a, bytes_b, "rebuilds must be byte-deterministic");
 }
 
-/// Corrupt cache → archived as .broken, then rebuilt fresh.
+/// An unreadable cache is refused intact instead of being replaced by a
+/// lossy projection.
 #[test]
-fn corrupt_cache_archived_and_replaced() {
+fn corrupt_cache_is_refused_without_modification() {
     let dir = tempdir().unwrap();
     let events_path = dir.path().join("events.jsonl");
     let mol_dir = dir
@@ -204,19 +205,13 @@ fn corrupt_cache_archived_and_replaced() {
             blocks: vec![],
         }],
     );
-    std::fs::write(&state_path, b"{ this is not valid json").unwrap();
+    let corrupt = b"{ this is not valid json";
+    std::fs::write(&state_path, corrupt).unwrap();
 
-    let outcome = rebuild_molecule_state(&events_path, &id, &state_path).unwrap();
-    assert_eq!(outcome, RebuildOutcome::RecoveredFromCorruption);
-
-    let broken = state_path.with_extension("json.broken");
-    assert!(broken.exists());
-    let corrupted = std::fs::read(&broken).unwrap();
-    assert_eq!(corrupted, b"{ this is not valid json");
-
-    let data: MoleculeData = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
-    assert_eq!(data.id, id);
-    assert_eq!(data.formula_id.as_str(), "task-work");
+    let error = rebuild_molecule_state(&events_path, &id, &state_path).unwrap_err();
+    assert!(error.to_string().contains("nothing was modified"));
+    assert_eq!(std::fs::read(&state_path).unwrap(), corrupt);
+    assert!(!state_path.with_extension("json.broken").exists());
 }
 
 /// Seals survive a rebuild — the prompt/briefing seal hashes read back from

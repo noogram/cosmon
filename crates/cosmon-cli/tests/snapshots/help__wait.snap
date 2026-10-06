@@ -10,7 +10,7 @@ Arguments:
   <MOLECULE>  Molecule ID to wait on. Must be an exact ID — we never want a prefix to match the wrong molecule under a long-running wait
 
 Options:
-      --config <PATH>                  Path to configuration file
+      --config <PATH>                  Path to the state directory (default: the galaxy's .cosmon/state/)
       --for <FOR>                      Statuses to wait for, comma-separated. Defaults to the terminal set so `cs tackle M && cs wait M && cs done M` just works [default: completed,collapsed]
       --timeout <TIMEOUT>              Maximum seconds to wait before giving up [default: 600]
   -v, --verbose                        Enable verbose output

@@ -7,7 +7,7 @@ Ask for the controls. Writes a request and confers nothing
 Usage: cs sessions takeover request [OPTIONS] --mission <MOLECULE_ID>
 
 Options:
-      --config <PATH>          Path to configuration file
+      --config <PATH>          Path to the state directory (default: the galaxy's .cosmon/state/)
       --mission <MOLECULE_ID>  Mission the controls are being asked for
       --to <SID>               Session that would become PRIMARY. Defaults to the requester
   -v, --verbose                Enable verbose output

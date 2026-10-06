@@ -10,7 +10,7 @@ Arguments:
   <TEMPLATE>  Template name (from `cs fleet list-templates`)
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
   -o, --output <PATH>  Output path (default: .cosmon/fleet.toml)
   -v, --verbose        Enable verbose output
       --json           Output in JSON format

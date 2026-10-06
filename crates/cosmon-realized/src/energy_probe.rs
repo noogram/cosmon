@@ -2997,6 +2997,17 @@ mod tests {
 
     /// Seed a codex rollout log carrying a `session_meta.cwd` join key, a
     /// `turn_context` model, and one cumulative `token_count` line.
+    /// Make `root` a galaxy: `FileStore::project_root()` only derives a root
+    /// from a state dir whose galaxy carries a `.cosmon/config.toml`.
+    fn write_galaxy_config(root: &Path) {
+        std::fs::create_dir_all(root.join(".cosmon")).unwrap();
+        std::fs::write(
+            root.join(".cosmon").join("config.toml"),
+            "[project]\nproject_id = \"fixture-ab12\"\n",
+        )
+        .unwrap();
+    }
+
     fn seed_codex_rollout(cwd: &Path, model: &str) {
         let sess = codex_sessions_dir().join("2026").join("07").join("19");
         std::fs::create_dir_all(&sess).unwrap();
@@ -3031,6 +3042,7 @@ mod tests {
 
         let mol = MoleculeId::new("task-20261002-217b").unwrap();
         let state_dir = root.path().join(".cosmon").join("state");
+        write_galaxy_config(root.path());
         let wt = root.path().join(".worktrees").join(mol.as_str());
         std::fs::create_dir_all(&wt).unwrap();
         let store = seed_running_molecule(&state_dir, &mol);
@@ -3093,6 +3105,7 @@ mod tests {
 
         let mol = MoleculeId::new("task-20260719-e401").unwrap();
         let state_dir = root.path().join(".cosmon").join("state");
+        write_galaxy_config(root.path());
         let wt = root.path().join(".worktrees").join(mol.as_str());
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::create_dir_all(&wt).unwrap();
@@ -3145,6 +3158,7 @@ mod tests {
 
         let mol = MoleculeId::new("task-20260719-e402").unwrap();
         let state_dir = root.path().join(".cosmon").join("state");
+        write_galaxy_config(root.path());
         let wt = root.path().join(".worktrees").join(mol.as_str());
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::create_dir_all(&wt).unwrap();
@@ -3186,6 +3200,7 @@ mod tests {
 
         let mol = MoleculeId::new("task-20260719-e403").unwrap();
         let state_dir = root.path().join(".cosmon").join("state");
+        write_galaxy_config(root.path());
         let wt = root.path().join(".worktrees").join(mol.as_str());
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::create_dir_all(&wt).unwrap();
@@ -3502,6 +3517,7 @@ mod tests {
         // Canonical project layout: state under .cosmon/state, worker parked
         // in .worktrees/<mol> — the repo path tackle records on the fleet.
         let state_dir = root.path().join(".cosmon").join("state");
+        write_galaxy_config(root.path());
         let wt = root.path().join(".worktrees").join(mol.as_str());
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::create_dir_all(&wt).unwrap();
@@ -3558,6 +3574,7 @@ mod tests {
 
         let mol = MoleculeId::new("task-20260719-4a02").unwrap();
         let state_dir = root.path().join(".cosmon").join("state");
+        write_galaxy_config(root.path());
         let wt = root.path().join(".worktrees").join(mol.as_str());
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::create_dir_all(&wt).unwrap();

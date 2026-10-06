@@ -7,7 +7,7 @@ Scan tracked files for leaked secrets and non-public state (blocking)
 Usage: cs doctor leaks [OPTIONS]
 
 Options:
-      --config <PATH>      Path to configuration file
+      --config <PATH>      Path to the state directory (default: the galaxy's .cosmon/state/)
       --path <PATH>        Limit scanning to this subdirectory (relative to repo root)
       --include-untracked  Also scan untracked working-tree files (use when pre-commit check)
   -v, --verbose            Enable verbose output

@@ -10,7 +10,7 @@ Arguments:
   <MESSAGE>  The notification message (positional, single line)
 
 Options:
-      --config <PATH>           Path to configuration file
+      --config <PATH>           Path to the state directory (default: the galaxy's .cosmon/state/)
       --title <TITLE>           Optional title prefix. Channels render it as the first line / header [default: cosmon]
       --channel <CHANNEL>       Override the configured channel set. May be repeated. Recognised values: `macos`, `file-drop`, `element`, `telegram`. When omitted, every channel declared in `.cosmon/config.toml` is used
   -v, --verbose                 Enable verbose output
