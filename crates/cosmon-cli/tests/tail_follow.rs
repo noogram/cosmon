@@ -3,6 +3,7 @@
 //! `cs tail -f` must remain attached after it has printed its history.
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -36,9 +37,16 @@ fn follow_stays_alive_after_the_initial_history_until_it_is_signalled() {
         .spawn()
         .expect("start cs tail");
 
-    // The initial row is already available. A short delay crosses that
-    // history boundary without relying on a notification from the fixture.
-    thread::sleep(Duration::from_millis(250));
+    // Wait until the history row has actually been printed, so the reader
+    // is past the history boundary and inside follow mode; a fixed short
+    // delay passes vacuously on a loaded machine before follow is reached.
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut first = String::new();
+    BufReader::new(stdout)
+        .read_line(&mut first)
+        .expect("read the history row");
+    assert!(first.contains("task-1"), "history row first: {first}");
+    thread::sleep(Duration::from_millis(500));
     assert!(
         child.try_wait().expect("inspect cs tail").is_none(),
         "cs tail -f exited after its initial history"
