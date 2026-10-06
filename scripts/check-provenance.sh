@@ -128,7 +128,10 @@ else
     # do not retroactively flag the historical c1cb-class merges that
     # motivated this gate's existence in the first place.
     base=""
-    head="HEAD"
+    # A pull_request run checks out GitHub's synthetic test-merge commit,
+    # which no cosmon gesture wrote; the self-tests that walk HEAD's
+    # history are handed the PR head the same way the gate step is.
+    head="${COSMON_PROVENANCE_HEAD:-HEAD}"
 fi
 
 # Default: since the day this gate landed. Force midnight so git's
