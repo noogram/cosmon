@@ -263,6 +263,10 @@ fn io_error(action: &str, path: &Path, error: &std::io::Error) -> CosmonError {
     }
 }
 
+/// One molecule's result in a [`rebuild_all_missing`] sweep: its id and either
+/// the outcome or the refusal that left its `state.json` untouched.
+pub type SweepEntry = (MoleculeId, Result<RebuildOutcome, CosmonError>);
+
 /// Discover which molecules exist on disk under `fleets_root` and rebuild
 /// any whose `state.json` is missing or corrupt.
 ///
@@ -284,7 +288,7 @@ fn io_error(action: &str, path: &Path, error: &std::io::Error) -> CosmonError {
 pub fn rebuild_all_missing(
     events_path: &Path,
     fleets_root: &Path,
-) -> Result<Vec<(MoleculeId, Result<RebuildOutcome, CosmonError>)>, CosmonError> {
+) -> Result<Vec<SweepEntry>, CosmonError> {
     let mut results = Vec::new();
     if !fleets_root.is_dir() {
         return Ok(results);
