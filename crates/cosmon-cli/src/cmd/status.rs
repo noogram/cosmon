@@ -68,7 +68,7 @@
 //! is the right answer for a human looking once and the wrong one for anything
 //! asking repeatedly.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use colored::Colorize;
 use cosmon_core::id::MoleculeId;
@@ -281,8 +281,8 @@ struct BacklogInfo {
 /// The harvest queue, as `cs status` emits it — issue #95: a molecule
 /// that is `Completed` and un-archived is un-harvested work, and it must
 /// never be silent. The same predicate `cs peek --phase harvestable` uses
-/// ([`super::peek::PhaseFilter::is_harvestable`]), so the two surfaces
-/// cannot disagree about which molecules are in the queue.
+/// ([`super::peek::PhaseFilter::is_harvestable`]), minus molecules whose work
+/// is already on the trunk (issue #174, see [`is_already_harvested`]).
 #[derive(serde::Serialize)]
 struct HarvestableInfo {
     /// How many `Completed`, un-archived molecules are waiting.
@@ -461,12 +461,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     // --- Harvest queue (issue #95) — same predicate `cs peek
     // --phase harvestable` uses, so the two views cannot disagree.
+    let repo_root = super::work_location::repo_root(ctx);
+    let merged_and_gone = merged_and_deleted_molecules(&repo_root);
     let mut harvestable_mols: Vec<_> = molecules
         .iter()
         .filter(|m| super::peek::PhaseFilter::is_harvestable(m.status, m.archived))
+        .filter(|m| !is_already_harvested(m, &merged_and_gone))
         .collect();
     harvestable_mols.sort_by_key(|m| m.updated_at);
-    let repo_root = super::work_location::repo_root(ctx);
     let items = harvestable_mols
         .iter()
         .map(|m| super::work_location::WorkLocation::from_state(m, &fleet, &repo_root))
@@ -1301,6 +1303,71 @@ fn discover_live_sessions(backends: &[cosmon_transport::TmuxBackend]) -> Vec<(St
     sessions
 }
 
+/// A `Completed`, un-archived molecule whose work is already on the trunk.
+///
+/// Issue #174: `archived` is written by `cs done` only. A branch merged by
+/// hand, or by a `cs done` that predates the field, leaves `archived` unset
+/// and the molecule listed under "Harvest" although there is nothing left to
+/// harvest. Two facts show the work landed: a recorded `merged_at` (the same
+/// fact `cs health` and #153 read), or a trunk merge of `feat/<id>` whose
+/// branch has since been deleted (`merged_and_gone`).
+fn is_already_harvested(
+    molecule: &cosmon_state::MoleculeData,
+    merged_and_gone: &HashSet<String>,
+) -> bool {
+    molecule.merged_at.is_some() || merged_and_gone.contains(molecule.id.as_str())
+}
+
+/// Molecule ids whose `feat/<id>` branch was merged into `main` and no
+/// longer exists.
+///
+/// A missing branch alone proves nothing (it may never have been created, or
+/// been dropped unmerged), so the merge commit on `main` is required too. The
+/// two git calls are made once per `cs status`, not once per molecule. Any git
+/// failure yields an empty set: the molecule then stays listed, which is the
+/// safe direction for a harvest queue.
+fn merged_and_deleted_molecules(repo_root: &std::path::Path) -> HashSet<String> {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(args)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let Some(subjects) = git(&["log", "main", "--merges", "--format=%s"]) else {
+        return HashSet::new();
+    };
+    let live =
+        git(&["branch", "--list", "feat/*", "--format=%(refname:short)"]).unwrap_or_default();
+    let live: HashSet<&str> = live.lines().map(str::trim).collect();
+    merged_molecule_ids(&subjects)
+        .into_iter()
+        .filter(|id| !live.contains(format!("feat/{id}").as_str()))
+        .collect()
+}
+
+/// Molecule ids named as `feat/<id>` in merge-commit subjects, one subject per
+/// line (`Merge branch 'feat/<id>'`, `Merge pull request … from …/feat/<id>`).
+fn merged_molecule_ids(subjects: &str) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for subject in subjects.lines() {
+        for (at, _) in subject.match_indices("feat/") {
+            let rest = &subject[at + "feat/".len()..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                .unwrap_or(rest.len());
+            if MoleculeId::new(&rest[..end]).is_ok() {
+                ids.insert(rest[..end].to_owned());
+            }
+        }
+    }
+    ids
+}
+
 /// True when `branch` is a molecule branch (`feat/<id>`) rather than an
 /// operator ref such as `backup/*`, a release bake branch, or `spore/*`.
 ///
@@ -1857,6 +1924,20 @@ fn run_one(ctx: &Context, id: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #174: merge subjects name the molecule branch in several shapes;
+    /// non-molecule refs and unrelated text yield nothing.
+    #[test]
+    fn merged_molecule_ids_reads_every_merge_subject_shape() {
+        let subjects = "Merge branch 'feat/task-20260101-aaaa'\n\
+                        Merge pull request #9 from org/feat/task-20260101-bbbb\n\
+                        Merge branch 'feat/issue-171' into main\n\
+                        Merge branch 'backup/task-20260101-cccc'\n";
+        let ids = merged_molecule_ids(subjects);
+        assert!(ids.contains("task-20260101-aaaa"));
+        assert!(ids.contains("task-20260101-bbbb"));
+        assert!(!ids.contains("task-20260101-cccc"));
+    }
 
     use std::collections::HashMap;
 

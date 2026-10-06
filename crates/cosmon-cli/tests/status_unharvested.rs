@@ -408,3 +408,127 @@ fn ensemble_resolves_referenced_legacy_blocker() {
         .collect();
     assert_eq!(tagged_ids, vec!["task-20260101-bbbb"]);
 }
+
+fn git_in(repo: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("spawn git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `cs status --json`, run from inside `repo` so branch discovery sees it.
+fn status_json_in_repo(repo: &Path, state_dir: &Path) -> serde_json::Value {
+    let out = Command::new(env!("CARGO_BIN_EXE_cs"))
+        .current_dir(repo)
+        .env_remove("COSMON_PARENT_MOL_ID")
+        .env_remove("COSMON_MOL_DIR")
+        .args([
+            "--json",
+            "--config",
+            state_dir.to_str().expect("utf-8 state dir"),
+            "status",
+        ])
+        .output()
+        .expect("run cs status");
+    assert!(
+        out.status.success(),
+        "cs status failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("cs status --json emits JSON")
+}
+
+/// Issue #174 — a `Completed` molecule whose `feat/<id>` branch was merged
+/// into `main` and then deleted has been harvested, even when no harvest
+/// record (`archived`, `merged_at`) was written. It must not be listed as
+/// harvestable. Two controls keep the rule narrow: a completed molecule with
+/// no trace on `main`, and one whose branch still exists unmerged, stay in
+/// the queue because their work may not be on the trunk.
+#[test]
+fn merged_and_deleted_branch_is_not_harvestable() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    git_in(&repo, &["config", "user.email", "test@example.com"]);
+    git_in(&repo, &["config", "user.name", "Test"]);
+    git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "root"]);
+
+    // Merged then deleted.
+    git_in(&repo, &["checkout", "-q", "-b", "feat/task-20260101-e001"]);
+    git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "work"]);
+    git_in(&repo, &["checkout", "-q", "main"]);
+    git_in(
+        &repo,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge branch 'feat/task-20260101-e001'",
+            "feat/task-20260101-e001",
+        ],
+    );
+    git_in(&repo, &["branch", "-q", "-d", "feat/task-20260101-e001"]);
+
+    // Control: branch still exists, unmerged.
+    git_in(&repo, &["checkout", "-q", "-b", "feat/task-20260101-e002"]);
+    git_in(
+        &repo,
+        &["commit", "-q", "--allow-empty", "-m", "unmerged work"],
+    );
+    git_in(&repo, &["checkout", "-q", "main"]);
+
+    let state_dir = tmp.path().join("state");
+    seed(
+        &state_dir,
+        &[
+            completed("task-20260101-e001", false),
+            completed("task-20260101-e002", false),
+            // Control: no branch, no merge on main.
+            completed("task-20260101-e003", false),
+        ],
+    );
+
+    let out = status_json_in_repo(&repo, &state_dir);
+    let ids: Vec<&str> = out["harvestable"]["ids"]
+        .as_array()
+        .expect("ids array")
+        .iter()
+        .filter_map(|id| id.as_str())
+        .collect();
+    assert!(
+        !ids.contains(&"task-20260101-e001"),
+        "merged-and-deleted must not be harvestable: {ids:?}"
+    );
+    assert!(ids.contains(&"task-20260101-e002"), "{ids:?}");
+    assert!(ids.contains(&"task-20260101-e003"), "{ids:?}");
+    assert_eq!(out["harvestable"]["count"], 2);
+}
+
+/// A recorded merge (`merged_at`) is a harvest record in its own right: the
+/// legacy-state case from #153, where `archived` was never written.
+#[test]
+fn merged_at_molecule_is_not_harvestable() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let mut merged = completed("task-20260101-f001", false);
+    merged.merged_at = Some(Utc::now());
+    seed(
+        &state_dir,
+        &[merged, completed("task-20260101-f002", false)],
+    );
+
+    let out = status_json(tmp.path(), &state_dir);
+    assert_eq!(
+        out["harvestable"]["ids"],
+        serde_json::json!(["task-20260101-f002"])
+    );
+}
