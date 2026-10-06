@@ -97,7 +97,7 @@ pub enum CosmonError {
     },
 
     /// A persisted molecule state cannot be read without risking a rewrite.
-    #[error("state file {path} could not be parsed: {reason}; nothing was modified")]
+    #[error("state file {path} could not be parsed: {reason}; nothing was modified (fix the file, or move it aside and rerun `cs reconcile`)")]
     StateParse {
         /// Path to the state file that was refused.
         path: String,
