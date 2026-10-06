@@ -167,6 +167,14 @@ impl Context {
         self.config.clone().unwrap_or_else(default_state_dir)
     }
 
+    /// Resolve the galaxy `config.toml` for this invocation.
+    ///
+    /// `ctx.config` holds a state directory, never a config file, so it must
+    /// not be passed to `resolve_config_path` as an explicit file.
+    pub(crate) fn config_path(&self) -> PathBuf {
+        cosmon_filestore::resolve_config_path_for_state_dir(&self.state_dir())
+    }
+
     /// Obtain the hexagonal state-store adapter rooted at the resolved
     /// state directory.
     ///

@@ -60,10 +60,10 @@ use std::path::{Path, PathBuf};
 
 // Re-export the resolution function for convenience.
 pub use resolve::{
-    resolve_cluster_config_path, resolve_config_path, resolve_config_path_from,
-    resolve_formulas_dir, resolve_formulas_dir_from, resolve_project_root, resolve_state_dir,
-    resolve_state_dir_from, resolve_state_dir_with_origin, walk_up_find_cosmon_dir_from,
-    StateDirOrigin,
+    resolve_cluster_config_path, resolve_config_path, resolve_config_path_for_state_dir,
+    resolve_config_path_from, resolve_formulas_dir, resolve_formulas_dir_from,
+    resolve_project_root, resolve_state_dir, resolve_state_dir_from, resolve_state_dir_with_origin,
+    walk_up_find_cosmon_dir_from, StateDirOrigin,
 };
 
 use cosmon_core::config::ProjectConfig;

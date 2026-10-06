@@ -100,11 +100,54 @@ fn env_state_dir_shadowing_project_warns_on_stderr() {
     );
     // The galaxy found by walk-up from cwd — the shadowed one — must be
     // named too, or an operator cannot tell which two fleets are in play.
-    let galaxy_a_state = galaxy_a.join(".cosmon").join("state");
+    // The warning names the galaxy root (the unit a declaration binds to),
+    // not its state directory, and prints the walk-up path canonicalized.
+    let galaxy_a_root = galaxy_a.canonicalize().unwrap();
     assert!(
-        stderr.contains(galaxy_a_state.to_str().unwrap()),
-        "expected the warning to name the shadowed project path {}, got: {stderr}",
-        galaxy_a_state.display()
+        stderr.contains(galaxy_a_root.to_str().unwrap()),
+        "expected the warning to name the shadowed galaxy {}, got: {stderr}",
+        galaxy_a_root.display()
+    );
+    assert!(
+        stderr.contains("galaxy.toml"),
+        "expected the warning to name the declaration remedy, got: {stderr}"
+    );
+}
+
+/// A `galaxy.toml` declaration in the override state dir that records the
+/// walk-up galaxy's `project_id` marks the override as intentional: no warning.
+#[test]
+fn declared_env_state_dir_is_silent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let galaxy_a = tmp.path().join("galaxy-a");
+    let galaxy_b = tmp.path().join("galaxy-b");
+    init_galaxy(&galaxy_a);
+    init_galaxy(&galaxy_b);
+    let galaxy_b_state = galaxy_b.join(".cosmon").join("state");
+    let config = fs::read_to_string(galaxy_a.join(".cosmon/config.toml")).unwrap();
+    let project_id = config
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("project_id = \""))
+        .and_then(|l| l.strip_suffix('"'))
+        .expect("init writes a project_id")
+        .to_owned();
+    fs::write(
+        galaxy_b_state.join("galaxy.toml"),
+        format!("project_id = \"{project_id}\"\n"),
+    )
+    .unwrap();
+
+    let out = cs(&galaxy_a)
+        .env("COSMON_STATE_DIR", &galaxy_b_state)
+        .arg("status")
+        .output()
+        .expect("cs status should run");
+
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("COSMON_STATE_DIR"),
+        "a matching declaration must silence the warning, got: {stderr}"
     );
 }
 

@@ -154,7 +154,9 @@ pub fn resolve_state_dir_with_origin(explicit: Option<&Path>) -> (PathBuf, State
 /// an explicit override used outside any galaxy is not shadowing anything,
 /// and warning there would just be noise on every host-global invocation.
 fn warn_if_env_shadows_project(env_dir: &Path, start: &Path) {
-    let Some(project_root) = resolve_project_root(start, env_dir) else {
+    let Some(project_root) =
+        walk_up_find_cosmon_dir_from(start).and_then(|dir| dir.parent().map(Path::to_path_buf))
+    else {
         return;
     };
     let config_path = project_root.join(COSMON_DIR_NAME).join("config.toml");
@@ -461,6 +463,25 @@ pub fn resolve_config_path(explicit: Option<&Path>) -> PathBuf {
         return found.join("config.toml");
     }
     global_config_fallback()
+}
+
+/// Resolve the galaxy config file for an invocation whose state directory is
+/// already decided (`state_dir`).
+///
+/// Walk-up from the current directory decides galaxy-level files, as in
+/// [`resolve_project_root`]; an override that points at a galaxy's own
+/// `.cosmon/state` still reads that galaxy's `config.toml` when the cwd is
+/// outside any galaxy. `COSMON_CONFIG` keeps precedence, and the global
+/// fallback applies when neither finds a configured galaxy.
+#[must_use]
+pub fn resolve_config_path_for_state_dir(state_dir: &Path) -> PathBuf {
+    if let Ok(path) = std::env::var("COSMON_CONFIG") {
+        return PathBuf::from(path);
+    }
+    let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    resolve_project_root(&start, state_dir).map_or_else(global_config_fallback, |root| {
+        root.join(COSMON_DIR_NAME).join("config.toml")
+    })
 }
 
 /// Resolve the Cosmon config file path starting walk-up from `start`.
