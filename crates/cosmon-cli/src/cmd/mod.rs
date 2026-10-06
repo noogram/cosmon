@@ -57,6 +57,7 @@ pub mod key;
 pub mod kill;
 pub use cosmon_harvest::lineage;
 pub(crate) mod codex_update;
+pub(crate) mod harvest_queue;
 pub mod listen;
 pub mod livelock;
 pub(crate) mod machine_reading;

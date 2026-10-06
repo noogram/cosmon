@@ -5219,8 +5219,15 @@ fn populate_snapshot(
 pub(crate) fn filter_snapshot_by_phase(
     snap: &mut FleetSnapshot,
     phase_filter: super::peek::PhaseFilter,
+    harvest: &super::harvest_queue::HarvestAssessment,
 ) {
-    snap.retain_molecules(|m| phase_filter.matches_molecule(m.status, m.archived));
+    snap.retain_molecules(|m| {
+        let archived = super::harvest_queue::effectively_archived(
+            m.archived,
+            harvest.is_settled(m.id.0.as_str()),
+        );
+        phase_filter.matches_molecule(m.status, archived)
+    });
 }
 
 /// Enumerate every tmux socket available to the current user.

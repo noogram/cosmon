@@ -34,6 +34,8 @@ use cosmon_filestore::FileStore;
 use cosmon_state::{MoleculeFilter, StateStore};
 use cosmon_transport::TmuxBackend;
 
+use super::harvest_queue::HarvestAssessment;
+
 use crate::event_log::{
     clear_line, poll_and_diff, print_baseline, print_events, render_heartbeat, PollOutcome,
     Snapshot, WatchEvent, HEARTBEAT_INTERVAL_MS, LOOP_SLEEP_MS, SPINNER_FRAMES,
@@ -286,7 +288,10 @@ impl PhaseFilter {
     ///
     /// The definition lives here, beside the filter that selects on it, so
     /// the renderer's heartbeat tier and `--phase harvestable` cannot drift
-    /// into two answers for one molecule.
+    /// into two answers for one molecule. `archived` is the *effective* flag
+    /// ([`super::harvest_queue::effectively_archived`]): work already on the
+    /// trunk with nothing left to tear down counts as finalized, on `cs status`
+    /// and `cs peek --phase harvestable` alike (issue #174).
     #[must_use]
     pub const fn is_harvestable(status: MoleculeStatus, archived: bool) -> bool {
         matches!(status, MoleculeStatus::Completed) && !archived
@@ -795,6 +800,24 @@ struct PeekJson {
     molecules: Vec<PeekMoleculeJson>,
 }
 
+/// The harvest-queue facts `--phase harvestable` shares with `cs status`
+/// (issue #174), read from the same store the snapshot was built from.
+fn harvest_assessment(
+    ctx: &Context,
+    state_dir: &std::path::Path,
+    socket: &str,
+) -> HarvestAssessment {
+    let store = FileStore::new(state_dir);
+    let (Ok(fleet), Ok(molecules)) = (
+        store.load_fleet(),
+        store.list_molecules(&MoleculeFilter::default()),
+    ) else {
+        return HarvestAssessment::default();
+    };
+    let repo_root = super::work_location::repo_root(ctx);
+    super::harvest_queue::assess(&molecules, &fleet, &repo_root, state_dir, socket)
+}
+
 /// Emit the machine projection of the fleet to stdout and exit.
 ///
 /// Shares [`super::peek_tui::build_snapshot`] and
@@ -821,7 +844,11 @@ fn run_json(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let phase_filter = args.phase_filter();
     if phase_filter != PhaseFilter::all() {
-        super::peek_tui::filter_snapshot_by_phase(&mut snap, phase_filter);
+        super::peek_tui::filter_snapshot_by_phase(
+            &mut snap,
+            phase_filter,
+            &harvest_assessment(ctx, &state_dir, &socket),
+        );
     }
 
     let output = snapshot_to_json(&snap, phase_filter);
@@ -902,7 +929,11 @@ fn run_canonical_snapshot(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // byte-identical contract for `cs peek --snapshot --all`.
     let phase_filter = args.phase_filter();
     if phase_filter != PhaseFilter::all() {
-        super::peek_tui::filter_snapshot_by_phase(&mut snap, phase_filter);
+        super::peek_tui::filter_snapshot_by_phase(
+            &mut snap,
+            phase_filter,
+            &harvest_assessment(ctx, &state_dir, &socket),
+        );
     }
 
     // Load the sensorium aggregate from disk and project it into the
@@ -1914,7 +1945,11 @@ mod tests {
     /// The molecule ids a filter leaves standing, sorted.
     fn ids_after(filter: PhaseFilter) -> Vec<String> {
         let mut snap = harvest_fixture();
-        super::super::peek_tui::filter_snapshot_by_phase(&mut snap, filter);
+        super::super::peek_tui::filter_snapshot_by_phase(
+            &mut snap,
+            filter,
+            &HarvestAssessment::default(),
+        );
         let mut ids: Vec<String> = snap.molecules().map(|m| m.id.to_string()).collect();
         ids.sort();
         ids
@@ -1988,7 +2023,11 @@ mod tests {
         // this slice exists for.
         let mut snap = harvest_fixture();
         let filter = PhaseFilter::harvestable();
-        super::super::peek_tui::filter_snapshot_by_phase(&mut snap, filter);
+        super::super::peek_tui::filter_snapshot_by_phase(
+            &mut snap,
+            filter,
+            &HarvestAssessment::default(),
+        );
         let v = serde_json::to_value(snapshot_to_json(&snap, filter)).unwrap();
         assert_eq!(v["filter"], "harvestable");
         assert_eq!(v["molecules"].as_array().unwrap().len(), 1);
@@ -2008,7 +2047,11 @@ mod tests {
         assert_eq!(rows[1]["archived"], false);
         assert_eq!(rows[2]["archived"], true);
         // And the projection carries it through the filter unchanged.
-        super::super::peek_tui::filter_snapshot_by_phase(&mut snap, PhaseFilter::harvestable());
+        super::super::peek_tui::filter_snapshot_by_phase(
+            &mut snap,
+            PhaseFilter::harvestable(),
+            &HarvestAssessment::default(),
+        );
         assert_eq!(snap.molecules().count(), 1);
     }
 
@@ -2038,7 +2081,11 @@ mod tests {
             cosmon_observability::HeartbeatTier::Active
         );
         // And it is still selected by the filter the operator will type.
-        super::super::peek_tui::filter_snapshot_by_phase(&mut snap, PhaseFilter::harvestable());
+        super::super::peek_tui::filter_snapshot_by_phase(
+            &mut snap,
+            PhaseFilter::harvestable(),
+            &HarvestAssessment::default(),
+        );
         assert_eq!(snap.molecules().count(), 1);
     }
 

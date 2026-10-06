@@ -286,8 +286,10 @@ struct BacklogInfo {
 /// The harvest queue, as `cs status` emits it — issue #95: a molecule
 /// that is `Completed` and un-archived is un-harvested work, and it must
 /// never be silent. The same predicate `cs peek --phase harvestable` uses
-/// ([`super::peek::PhaseFilter::is_harvestable`]), so the two surfaces
-/// cannot disagree about which molecules are in the queue.
+/// ([`super::peek::PhaseFilter::is_harvestable`] over
+/// [`super::harvest_queue::effectively_archived`]): a molecule whose work is
+/// on the trunk leaves the queue only when nothing is left to tear down
+/// (issue #174).
 #[derive(serde::Serialize)]
 struct HarvestableInfo {
     /// How many `Completed`, un-archived molecules are waiting.
@@ -468,15 +470,30 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     // --- Harvest queue (issue #95) — same predicate `cs peek
     // --phase harvestable` uses, so the two views cannot disagree.
+    let repo_root = super::work_location::repo_root(ctx);
+    let assessment = super::harvest_queue::assess(
+        &molecules,
+        &fleet,
+        &repo_root,
+        &state_dir,
+        &super::tmux_socket_name(ctx),
+    );
     let mut harvestable_mols: Vec<_> = molecules
         .iter()
-        .filter(|m| super::peek::PhaseFilter::is_harvestable(m.status, m.archived))
+        .filter(|m| {
+            super::peek::PhaseFilter::is_harvestable(
+                m.status,
+                super::harvest_queue::effectively_archived(
+                    m.archived,
+                    assessment.is_settled(m.id.as_str()),
+                ),
+            )
+        })
         .collect();
     harvestable_mols.sort_by_key(|m| m.updated_at);
-    let repo_root = super::work_location::repo_root(ctx);
     let items = harvestable_mols
         .iter()
-        .map(|m| super::work_location::WorkLocation::from_state(m, &fleet, &repo_root))
+        .map(|m| assessment.location(m, &fleet, &repo_root))
         .collect();
     let harvestable = HarvestableInfo {
         count: harvestable_mols.len(),

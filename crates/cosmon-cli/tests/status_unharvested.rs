@@ -408,3 +408,356 @@ fn ensemble_resolves_referenced_legacy_blocker() {
         .collect();
     assert_eq!(tagged_ids, vec!["task-20260101-bbbb"]);
 }
+
+fn git_in(repo: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("spawn git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `cs status --json`, run from inside `repo` so branch discovery sees it.
+fn status_json_in_repo(repo: &Path, state_dir: &Path) -> serde_json::Value {
+    let out = Command::new(env!("CARGO_BIN_EXE_cs"))
+        .current_dir(repo)
+        .env_remove("COSMON_PARENT_MOL_ID")
+        .env_remove("COSMON_MOL_DIR")
+        .args([
+            "--json",
+            "--config",
+            state_dir.to_str().expect("utf-8 state dir"),
+            "status",
+        ])
+        .output()
+        .expect("run cs status");
+    assert!(
+        out.status.success(),
+        "cs status failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("cs status --json emits JSON")
+}
+
+/// Issue #174 — a `Completed` molecule whose `feat/<id>` branch was merged
+/// into `main` and then deleted has been harvested, even when no harvest
+/// record (`archived`, `merged_at`) was written. It must not be listed as
+/// harvestable. Two controls keep the rule narrow: a completed molecule with
+/// no trace on `main`, and one whose branch still exists unmerged, stay in
+/// the queue because their work may not be on the trunk.
+#[test]
+fn merged_and_deleted_branch_is_not_harvestable() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    git_in(&repo, &["config", "user.email", "test@example.com"]);
+    git_in(&repo, &["config", "user.name", "Test"]);
+    git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "root"]);
+
+    // Merged then deleted.
+    git_in(&repo, &["checkout", "-q", "-b", "feat/task-20260101-e001"]);
+    git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "work"]);
+    git_in(&repo, &["checkout", "-q", "main"]);
+    git_in(
+        &repo,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge branch 'feat/task-20260101-e001'",
+            "feat/task-20260101-e001",
+        ],
+    );
+    git_in(&repo, &["branch", "-q", "-d", "feat/task-20260101-e001"]);
+
+    // Control: branch still exists, unmerged.
+    git_in(&repo, &["checkout", "-q", "-b", "feat/task-20260101-e002"]);
+    git_in(
+        &repo,
+        &["commit", "-q", "--allow-empty", "-m", "unmerged work"],
+    );
+    git_in(&repo, &["checkout", "-q", "main"]);
+
+    let state_dir = tmp.path().join("state");
+    seed(
+        &state_dir,
+        &[
+            completed("task-20260101-e001", false),
+            completed("task-20260101-e002", false),
+            // Control: no branch, no merge on main.
+            completed("task-20260101-e003", false),
+        ],
+    );
+
+    let out = status_json_in_repo(&repo, &state_dir);
+    let ids: Vec<&str> = out["harvestable"]["ids"]
+        .as_array()
+        .expect("ids array")
+        .iter()
+        .filter_map(|id| id.as_str())
+        .collect();
+    assert!(
+        !ids.contains(&"task-20260101-e001"),
+        "merged-and-deleted must not be harvestable: {ids:?}"
+    );
+    assert!(ids.contains(&"task-20260101-e002"), "{ids:?}");
+    assert!(ids.contains(&"task-20260101-e003"), "{ids:?}");
+    assert_eq!(out["harvestable"]["count"], 2);
+}
+
+/// A recorded merge (`merged_at`) is a harvest record in its own right: the
+/// legacy-state case from #153, where `archived` was never written.
+#[test]
+fn merged_at_molecule_is_not_harvestable() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let mut merged = completed("task-20260101-f001", false);
+    merged.merged_at = Some(Utc::now());
+    seed(
+        &state_dir,
+        &[merged, completed("task-20260101-f002", false)],
+    );
+
+    let out = status_json(tmp.path(), &state_dir);
+    assert_eq!(
+        out["harvestable"]["ids"],
+        serde_json::json!(["task-20260101-f002"])
+    );
+}
+
+/// A repo whose `main` merged and deleted the branches of the ids in
+/// `merged`, and still holds an unmerged `feat/<id>` for each of `unmerged`.
+fn repo_with_merged_branches(tmp: &Path, merged: &[&str], unmerged: &[&str]) -> std::path::PathBuf {
+    let repo = tmp.join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    git_in(&repo, &["config", "user.email", "test@example.com"]);
+    git_in(&repo, &["config", "user.name", "Test"]);
+    git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "root"]);
+    for id in merged {
+        let branch = format!("feat/{id}");
+        git_in(&repo, &["checkout", "-q", "-b", &branch]);
+        git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "work"]);
+        git_in(&repo, &["checkout", "-q", "main"]);
+        git_in(
+            &repo,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                &format!("Merge branch '{branch}'"),
+                &branch,
+            ],
+        );
+        git_in(&repo, &["branch", "-q", "-d", &branch]);
+    }
+    for id in unmerged {
+        git_in(&repo, &["checkout", "-q", "-b", &format!("feat/{id}")]);
+        git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "unmerged"]);
+        git_in(&repo, &["checkout", "-q", "main"]);
+    }
+    repo
+}
+
+/// A completed molecule in the project `cs peek` is scoped to.
+fn completed_in_project(id: &str) -> MoleculeData {
+    let mut m = completed(id, false);
+    m.project_id = Some(ProjectId::new("test-174").expect("valid project id"));
+    m
+}
+
+/// `cs peek --json --phase harvestable`, as an id list.
+fn peek_harvestable_ids(repo: &Path, state_dir: &Path) -> Vec<String> {
+    std::fs::write(
+        state_dir.join("config.toml"),
+        "[project]\nproject_id = \"test-174\"\n",
+    )
+    .expect("write config");
+    let out = Command::new(env!("CARGO_BIN_EXE_cs"))
+        .current_dir(repo)
+        .env_remove("COSMON_PARENT_MOL_ID")
+        .env_remove("COSMON_MOL_DIR")
+        .args([
+            "--json",
+            "--config",
+            state_dir.to_str().expect("utf-8 state dir"),
+            "peek",
+            "--phase",
+            "harvestable",
+        ])
+        .output()
+        .expect("run cs peek");
+    assert!(
+        out.status.success(),
+        "cs peek failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("peek JSON");
+    let mut ids: Vec<String> = value["molecules"]
+        .as_array()
+        .expect("molecules array")
+        .iter()
+        .filter_map(|m| m["id"].as_str().map(str::to_owned))
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn status_ids(out: &serde_json::Value) -> Vec<String> {
+    let mut ids: Vec<String> = out["harvestable"]["ids"]
+        .as_array()
+        .expect("ids array")
+        .iter()
+        .filter_map(|id| id.as_str().map(str::to_owned))
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn harvest_command_of(out: &serde_json::Value, id: &str) -> String {
+    out["harvestable"]["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .find(|item| item["molecule"] == id)
+        .and_then(|item| item["harvest_command"].as_str())
+        .unwrap_or_else(|| panic!("{id} is not listed: {out}"))
+        .to_owned()
+}
+
+/// Issue #174, merged work with nothing left to tear down is harvested: neither
+/// `cs status` nor `cs peek --phase harvestable` lists it.
+#[test]
+fn merged_without_residue_is_listed_by_neither_status_nor_peek() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = repo_with_merged_branches(tmp.path(), &["task-20260101-a001"], &[]);
+    let state_dir = tmp.path().join("state");
+    let mut merged_at = completed_in_project("task-20260101-a002");
+    merged_at.merged_at = Some(Utc::now());
+    // Control: unmerged, so the queue is not vacuously empty.
+    seed(
+        &state_dir,
+        &[
+            completed_in_project("task-20260101-a001"),
+            merged_at,
+            completed_in_project("task-20260101-a003"),
+        ],
+    );
+
+    assert_eq!(
+        status_ids(&status_json_in_repo(&repo, &state_dir)),
+        ["task-20260101-a003"]
+    );
+    assert_eq!(
+        peek_harvestable_ids(&repo, &state_dir),
+        ["task-20260101-a003"]
+    );
+}
+
+/// Issue #174, hiding residue is worse than the original bug: merged work that
+/// still has a worktree on disk, or a worker on the roster, stays listed and
+/// names `cs done <id> --no-merge`, the gesture that tears it down without
+/// merging a second time. Both surfaces list it.
+#[test]
+fn merged_with_residue_stays_listed_and_names_the_no_merge_gesture() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo =
+        repo_with_merged_branches(tmp.path(), &["task-20260101-b001"], &["task-20260101-b004"]);
+    let state_dir = tmp.path().join("state");
+
+    // b001: merged and branch gone, worktree directory left behind.
+    std::fs::create_dir_all(repo.join(".worktrees/task-20260101-b001")).expect("worktree dir");
+
+    // b002: `merged_at` recorded, worker still on the roster.
+    let worker_id = WorkerId::new("b002-worker").expect("valid worker id");
+    let mut on_roster = completed_in_project("task-20260101-b002");
+    on_roster.merged_at = Some(Utc::now());
+    on_roster.assigned_worker = Some(worker_id.clone());
+    let mut fleet = Fleet::default();
+    fleet.workers.insert(
+        worker_id.clone(),
+        WorkerData::new(
+            worker_id,
+            AgentId::new("tackle").expect("valid agent id"),
+            AgentRole::Implementation,
+            Clearance::Write,
+            WorkerStatus::Active,
+        )
+        .with_molecule(on_roster.id.clone()),
+    );
+
+    // b003: merged, no residue. b004: not merged.
+    let store = FileStore::new(&state_dir);
+    store.save_fleet(&fleet).expect("save fleet");
+    for m in [
+        completed_in_project("task-20260101-b001"),
+        on_roster,
+        completed_in_project("task-20260101-b003"),
+        completed_in_project("task-20260101-b004"),
+    ] {
+        store.save_molecule(&m.id, &m).expect("save molecule");
+    }
+    // b003 is merged but only through `merged_at`.
+    let mut b003 = completed_in_project("task-20260101-b003");
+    b003.merged_at = Some(Utc::now());
+    store.save_molecule(&b003.id, &b003).expect("save b003");
+
+    let out = status_json_in_repo(&repo, &state_dir);
+    assert_eq!(
+        status_ids(&out),
+        [
+            "task-20260101-b001",
+            "task-20260101-b002",
+            "task-20260101-b004"
+        ],
+        "b003 has no residue and drops out; the rest stay: {out}"
+    );
+    assert_eq!(
+        harvest_command_of(&out, "task-20260101-b001"),
+        "cs done task-20260101-b001 --no-merge"
+    );
+    assert_eq!(
+        harvest_command_of(&out, "task-20260101-b002"),
+        "cs done task-20260101-b002 --no-merge"
+    );
+    assert_eq!(
+        harvest_command_of(&out, "task-20260101-b004"),
+        "cs done task-20260101-b004",
+        "work that has not landed is still merged by plain `cs done`"
+    );
+    assert_eq!(peek_harvestable_ids(&repo, &state_dir), status_ids(&out));
+}
+
+/// Unmerged work is listed as before, with the merging command.
+#[test]
+fn unmerged_completed_work_is_listed_as_before() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = repo_with_merged_branches(tmp.path(), &[], &["task-20260101-c001"]);
+    let state_dir = tmp.path().join("state");
+    seed(
+        &state_dir,
+        &[
+            completed_in_project("task-20260101-c001"),
+            completed_in_project("task-20260101-c002"),
+        ],
+    );
+    let out = status_json_in_repo(&repo, &state_dir);
+    assert_eq!(
+        status_ids(&out),
+        ["task-20260101-c001", "task-20260101-c002"]
+    );
+    assert_eq!(
+        harvest_command_of(&out, "task-20260101-c001"),
+        "cs done task-20260101-c001"
+    );
+    assert_eq!(peek_harvestable_ids(&repo, &state_dir), status_ids(&out));
+}

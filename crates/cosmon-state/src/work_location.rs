@@ -22,8 +22,12 @@ pub struct WorkLocation {
     pub branch: String,
     /// Worker checkout recorded at dispatch, or the conventional legacy path.
     pub worktree: String,
-    /// Concrete command that merges this molecule and tears its worker down.
+    /// Concrete command that finishes this molecule: merges it and tears its
+    /// worker down, or — once [`Self::landed`] — only archives and tears down.
     pub harvest_command: String,
+    /// The work is already on the trunk, so [`Self::harvest_command`] must
+    /// not merge it again.
+    pub landed: bool,
 }
 
 impl WorkLocation {
@@ -55,15 +59,33 @@ impl WorkLocation {
             branch,
             worktree: worktree.display().to_string(),
             harvest_command: format!("cs done {}", molecule.id),
+            landed: false,
         }
+    }
+
+    /// Mark the work as already merged: the way to finish the molecule is
+    /// `cs done <id> --no-merge`, which archives it and tears down its
+    /// worktree, session and worker without merging a second time.
+    #[must_use]
+    pub fn already_merged(mut self) -> Self {
+        self.harvest_command = format!("cs done {} --no-merge", self.molecule);
+        self.landed = true;
+        self
     }
 
     /// Render the location line shared by human-readable lifecycle surfaces.
     #[must_use]
     pub fn render(&self) -> String {
+        let outcome = if self.landed {
+            "already merged; run `{}` to archive and tear it down"
+        } else {
+            "run `{}` to merge it"
+        };
         format!(
-            "branch `{}` · worktree `{}` · run `{}` to merge it",
-            self.branch, self.worktree, self.harvest_command
+            "branch `{}` · worktree `{}` · {}",
+            self.branch,
+            self.worktree,
+            outcome.replace("{}", &self.harvest_command)
         )
     }
 }

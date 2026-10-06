@@ -196,10 +196,15 @@ fn cs_done_clears_a_legacy_merged_molecule_from_harvestable() {
     make_legacy_merged(&state_dir, &merged, true);
     make_legacy_merged(&state_dir, &unmerged, false);
 
+    // A merged row with nothing left to tear down is already out of the
+    // harvest queue (issue #174); leave a worktree directory behind so this
+    // row is still owed the teardown `cs done` performs.
+    fs::create_dir_all(repo.join(".worktrees").join(&merged)).unwrap();
+
     let before = harvestable(repo).join("\n");
     assert!(
         before.contains(&merged),
-        "precondition: legacy row is counted:\n{before}"
+        "precondition: legacy row with residue is counted:\n{before}"
     );
 
     let done = cs_isolated(repo)
@@ -260,10 +265,15 @@ fn cs_done_if_completed_archives_a_legacy_merged_molecule() {
     make_legacy_merged(&state_dir, &merged, true);
     make_legacy_merged(&state_dir, &unmerged, false);
 
+    // A merged row with nothing left to tear down is already out of the
+    // harvest queue (issue #174); leave a worktree directory behind so this
+    // row is still owed the teardown `cs done` performs.
+    fs::create_dir_all(repo.join(".worktrees").join(&merged)).unwrap();
+
     let before = harvestable(repo).join("\n");
     assert!(
         before.contains(&merged),
-        "precondition: legacy row is counted:\n{before}"
+        "precondition: legacy row with residue is counted:\n{before}"
     );
     assert!(
         !archive_entry_exists(&state_dir, &merged),
