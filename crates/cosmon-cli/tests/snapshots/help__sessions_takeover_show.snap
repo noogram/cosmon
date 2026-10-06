@@ -7,7 +7,7 @@ Who holds the controls, at which epoch, and what has been asked
 Usage: cs sessions takeover show [OPTIONS] --mission <MOLECULE_ID>
 
 Options:
-      --config <PATH>          Path to configuration file
+      --config <PATH>          Path to the state directory (default: the galaxy's .cosmon/state/)
       --mission <MOLECULE_ID>  Mission whose lease to inspect
       --history                Print every grant ever recorded instead of only the head
   -v, --verbose                Enable verbose output

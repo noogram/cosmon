@@ -8,7 +8,7 @@ Usage: cs sync [OPTIONS]
 
 Options:
       --base <BASE>    Base branch to sync from (defaults to `main`) [default: main]
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --dry-run        Report what would happen without performing the merge
   -v, --verbose        Enable verbose output
       --json           Output in JSON format

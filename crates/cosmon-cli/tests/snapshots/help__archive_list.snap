@@ -7,7 +7,7 @@ List archived molecules (optionally filtered by year / month)
 Usage: cs archive list [OPTIONS]
 
 Options:
-      --config <PATH>   Path to configuration file
+      --config <PATH>   Path to the state directory (default: the galaxy's .cosmon/state/)
       --year <YYYY>     Restrict the scan to a single year (e.g. `2026`)
       --month <MM>      Restrict the scan to a single month (01..=12). Must be used with `--year` to be meaningful; standalone `--month` still filters across whichever years contain that month
   -v, --verbose         Enable verbose output

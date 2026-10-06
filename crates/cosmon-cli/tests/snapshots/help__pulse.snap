@@ -1,6 +1,5 @@
 ---
 source: crates/cosmon-cli/tests/help_goldens.rs
-assertion_line: 88
 expression: stdout
 ---
 Pulse — runtime-vitality reading: RPM tachometer, six-voyant strip (ADR-138 P1)
@@ -9,7 +8,7 @@ Usage: cs pulse [OPTIONS]
 
 Options:
       --config <PATH>
-          Path to configuration file
+          Path to the state directory (default: the galaxy's .cosmon/state/)
 
       --window <WINDOW>
           Observation window — accepts `<N>d` / `<N>h` / `<N>m` / `<N>s`. Defaults to 5 minutes (`5m`)

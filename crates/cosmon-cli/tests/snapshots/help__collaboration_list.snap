@@ -7,7 +7,7 @@ List every binding, active and revoked, without verifiers or proofs
 Usage: cs collaboration list [OPTIONS]
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
   -v, --verbose        Enable verbose output
       --json           Output in JSON format
   -h, --help           Print help

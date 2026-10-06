@@ -277,7 +277,9 @@ fn print_grouped_reference() {
     }
 
     println!("Global options:");
-    println!("  --config <PATH>      Path to configuration file");
+    println!(
+        "  --config <PATH>      Path to the state directory (default: the galaxy's .cosmon/state/)"
+    );
     println!("  --verbose, -v        Enable verbose output");
     println!("  --json               Output in JSON format");
     println!();

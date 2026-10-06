@@ -49,7 +49,7 @@ use cosmon_cli::sensorium;
     disable_help_subcommand = true
 )]
 struct Cli {
-    /// Path to configuration file
+    /// Path to the state directory (default: the galaxy's .cosmon/state/)
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
 
@@ -703,10 +703,22 @@ fn main() {
     // instead of the floor.
     install_tracing(cli.verbose);
 
+    let (resolved_state_dir, state_dir_origin) =
+        cosmon_filestore::resolve_state_dir_with_origin(cli.config.as_deref());
+    // Before any I/O: a state path that exists as a file would otherwise be
+    // read as an empty fleet and projected over tracked surfaces.
+    if let Err(e) = cmd::reject_non_directory_state_dir(&resolved_state_dir, state_dir_origin) {
+        if cli.json {
+            eprintln!("{}", serde_json::json!({"error": format!("{e:#}")}));
+        } else {
+            eprintln!("cs: {e:#}");
+        }
+        std::process::exit(1);
+    }
     let ctx = cmd::Context {
         verbose: cli.verbose,
         json: cli.json,
-        config: Some(cosmon_filestore::resolve_state_dir(cli.config.as_deref())),
+        config: Some(resolved_state_dir),
     };
     let record_operator_presence = records_operator_presence(&cli.command);
 

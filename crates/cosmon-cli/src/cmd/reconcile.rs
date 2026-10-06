@@ -205,14 +205,22 @@ struct SurfacePlan<'a> {
 /// alias, via [`run_reconcile_alias`]).
 #[allow(clippy::too_many_lines)]
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
-    // Find the .cosmon/ directory (walk-up).
-    let state_dir = ctx.config.clone().unwrap_or_else(super::default_state_dir);
+    let state_dir = ctx.state_dir();
 
-    // The project root is the parent of .cosmon/ (state_dir is .cosmon/state/).
-    let project_root = state_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+    // Galaxy-level files (surfaces.toml, the surfaces themselves) resolve from
+    // the walk-up project root, not from `state_dir/../..`: an override state
+    // directory decides where state lives, never which galaxy's tracked files
+    // a projection rewrites. No galaxy is a named error, never ".".
+    let cwd = std::env::current_dir()?;
+    let project_root =
+        cosmon_filestore::resolve_project_root(&cwd, &state_dir).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no galaxy found from {} and {} is not under one (no .cosmon/config.toml); \
+             nothing was read or modified",
+                cwd.display(),
+                state_dir.display()
+            )
+        })?;
 
     let cosmon_dir = project_root.join(".cosmon");
     let surfaces_path = cosmon_dir.join("surfaces.toml");
@@ -531,6 +539,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         );
     }
 
+    // Every write precondition is settled before the first surface write, so a
+    // run that cannot record its frontier or snapshot leaves the tracked
+    // surfaces untouched instead of rewriting them and then failing.
+    let frontier = cosmon_state::frontier::compute(store.as_ref())
+        .map_err(|e| anyhow::anyhow!("frontier compute failed: {e}"))?;
+    cosmon_state::frontier::save(&state_dir, &frontier)
+        .map_err(|e| anyhow::anyhow!("frontier.json write failed: {e}"))?;
+    cosmon_surface::snapshot::save_snapshot(&state_dir, &snap)
+        .map_err(|e| anyhow::anyhow!("failed to save snapshot: {e}"))?;
+
     // Overwrite every surface from authoritative state. `force = true` makes
     // `project_filtered` ignore the per-surface decision and write all of
     // them — exactly the derived-view "always regenerate" contract. The
@@ -546,18 +564,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         true,
     )?;
 
-    // Atomic frontier projection (ADR-041) — collapsed ready ∧ merged state.
-    // Rebuilt here so `cs reconcile` is the canonical "reproject everything
-    // from authoritative state" command, and any stale `frontier.json`
-    // left by an aborted `cs done` gets refreshed.
-    match cosmon_state::frontier::compute(store.as_ref()) {
-        Ok(f) => {
-            if let Err(e) = cosmon_state::frontier::save(&state_dir, &f) {
-                eprintln!("  ⚠ frontier.json write failed: {e}");
-            }
-        }
-        Err(e) => eprintln!("  ⚠ frontier compute failed: {e}"),
-    }
+    // The atomic frontier projection (ADR-041) was refreshed above, before the
+    // surface writes, so `cs reconcile` stays the canonical "reproject
+    // everything from authoritative state" command and a stale `frontier.json`
+    // left by an aborted `cs done` still gets refreshed.
 
     // Record the projection snapshot for the next run's divergence report.
     // Every surface we wrote (i.e. all of them) gets a fresh baseline so the

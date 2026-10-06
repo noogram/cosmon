@@ -7,7 +7,7 @@ Verify the pre-migration BLAKE3 manifest against the current state. Exit codes m
 Usage: cs migrate verify [OPTIONS]
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
   -v, --verbose        Enable verbose output
       --json           Output in JSON format
   -h, --help           Print help

@@ -7,7 +7,7 @@ Generate a fresh Ed25519 operator key (32 bytes OS randomness, hex-encoded)
 Usage: cs key generate [OPTIONS]
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --output <PATH>  Destination path. Defaults to `~/.config/cosmon/operator.key`
       --force          Overwrite an existing key file. Without this flag, refuses to clobber any pre-existing key — silent rotation is forbidden (ADR-060 §Alternatives-rejected)
   -v, --verbose        Enable verbose output

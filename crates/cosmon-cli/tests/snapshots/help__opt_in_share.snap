@@ -7,7 +7,7 @@ Opt-in-share — first-run consent prompt for encrypted developer bundles
 Usage: cs opt-in-share [OPTIONS]
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --status         Print the current consent state (accepted / declined / none) and exit
       --decline        Bypass the TTY prompt and persist a declined record (non-interactive)
   -v, --verbose        Enable verbose output

@@ -7,7 +7,7 @@ Report whether the hook is wired, and what it has cost
 Usage: cs sessions hook status [OPTIONS]
 
 Options:
-      --config <PATH>    Path to configuration file
+      --config <PATH>    Path to the state directory (default: the galaxy's .cosmon/state/)
       --provider <NAME>  Restrict the report to one provider
       --settings <PATH>  The settings file to inspect, when it is not the provider's default
   -v, --verbose          Enable verbose output

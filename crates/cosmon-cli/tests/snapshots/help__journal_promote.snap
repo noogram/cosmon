@@ -14,7 +14,7 @@ Arguments:
 
 Options:
       --config <PATH>
-          Path to configuration file
+          Path to the state directory (default: the galaxy's .cosmon/state/)
 
       --session <SESSION>
           Session file stem (e.g. `session-2026-04-22T10-31-31Z`) or an absolute path. Defaults to the currently open session; if no session is open, defaults to scanning every session file

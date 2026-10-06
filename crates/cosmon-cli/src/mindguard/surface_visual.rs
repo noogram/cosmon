@@ -143,11 +143,12 @@ pub(crate) fn gate_with_config(
     config: &SurfaceConfig,
     now: chrono::DateTime<Utc>,
 ) -> Result<(), MindguardError> {
-    let project_root = store.project_root().ok_or_else(|| {
-        MindguardError::Unavailable(
-            "no project root resolvable from state store (test fixture?)".to_owned(),
-        )
-    })?;
+    // A state dir that is not under a galaxy has no tracked surfaces to
+    // protect: moot, the same outcome the old unconditional `../..` derivation
+    // reached when that arbitrary ancestor was not a git work tree.
+    let Some(project_root) = store.project_root() else {
+        return Ok(());
+    };
 
     // Self-exemption: a `verify-surface` molecule *is* the terminal
     // observation that mints the GREEN this gate looks for. Gating its
@@ -643,6 +644,12 @@ mod tests {
 
         let state_dir = tmp.path().join(".cosmon").join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
+        // A galaxy, not a bare state dir: `project_root()` needs the config.
+        std::fs::write(
+            tmp.path().join(".cosmon").join("config.toml"),
+            "[project]\nproject_id = \"fixture-ab12\"\n",
+        )
+        .unwrap();
         let store = FileStore::new(state_dir);
         store.save_fleet(&cosmon_state::Fleet::default()).unwrap();
         (tmp, store)
@@ -1215,6 +1222,12 @@ mod tests {
 
         let state_dir = root.join(".cosmon").join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
+        // A galaxy, not a bare state dir: `project_root()` needs the config.
+        std::fs::write(
+            root.join(".cosmon").join("config.toml"),
+            "[project]\nproject_id = \"fixture-ab12\"\n",
+        )
+        .unwrap();
         let store = FileStore::new(state_dir);
         store.save_fleet(&cosmon_state::Fleet::default()).unwrap();
         let mol = sample_mol(mol_id, "task-work", MoleculeStatus::Running);
@@ -1258,6 +1271,12 @@ mod tests {
 
         let state_dir = root.join(".cosmon").join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
+        // A galaxy, not a bare state dir: `project_root()` needs the config.
+        std::fs::write(
+            root.join(".cosmon").join("config.toml"),
+            "[project]\nproject_id = \"fixture-ab12\"\n",
+        )
+        .unwrap();
         let store = FileStore::new(state_dir);
         store.save_fleet(&cosmon_state::Fleet::default()).unwrap();
         let mol = sample_mol(mol_id, "task-work", MoleculeStatus::Running);

@@ -7,7 +7,7 @@ Provision a binding and write its attachment proof to a new private file
 Usage: cs collaboration bind [OPTIONS] --issuer <ISSUER> --subject <SUBJECT> --audience <AUDIENCE> --tenant <TENANT> --scope <SCOPES> --proof-out <PROOF_OUT>
 
 Options:
-      --config <PATH>            Path to configuration file
+      --config <PATH>            Path to the state directory (default: the galaxy's .cosmon/state/)
       --issuer <ISSUER>          Exact token issuer
       --subject <SUBJECT>        Exact token subject
   -v, --verbose                  Enable verbose output

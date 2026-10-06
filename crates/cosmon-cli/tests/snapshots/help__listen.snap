@@ -8,7 +8,7 @@ Usage: cs listen [OPTIONS]
 
 Options:
       --config <PATH>
-          Path to configuration file
+          Path to the state directory (default: the galaxy's .cosmon/state/)
 
       --seconds <SECONDS>
           Seconds to record before cutting off (no VAD in v0).

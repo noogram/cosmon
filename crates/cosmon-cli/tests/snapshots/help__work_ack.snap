@@ -10,7 +10,7 @@ Arguments:
   <KEY>  Key of the received message
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --considered     Report that the message was considered
       --deferred       Report that the message was deferred
   -v, --verbose        Enable verbose output

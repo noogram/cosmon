@@ -7,7 +7,7 @@ Inspect effective policy, provenance, epoch and public root
 Usage: cs harvest-authority status [OPTIONS]
 
 Options:
-      --config <PATH>        Path to configuration file
+      --config <PATH>        Path to the state directory (default: the galaxy's .cosmon/state/)
       --molecule <MOLECULE>  Check an installed grant against this molecule's current facts
   -v, --verbose              Enable verbose output
       --json                 Output in JSON format

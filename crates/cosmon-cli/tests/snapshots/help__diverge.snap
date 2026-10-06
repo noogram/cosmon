@@ -11,7 +11,7 @@ Arguments:
   <B>  Second session — a session id or a path to a galaxy root
 
 Options:
-      --config <PATH>        Path to configuration file
+      --config <PATH>        Path to the state directory (default: the galaxy's .cosmon/state/)
   -m, --molecule <MOLECULE>  Molecule id (or prefix) whose views to compare. If omitted, only the git merge-base clause is evaluated and all molecule clauses are marked inconclusive
   -v, --verbose              Enable verbose output
       --json                 Output in JSON format

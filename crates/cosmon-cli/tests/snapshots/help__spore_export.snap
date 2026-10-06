@@ -10,7 +10,7 @@ Arguments:
   <REF>  Path to a `spore.toml` manifest (or a directory containing one)
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
       --out <DIR>      Output directory for the ASTRA descriptive layer. Defaults to the manifest directory. The crate is always written here as `ro-crate-metadata.json` unless `[spore.astra].output` names a different (manifest-relative) path
   -v, --verbose        Enable verbose output
       --json           Output in JSON format

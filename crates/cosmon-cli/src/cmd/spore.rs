@@ -245,6 +245,21 @@ fn run_validate(ctx: &Context, args: &ValidateArgs) -> anyhow::Result<()> {
 // run
 // ---------------------------------------------------------------------------
 
+/// The galaxy root the output-containment check guards, from the walk-up
+/// resolver rather than `state_dir/../..`; a named error when there is none.
+fn galaxy_root_for(store_dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| cosmon_filestore::resolve_project_root(&cwd, store_dir))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no galaxy found for state dir {}: cannot determine the repo root the \
+                 output containment check guards",
+                store_dir.display()
+            )
+        })
+}
+
 /// `cs spore run` — parse + expand + seal gate, then germinate the polymer.
 fn run_run(ctx: &Context, args: &RunArgs) -> anyhow::Result<()> {
     let (spore, manifest_dir) = load_spore(&args.reference)?;
@@ -282,11 +297,7 @@ fn run_run(ctx: &Context, args: &RunArgs) -> anyhow::Result<()> {
     // Active containment refusal, not a dormant detector: every handed
     // `output_dir` must be inside the run home and outside the two documented
     // anti-pattern homes (the spore definition tree, the repo root).
-    let repo_root = store_dir
-        .parent()
-        .and_then(std::path::Path::parent)
-        .unwrap_or(&store_dir)
-        .to_path_buf();
+    let repo_root = galaxy_root_for(&store_dir)?;
     for call in &calls {
         let Some(out) = call.vars.get(cosmon_core::spore::OUTPUT_DIR_VAR) else {
             continue;

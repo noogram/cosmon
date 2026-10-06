@@ -7,7 +7,7 @@ List every adapter name the dispatch registry would accept (union of compile-tim
 Usage: cs config adapters [OPTIONS]
 
 Options:
-      --config <PATH>  Path to configuration file
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
   -v, --verbose        Enable verbose output
       --json           Output in JSON format
   -h, --help           Print help

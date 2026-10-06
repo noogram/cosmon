@@ -10,7 +10,7 @@ Arguments:
   [PAYLOAD]  The provider's payload. Codex passes it as this trailing argument; Claude pipes it on stdin, which is read when this is absent
 
 Options:
-      --config <PATH>    Path to configuration file
+      --config <PATH>    Path to the state directory (default: the galaxy's .cosmon/state/)
       --event <EVENT>    Which moment fired: `session-start`, `turn-start`, `turn-end`, `waiting` or `asking`
       --provider <NAME>  The pilot this hook runs inside. Inferred from the payload when it names one; `claude` otherwise
   -v, --verbose          Enable verbose output

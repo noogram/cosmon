@@ -7,7 +7,7 @@ Resume — convenience alias for `cs patrol --propel --molecule <id>`
 Usage: cs resume [OPTIONS]
 
 Options:
-      --config <PATH>      Path to configuration file
+      --config <PATH>      Path to the state directory (default: the galaxy's .cosmon/state/)
       --fleet <FLEET>      Only resume workers in this fleet
       --agent <AGENT>      Only resume this specific agent (by name, across all fleets)
   -v, --verbose            Enable verbose output

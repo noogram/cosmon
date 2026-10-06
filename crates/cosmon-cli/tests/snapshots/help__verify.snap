@@ -14,7 +14,7 @@ Arguments:
 
 Options:
       --config <PATH>
-          Path to configuration file
+          Path to the state directory (default: the galaxy's .cosmon/state/)
 
       --no-replay
           Skip gate replay (shell/native step re-execution). Artifact hash check and event chain check still run

@@ -10,7 +10,7 @@ Arguments:
   [SOURCES]...  Source molecule IDs to merge (space-separated)
 
 Options:
-      --config <PATH>                Path to configuration file
+      --config <PATH>                Path to the state directory (default: the galaxy's .cosmon/state/)
       --formula <FORMULA>            Formula for the product molecule
       --product-kind <PRODUCT_KIND>  Kind for the product molecule (default: decision) [default: decision]
   -v, --verbose                      Enable verbose output

@@ -17,7 +17,7 @@ Options:
           Parse the previously-composed review file and apply the verdicts. Without this flag, the verb composes the markdown review file and opens it in `$EDITOR`
 
       --config <PATH>
-          Path to configuration file
+          Path to the state directory (default: the galaxy's .cosmon/state/)
 
       --editor <CMD>
           Override the editor (defaults to `$EDITOR`, then `vi`). Ignored with `--apply` and with `--json`

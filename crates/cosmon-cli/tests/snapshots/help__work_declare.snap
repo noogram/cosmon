@@ -11,7 +11,7 @@ Arguments:
 
 Options:
       --config <PATH>
-          Path to configuration file
+          Path to the state directory (default: the galaxy's .cosmon/state/)
       --seat <NAME=MOLECULE>
           Seat and molecule, written NAME=MOLECULE; repeat for each member
       --max-payload-bytes <MAX_PAYLOAD_BYTES>
