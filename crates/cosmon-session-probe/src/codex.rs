@@ -56,16 +56,22 @@ impl CodexProbe {
         })
     }
 
-    /// A probe reading the ambient `$HOME/.codex/sessions`.
+    /// A probe reading the ambient configured sessions directory.
+    ///
+    /// The command-line client resolves its state beneath `CODEX_HOME` when
+    /// that variable is present. Discovery must make the same choice; falling
+    /// back to `$HOME/.codex` in that case makes a live configured session
+    /// invisible to the cockpit.
     ///
     /// # Errors
     ///
-    /// [`ProbeError::InvalidIdentifier`] if `HOME` is unset.
+    /// [`ProbeError::InvalidIdentifier`] if neither `CODEX_HOME` nor `HOME`
+    /// is set.
     pub fn from_home() -> Result<Self, ProbeError> {
-        let home = std::env::var("HOME").map_err(|_| {
-            ProbeError::InvalidIdentifier("HOME is unset — no Codex sessions root".to_string())
-        })?;
-        Self::new(PathBuf::from(home).join(".codex").join("sessions"))
+        Self::new(sessions_root_from_homes(
+            std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            std::env::var_os("HOME").map(PathBuf::from),
+        )?)
     }
 
     /// The `sessions/` root this probe reads.
@@ -73,6 +79,22 @@ impl CodexProbe {
     pub fn sessions_root(&self) -> &Path {
         &self.sessions_root
     }
+}
+
+/// Resolve the state directory used by the provider command-line client.
+fn sessions_root_from_homes(
+    codex_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, ProbeError> {
+    if let Some(codex_home) = codex_home.filter(|path| !path.as_os_str().is_empty()) {
+        return Ok(codex_home.join("sessions"));
+    }
+    let home = home.ok_or_else(|| {
+        ProbeError::InvalidIdentifier(
+            "CODEX_HOME and HOME are unset — no Codex sessions root".to_string(),
+        )
+    })?;
+    Ok(home.join(".codex").join("sessions"))
 }
 
 /// Every `*.jsonl` under a date-bucketed sessions tree, sorted for determinism.
@@ -379,5 +401,18 @@ mod tests {
             .discover(&DiscoveryFilter::all())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn configured_home_is_the_ambient_sessions_root() {
+        let configured = PathBuf::from("/fixture/configured-home");
+        assert_eq!(
+            sessions_root_from_homes(
+                Some(configured.clone()),
+                Some(PathBuf::from("/fixture/home"))
+            )
+            .unwrap(),
+            configured.join("sessions")
+        );
     }
 }

@@ -75,6 +75,15 @@ present only for a Claude `Notification` moment; a detail-only change does not
 append another event. `operator_present` is a different event: it is per `cs`
 call, not per session.
 
+**Provider coverage.** The state vocabulary is not a promise that every
+provider can publish every state. A provider configured through its single
+`notify` callback can publish only `idle` at turn end; it does not publish
+`session_start`, `working`, `waiting_permission`, `idle_input`, or `asking`.
+Its local rollout files are a discovery and post-turn observation source, not
+a live lifecycle stream. Its experimental app-server protocol has turn and
+approval notifications for a connected client, but it is not a callback for
+independently launched sessions, so it does not enlarge this hook contract.
+
 **Usage.** `usage_observed` carries one `usage` object per answered model
 request, with its own `schema_version` (currently `1`) that moves independently
 of the log's. The fields a reader may rely on:
