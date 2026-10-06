@@ -26,17 +26,19 @@ echo "── run-gates-bg.sh ─────────────────
 
 # ── 1. returns immediately instead of blocking for the command's duration ──
 dir1="$tmp/immediate"; mkdir -p "$dir1"
-start=$(date +%s)
-COSMON_RUN_GATES_BG_DIR="$dir1" "$SCRIPT" sleep 0.8 >/dev/null
-elapsed=$(( $(date +%s) - start ))
-[ "$elapsed" -lt 2 ] \
-    && ok "launch returns at once, not after the command finishes" \
-    || ko "launch returns at once" "took ${elapsed}s for a 3s command"
+# The command outlasts any plausible launcher wait (interpreter start-up alone
+# takes seconds under load), so the property is "the launcher returned while
+# the command was still running", not a wall-clock threshold.
+COSMON_RUN_GATES_BG_DIR="$dir1" "$SCRIPT" sleep 120 >/dev/null
+[ ! -f "$dir1/gates.exit" ] \
+    && ok "launch returns before the command finishes" \
+    || ko "launch returns before the command finishes" "gates.exit already present"
 [ -f "$dir1/gates.pid" ] \
     && ok "pid file is written before the launcher returns" \
     || ko "pid file is written before the launcher returns" "missing"
-# drain: don't leave a dangling sleep past this test's own window
-for _ in $(seq 1 20); do [ -f "$dir1/gates.exit" ] && break; sleep 0.1; done
+# drain: end the long sleep (the pid is the session leader; its group holds it)
+kill -TERM -- "-$(cat "$dir1/gates.pid")" 2>/dev/null || true
+for _ in $(seq 1 100); do [ -f "$dir1/gates.exit" ] && break; sleep 0.1; done
 
 # ── 2. survives the LAUNCHER's entire process group being killed ───────────
 #
@@ -53,7 +55,7 @@ os.setsid()
 subprocess.call(["bash", "-c", sys.argv[1]])
 ' "
     COSMON_RUN_GATES_BG_DIR='$dir2' '$SCRIPT' sleep 5
-    sleep 3
+    sleep 60
 " &
 launcher_pid=$!
 # give run-gates-bg.sh time to fork its own detached child and return
@@ -102,6 +104,33 @@ for _ in $(seq 1 20); do [ -f "$dir4/gates.exit" ] && break; sleep 0.1; done
 [ "$(cat "$dir4/gates.exit" 2>/dev/null)" = "0" ] \
     && ok "the new run's own exit code replaces the stale one" \
     || ko "new run's exit code replaces stale one" "got $(cat "$dir4/gates.exit" 2>/dev/null)"
+
+# ── 5. survives a runner that kills the launcher's tree the instant it returns ─
+#
+# noogram/cosmon#176: under `codex exec` the launcher returned in ~200 ms and
+# the detached run never produced gates.exit. The child only leaves the
+# caller's session when its interpreter reaches os.setsid(); a slow interpreter
+# start (a pyenv shim, a cold disk) leaves a window after the launcher returns
+# in which the child is still in the caller's group. Here a `python3` shim
+# makes that window 1 s wide, and the "runner" kills its own process group
+# right after the launcher returns. The property: the run still completes and
+# publishes its exit code.
+dir5="$tmp/instant-kill"; mkdir -p "$dir5" "$tmp/slowpy"
+real_py="$(command -v python3)"
+printf '#!/bin/sh\nsleep 1\nexec "%s" "$@"\n' "$real_py" > "$tmp/slowpy/python3"
+chmod +x "$tmp/slowpy/python3"
+( "$real_py" -c '
+import os, subprocess, sys
+os.setsid()
+subprocess.call(["bash", "-c", sys.argv[1]])
+' "
+    PATH='$tmp/slowpy':\$PATH COSMON_RUN_GATES_BG_DIR='$dir5' '$SCRIPT' sleep 1 >/dev/null
+    kill -KILL 0
+" ) >/dev/null 2>&1
+for _ in $(seq 1 100); do [ -f "$dir5/gates.exit" ] && break; sleep 0.1; done
+[ "$(cat "$dir5/gates.exit" 2>/dev/null)" = "0" ] \
+    && ok "the run completes although the runner killed the launcher's tree on return" \
+    || ko "run survives an instant kill of the launcher's tree" "gates.exit: '$(cat "$dir5/gates.exit" 2>/dev/null)'"
 
 echo "──────────────────────────────────────────────────────────────────────"
 if [ "$fail" -eq 0 ]; then
