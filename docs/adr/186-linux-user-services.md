@@ -8,7 +8,7 @@
 [ADR-053](053-cosmon-daemon-supervisor.md), and
 [ADR-095](095-resident-runtime-ifbdd-path.md).
 
-**Tracks:** issue #143, units W1 and W2.
+**Tracks:** issue #143, units W1–W6.
 
 ## Context
 
@@ -88,3 +88,15 @@ availability and linger are explicit prerequisites, never installer mutations.
 An active unit proves manager state only; application state remains observable
 through cosmon's existing files and commands. Shutdown of the distribution can
 still interrupt workers, and no unit promises host wakefulness.
+
+## Evidence
+
+The ordinary Linux manager contract is exercised by the service harnesses. The
+[WSL2 validation runbook](../guides/wsl2-host-validation.md) defines the manual
+host boundary, and the sanitized
+[candidate measurement](../measurements/wsl2-host-validation.md) records the
+observed matrix. The candidate passed install, lifecycle, crash recovery,
+timer, logout, distribution restart, and real host reboot. The first sleep
+attempt instead observed an idle distribution stop, so sleep remains
+unmeasured. Version 0.7.3 ships the service bundle; the exact published assets
+and served installer still require the same host witness.

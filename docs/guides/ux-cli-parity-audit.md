@@ -13,6 +13,17 @@ directly. The confirmation acknowledges that stdout may be retained by a shell,
 redirect, or process supervisor. Two simultaneous calls converge through the
 credential store's refresh protocol; only one refresh grant is permitted.
 
+## Linux user-service distribution (issue #143, W6)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Install, inspect, reload, or uninstall the supervisor and scheduler as user services | No new `cs` verb or flag. The public installer's opt-in `--with-services` route installs service helpers with `status`, `reload`, and `uninstall` operations | No service-management surface audited | No service-management route; host service ownership stays outside the tenant API |
+
+This delivery changes installer scripts, unit templates, and documentation, not
+the `cs` command surface. Generated help, manual, reference, and route snapshots
+are therefore not applicable. The existing runtime and scheduler `cs` commands
+retain their prior parity status.
+
 ## Cross-galaxy event origin (issue #183)
 
 | Capability | CLI | Native UI | Other CLI views |

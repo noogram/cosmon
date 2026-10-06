@@ -1,6 +1,6 @@
 # WSL2 candidate host validation
 
-Date: 2026-10-05. Scope: candidate evidence for issue #143, not a published
+Date: 2026-10-06. Scope: candidate evidence for issue #143, not a published
 release witness.
 
 ## Candidate
@@ -56,8 +56,30 @@ repository root, outside the worker. The worker commit became an ancestor of
 were absent afterwards.
 
 At handoff, the supervisor service and scheduler timer were active. The
-last-shell logout, distribution shutdown and relaunch, host reboot and
-distribution launch, and host sleep and resume phases remain pending for the
-external driver. Their absence is not a pass. A second run against the exact
-published archives and served installer is also required before making a
-release support claim.
+last-shell logout checkpoint was then measured after more than forty seconds
+without a shell; both services were active on reconnect. Distribution shutdown
+and explicit relaunch restarted the distribution and both services became
+active again.
+
+A host shutdown followed by power-on did not change the host boot time because
+Fast Startup retained the prior boot. It was therefore rejected as reboot
+evidence. A subsequent **Restart** advanced the host boot time. WSL2 remained
+stopped after host startup, as expected; after explicit distribution launch,
+the supervisor service and scheduler timer were active. Remote test access also
+needed its listener decoupled from a late-arriving network address. That was a
+remote-access boot-order issue, not a cosmon service failure.
+
+The sleep checkpoint did not pass. The host entered and left sleep, but the
+distribution had already stopped while idle with no WSL client attached. Its
+boot time after wake was later than the before-sleep boot time, the in-flight
+probe never completed, and a later probe was a new timer firing. This measures
+an idle-distribution stop, not survival through sleep. A rerun must keep a WSL
+client attached across the power boundary.
+
+The measured candidate matrix is therefore: install, lifecycle, supervisor
+crash recovery, child crash recovery, timer firing, last-shell logout,
+distribution restart, and real host reboot passed; host sleep remains
+unmeasured. Version 0.7.3 ships the service bundle and the served installer
+accepts `--with-services`, but a second host run against those exact published
+assets and that served installer is still required before claiming a release
+witness.

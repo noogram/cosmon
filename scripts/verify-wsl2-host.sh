@@ -51,6 +51,8 @@ Environment:
   COSMON_WSL2_MODEL        configured model for the single lifecycle probe
   COSMON_WSL2_IDENTITY_REPO existing repository supplying Git identity when
                             the account has no global user.name/user.email
+  COSMON_WSL2_WINDOWS_BOOT_EPOCH Windows boot time as Unix seconds, required
+                            for reboot phases when powershell.exe is unavailable
 EOF
 }
 
@@ -68,11 +70,51 @@ git_identity() {
 
 [[ -n "$phase" ]] || { usage; exit 2; }
 mkdir -p "$checkpoint_dir" "$log_dir"
-exec > >(tee -a "$log_dir/$phase.log") 2>&1
+if [[ "${COSMON_WSL2_TEST_DIRECT_OUTPUT:-0}" != 1 ]]; then
+    exec > >(tee -a "$log_dir/$phase.log") 2>&1
+fi
 
 checkpoint() {
     local name="$1"
     printf '%s\n' "$(date --iso-8601=seconds)" >"$checkpoint_dir/$name"
+}
+
+distribution_boot_time() {
+    local value
+    value="$(uptime -s)" || fail "could not read the distribution boot time"
+    [[ -n "$value" ]] || fail "distribution boot time is empty"
+    printf '%s\n' "$value"
+}
+
+windows_boot_epoch() {
+    local value="${COSMON_WSL2_WINDOWS_BOOT_EPOCH:-}"
+    if [[ -z "$value" ]] && command -v powershell.exe >/dev/null 2>&1; then
+        value="$(powershell.exe -NoProfile -NonInteractive -Command \
+            '([DateTimeOffset]((Get-CimInstance Win32_OperatingSystem).LastBootUpTime)).ToUnixTimeSeconds()' \
+            | tr -d '\r' | tail -n 1)" \
+            || fail "could not read the Windows boot time through powershell.exe"
+    fi
+    [[ "$value" =~ ^[0-9]+$ ]] \
+        || fail "Windows boot time is required as COSMON_WSL2_WINDOWS_BOOT_EPOCH when powershell.exe interop is unavailable"
+    printf '%s\n' "$value"
+}
+
+record_distribution_boot() {
+    local checkpoint_name="$1"
+    distribution_boot_time >"$checkpoint_dir/$checkpoint_name.distribution-boot"
+}
+
+report_distribution_transition() {
+    local before_name="$1" after_name="$2" before after disposition
+    before="$(cat "$checkpoint_dir/$before_name.distribution-boot")"
+    after="$(cat "$checkpoint_dir/$after_name.distribution-boot")"
+    if [[ "$before" == "$after" ]]; then
+        disposition=SURVIVED
+    else
+        disposition=RESTARTED
+    fi
+    printf 'boundary=%s distribution=%s before=%s after=%s\n' \
+        "${after_name#after-}" "$disposition" "$before" "$after"
 }
 
 require_checkpoint() {
@@ -429,6 +471,10 @@ before-logout|before-distribution|before-reboot)
     require_inside_host
     boundary="${phase#before-}"
     services_ready || fail "services are not ready before $boundary"
+    record_distribution_boot "$phase"
+    if [[ "$phase" == before-reboot ]]; then
+        windows_boot_epoch >"$checkpoint_dir/before-reboot.windows-boot-epoch"
+    fi
     checkpoint "$phase"
     case "$phase" in
         before-logout)
@@ -448,10 +494,20 @@ after-logout|after-distribution|after-reboot)
     require_checkpoint "before-$previous"
     require_checkpoint service-baseline
     require_inside_host
+    record_distribution_boot "$phase"
+    if [[ "$phase" == after-reboot ]]; then
+        before_host_boot="$(cat "$checkpoint_dir/before-reboot.windows-boot-epoch")"
+        after_host_boot="$(windows_boot_epoch)"
+        printf '%s\n' "$after_host_boot" >"$checkpoint_dir/after-reboot.windows-boot-epoch"
+        (( after_host_boot > before_host_boot )) \
+            || fail "host did not reboot: Windows boot time did not advance"
+    fi
     bounded_wait 25 "services after $previous" services_ready
     state_is_readable "$HOME/.cosmon/daemon-supervisor.state.json" \
         || fail "supervisor state is unreadable after $previous"
     record_service_snapshot | tee "$run_root/$phase.txt"
+    report_distribution_transition "before-$previous" "$phase" \
+        | tee -a "$run_root/$phase.txt"
     checkpoint "$phase"
     ;;
 
@@ -472,18 +528,34 @@ EOF
         "$HOME/.local/libexec/cosmon/install-scheduler.sh" reload
     systemctl --user start cosmon-scheduler.service
     bounded_wait 10 "detached sleep probe start" test -s "$run_root/probes/sleep-started"
+    record_distribution_boot before-sleep
+    stat -c %Y "$run_root/probes/sleep-started" \
+        >"$checkpoint_dir/before-sleep.probe-start-epoch"
     checkpoint before-sleep
-    echo "External driver: sleep the host now, resume it, then run phase after-sleep."
+    echo "External driver: keep a WSL client attached, sleep the host now, resume it, then run phase after-sleep."
     ;;
 
 after-sleep)
     require_checkpoint before-sleep
     require_inside_host
-    bounded_wait 150 "in-flight patrol completion after sleep" test -s "$run_root/probes/sleep-finished"
+    record_distribution_boot after-sleep
+    before_distribution_boot="$(cat "$checkpoint_dir/before-sleep.distribution-boot")"
+    after_distribution_boot="$(cat "$checkpoint_dir/after-sleep.distribution-boot")"
+    [[ "$before_distribution_boot" == "$after_distribution_boot" ]] \
+        || fail "distribution stopped before or during sleep"
+    probe_start_epoch="$(cat "$checkpoint_dir/before-sleep.probe-start-epoch")"
+    now_epoch="$(date +%s)"
+    remaining=$((probe_start_epoch + 150 - now_epoch))
+    (( remaining > 0 )) \
+        || fail "in-flight patrol probe completion budget expired before after-sleep"
+    bounded_wait "$remaining" "in-flight patrol completion after sleep" \
+        test -s "$run_root/probes/sleep-finished"
     bounded_wait 25 "services after sleep" services_ready
     state_is_readable "$HOME/.cosmon/scheduler.state.json" \
         || fail "scheduler state is unreadable after sleep"
     record_service_snapshot | tee "$run_root/after-sleep.txt"
+    report_distribution_transition before-sleep after-sleep \
+        | tee -a "$run_root/after-sleep.txt"
     checkpoint after-sleep
     ;;
 
@@ -492,6 +564,12 @@ final)
     require_checkpoint supervisor-crash
     require_checkpoint child-crash
     require_checkpoint timer
+    missing=()
+    for required in after-logout after-distribution after-reboot after-sleep; do
+        [[ -s "$checkpoint_dir/$required" ]] || missing+=("$required")
+    done
+    ((${#missing[@]} == 0)) \
+        || fail "missing required external checkpoints: ${missing[*]}"
     require_inside_host
     services_ready || fail "services are not running at final handoff"
     record_service_snapshot | tee "$run_root/final.txt"
