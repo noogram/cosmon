@@ -212,6 +212,18 @@ enum Cmd {
     #[command(display_order = 3)]
     #[allow(clippy::doc_markdown)] // prose is shown verbatim in --help; no backticks
     Logout,
+    /// Print a current access token from the credential saved by `login`.
+    ///
+    /// This writes a bearer to standard output for a program that reads it
+    /// directly. It deliberately ignores `--token` and `$COSMON_REMOTE_TOKEN`:
+    /// the saved credential is the one protected by the single-writer refresh
+    /// path. Pass `--confirm` to acknowledge that stdout may be captured.
+    #[command(display_order = 3)]
+    Token {
+        /// Acknowledge that the bearer will be written to standard output.
+        #[arg(long)]
+        confirm: bool,
+    },
     #[command(display_order = 4, about = format!("Server-Sent Events stream of molecule lifecycle events ({}){}", canon::GET_V1_EVENTS.label(), canon::GET_V1_EVENTS.effect_suffix()))]
     Events {
         #[command(subcommand)]
@@ -1101,6 +1113,17 @@ async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
         Cmd::Logout => {
             let (_, profile) = store.resolve(cli.profile.as_deref())?;
             run_logout(&profile, cli.json)
+        }
+        Cmd::Token { confirm } => {
+            if !confirm {
+                return Err(Error::Config(
+                    "refusing to write a bearer to stdout without --confirm".into(),
+                ));
+            }
+            let (_, profile) = store.resolve(cli.profile.as_deref())?;
+            let (token, _) = ensure_persisted_token(&profile).await?;
+            println!("{token}");
+            Ok(())
         }
         Cmd::Molecule { sub } => {
             let (_, profile) = store.resolve(cli.profile.as_deref())?;
@@ -2412,7 +2435,7 @@ async fn ensure_persisted_token(profile: &Profile) -> Result<(String, ReactiveRe
         oidc::CacheState::Cold => TokenState::NeedsLogin,
         oidc::CacheState::Stale(_) => {
             // A refresh is needed: discover the token endpoint (network, only on
-            // the 15-minute boundary) and run the single-writer refresh.
+            // the 15-minute boundary), then use the shared refresh seam.
             let cfg = oidc::RefreshConfig {
                 token_endpoint: oidc::ProviderMetadata::fetch(&http, &profile.oidc_url)
                     .await?
@@ -2423,7 +2446,7 @@ async fn ensure_persisted_token(profile: &Profile) -> Result<(String, ReactiveRe
                 // presented one is already spent — never reuse it.
                 rotation: oidc::RefreshRotation::Rotating,
             };
-            oidc::refresh_credential(&http, &store, &key, &cfg, leeway).await?
+            oidc::ensure_token(&http, &store, &key, &cfg, now, leeway).await?
         }
     };
 
@@ -2634,6 +2657,28 @@ fn run_logout(profile: &Profile, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn token_refuses_stdout_without_confirmation_before_profile_lookup() {
+        let home = tempfile::tempdir().unwrap();
+        let profiles = ProfileStore::at(home.path());
+        let err = dispatch(
+            Cli {
+                profile: None,
+                json: false,
+                token: None,
+                cmd: Cmd::Token { confirm: false },
+            },
+            &profiles,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "config error: refusing to write a bearer to stdout without --confirm"
+        );
+    }
 
     #[test]
     fn reinstall_keeps_an_existing_login_and_every_profile_field() {

@@ -2,6 +2,17 @@
 
 # CLI and UI parity audit
 
+## Remote bearer hand-off (issue #188)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Supply a current bearer to a local API consumer | `cosmon-remote token --confirm` prints the credential saved by `login` after resolving it through the same single-writer refresh path used by authenticated commands. It refuses without explicit confirmation and does not accept process-supplied bearer overrides. | No matching credential-export control audited | No new route; the bearer remains a client-side credential |
+
+The command writes only the bearer to stdout so a local consumer can read it
+directly. The confirmation acknowledges that stdout may be retained by a shell,
+redirect, or process supervisor. Two simultaneous calls converge through the
+credential store's refresh protocol; only one refresh grant is permitted.
+
 ## Cross-galaxy event origin (issue #183)
 
 | Capability | CLI | Native UI | Other CLI views |

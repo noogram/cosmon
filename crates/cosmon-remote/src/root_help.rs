@@ -67,6 +67,11 @@ AUTHENTICATION — two independent badges:\n  \
 1. The API badge (JWT). From the OIDC credential recorded by\n     \
 `login`, refreshed silently, or supplied via\n     \
 --token / $COSMON_REMOTE_TOKEN.\n  \
+`token --confirm` writes the saved API bearer to stdout for a local
+    \
+consumer. It does not read --token or $COSMON_REMOTE_TOKEN, and the
+    \
+confirmation is required because stdout can be captured.\n  \
 2. The worker badge (Claude credential). Posed once with `auth login`\n     \
 (a guided three-step flow — see `auth login --help`). Without it,\n     \
 a tackled worker has nothing to spend.\n\n\
