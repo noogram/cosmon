@@ -208,10 +208,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
 /// `cs spore validate` — parse + expand, print the call list, germinate nothing.
 fn run_validate(ctx: &Context, args: &ValidateArgs) -> anyhow::Result<()> {
-    let (spore, _dir) = load_spore(&args.reference)?;
+    let (spore, manifest_dir) = load_spore(&args.reference)?;
     let params = coerce_vars(&spore, &args.vars)?;
     let mut admission = admission_preflight(&spore, &params, args.admission.as_deref())?;
     let calls = expand(&spore, &params).map_err(|e| anyhow::anyhow!("expand failed: {e}"))?;
+    check_formula_files(&spore, &manifest_dir)?;
     if let Some(record) = &mut admission {
         record.expected_molecules = calls.len();
     }
@@ -239,6 +240,36 @@ fn run_validate(ctx: &Context, args: &ValidateArgs) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Fail when a node references a formula file that is not on disk.
+///
+/// `cs spore run` loads each node's recipe from `<manifest dir>/<path>`; a
+/// missing file used to surface only there, at dispatch (issue #173).
+/// Validation resolves the same path, so the two cannot disagree, and names
+/// every offending node with its file.
+fn check_formula_files(spore: &Spore, manifest_dir: &Path) -> anyhow::Result<()> {
+    let missing: Vec<String> = spore
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let formula = spore.formulas.get(&node.formula)?;
+            let path = manifest_dir.join(&formula.path);
+            (!path.is_file()).then(|| {
+                format!(
+                    "node \"{}\": formula file {} (alias \"{}\") does not exist",
+                    node.id,
+                    path.display(),
+                    node.formula
+                )
+            })
+        })
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("{}", missing.join("\n"))
+    }
 }
 
 // ---------------------------------------------------------------------------
