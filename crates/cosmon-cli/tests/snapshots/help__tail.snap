@@ -7,7 +7,7 @@ Tail — live `notify`-driven reader over `events.jsonl` (fleet or `--all-galaxi
 Usage: cs tail [OPTIONS]
 
 Options:
-      --all-galaxies                 Scan every project under `$COSMON_CLUSTER_ROOT`. Opt-in — cross-project reach is never implicit
+      --all-galaxies                 Scan every project under `$COSMON_CLUSTER_ROOT`. Opt-in — cross-project reach is never implicit. JSON output adds the source galaxy to every row
       --config <PATH>                Path to the state directory (default: the galaxy's .cosmon/state/)
   -f, --follow                       Stay attached and stream new events via `notify`
   -v, --verbose                      Enable verbose output

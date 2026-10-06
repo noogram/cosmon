@@ -22,7 +22,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -33,7 +32,8 @@ use super::Context;
 #[derive(clap::Args)]
 pub struct Args {
     /// Scan every project under `$COSMON_CLUSTER_ROOT`.
-    /// Opt-in — cross-project reach is never implicit.
+    /// Opt-in — cross-project reach is never implicit. JSON output adds the
+    /// source galaxy to every row.
     #[arg(long)]
     all_galaxies: bool,
 
@@ -191,7 +191,19 @@ fn accept(line: &Line, since: Option<&DateTime<Utc>>, kind: Option<&str>) -> boo
 /// Emit a line in either column-delimited (default) or JSON (`--json`) form.
 fn emit<W: Write>(out: &mut W, line: &Line, raw: &str, json: bool) -> anyhow::Result<()> {
     if json {
-        writeln!(out, "{raw}")?;
+        // The ledger row describes an event, while `source_galaxy` describes
+        // the source selected by this reader. Stamp it at the read boundary
+        // so cross-galaxy consumers can re-read the authoritative ledger
+        // without overwriting an event field with the same name.
+        let mut value: serde_json::Value = serde_json::from_str(raw)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("event log row is not a JSON object"))?;
+        object.insert(
+            "source_galaxy".to_owned(),
+            serde_json::Value::String(line.galaxy.clone()),
+        );
+        writeln!(out, "{}", serde_json::to_string(&value)?)?;
     } else {
         writeln!(
             out,
@@ -331,9 +343,10 @@ fn follow(
     }
 
     let mut out = std::io::stdout().lock();
-    let deadline = Instant::now() + Duration::from_secs(u64::MAX / 2);
-    while Instant::now() < deadline {
-        let Ok(path) = rx.recv() else { break };
+    // `recv` blocks until a file notification or signal closes the process.
+    // Do not manufacture an effectively-infinite `Instant`: that addition
+    // overflows on platforms whose monotonic clock has a smaller range.
+    while let Ok(path) = rx.recv() {
         let Some((galaxy, offset)) = cursors.get_mut(&path) else {
             continue;
         };
@@ -469,7 +482,17 @@ mod tests {
         assert!(s.contains("cosmon | task-1 | molecule_completed | reason=ok"));
 
         let mut out = Vec::new();
-        emit(&mut out, &line, "raw", true).unwrap();
-        assert_eq!(String::from_utf8(out).unwrap(), "raw\n");
+        emit(
+            &mut out,
+            &line,
+            r#"{"timestamp":"2026-04-20T10:00:00Z","type":"molecule_completed","galaxy":"event-galaxy"}"#,
+            true,
+        )
+        .unwrap();
+        let emitted: serde_json::Value =
+            serde_json::from_slice(&out).expect("tail JSON must remain a JSON object");
+        assert_eq!(emitted["source_galaxy"], "cosmon");
+        assert_eq!(emitted["galaxy"], "event-galaxy");
+        assert_eq!(emitted["type"], "molecule_completed");
     }
 }
