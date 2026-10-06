@@ -8618,6 +8618,7 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
         &job.prompt,
         &mol,
         &job.molecule_dir,
+        &job.state_dir,
         job.adapter_entry.as_ref(),
         job.preferred_model.as_deref(),
     );
@@ -9509,6 +9510,9 @@ fn run_local_agent_loop(
     prompt: &str,
     mol: &MoleculeData,
     mol_state_dir: &std::path::Path,
+    // The galaxy state directory: usage records go to its ledger, as in the
+    // openai and anthropic arms, not to the molecule's own log.
+    state_dir: &std::path::Path,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
 ) -> anyhow::Result<String> {
@@ -9551,7 +9555,7 @@ fn run_local_agent_loop(
     let provider = provider.with_usage_sink(Some(inprocess_usage_sink(
         mol,
         wid,
-        mol_state_dir,
+        state_dir,
         &invocation_uuid,
     )));
     // The `local` floor reuses `OpenAIProvider` against Ollama. Stamp the

@@ -14,10 +14,42 @@ internal and versioned independently; they carry no public API guarantee at
 this stage.
 
 > The commit-by-commit development history before `0.1.0` is preserved in the
-> git log and in [`docs/lore/CHRONICLES.md`](docs/lore/CHRONICLES.md). This
-> file starts its curated, public-facing record at the first tagged release.
+> git log. This file starts its curated, public-facing record at the first
+> tagged release.
 
 ## [Unreleased]
+
+### Added
+
+- **EXPERIMENTAL: Linux and WSL2 as a supported host.** The public installer
+  gains an opt-in `--with-services`. It downloads and verifies a separate
+  service archive, installs `cosmon-daemon-supervisor` and `cosmon-scheduler`
+  next to `cs` (in `--dir`), creates minimal valid supervisor and scheduler
+  configurations only when they are absent (existing files are left untouched),
+  and activates the services through the systemd user-service and user-timer
+  scripts. A default install stays client-only. (#143)
+- A "Linux evidence" CI lane runs the real systemd user-manager harnesses in an
+  isolated account on Ubuntu 24.04. It is Linux evidence, not WSL evidence.
+  (#143)
+- `scripts/verify-wsl2-host.sh`, a resumable phase-by-phase host witness, with
+  the procedure in `docs/guides/wsl2-host-validation.md` and the results in
+  `docs/measurements/wsl2-host-validation.md`. (#143)
+
+  Limits of the evidence. It was measured on one WSL2 x86_64 Ubuntu 24.04 host
+  with candidate binaries, not yet with a published release. It covers install,
+  one tackle-to-done lifecycle, supervisor and child crash recovery, and timer
+  firing. Last-shell logout, distribution shutdown and relaunch, host reboot
+  and sleep/resume are not yet recorded as measured. Other distributions,
+  architectures and filesystems are not claimed. WSL does not start itself when
+  Windows boots; the services restart on the next distribution start (ADR-186).
+  (#143)
+
+### Changed
+
+- `cosmon-daemon-supervisor` and `cosmon-scheduler` are now listed as shipped
+  service binaries in `packaging/shipped-binaries.txt`, and each release
+  carries a `cosmon-service-<version>-<target>.tar.gz` archive with them and
+  their user-service assets. (#143)
 
 ### Fixed
 
@@ -38,6 +70,18 @@ this stage.
   `idle_prompt` gives the new `idle_input` state, `elicitation_dialog` gives
   `asking`, and `permission_prompt` or any other value keeps
   `waiting_permission`. `idle_input` is an additive value of the `state` enum.
+- The local harness arm now records per-request usage in the galaxy ledger,
+  like the other in-process arms, instead of in the molecule's own
+  `events.jsonl`.
+
+### Documentation
+
+- ADR-168 is amended for the presence `detail` field, and
+  `docs/book/src/reference/read-contracts.md` documents `idle_input`, `detail`
+  and the `session_presence` fields. `cs status` help describes the dead-worker
+  count. (#165, #172)
+- `docs/guides/release-verification.md` lists the service archive among the
+  release artifacts. (#143)
 
 ## [0.7.2] — 2026-10-05
 
