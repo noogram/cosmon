@@ -40,8 +40,10 @@
 #
 # Files written there:
 #   gates.log    — combined stdout/stderr of the run, from the start
-#   gates.pid    — pid of the detached session leader, written before this
-#                  script returns
+#   gates.pid    — pid of the detached session leader. The leader writes it
+#                  itself, after os.setsid() has succeeded, and this script
+#                  does not return until it exists: "pid file present" means
+#                  "already in its own session", never "about to be"
 #   gates.exit   — the run's exit code, written ONLY once it finishes (atomic
 #                  rename, so a poller never observes a partial write); any
 #                  previous gates.exit is removed before the new run starts, so
@@ -61,7 +63,7 @@ exitfile="$dir/gates.exit"
 
 # A stale exit file from a previous run would make a poller believe THIS run
 # is already done before it has even started.
-rm -f "$exitfile" "$exitfile.tmp"
+rm -f "$exitfile" "$exitfile.tmp" "$pidfile" "$pidfile.tmp"
 : > "$log"
 
 if [[ $# -eq 0 ]]; then
@@ -80,9 +82,15 @@ import subprocess
 import sys
 
 exitfile = sys.argv[1]
-cmd = sys.argv[2:]
+pidfile = sys.argv[2]
+cmd = sys.argv[3:]
 
 os.setsid()
+# Published only now, so the launcher can wait until the detach has really
+# happened (see the wait loop in run-gates-bg.sh).
+with open(pidfile + ".tmp", "w", encoding="ascii") as f:
+    f.write(str(os.getpid()))
+os.replace(pidfile + ".tmp", pidfile)
 rc = subprocess.call(cmd)
 
 tmp = exitfile + ".tmp"
@@ -91,10 +99,27 @@ with open(tmp, "w", encoding="ascii") as f:
 os.replace(tmp, exitfile)
 sys.exit(rc)
 '
-python3 -c "$detach_py" "$exitfile" "$@" >"$log" 2>&1 </dev/null &
+python3 -c "$detach_py" "$exitfile" "$pidfile" "$@" >"$log" 2>&1 </dev/null &
 child=$!
 disown "$child" 2>/dev/null || true
-echo "$child" > "$pidfile"
+
+# Until os.setsid() has run, the child is still in the caller's session and
+# process group. Starting the interpreter takes tens to hundreds of ms (a
+# pyenv shim adds more), and a command runner that ends the command's whole
+# tree the moment the command returns kills it inside that window: no
+# gates.exit is ever written (noogram/cosmon#176, observed under `codex
+# exec`). So do not return before the child has published its pid from
+# inside the new session. 15 s bound; 0.05 s steps.
+for _ in $(seq 1 300); do
+    [[ -s "$pidfile" ]] && break
+    kill -0 "$child" 2>/dev/null || break
+    sleep 0.05
+done
+if [[ ! -s "$pidfile" ]]; then
+    echo "run-gates-bg: detached runner did not start (see $log)" >&2
+    exit 1
+fi
+child="$(cat "$pidfile")"
 
 echo "gates running detached (pid $child)"
 echo "log:  $log"
