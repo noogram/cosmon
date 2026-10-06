@@ -628,6 +628,7 @@ mod tests {
             issuer: "https://mock-issuer".to_owned(),
             claude_credentials_present: present,
             claude_credentials_status: status.map(str::to_owned),
+            api_contract_version: None,
             extra: Default::default(),
         }
     }
