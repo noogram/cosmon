@@ -217,6 +217,7 @@ fn authorise_events_subscribe(state: &Arc<AppState>, jwt: &ValidatedJwt) -> Resu
             status: StatusCode::FORBIDDEN,
             label: "forbidden",
             request_id: None,
+            retry_after_seconds: None,
         })
     }
 }

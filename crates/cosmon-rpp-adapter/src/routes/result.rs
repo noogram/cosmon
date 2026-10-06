@@ -585,6 +585,7 @@ pub async fn get_result(
         status: StatusCode::NOT_FOUND,
         label: "not_found",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
 
     // 5 — load the molecule (tenant-isolated) to learn its fleet (for

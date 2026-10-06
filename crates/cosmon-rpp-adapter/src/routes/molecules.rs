@@ -278,6 +278,7 @@ fn authorise_scope(
             status: StatusCode::FORBIDDEN,
             label: "forbidden",
             request_id: None,
+            retry_after_seconds: None,
         })
     }
 }
@@ -322,6 +323,7 @@ pub async fn get_molecule(
         status: StatusCode::NOT_FOUND,
         label: "not_found",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
 
     let view = run_observe(&state, &spark, &jwt, &molecule_id)?;
@@ -412,6 +414,7 @@ pub async fn post_molecule(
         status: StatusCode::BAD_REQUEST,
         label: "invalid_json_body",
         request_id: None,
+        retry_after_seconds: None,
     })?;
     let formula = body.formula.trim().to_owned();
     if formula.is_empty() {
@@ -419,12 +422,14 @@ pub async fn post_molecule(
             status: StatusCode::BAD_REQUEST,
             label: "missing_formula",
             request_id: None,
+            retry_after_seconds: None,
         });
     }
     let variables = parse_variables(body.variables.as_ref()).map_err(|label| ApiError {
         status: StatusCode::BAD_REQUEST,
         label,
         request_id: None,
+        retry_after_seconds: None,
     })?;
     let tags = body.tags.unwrap_or_default();
 
@@ -441,6 +446,7 @@ pub async fn post_molecule(
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "tenant_unavailable",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
@@ -551,6 +557,7 @@ fn run_observe(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
@@ -561,16 +568,19 @@ fn run_observe(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         },
         ObserveError::StoreUnavailable(_) => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: ops_error_label(&e),
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         },
         _ => ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             label: ops_error_label(&e),
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         },
     })
 }
@@ -598,6 +608,7 @@ pub(crate) fn observe_with_state_dir_public(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
@@ -609,16 +620,19 @@ pub(crate) fn observe_with_state_dir_public(
                 status: StatusCode::NOT_FOUND,
                 label: "not_found",
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             },
             ObserveError::StoreUnavailable(_) => ApiError {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 label: ops_error_label(&e),
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             },
             _ => ApiError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 label: ops_error_label(&e),
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             },
         })?;
     Ok((view, tenant_state_dir))
@@ -644,6 +658,7 @@ pub(crate) fn status_public(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     let store = FileStore::new(tenant_root.join(".cosmon").join("state"));
@@ -652,16 +667,19 @@ pub(crate) fn status_public(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         },
         cosmon_state::ops::StatusError::StoreUnavailable(_) => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "store_unavailable",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         },
         _ => ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             label: "status_failed",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         },
     })
 }
@@ -690,6 +708,7 @@ fn nucleate_error_to_api(err: &NucleateError, request_id: &str) -> ApiError {
         status,
         label,
         request_id: Some(request_id.to_owned()),
+        retry_after_seconds: None,
     }
 }
 
@@ -767,6 +786,7 @@ pub async fn tag_molecule(
         status: StatusCode::BAD_REQUEST,
         label: "invalid_json_body",
         request_id: None,
+        retry_after_seconds: None,
     })?;
     let add_strs = body.add.unwrap_or_default();
     let remove_strs = body.remove.unwrap_or_default();
@@ -775,6 +795,7 @@ pub async fn tag_molecule(
             status: StatusCode::BAD_REQUEST,
             label: "empty_tag_request",
             request_id: None,
+            retry_after_seconds: None,
         });
     }
     let add_tags: Vec<Tag> = add_strs
@@ -785,6 +806,7 @@ pub async fn tag_molecule(
             status: StatusCode::BAD_REQUEST,
             label: "invalid_tag",
             request_id: None,
+            retry_after_seconds: None,
         })?;
     let remove_tags: Vec<Tag> = remove_strs
         .into_iter()
@@ -794,6 +816,7 @@ pub async fn tag_molecule(
             status: StatusCode::BAD_REQUEST,
             label: "invalid_tag",
             request_id: None,
+            retry_after_seconds: None,
         })?;
 
     let spark = build_spark(&state, &jwt, Verb::TagMolecule, Some(&molecule_id_str))?;
@@ -802,6 +825,7 @@ pub async fn tag_molecule(
         status: StatusCode::NOT_FOUND,
         label: "not_found",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
 
     let tenant_root = state.galaxies_root.join(spark.noyau.as_str());
@@ -810,6 +834,7 @@ pub async fn tag_molecule(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
@@ -829,26 +854,31 @@ pub async fn tag_molecule(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         },
         TagError::EmptyRequest => ApiError {
             status: StatusCode::BAD_REQUEST,
             label: "empty_tag_request",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         },
         TagError::ProtectedReservation(_) => ApiError {
             status: StatusCode::FORBIDDEN,
             label: "protected_runtime_reservation",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         },
         TagError::ProtectedDecisionOptIn(_) => ApiError {
             status: StatusCode::FORBIDDEN,
             label: "protected_runtime_decision_opt_in",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         },
         TagError::StoreUnavailable(_) => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "store_unavailable",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         },
     })?;
 
@@ -916,6 +946,7 @@ fn page_ensemble(
                 status: StatusCode::BAD_REQUEST,
                 label: "invalid_filter",
                 request_id: Some(request_id.to_owned()),
+                retry_after_seconds: None,
             })?
     } else {
         0
@@ -972,6 +1003,7 @@ pub async fn list_molecules(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
@@ -981,6 +1013,7 @@ pub async fn list_molecules(
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "store_unavailable",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         })?
         .to_string();
     let store = FileStore::new(&tenant_state_dir);
@@ -993,6 +1026,7 @@ pub async fn list_molecules(
             status: StatusCode::BAD_REQUEST,
             label: "invalid_filter",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
 
@@ -1008,11 +1042,13 @@ pub async fn list_molecules(
                 status: StatusCode::BAD_REQUEST,
                 label: "invalid_filter",
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             },
             EnsembleError::StoreUnavailable(_) => ApiError {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 label: "store_unavailable",
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             },
         })?;
 
@@ -1024,6 +1060,7 @@ pub async fn list_molecules(
         status: StatusCode::INTERNAL_SERVER_ERROR,
         label: "serialization_failed",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
     let conditional = headers
         .get(header::IF_NONE_MATCH)
@@ -1079,17 +1116,20 @@ fn collapse_work_location(
                 status: StatusCode::NOT_FOUND,
                 label: "not_found",
                 request_id: Some(request_id.to_owned()),
+                retry_after_seconds: None,
             },
             _ => ApiError {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 label: "store_unavailable",
                 request_id: Some(request_id.to_owned()),
+                retry_after_seconds: None,
             },
         })?;
     let fleet = store.load_fleet().map_err(|_| ApiError {
         status: StatusCode::SERVICE_UNAVAILABLE,
         label: "store_unavailable",
         request_id: Some(request_id.to_owned()),
+        retry_after_seconds: None,
     })?;
     let repo_root =
         std::fs::canonicalize(tenant_root).unwrap_or_else(|_| tenant_root.to_path_buf());
@@ -1136,12 +1176,14 @@ pub async fn collapse_molecule(
         status: StatusCode::BAD_REQUEST,
         label: "invalid_json_body",
         request_id: None,
+        retry_after_seconds: None,
     })?;
     if body.reason.trim().is_empty() {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
             label: "missing_reason",
             request_id: None,
+            retry_after_seconds: None,
         });
     }
 
@@ -1150,6 +1192,7 @@ pub async fn collapse_molecule(
         status: StatusCode::NOT_FOUND,
         label: "not_found",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
 
     let tenant_root = state.galaxies_root.join(spark.noyau.as_str());
@@ -1158,6 +1201,7 @@ pub async fn collapse_molecule(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
@@ -1184,26 +1228,31 @@ pub async fn collapse_molecule(
                     status: StatusCode::NOT_FOUND,
                     label: "not_found",
                     request_id: Some(spark.request_id.clone()),
+                    retry_after_seconds: None,
                 },
                 CollapseError::InvalidCause(_) => ApiError {
                     status: StatusCode::BAD_REQUEST,
                     label: "invalid_cause",
                     request_id: Some(spark.request_id.clone()),
+                    retry_after_seconds: None,
                 },
                 CollapseError::MismatchedAccountKind(_) => ApiError {
                     status: StatusCode::BAD_REQUEST,
                     label: "mismatched_account_kind",
                     request_id: Some(spark.request_id.clone()),
+                    retry_after_seconds: None,
                 },
                 CollapseError::AlreadyCompleted(_) => ApiError {
                     status: StatusCode::CONFLICT,
                     label: "already_completed",
                     request_id: Some(spark.request_id.clone()),
+                    retry_after_seconds: None,
                 },
                 CollapseError::StoreUnavailable(_) => ApiError {
                     status: StatusCode::SERVICE_UNAVAILABLE,
                     label: "store_unavailable",
                     request_id: Some(spark.request_id.clone()),
+                    retry_after_seconds: None,
                 },
             }
         })?;
@@ -1283,6 +1332,7 @@ pub async fn freeze_molecule(
         status: StatusCode::BAD_REQUEST,
         label: "invalid_json_body",
         request_id: None,
+        retry_after_seconds: None,
     })?;
 
     // Audit-trail verb matches the actual operation dispatched. This
@@ -1297,6 +1347,7 @@ pub async fn freeze_molecule(
         status: StatusCode::NOT_FOUND,
         label: "not_found",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
 
     let tenant_root = state.galaxies_root.join(spark.noyau.as_str());
@@ -1305,6 +1356,7 @@ pub async fn freeze_molecule(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
@@ -1322,16 +1374,19 @@ pub async fn freeze_molecule(
                         status: StatusCode::NOT_FOUND,
                         label: "not_found",
                         request_id: Some(spark.request_id.clone()),
+                        retry_after_seconds: None,
                     },
                     FreezeError::TerminalStatus(_, _) => ApiError {
                         status: StatusCode::CONFLICT,
                         label: "terminal_status",
                         request_id: Some(spark.request_id.clone()),
+                        retry_after_seconds: None,
                     },
                     FreezeError::StoreUnavailable(_) => ApiError {
                         status: StatusCode::SERVICE_UNAVAILABLE,
                         label: "store_unavailable",
                         request_id: Some(spark.request_id.clone()),
+                        retry_after_seconds: None,
                     },
                 })?;
             let json = FreezeJson::from_view(&view);
@@ -1353,16 +1408,19 @@ pub async fn freeze_molecule(
                         status: StatusCode::NOT_FOUND,
                         label: "not_found",
                         request_id: Some(spark.request_id.clone()),
+                        retry_after_seconds: None,
                     },
                     ThawError::InvalidStatus(_, _) => ApiError {
                         status: StatusCode::CONFLICT,
                         label: "invalid_status",
                         request_id: Some(spark.request_id.clone()),
+                        retry_after_seconds: None,
                     },
                     ThawError::StoreUnavailable(_) => ApiError {
                         status: StatusCode::SERVICE_UNAVAILABLE,
                         label: "store_unavailable",
                         request_id: Some(spark.request_id.clone()),
+                        retry_after_seconds: None,
                     },
                 })?;
             let json = ThawJson::from_view(&view);
@@ -1439,12 +1497,14 @@ pub async fn stuck_molecule(
         status: StatusCode::BAD_REQUEST,
         label: "invalid_json_body",
         request_id: None,
+        retry_after_seconds: None,
     })?;
     if body.reason.trim().is_empty() {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
             label: "empty_reason",
             request_id: None,
+            retry_after_seconds: None,
         });
     }
 
@@ -1453,6 +1513,7 @@ pub async fn stuck_molecule(
         status: StatusCode::NOT_FOUND,
         label: "not_found",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
 
     let tenant_root = state.galaxies_root.join(spark.noyau.as_str());
@@ -1461,6 +1522,7 @@ pub async fn stuck_molecule(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
@@ -1476,21 +1538,25 @@ pub async fn stuck_molecule(
                 status: StatusCode::NOT_FOUND,
                 label: "not_found",
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             },
             StuckError::EmptyReason => ApiError {
                 status: StatusCode::BAD_REQUEST,
                 label: "empty_reason",
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             },
             StuckError::TerminalStatus(_, _) => ApiError {
                 status: StatusCode::CONFLICT,
                 label: "terminal_status",
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             },
             StuckError::StoreUnavailable(_) => ApiError {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 label: "store_unavailable",
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             },
         },
     )?;
@@ -1636,6 +1702,7 @@ pub async fn tackle_molecule(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         }
     })?;
 
@@ -1660,6 +1727,7 @@ pub async fn tackle_molecule(
             status: StatusCode::CONFLICT,
             label: "already_active",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
 
@@ -1675,6 +1743,7 @@ pub async fn tackle_molecule(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
 
@@ -1700,6 +1769,7 @@ pub async fn tackle_molecule(
             status: StatusCode::TOO_MANY_REQUESTS,
             label: "tackle_ceiling",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
 
@@ -1760,6 +1830,7 @@ pub async fn tackle_molecule(
         status: StatusCode::INTERNAL_SERVER_ERROR,
         label: "tackle_unavailable",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
     let receipt = match dispatched.map_err(|boxed| *boxed) {
         Ok(receipt) => receipt,
@@ -1883,11 +1954,13 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             status: StatusCode::CONFLICT,
             label: "not_tackleable",
             request_id: Some(request_id.to_owned()),
+            retry_after_seconds: None,
         },
         TackleExecError::UnsupportedStep { .. } => ApiError {
             status: StatusCode::NOT_IMPLEMENTED,
             label: "tackle_unsupported_step",
             request_id: Some(request_id.to_owned()),
+            retry_after_seconds: None,
         },
         // ADR-177 / issue #65: the step pinned `[steps.harness]` settings and
         // the resolved adapter has no channel to carry them. A distinct label
@@ -1899,6 +1972,7 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             status: StatusCode::NOT_IMPLEMENTED,
             label: "tackle_unsupported_harness",
             request_id: Some(request_id.to_owned()),
+            retry_after_seconds: None,
         },
         // Issue #72: a model pin the resolved adapter cannot receive on the
         // in-process seam. Its own label, for the same reason as the harness
@@ -1908,6 +1982,7 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             status: StatusCode::NOT_IMPLEMENTED,
             label: "tackle_unsupported_model",
             request_id: Some(request_id.to_owned()),
+            retry_after_seconds: None,
         },
         // The precondition refusals carry their own contract label
         // (issue #48): `worker_credential_missing` /
@@ -1918,16 +1993,19 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: refusal.label(),
             request_id: Some(request_id.to_owned()),
+            retry_after_seconds: None,
         },
         TackleExecError::Spawn { .. } => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "subprocess_spawn_failed",
             request_id: Some(request_id.to_owned()),
+            retry_after_seconds: None,
         },
         TackleExecError::BriefingNotConfirmed { .. } => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "briefing_not_confirmed",
             request_id: Some(request_id.to_owned()),
+            retry_after_seconds: None,
         },
         // contract-20A outcome 2: the dispatcher is root and cannot demote, so
         // no worker was created. Its own label, because the remedy is an
@@ -1938,6 +2016,7 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "root_spawn_refused",
             request_id: Some(request_id.to_owned()),
+            retry_after_seconds: None,
         },
         // Issue #81 point 4: the worker's Claude config could not be written
         // to pre-grant folder trust, so the worker would have stopped on the
@@ -1947,6 +2026,7 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "startup_consent_refused",
             request_id: Some(request_id.to_owned()),
+            retry_after_seconds: None,
         },
 
         // The rollback wrapper adds *what was preserved*, never a different
@@ -1969,6 +2049,7 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "tackle_unavailable",
             request_id: Some(request_id.to_owned()),
+            retry_after_seconds: None,
         },
     }
 }
@@ -2071,6 +2152,7 @@ pub async fn run_molecule(
         status: StatusCode::NOT_FOUND,
         label: "not_found",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
     let tenant_root = state.galaxies_root.join(spark.noyau.as_str());
     if !tenant_root.exists() {
@@ -2078,6 +2160,7 @@ pub async fn run_molecule(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
 
@@ -2106,6 +2189,7 @@ pub async fn run_molecule(
             status: StatusCode::CONFLICT,
             label: "drain_already_active",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
 
@@ -2360,6 +2444,7 @@ pub async fn done_molecule(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         }
         .into());
     }
@@ -2391,6 +2476,7 @@ pub async fn done_molecule(
         status: StatusCode::NOT_FOUND,
         label: "not_found",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
     status_public(&state, &spark, &molecule_id)?;
     let cfg = cfg_read.map_err(|_| {
@@ -2399,6 +2485,7 @@ pub async fn done_molecule(
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 label: "harvest_failed",
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             },
             cosmon_core::harvest_authorization::HarvestAuthorizationCause::FactsUnavailable,
         )
@@ -2410,6 +2497,7 @@ pub async fn done_molecule(
                     status: StatusCode::SERVICE_UNAVAILABLE,
                     label: "harvest_failed",
                     request_id: Some(spark.request_id.clone()),
+                    retry_after_seconds: None,
                 },
                 cosmon_core::harvest_authorization::HarvestAuthorizationCause::PolicyConflict,
             )
@@ -2420,6 +2508,7 @@ pub async fn done_molecule(
                 status: StatusCode::FORBIDDEN,
                 label: "not_authorized",
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             },
             cosmon_core::harvest_authorization::HarvestAuthorizationCause::Disabled,
         ));
@@ -2436,11 +2525,13 @@ pub async fn done_molecule(
         status: StatusCode::BAD_REQUEST,
         label: "unsupported_parameter",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
     let options = parsed.into_options().map_err(|label| ApiError {
         status: StatusCode::BAD_REQUEST,
         label,
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
     if let Err(refusal) = options.validate() {
         return Err(door_refusal_to_api_error(refusal, &spark.request_id).into());
@@ -2452,6 +2543,7 @@ pub async fn done_molecule(
             status: StatusCode::FORBIDDEN,
             label: "not_authorized",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         }, cosmon_core::harvest_authorization::HarvestAuthorizationCause::OverrideRequiresRatification));
     }
     if policy.provenance == PolicyProvenance::Explicit
@@ -2462,6 +2554,7 @@ pub async fn done_molecule(
                 status: StatusCode::NOT_IMPLEMENTED,
                 label: "harvest_effect_unavailable",
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             },
             cosmon_core::harvest_authorization::HarvestAuthorizationCause::EffectUnsupported,
         ));
@@ -2517,6 +2610,7 @@ pub async fn done_molecule(
                     status: StatusCode::FORBIDDEN,
                     label: "forbidden",
                     request_id: Some(spark.request_id.clone()),
+                    retry_after_seconds: None,
                 },
                 cause,
             )
@@ -2541,6 +2635,7 @@ pub async fn done_molecule(
                     status: StatusCode::FORBIDDEN,
                     label: "forbidden",
                     request_id: Some(spark.request_id.clone()),
+                    retry_after_seconds: None,
                 },
                 cause,
             )
@@ -2744,6 +2839,7 @@ async fn run_harvest_effect(
             status: StatusCode::INTERNAL_SERVER_ERROR,
             label: "harvest_failed",
             request_id: Some(request_id.to_owned()),
+            retry_after_seconds: None,
         }
         .into());
     };
@@ -2762,6 +2858,7 @@ fn project_harvest_result(
         status: StatusCode::INTERNAL_SERVER_ERROR,
         label: "harvest_failed",
         request_id: Some(request_id.to_owned()),
+        retry_after_seconds: None,
     };
     match result {
         Ok(outcome) => Ok(outcome),
@@ -2781,6 +2878,7 @@ fn project_harvest_result(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(request_id.to_owned()),
+            retry_after_seconds: None,
         }
         .into()),
         Err(harvest_door::LandError::EffectUnavailable) => {
@@ -2794,6 +2892,7 @@ fn project_harvest_result(
                 status: StatusCode::NOT_IMPLEMENTED,
                 label: "harvest_effect_unavailable",
                 request_id: Some(request_id.to_owned()),
+                retry_after_seconds: None,
             }
             .into())
         }
@@ -2892,6 +2991,7 @@ async fn decide_harvest_in_process(
         status: StatusCode::INTERNAL_SERVER_ERROR,
         label: "harvest_failed",
         request_id: Some(request_id.to_owned()),
+        retry_after_seconds: None,
     })?;
 
     decision.map_err(|err| match err {
@@ -2907,6 +3007,7 @@ async fn decide_harvest_in_process(
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 label: "harvest_failed",
                 request_id: Some(request_id.to_owned()),
+                retry_after_seconds: None,
             },
             cause,
         ),
@@ -2915,6 +3016,7 @@ async fn decide_harvest_in_process(
                 status: StatusCode::NOT_FOUND,
                 label: "not_found",
                 request_id: Some(request_id.to_owned()),
+                retry_after_seconds: None,
             }
             .into()
         }
@@ -2923,6 +3025,7 @@ async fn decide_harvest_in_process(
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 label: "harvest_failed",
                 request_id: Some(request_id.to_owned()),
+                retry_after_seconds: None,
             },
             cosmon_core::harvest_authorization::HarvestAuthorizationCause::FactsUnavailable,
         ),
@@ -2930,6 +3033,7 @@ async fn decide_harvest_in_process(
             status: StatusCode::INTERNAL_SERVER_ERROR,
             label: "harvest_failed",
             request_id: Some(request_id.to_owned()),
+            retry_after_seconds: None,
         }
         .into(),
     })
@@ -3007,6 +3111,7 @@ fn door_refusal_to_api_error(
         status,
         label: refusal.as_str(),
         request_id: Some(request_id.to_owned()),
+        retry_after_seconds: None,
     }
 }
 

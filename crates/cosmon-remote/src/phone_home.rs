@@ -183,7 +183,7 @@ pub fn on_failure(
     if !enabled {
         return None;
     }
-    let Error::Api { status, body } = err else {
+    let Error::Api { status, body, .. } = err else {
         return None;
     };
 
@@ -283,6 +283,7 @@ mod tests {
     fn api_err(status: u16, label: &str, request_id: &str) -> Error {
         Error::Api {
             status,
+            retry_after_seconds: None,
             body: serde_json::json!({"error": label, "request_id": request_id}),
         }
     }
@@ -368,6 +369,7 @@ mod tests {
         let secret_artifact = "synthesis.md: la stratégie confidentielle du client";
         let err = Error::Api {
             status: 503,
+            retry_after_seconds: None,
             body: serde_json::json!({
                 "error": "tackle_unavailable",
                 "request_id": "req-leak1",

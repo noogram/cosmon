@@ -781,6 +781,7 @@ pub async fn get_session(
         status: StatusCode::NOT_FOUND,
         label: "not_found",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
 
     let (view, tenant_state_dir) =
@@ -793,6 +794,7 @@ pub async fn get_session(
             status: StatusCode::INTERNAL_SERVER_ERROR,
             label: "internal",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         })?;
 
     let truncated = transcript.as_ref().is_some_and(|t| t.truncated);

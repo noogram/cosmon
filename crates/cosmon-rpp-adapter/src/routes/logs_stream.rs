@@ -420,6 +420,7 @@ fn authorise_logs_subscribe(state: &Arc<AppState>, jwt: &ValidatedJwt) -> Result
             status: StatusCode::FORBIDDEN,
             label: "forbidden",
             request_id: None,
+            retry_after_seconds: None,
         })
     }
 }
@@ -440,6 +441,7 @@ fn reject_unsafe_segment(segment: &str, spark: &Spark) -> Result<(), ApiError> {
             status: StatusCode::BAD_REQUEST,
             label: "invalid_path_segment",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     Ok(())

@@ -162,6 +162,7 @@ pub async fn get_quota(
             status: StatusCode::INTERNAL_SERVER_ERROR,
             label: "rate_limit_read_failed",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         })?;
 
     // Effective drain bounds from the tenant's loaded binding — the

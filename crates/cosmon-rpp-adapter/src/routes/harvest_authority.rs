@@ -48,6 +48,7 @@ fn api(status: StatusCode, label: &'static str, id: Option<String>) -> ApiError 
         status,
         label,
         request_id: id,
+        retry_after_seconds: None,
     }
 }
 

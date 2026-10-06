@@ -1699,11 +1699,21 @@ async fn ensure_stream_success(resp: reqwest::Response) -> Result<reqwest::Respo
     if status.is_success() {
         return Ok(resp);
     }
+    let retry_after_header = resp
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
     let body = resp.text().await.unwrap_or_default();
     let body_json =
         serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::Value::String(body));
     Err(Error::Api {
         status: status.as_u16(),
+        retry_after_seconds: retry_after_header.or_else(|| {
+            body_json
+                .get("retry_after_seconds")
+                .and_then(serde_json::Value::as_u64)
+        }),
         body: body_json,
     })
 }
@@ -1876,12 +1886,21 @@ async fn api_error_from(resp: reqwest::Response) -> Error {
 }
 
 async fn api_error_from_status(status: StatusCode, resp: reqwest::Response) -> Error {
+    let retry_after_header = resp
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
     let body: serde_json::Value = resp
         .json()
         .await
         .unwrap_or_else(|_| serde_json::json!({"error": "non_json_response"}));
     Error::Api {
         status: status.as_u16(),
+        retry_after_seconds: retry_after_header.or_else(|| {
+            body.get("retry_after_seconds")
+                .and_then(serde_json::Value::as_u64)
+        }),
         body,
     }
 }

@@ -22,7 +22,7 @@
 
 use std::time::Duration;
 
-use axum::http::StatusCode;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use cosmon_core::harvest_authorization::HarvestAuthorizationCause;
@@ -227,6 +227,11 @@ pub struct ApiError {
     pub label: &'static str,
     /// Optional `request_id` (clause (b) — the inbox file name).
     pub request_id: Option<String>,
+    /// Retry delay in whole seconds, when this is a rate-limit refusal.
+    ///
+    /// Kept as a wire-ready value so the JSON body and `Retry-After`
+    /// header cannot diverge through separate rounding rules.
+    pub retry_after_seconds: Option<u64>,
 }
 
 impl ApiError {
@@ -235,10 +240,19 @@ impl ApiError {
     /// client sees only the stable label and the `request_id`.
     #[must_use]
     pub fn from_reject(reason: &RppRejectReason, request_id: Option<String>) -> Self {
+        let retry_after_seconds = match reason {
+            RppRejectReason::RateLimited { retry_after } => Some(
+                retry_after
+                    .as_secs()
+                    .saturating_add(u64::from(retry_after.subsec_nanos() > 0)),
+            ),
+            _ => None,
+        };
         Self {
             status: reason.http_status(),
             label: reason.label(),
             request_id,
+            retry_after_seconds,
         }
     }
 
@@ -250,6 +264,7 @@ impl ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             label,
             request_id: None,
+            retry_after_seconds: None,
         }
     }
 
@@ -264,16 +279,25 @@ impl ApiError {
             status,
             label,
             request_id: None,
+            retry_after_seconds: None,
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let body = match self.request_id {
+        let mut body = match self.request_id {
             Some(id) => json!({"error": self.label, "request_id": id}),
             None => json!({"error": self.label}),
         };
+        if let Some(seconds) = self.retry_after_seconds {
+            body["retry_after_seconds"] = json!(seconds);
+            let mut response = (self.status, Json(body)).into_response();
+            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
+            return response;
+        }
         (self.status, Json(body)).into_response()
     }
 }
@@ -404,6 +428,7 @@ mod tests {
                     status: StatusCode::INTERNAL_SERVER_ERROR,
                     label: "harvest_failed",
                     request_id: Some("req-safe".into()),
+                    retry_after_seconds: None,
                 },
                 cause,
             )
@@ -480,6 +505,27 @@ mod tests {
             .http_status(),
             StatusCode::TOO_MANY_REQUESTS,
         );
+    }
+
+    #[tokio::test]
+    async fn rate_limited_response_exposes_rounded_retry_delay() {
+        let response = ApiError::from_reject(
+            &RppRejectReason::RateLimited {
+                retry_after: Duration::from_millis(1_001),
+            },
+            Some("req-safe".into()),
+        )
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "2");
+        let body = axum::body::to_bytes(response.into_body(), 2048)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"], "rate_limited");
+        assert_eq!(body["retry_after_seconds"], 2);
+        assert_eq!(body["request_id"], "req-safe");
     }
 
     #[test]

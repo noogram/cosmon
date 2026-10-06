@@ -43,7 +43,7 @@ async fn refused_body(reason: &str, action: &str) -> serde_json::Value {
         .done("task-1", &DoneRequest::new("test harvest"))
         .await
         .expect_err("refusal");
-    let Error::Api { status, body } = err else {
+    let Error::Api { status, body, .. } = err else {
         panic!("expected API error")
     };
     assert_eq!(status, 403);

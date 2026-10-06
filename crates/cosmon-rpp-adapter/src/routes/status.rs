@@ -133,6 +133,7 @@ pub async fn get_status(
         status: StatusCode::NOT_FOUND,
         label: "not_found",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
 
     let view = status_public(&state, &spark, &molecule_id)?;
