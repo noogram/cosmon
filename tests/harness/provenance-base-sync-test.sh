@@ -208,7 +208,7 @@ else
     # vacuous pass (or a false red) into the reported result.
     real_all=$(env -u GITHUB_SHA -u GITHUB_BASE_REF -u GITHUB_EVENT_BEFORE \
         COSMON_PROVENANCE_SINCE="2020-01-01 00:00:00" \
-        COSMON_PROVENANCE_HEAD="${COSMON_REPLAY_HEAD:-HEAD}" \
+        COSMON_PROVENANCE_HEAD="${COSMON_PR_HEAD:-HEAD}" \
         bash "$GATE" 2>&1 || true)
     for sha in "${RED_SHAS[@]}"; do
         if grep -q "^ok    $sha" <<<"$real_all"; then

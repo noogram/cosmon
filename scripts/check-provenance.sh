@@ -129,8 +129,8 @@ else
     # motivated this gate's existence in the first place.
     base=""
     # A pull_request run checks out GitHub's synthetic test-merge commit,
-    # which no cosmon gesture wrote; a self-test that replays the trunk's
-    # history names the commit to walk instead.
+    # which no cosmon gesture wrote; the self-tests that walk HEAD's
+    # history are handed the PR head the same way the gate step is.
     head="${COSMON_PROVENANCE_HEAD:-HEAD}"
 fi
 

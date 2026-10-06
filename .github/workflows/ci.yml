@@ -776,13 +776,12 @@ jobs:
       - name: Self-test the gate against the c1cb pathology
         run: bash tests/harness/provenance-gate-test.sh
       - name: Self-test the base-sync exemption (ADR-052 §D5-bis)
-        # Scenario 4 replays base-sync merges recorded on the trunk. On a
-        # pull_request run HEAD is GitHub's synthetic test-merge commit and
-        # the PR head's own first-parent chain is not the trunk, so the
-        # scenario walks the PR's base commit instead (the other scenarios
-        # build their own repos and never read this variable).
+        # Scenario 4 replays this repo's real history from HEAD; on a
+        # pull_request run HEAD is GitHub's synthetic test-merge commit, so
+        # the scenario walks the PR head instead (the other scenarios build
+        # their own repos and never read this variable).
         env:
-          COSMON_REPLAY_HEAD: ${{ github.event.pull_request.base.sha || '' }}
+          COSMON_PR_HEAD: ${{ github.event.pull_request.head.sha || '' }}
         run: bash tests/harness/provenance-base-sync-test.sh
       - name: Self-test ledger coverage vs residence (ADR-055)
         run: bash tests/harness/provenance-residence-test.sh
