@@ -30,7 +30,7 @@
 //!    flips clap's root `--help` to long-form rendering:
 //!    option lines reflow and narrative sections append. The
 //!    `Commands:` catalogue — the contract surface — is still checked
-//!    line-by-line: nothing lost, the avatar line the only addition.
+//!    line-by-line: nothing lost, and each listed addition is pinned.
 //!
 //! Anything else differing from its pre-fusion snapshot fails this
 //! test: usage lines, argument lists and option blocks must be
@@ -179,12 +179,14 @@ fn root_commands_catalogue_gains_the_blessed_verbs() {
     //    (delib-20260710-33b7 C2/C7, task-20260710-2565); distinct from
     //    `auth login` (the Claude device flow).
     // 7. `logout`   \u{2014} forget the persisted credential; reverse of `login`.
-    // 8. `wait`     \u{2014} block until a molecule reaches a status, by
+    // 8. `token`    \u{2014} deliberately confirmed export through the persisted
+    //    credential's single-writer refresh path (issue #188).
+    // 9. `wait`     \u{2014} block until a molecule reaches a status, by
     //    polling `GET /v1/molecules/{id}/status`. Client-side by
     //    decision: a blocking ROUTE would make the adapter hold a
     //    thread and a waiter-keyed piece of state per client
     //    (issue #51 follow-up, task-20260907-b25f).
-    // 9. `harvest`  \u{2014} operator-side grant and authority workflow (#120 W7).
+    // 10. `harvest` \u{2014} operator-side grant and authority workflow (#120 W7).
     // Plus four in-place description edits: the diagnostic verbs
     // (healthz, quota, workers, noyaux) gained an explicit
     // `(diagnostic)` marker in the B2+C1 integration (stitch 828e) \u{2014}
@@ -217,8 +219,8 @@ fn root_commands_catalogue_gains_the_blessed_verbs() {
     }
     assert_eq!(
         added.len(),
-        9 + inplace_subs.len(),
-        "root commands: blessed additions are avatar, do, doctor, converse, run, login, logout, wait, harvest \
+        10 + inplace_subs.len(),
+        "root commands: blessed additions are avatar, do, doctor, converse, run, login, logout, token, wait, harvest \
          + the in-place edits, got {added:?}"
     );
     for verb in [
@@ -229,6 +231,7 @@ fn root_commands_catalogue_gains_the_blessed_verbs() {
         "  run  ",
         "  login  ",
         "  logout  ",
+        "  token  ",
         "  wait  ",
         "  harvest  ",
     ] {
