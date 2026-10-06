@@ -214,6 +214,14 @@ else
             verdict "4. replay ${sha:0:7} accepted" 0 0
         else
             verdict "4. replay ${sha:0:7} accepted" 0 1
+            # Diagnostic only: show what the gate said about this SHA and
+            # the head of its output, so a red CI run is self-explanatory.
+            {
+                echo "      --- gate lines mentioning ${sha:0:7}:"
+                grep -F "$sha" <<<"$real_all" | sed 's/^/      /' || true
+                echo "      --- first 15 lines of gate output:"
+                head -n 15 <<<"$real_all" | sed 's/^/      /'
+            } >&2
         fi
     done
 fi
