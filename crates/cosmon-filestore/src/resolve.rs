@@ -23,6 +23,15 @@
 //! `warn_if_env_shadows_project`).
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use cosmon_core::config::ProjectConfig;
+
+/// Name of the declaration file an operator places in an override state
+/// directory to bind it to one galaxy.
+pub const GALAXY_DECLARATION_FILE: &str = "galaxy.toml";
+
+static ENV_SHADOW_WARNING_EMITTED: OnceLock<()> = OnceLock::new();
 
 /// The marker directory name that identifies a cosmon project root.
 pub const COSMON_DIR_NAME: &str = ".cosmon";
@@ -145,24 +154,83 @@ pub fn resolve_state_dir_with_origin(explicit: Option<&Path>) -> (PathBuf, State
 /// an explicit override used outside any galaxy is not shadowing anything,
 /// and warning there would just be noise on every host-global invocation.
 fn warn_if_env_shadows_project(env_dir: &Path, start: &Path) {
-    let Some(project_cosmon) = walk_up_find_cosmon_dir_from(start) else {
+    let Some(project_root) = resolve_project_root(start, env_dir) else {
         return;
     };
-    let project_state = project_cosmon.join("state");
-    let env_canonical = env_dir
-        .canonicalize()
-        .unwrap_or_else(|_| env_dir.to_path_buf());
-    if env_canonical == project_state {
+    let config_path = project_root.join(COSMON_DIR_NAME).join("config.toml");
+    let Some(project_id) = project_id_from_config(&config_path) else {
+        return;
+    };
+    let declared_project_id = declared_project_id(env_dir);
+    if declared_project_id.as_deref() == Some(project_id.as_str()) {
+        return;
+    }
+    let remedy = format!(
+        "create {}/{} with `project_id = \"{}\"` to declare this override",
+        env_dir.display(),
+        GALAXY_DECLARATION_FILE,
+        project_id
+    );
+    if ENV_SHADOW_WARNING_EMITTED.set(()).is_err() {
+        return;
+    }
+    if let Some(declared_project_id) = declared_project_id {
+        eprintln!(
+            "warning: COSMON_STATE_DIR={} is declared for project_id={}, but walk-up found \
+             galaxy {} with project_id={} — using the environment variable. {}.",
+            env_dir.display(),
+            declared_project_id,
+            project_root.display(),
+            project_id,
+            remedy,
+        );
         return;
     }
     eprintln!(
         "warning: COSMON_STATE_DIR={} overrides the galaxy found at {} (from {}) \
          — using the environment variable. Unset COSMON_STATE_DIR to use the \
-         galaxy in cwd instead.",
+         galaxy in cwd instead, or {}.",
         env_dir.display(),
-        project_state.display(),
-        start.display()
+        project_root.display(),
+        start.display(),
+        remedy,
     );
+}
+
+/// Resolve the galaxy root used for project-scoped files.
+///
+/// Walk-up from `start` wins so a process using an out-of-tree state override
+/// still reads galaxy declarations from its current galaxy. If walk-up finds
+/// no galaxy, the conventional `state_dir/../..` layout is accepted only when
+/// that derived directory has a project configuration. This intentionally
+/// never manufactures `.` as a project root.
+#[must_use]
+pub fn resolve_project_root(start: &Path, state_dir: &Path) -> Option<PathBuf> {
+    if let Some(cosmon_dir) = walk_up_find_cosmon_dir_from(start) {
+        return cosmon_dir.parent().map(Path::to_path_buf);
+    }
+
+    let derived = state_dir.parent().and_then(Path::parent)?;
+    derived
+        .join(COSMON_DIR_NAME)
+        .join("config.toml")
+        .is_file()
+        .then(|| derived.to_path_buf())
+}
+
+fn project_id_from_config(config_path: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(config_path).ok()?;
+    ProjectConfig::parse(&contents)
+        .ok()?
+        .project
+        .project_id
+        .map(|id| id.to_string())
+}
+
+fn declared_project_id(state_dir: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(state_dir.join(GALAXY_DECLARATION_FILE)).ok()?;
+    let document = contents.parse::<toml_edit::DocumentMut>().ok()?;
+    document.get("project_id")?.as_str().map(str::to_owned)
 }
 
 /// Walk up from the current working directory looking for a `.cosmon/` directory.
@@ -449,6 +517,60 @@ mod tests {
         let (resolved, origin) = resolve_state_dir_with_origin(Some(&path));
         assert_eq!(resolved, path);
         assert_eq!(origin, StateDirOrigin::Explicit);
+    }
+
+    #[test]
+    fn resolve_project_root_prefers_walk_up_over_an_override_derivation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let galaxy = tmp.path().join("galaxy");
+        let cosmon = galaxy.join(COSMON_DIR_NAME);
+        let nested = galaxy.join("src/nested");
+        let override_state = tmp.path().join("operator-state");
+        fs::create_dir_all(&cosmon).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&override_state).unwrap();
+        fs::write(
+            cosmon.join("config.toml"),
+            "[project]\nproject_id = \"galaxy-a\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_project_root(&nested, &override_state),
+            Some(galaxy.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    fn resolve_project_root_only_derives_a_configured_galaxy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let galaxy = tmp.path().join("galaxy");
+        let state = galaxy.join(".cosmon/state");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        assert_eq!(resolve_project_root(&outside, &state), None);
+
+        fs::write(
+            galaxy.join(".cosmon/config.toml"),
+            "[project]\nproject_id = \"galaxy-a\"\n",
+        )
+        .unwrap();
+        assert_eq!(resolve_project_root(&outside, &state), Some(galaxy));
+    }
+
+    #[test]
+    fn override_declaration_matches_only_its_recorded_project_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join(GALAXY_DECLARATION_FILE),
+            "project_id = \"galaxy-a\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(declared_project_id(tmp.path()).as_deref(), Some("galaxy-a"));
+        assert_ne!(declared_project_id(tmp.path()).as_deref(), Some("galaxy-b"));
     }
 
     #[test]

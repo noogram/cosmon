@@ -115,6 +115,15 @@ to it. It is the exact twin of `molecule_dir` (D1's precedent), so:
   depend on `&dyn StateStore`. `patrol`'s seven sweep helpers retyped their
   `store: &FileStore` parameter to `&dyn StateStore`.
 
+**Amendment (2026-10-06, issue #171 U2).** `project_root` is no longer purely
+derived from the state-store path: an explicit or environment state override
+may intentionally serve a galaxy other than the directory containing that
+state. `resolve_project_root(start, state_dir)` therefore uses walk-up from the
+invocation first, and accepts the legacy `state_dir/../..` derivation only when
+that derived root carries `.cosmon/config.toml`. This preserves the port's
+answer for a conventional store without turning an arbitrary override into a
+false galaxy root.
+
 ### Decision 2 — Locking is a *storage-atomicity* concern; its object-safe port is specified but deferred (DEFERRED)
 
 The instinct "locking is filesystem plumbing, leave it welded" (Option A) is

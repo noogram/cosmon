@@ -195,6 +195,20 @@ order and returns the first one that yields a usable path:
 2. **Environment variable.** `COSMON_STATE_DIR` / `COSMON_FORMULAS_DIR`.
    These are intended for developer-local overrides and test harnesses;
    production deployments should prefer the explicit override.
+
+   When `COSMON_STATE_DIR` is deliberately shared by a galaxy, declare the
+   association in the override state directory so commands run from that
+   galaxy stay quiet while a command in another galaxy warns once. Create
+   `<state-dir>/galaxy.toml` containing the identity from that galaxy's
+   tracked `.cosmon/config.toml`:
+
+   ```toml
+   project_id = "your-galaxy-project-id"
+   ```
+
+   A missing, malformed, or different declaration never suppresses the
+   warning. The override still takes precedence; the declaration documents
+   which galaxy it is intended to serve.
 3. **Walk-up discovery from a start directory.** The resolver walks
    upward looking for a `.cosmon/` directory, like `git` finds `.git/`.
    The start directory is:
