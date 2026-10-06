@@ -13,6 +13,20 @@ use serde::Serialize;
 
 use crate::{Fleet, MoleculeData};
 
+/// Resolve the branch that holds a molecule's work from persisted state.
+///
+/// `originating_branch` records non-conventional and integration branches.
+/// Molecules written before that field existed retain the historical
+/// `feat/<id>` convention.
+#[must_use]
+pub fn molecule_branch(molecule: &MoleculeData) -> String {
+    molecule
+        .originating_branch
+        .clone()
+        .filter(|branch| !branch.trim().is_empty())
+        .unwrap_or_else(|| format!("feat/{}", molecule.id))
+}
+
 /// Concrete branch, checkout, and command needed to harvest one molecule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkLocation {
@@ -37,11 +51,7 @@ impl WorkLocation {
     /// paths are resolved beneath it; legacy absolute paths remain absolute.
     #[must_use]
     pub fn from_state(molecule: &MoleculeData, fleet: &Fleet, repo_root: &Path) -> Self {
-        let branch = molecule
-            .originating_branch
-            .clone()
-            .filter(|branch| !branch.trim().is_empty())
-            .unwrap_or_else(|| format!("feat/{}", molecule.id));
+        let branch = molecule_branch(molecule);
         let recorded = molecule.worker().and_then(|worker_id| {
             let repo = fleet.workers.get(worker_id)?.repo.as_deref()?;
             let path = Path::new(repo);

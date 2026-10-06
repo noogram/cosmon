@@ -416,6 +416,30 @@ async fn a_write_by_another_process_appears() {
 }
 
 #[tokio::test]
+async fn terminal_and_merge_frames_carry_the_documented_fold_inputs() {
+    let rig = Rig::new().await;
+    let app = rig.app();
+    append(
+        &rig.ledger(),
+        &[
+            r#"{"type":"molecule_completed","molecule_id":"m-fold","timestamp":"2026-10-06T10:00:00Z","reason":"done"}"#.to_owned(),
+            r#"{"type":"merge_completed","molecule_id":"m-fold","timestamp":"2026-10-06T10:01:00Z","result":"merged","branch":"feat/custom"}"#.to_owned(),
+            r#"{"type":"molecule_collapsed","molecule_id":"m-fold","timestamp":"2026-10-06T10:02:00Z","reason":"superseded","kind":"design_change"}"#.to_owned(),
+        ],
+    );
+
+    let mut stream = Sse::new(rig.open(&app, None, BOTH, "fold-inputs").await);
+    let frames = stream.lines(3).await;
+
+    assert_eq!(frames[0].event, "molecule_completed");
+    assert_eq!(frames[0].data["timestamp"], "2026-10-06T10:00:00Z");
+    assert_eq!(frames[1].event, "merge_completed");
+    assert_eq!(frames[1].data["result"], "merged");
+    assert_eq!(frames[2].event, "molecule_collapsed");
+    assert_eq!(frames[2].data["timestamp"], "2026-10-06T10:02:00Z");
+}
+
+#[tokio::test]
 async fn frames_carry_no_excluded_field() {
     let rig = Rig::new().await;
     let app = rig.app();
