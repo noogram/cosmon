@@ -143,6 +143,31 @@ shell commands and harness-turn text are in no projection. `usage_observed` and
 **Bounds.** A connection ends after 5,000 frames; reconnect with the last `id`.
 A principal holds one ledger stream at a time.
 
+## Reading the molecule collection over HTTP
+
+`GET /v1/molecules` returns the tenant's state-only molecule index. Rows are
+ordered by `(created_at, id)` ascending. Each row carries `id`, `formula`,
+`status`, derived `phase`, `updated_at`, `kind` when recorded, `fleet`, step
+counts, worker when assigned, sorted `tags`, `created_at`, `typed_links`, and
+the optional state facts `merged_at`, `non_integration`, `last_progress_at`,
+and `base_branch`. Token totals, model attribution, and energy are deliberately
+absent; those remain on `GET /v1/molecules/{id}`.
+
+Paging is opt-in. Without `limit`, the route returns the complete filtered
+collection as before. With `limit=1..200`, `next_cursor` is the final molecule
+id on a non-final page; echo it as `cursor` with the same filters and limit.
+The `total` is the number of filtered rows before paging. A 500-row cold start
+therefore takes three list requests at the maximum page size.
+
+The weak `ETag` covers the projected page and its filters. Send it in
+`If-None-Match`; an unchanged page returns a bodiless `304`. The
+`ledger_cursor` is the ledger head read immediately before the state listing.
+Open `GET /v1/ledger` from that opaque cursor for subsequent deltas. This is a
+watermark, not a transactional snapshot: not every historical writer is known
+to save `state.json` before appending its event. A consumer keeps the stream
+and periodically revalidates the collection instead of treating one list plus
+one stream as permanently gap-free.
+
 ## state.json
 
 Stable keys: `schema_version`, `id`, `status` (`pending`, `running`,
@@ -182,6 +207,10 @@ lineage and does not order anything.
 
 Stable keys: `schema_version`, and for each entry of `workers`: `name`,
 `molecule`, `model`, `live`, `effective`, `ghost`, `molecule_health`.
+Each entry of `molecule_states` carries `id`, `status`, derived `phase`,
+`fleet`, `updated_at`, optional `kind`, `tags`, `blocked_by`, `typed_links`,
+optional `merged_at`, `non_integration`, `last_progress_at`, `stuck_at`,
+adapter fields, and optional `base_branch`.
 
 ## Presence records
 

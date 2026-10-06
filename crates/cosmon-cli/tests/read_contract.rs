@@ -177,4 +177,9 @@ fn ensemble_json_carries_schema_version() {
     let v: serde_json::Value = serde_json::from_str(out.trim()).expect("ensemble JSON");
     assert_eq!(v["schema_version"], 1);
     assert!(v["workers"].is_array());
+    let row = &v["molecule_states"][0];
+    assert_eq!(row["phase"], "done");
+    assert_eq!(row["fleet"], "default");
+    assert!(row["updated_at"].is_string());
+    assert!(row["typed_links"].is_array());
 }

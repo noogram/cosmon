@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Cosmon Remote Pilot Port (RPP) — V0+V1
-  version: "0.5.0"
+  version: "0.6.0"
   description: |
     Hand-curated tenant client contract for the Remote Pilot Port. Requests
     execute through the admission boundary and injectable library ports.
@@ -168,7 +168,8 @@ paths:
         filters. V1 read cut (T-CST-EXPAND).
       description: |
         Library-direct call to `cosmon_state::ops::ensemble`. The
-        response is byte-stable with `cs --json ensemble`.
+        per-molecule state fields are also present in the local
+        `cs --json ensemble` projection.
 
         ## Required scope
 
@@ -210,13 +211,44 @@ paths:
           schema:
             type: string
           description: Optional fleet filter.
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+          description: |
+            Opt in to paging. When absent the route preserves its original
+            behavior and returns the complete filtered collection.
+        - in: query
+          name: cursor
+          required: false
+          schema:
+            type: string
+          description: |
+            Opaque molecule id returned as `next_cursor` by the preceding
+            page. Valid only together with `limit`.
+        - in: header
+          name: If-None-Match
+          required: false
+          schema:
+            type: string
+          description: Weak collection validator returned by an earlier request.
       responses:
         "200":
           description: Ensemble list (possibly empty).
+          headers:
+            ETag:
+              description: Weak validator for this filtered page.
+              schema:
+                type: string
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/EnsembleEnvelope"
+        "304":
+          description: The filtered page still matches `If-None-Match`.
         "400":
           description: Invalid filter expression.
           content:
@@ -3438,10 +3470,54 @@ components:
         ensemble:
           type: object
           additionalProperties: true
-          description: |
-            Byte-stable projection of `cs --json ensemble`. Concrete
-            shape: `{ molecules: [MoleculeView, ...] }` with the same
-            field set as `cs --json ensemble`.
+          required: [molecules, total, ledger_cursor]
+          properties:
+            molecules:
+              type: array
+              items:
+                $ref: "#/components/schemas/EnsembleEntry"
+            total:
+              type: integer
+              minimum: 0
+              description: Total rows matching the filters, before paging.
+            next_cursor:
+              type: string
+              description: Last id on this page; absent on the final page.
+            ledger_cursor:
+              type: string
+              description: |
+                Opaque ledger head read before the collection snapshot.
+                Open `GET /v1/ledger` from this cursor, and periodically
+                revalidate the collection.
+
+    EnsembleEntry:
+      type: object
+      additionalProperties: true
+      required:
+        [id, formula, status, phase, updated_at, fleet, current_step,
+         total_steps, tags, created_at, typed_links]
+      properties:
+        id: { type: string }
+        formula: { type: string }
+        status: { type: string }
+        phase: { type: string, enum: [live, waiting, blocked, parked, failed, done] }
+        updated_at: { type: string, format: date-time }
+        kind: { type: string }
+        fleet: { type: string }
+        current_step: { type: integer, minimum: 0 }
+        total_steps: { type: integer, minimum: 0 }
+        worker: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        created_at: { type: string, format: date-time }
+        typed_links:
+          type: array
+          items: { type: object, additionalProperties: true }
+        merged_at: { type: string, format: date-time }
+        non_integration: { type: object, additionalProperties: true }
+        last_progress_at: { type: string, format: date-time }
+        base_branch: { type: string }
 
     VitalsEnvelope:
       type: object

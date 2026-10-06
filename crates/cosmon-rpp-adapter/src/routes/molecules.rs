@@ -61,6 +61,7 @@ use cosmon_core::tag::Tag;
 use cosmon_core::worker_argv::CLAUDE_ADAPTER;
 use cosmon_filestore::{harvest_door, FileStore};
 use cosmon_process_witness::process_start_time;
+use cosmon_state::event_log::LedgerReader;
 use cosmon_state::instrumentation::{emit_authz_decision_with_source, AuthzDecision};
 use cosmon_state::ops::{
     self, CollapseError, CollapseJson, CollapseRequest, EnsembleError, EnsembleJson,
@@ -890,6 +891,12 @@ pub struct EnsembleQuery {
     /// Optional fleet filter.
     #[serde(default)]
     pub fleet: Option<String>,
+    /// Maximum rows returned. Paging is opt-in; absent means the full list.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Last molecule id returned by the previous page.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 /// `GET /v1/molecules` — V1 listing cut (T-CST-EXPAND).
@@ -903,7 +910,7 @@ pub async fn list_molecules(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<EnsembleQuery>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let token = extract_bearer(&headers).map_err(|e| state.reject(e))?;
     let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
         .map_err(|e| state.reject(e))?;
@@ -927,14 +934,32 @@ pub async fn list_molecules(
         });
     }
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
+    let ledger_path = cosmon_state::event_log::resolve_events_log_path(&tenant_state_dir);
+    let ledger_cursor = LedgerReader::head(&ledger_path)
+        .map_err(|_| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: "store_unavailable",
+            request_id: Some(spark.request_id.clone()),
+        })?
+        .to_string();
     let store = FileStore::new(&tenant_state_dir);
     let subject = subject_for_jwt(&jwt);
 
+    if query.limit.is_some_and(|limit| limit == 0 || limit > 200)
+        || (query.cursor.is_some() && query.limit.is_none())
+    {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            label: "invalid_filter",
+            request_id: Some(spark.request_id.clone()),
+        });
+    }
+
     let request = EnsembleRequest {
-        status: query.status,
-        kind: query.kind,
-        tag_globs: query.tag.into_iter().collect(),
-        fleet: query.fleet,
+        status: query.status.clone(),
+        kind: query.kind.clone(),
+        tag_globs: query.tag.clone().into_iter().collect(),
+        fleet: query.fleet.clone(),
     };
     let view =
         ops::ensemble(&store, &tenant_state_dir, &subject, request).map_err(|e| match &e {
@@ -950,12 +975,66 @@ pub async fn list_molecules(
             },
         })?;
 
-    let body = EnsembleJson::from_view(&view);
-    let body_value = serde_json::to_value(&body).unwrap_or(Value::Null);
-    Ok(Json(json!({
-        "request_id": spark.request_id,
-        "ensemble": body_value,
-    })))
+    let mut body = EnsembleJson::from_view(&view);
+    if let Some(limit) = query.limit {
+        let start = if let Some(cursor) = query.cursor.as_deref() {
+            body.molecules
+                .iter()
+                .position(|row| row.id == cursor)
+                .map(|index| index + 1)
+                .ok_or_else(|| ApiError {
+                    status: StatusCode::BAD_REQUEST,
+                    label: "invalid_filter",
+                    request_id: Some(spark.request_id.clone()),
+                })?
+        } else {
+            0
+        };
+        let end = start.saturating_add(limit).min(body.molecules.len());
+        body.next_cursor =
+            (end < body.molecules.len() && end > start).then(|| body.molecules[end - 1].id.clone());
+        body.molecules = body.molecules[start..end].to_vec();
+    }
+    body.ledger_cursor = Some(ledger_cursor);
+
+    let validator = serde_json::to_vec(&json!({
+        "molecules": &body.molecules,
+        "status": &query.status,
+        "kind": &query.kind,
+        "tag": &query.tag,
+        "fleet": &query.fleet,
+        "limit": query.limit,
+        "cursor": &query.cursor,
+    }))
+    .map_err(|_| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        label: "serialization_failed",
+        request_id: Some(spark.request_id.clone()),
+    })?;
+    let etag = format!("W/\"{}\"", blake3::hash(&validator).to_hex());
+    let conditional = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| crate::routes::status::if_none_match_hits(value, &etag));
+
+    let mut response = if conditional {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        let body_value = serde_json::to_value(&body).unwrap_or(Value::Null);
+        Json(json!({
+            "request_id": spark.request_id,
+            "ensemble": body_value,
+        }))
+        .into_response()
+    };
+    if let Ok(value) = etag.parse() {
+        response.headers_mut().insert(header::ETAG, value);
+    }
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    Ok(response)
 }
 
 /// Body schema for `POST /v1/molecules/:id/collapse`.
