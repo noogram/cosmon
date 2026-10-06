@@ -29,6 +29,7 @@ use serde::Serialize;
 use crate::instrumentation::{emit_authz_decision, AuthzDecision};
 use crate::ops::error::OpsError;
 use crate::wait::{coupling_report_snapshot, EnergyMetrics, EntropyMetrics, WaitMetrics};
+use crate::work_location::molecule_branch;
 use crate::{EscalationEntry, MoleculeData, StateStore};
 use cosmon_core::error::CosmonError;
 
@@ -529,6 +530,17 @@ pub struct ObserveJson {
     /// Both absent means no harvest has been attempted yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub non_integration: Option<crate::NonIntegration>,
+    /// Base branch recorded for this molecule, when one was persisted.
+    ///
+    /// This is copied verbatim from `state.json`; it is not inferred from the
+    /// repository checked out by the reader.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    /// Branch holding this molecule's work.
+    ///
+    /// Honours the persisted `originating_branch`, including integration
+    /// branches, and falls back to the historical `feat/<id>` convention.
+    pub branch: String,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -604,6 +616,8 @@ impl ObserveJson {
                 .map(cosmon_core::adapter_attribution::AdapterAttribution::realized_disposition),
             merged_at: mol.merged_at.map(|t| t.to_rfc3339()),
             non_integration: mol.non_integration.clone(),
+            base_branch: mol.base_branch.clone(),
+            branch: molecule_branch(mol),
         }
     }
 }
@@ -834,6 +848,30 @@ mod tests {
         let s = serde_json::to_string(&json).unwrap();
         assert!(s.contains("\"id\":\"task-20260503-cccc\""));
         assert!(s.contains("\"poll_count\":1"));
+    }
+
+    #[test]
+    fn observe_json_exposes_base_branch_and_server_computed_branch() {
+        let store = FakeStore::default();
+        let mut molecule = make_molecule("task-20261006-branch", MoleculeStatus::Running);
+        molecule.base_branch = Some("release/next".to_owned());
+        molecule.originating_branch = Some("feat/issue-186-u3".to_owned());
+        store.insert(molecule);
+        let tmp = TempDir::new().unwrap();
+        let id = MoleculeId::new("task-20261006-branch").unwrap();
+
+        let view = observe(&store, tmp.path(), &Subject::operator(), &id).unwrap();
+        let wire = serde_json::to_value(ObserveJson::from_view(&view, "/tmp/molecule")).unwrap();
+
+        assert_eq!(wire["base_branch"], "release/next");
+        assert_eq!(wire["branch"], "feat/issue-186-u3");
+
+        let fallback = make_molecule("task-20261006-fallback", MoleculeStatus::Pending);
+        let fallback_view = observe_loaded(fallback, tmp.path(), &Subject::operator());
+        let fallback_wire =
+            serde_json::to_value(ObserveJson::from_view(&fallback_view, "/tmp/fallback")).unwrap();
+        assert_eq!(fallback_wire["branch"], "feat/task-20261006-fallback");
+        assert!(fallback_wire.get("base_branch").is_none());
     }
 
     #[test]

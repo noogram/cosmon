@@ -175,6 +175,26 @@ to save `state.json` before appending its event. A consumer keeps the stream
 and periodically revalidates the collection instead of treating one list plus
 one stream as permanently gap-free.
 
+## Reading one molecule over HTTP
+
+`GET /v1/molecules/{id}` carries the persisted `base_branch` when `state.json`
+has one and always carries the server-computed `branch`. The branch honours a
+non-empty persisted `originating_branch`; older records without one fall back
+to `feat/<id>`. Consumers use this field instead of reproducing that rule.
+
+Two useful consumer values remain ledger folds rather than molecule fields:
+
+- `ended_at` is the `timestamp` of the last `molecule_completed` or
+  `molecule_collapsed` frame for the molecule in ledger order.
+- `merge_result` is the `result` of the last `merge_completed` frame for the
+  molecule in ledger order.
+
+Before a matching frame, each value is absent rather than an empty string. A
+`ledger.reset` clears both folds before replay. `merged_at` and
+`non_integration` remain the authoritative persisted integration facts on the
+molecule response; `merge_result` explains the latest merge attempt and does
+not replace either one.
+
 ## state.json
 
 Stable keys: `schema_version`, `id`, `status` (`pending`, `running`,
@@ -233,6 +253,7 @@ follows the same additive rule.
 
 ## Git conventions
 
-A molecule's branch is `feat/<id>`, and the merge commit subject is
-`Merge branch 'feat/<id>'`. No state field names the branch; this convention
-is the contract. Molecule ids match `[A-Za-z0-9_.:/@+-]{1,128}`.
+A molecule's branch is its non-empty persisted `originating_branch`, with
+`feat/<id>` as the legacy fallback. `GET /v1/molecules/{id}` exposes the
+resolved value as `branch`. The merge commit subject is `Merge branch
+'<branch>'`. Molecule ids match `[A-Za-z0-9_.:/@+-]{1,128}`.

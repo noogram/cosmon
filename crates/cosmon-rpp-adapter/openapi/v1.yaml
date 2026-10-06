@@ -3770,9 +3770,9 @@ components:
         Public projection of a molecule. The exact field set is
         intentionally lenient — additional fields may appear without
         bumping the API version, but the contract is that `id`,
-        `kind`, and `status` are always present.
+        `kind`, `status`, and `branch` are always present.
       additionalProperties: true
-      required: [id, kind, status]
+      required: [id, kind, status, branch]
       properties:
         id:
           type: string
@@ -3788,6 +3788,16 @@ components:
           description: |
             Lifecycle status — `pending`, `active`, `running`,
             `completed`, `collapsed`, `frozen`, etc.
+        base_branch:
+          type: string
+          description: |
+            Base branch copied from persisted molecule state. Absent when the
+            molecule has no recorded base.
+        branch:
+          type: string
+          description: |
+            Server-computed work branch: the non-empty persisted
+            `originating_branch`, or `feat/<id>` for a legacy record.
         api_tokens:
           type: object
           description: |
