@@ -804,6 +804,10 @@ pub struct AuthMeResponse {
     /// "some other cause", never as an error.
     #[serde(default)]
     pub claude_credentials_status: Option<String>,
+    /// Server's semantic version for the hand-written `/v1` response
+    /// contract. Absent when talking to an adapter predating issue #187.
+    #[serde(default)]
+    pub api_contract_version: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
