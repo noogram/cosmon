@@ -108,6 +108,8 @@ struct StatusOutput {
     harvestable: HarvestableInfo,
     /// Pending dependents held by a blocker absent from the resident view.
     missing_blockers: Vec<MissingBlocker>,
+    /// Molecules whose `state.json` could not be read; skipped, not absent.
+    unreadable: Vec<cosmon_state::UnreadableMolecule>,
     attention: AttentionInfo,
     /// Four-family taxonomy snapshot.
     /// Keyed by kind token (`infra | project | social-hub | editorial
@@ -414,7 +416,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let store = ctx.store_at(&state_dir);
 
     let fleet = store.load_fleet()?;
-    let molecules = store.list_molecules(&MoleculeFilter::default())?;
+    let listing = store.list_molecules_report(&MoleculeFilter::default())?;
+    let molecules = listing.molecules;
+    let unreadable = listing.unreadable;
     let resident_view = if let Some(project_id) = super::ensemble::configured_project_id(ctx) {
         let scoped = molecules
             .iter()
@@ -626,6 +630,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             },
             harvestable,
             missing_blockers,
+            unreadable: unreadable.clone(),
             attention: AttentionInfo {
                 alive,
                 budget,
@@ -637,6 +642,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         };
         let json = serde_json::to_string_pretty(&output)?;
         println!("{json}");
+        exit_if_skipped(&unreadable);
         return Ok(());
     }
 
@@ -680,8 +686,23 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             missing.dependent, missing.blocker, missing.reason, missing.repair
         );
     }
+    for u in &unreadable {
+        println!("  Unreadable: {} skipped ({}): {}", u.id, u.path, u.reason);
+    }
+    exit_if_skipped(&unreadable);
 
     Ok(())
+}
+
+/// Exit status when a listing skipped at least one unreadable molecule.
+const EXIT_SKIPPED_UNREADABLE: i32 = 3;
+
+/// Exit [`EXIT_SKIPPED_UNREADABLE`] after output when something was skipped,
+/// so scripts can tell a complete listing from a partial one.
+fn exit_if_skipped(unreadable: &[cosmon_state::UnreadableMolecule]) {
+    if !unreadable.is_empty() {
+        std::process::exit(EXIT_SKIPPED_UNREADABLE);
+    }
 }
 
 /// Find predecessors absent from the resident view, without releasing edges.

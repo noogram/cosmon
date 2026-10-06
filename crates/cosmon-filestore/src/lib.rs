@@ -1043,7 +1043,14 @@ impl StateStore for FileStore {
     }
 
     fn list_molecules(&self, filter: &MoleculeFilter) -> Result<Vec<MoleculeData>, CosmonError> {
-        let mut results = Vec::new();
+        Ok(self.list_molecules_report(filter)?.molecules)
+    }
+
+    fn list_molecules_report(
+        &self,
+        filter: &MoleculeFilter,
+    ) -> Result<cosmon_state::MoleculeListing, CosmonError> {
+        let mut listing = cosmon_state::MoleculeListing::default();
 
         // Scan fleet-scoped directories: fleets/{fleet}/molecules/{id}/state.json
         let fleets_root = self.fleets_root();
@@ -1053,14 +1060,14 @@ impl StateStore for FileStore {
                 if !mols_dir.is_dir() {
                     continue;
                 }
-                Self::scan_molecules_dir(&mols_dir, filter, &mut results)?;
+                Self::scan_molecules_dir(&mols_dir, filter, &mut listing)?;
             }
         }
 
         // Also scan legacy flat layout: ops/molecules/{id}/state.json
         let legacy_root = self.molecules_root();
         if legacy_root.is_dir() {
-            Self::scan_molecules_dir(&legacy_root, filter, &mut results)?;
+            Self::scan_molecules_dir(&legacy_root, filter, &mut listing)?;
         }
 
         // Sort for deterministic output. `fs::read_dir` does not guarantee any
@@ -1068,9 +1075,12 @@ impl StateStore for FileStore {
         // hash order). Without this sort, every `cs reconcile` would produce
         // a spurious diff on STATUS.md, breaking idempotency and polluting
         // git history with no-op reorderings.
-        results.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+        listing
+            .molecules
+            .sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+        listing.unreadable.sort_by(|a, b| a.path.cmp(&b.path));
 
-        Ok(results)
+        Ok(listing)
     }
 
     fn molecule_dir(&self, id: &MoleculeId) -> PathBuf {
@@ -1104,10 +1114,14 @@ impl StateStore for FileStore {
 
 impl FileStore {
     /// Scan a molecules directory and collect matching molecules.
+    ///
+    /// A `state.json` that cannot be read or parsed is recorded in
+    /// `listing.unreadable` and skipped, so one damaged or foreign file does
+    /// not hide the rest of the fleet.
     fn scan_molecules_dir(
         dir: &Path,
         filter: &MoleculeFilter,
-        results: &mut Vec<MoleculeData>,
+        listing: &mut cosmon_state::MoleculeListing,
     ) -> Result<(), CosmonError> {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
@@ -1118,10 +1132,22 @@ impl FileStore {
             if !state_path.exists() {
                 continue;
             }
-            let data = fs::read_to_string(&state_path)?;
-            let mol: MoleculeData = serde_json::from_str(&data)?;
-            if matches_filter(&mol, filter) {
-                results.push(mol);
+            let parsed = fs::read_to_string(&state_path)
+                .map_err(|e| e.to_string())
+                .and_then(|data| {
+                    serde_json::from_str::<MoleculeData>(&data).map_err(|e| e.to_string())
+                });
+            match parsed {
+                Ok(mol) => {
+                    if matches_filter(&mol, filter) {
+                        listing.molecules.push(mol);
+                    }
+                }
+                Err(reason) => listing.unreadable.push(cosmon_state::UnreadableMolecule {
+                    id: entry.file_name().to_string_lossy().into_owned(),
+                    path: state_path.to_string_lossy().into_owned(),
+                    reason,
+                }),
             }
         }
         Ok(())
