@@ -899,6 +899,47 @@ pub struct EnsembleQuery {
     pub cursor: Option<String>,
 }
 
+fn page_ensemble(
+    body: &mut EnsembleJson,
+    query: &EnsembleQuery,
+    request_id: &str,
+) -> Result<(), ApiError> {
+    let Some(limit) = query.limit else {
+        return Ok(());
+    };
+    let start = if let Some(cursor) = query.cursor.as_deref() {
+        body.molecules
+            .iter()
+            .position(|row| row.id == cursor)
+            .map(|index| index + 1)
+            .ok_or_else(|| ApiError {
+                status: StatusCode::BAD_REQUEST,
+                label: "invalid_filter",
+                request_id: Some(request_id.to_owned()),
+            })?
+    } else {
+        0
+    };
+    let end = start.saturating_add(limit).min(body.molecules.len());
+    body.next_cursor =
+        (end < body.molecules.len() && end > start).then(|| body.molecules[end - 1].id.clone());
+    body.molecules = body.molecules[start..end].to_vec();
+    Ok(())
+}
+
+fn ensemble_etag(body: &EnsembleJson, query: &EnsembleQuery) -> Result<String, serde_json::Error> {
+    let validator = serde_json::to_vec(&json!({
+        "molecules": &body.molecules,
+        "status": &query.status,
+        "kind": &query.kind,
+        "tag": &query.tag,
+        "fleet": &query.fleet,
+        "limit": query.limit,
+        "cursor": &query.cursor,
+    }))?;
+    Ok(format!("W/\"{}\"", blake3::hash(&validator).to_hex()))
+}
+
 /// `GET /v1/molecules` — V1 listing cut (T-CST-EXPAND).
 ///
 /// Pipeline mirrors [`get_molecule`]: extract bearer, validate JWT,
@@ -976,42 +1017,14 @@ pub async fn list_molecules(
         })?;
 
     let mut body = EnsembleJson::from_view(&view);
-    if let Some(limit) = query.limit {
-        let start = if let Some(cursor) = query.cursor.as_deref() {
-            body.molecules
-                .iter()
-                .position(|row| row.id == cursor)
-                .map(|index| index + 1)
-                .ok_or_else(|| ApiError {
-                    status: StatusCode::BAD_REQUEST,
-                    label: "invalid_filter",
-                    request_id: Some(spark.request_id.clone()),
-                })?
-        } else {
-            0
-        };
-        let end = start.saturating_add(limit).min(body.molecules.len());
-        body.next_cursor =
-            (end < body.molecules.len() && end > start).then(|| body.molecules[end - 1].id.clone());
-        body.molecules = body.molecules[start..end].to_vec();
-    }
+    page_ensemble(&mut body, &query, &spark.request_id)?;
     body.ledger_cursor = Some(ledger_cursor);
 
-    let validator = serde_json::to_vec(&json!({
-        "molecules": &body.molecules,
-        "status": &query.status,
-        "kind": &query.kind,
-        "tag": &query.tag,
-        "fleet": &query.fleet,
-        "limit": query.limit,
-        "cursor": &query.cursor,
-    }))
-    .map_err(|_| ApiError {
+    let etag = ensemble_etag(&body, &query).map_err(|_| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         label: "serialization_failed",
         request_id: Some(spark.request_id.clone()),
     })?;
-    let etag = format!("W/\"{}\"", blake3::hash(&validator).to_hex());
     let conditional = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|value| value.to_str().ok())
