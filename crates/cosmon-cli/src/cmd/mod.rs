@@ -180,7 +180,7 @@ pub(crate) fn reject_non_directory_state_dir(
         _ => "the resolved state path",
     };
     anyhow::bail!(
-        "{source} must name a state directory (e.g. .cosmon/state), but {} is not a directory;          nothing was read or modified",
+        "{source} must name a state directory (e.g. .cosmon/state), but {} is not a directory; nothing was read or modified",
         state_dir.display()
     )
 }
