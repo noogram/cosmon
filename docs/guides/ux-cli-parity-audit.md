@@ -81,7 +81,7 @@ repository leaves `merge_subject` unset, so its existing gate remains valid.
 
 | Capability | CLI | Native UI | Remote service |
 |---|---|---|---|
-| Select the default worker model | `cs tackle` probes `claude-sonnet-5-5` when no model is pinned; `claude-sonnet-5` remains an explicit pin and a historical realized-model id | No matching default selector audited | The adapter's absent-model default uses the same chain head |
+| Select the default worker model | `cs tackle` probes `claude-sonnet-5-5` when no model is pinned; `claude-sonnet-5` remains an explicit pin and a historical realized-model id. `COSMON_MODEL_PROBE_TIMEOUT_SECS` sets the positive, bounded Claude availability-probe budget (default 60 seconds). | No matching default selector audited | The adapter's absent-model default uses the same chain head |
 
 ## Context occupancy (issue #127)
 

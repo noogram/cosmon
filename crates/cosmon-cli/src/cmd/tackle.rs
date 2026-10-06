@@ -241,6 +241,12 @@ pub struct Args {
     /// adapter cannot run it. Self-hosted endpoints and unrecognised model ids
     /// remain opaque and pass through. Config `default_model` rows are scoped
     /// per adapter because a model id only has meaning inside its adapter.
+    ///
+    /// For the Claude adapter, the availability probe waits up to 60 seconds
+    /// by default. Set `COSMON_MODEL_PROBE_TIMEOUT_SECS` to a positive number
+    /// of seconds when host load makes Claude Code start more slowly. The
+    /// bound remains mandatory: a model that does not answer before the
+    /// selected budget is refused rather than dispatched.
     #[arg(long, value_name = "MODEL_ID")]
     pub model: Option<String>,
 
@@ -6288,7 +6294,7 @@ where
     }
 }
 
-/// Per-model timeout for the pre-flight availability probe.
+/// Default per-model timeout for the pre-flight availability probe.
 ///
 /// The probe runs `claude -p` (print mode, one turn) which makes a single
 /// API round-trip and exits. A model that is unreachable either errors
@@ -6296,7 +6302,41 @@ where
 /// exists for — *hangs*. We bound it: a probe that has not finished within
 /// this window is killed and treated as unavailable, so a hanging model
 /// can never be selected (the very failure we are guarding against).
-const MODEL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+///
+/// Sixty seconds leaves headroom for a healthy Claude Code process to start
+/// under machine load while keeping the bounded-hang guarantee. Operators can
+/// raise or lower it per dispatch environment with
+/// `COSMON_MODEL_PROBE_TIMEOUT_SECS`.
+const DEFAULT_MODEL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const MODEL_PROBE_TIMEOUT_ENV: &str = "COSMON_MODEL_PROBE_TIMEOUT_SECS";
+
+/// Resolve the bounded model-probe budget from its operator override.
+///
+/// An invalid or zero value is a configuration error rather than a silent
+/// fallback: accepting it would make an operator believe a different safety
+/// bound guarded the dispatch than the one actually used.
+fn model_probe_timeout() -> anyhow::Result<std::time::Duration> {
+    match std::env::var(MODEL_PROBE_TIMEOUT_ENV) {
+        Ok(raw) => parse_model_probe_timeout(&raw).map_err(|reason| anyhow::anyhow!(reason)),
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_MODEL_PROBE_TIMEOUT),
+        Err(std::env::VarError::NotUnicode(_)) => Err(anyhow::anyhow!(
+            "{MODEL_PROBE_TIMEOUT_ENV} must be a positive whole number of seconds"
+        )),
+    }
+}
+
+/// Parse the operator's model-probe budget without reading process state.
+fn parse_model_probe_timeout(raw: &str) -> Result<std::time::Duration, String> {
+    let seconds = raw.parse::<u64>().map_err(|_| {
+        format!("{MODEL_PROBE_TIMEOUT_ENV} must be a positive whole number of seconds")
+    })?;
+    if seconds == 0 {
+        return Err(format!(
+            "{MODEL_PROBE_TIMEOUT_ENV} must be a positive whole number of seconds"
+        ));
+    }
+    Ok(std::time::Duration::from_secs(seconds))
+}
 
 /// What an `"available"` verdict in a `model-selection.json` `probes` array
 /// actually establishes — stamped into every trail this path writes.
@@ -6361,10 +6401,12 @@ fn resolve_worker_model(
             .map(std::borrow::ToOwned::to_owned));
     }
 
+    let probe_timeout = model_probe_timeout()?;
+
     // Probe with the same Claude account the worker will run under, so
     // the verdict reflects the worker's real auth path.
     let decided = decide_worker_model(preferred, strong_set, |model| {
-        probe_claude_model(claude_bin, model, config_dir, identity)
+        probe_claude_model(claude_bin, model, config_dir, identity, probe_timeout)
     });
 
     match decided {
@@ -6477,7 +6519,7 @@ fn record_model_selection(mol_state_dir: &std::path::Path, value: &serde_json::V
 ///
 /// Runs `claude --model <model> -p <trivial-prompt>` (print mode: one
 /// turn, then exit) under the resolved `CLAUDE_CONFIG_DIR`, bounded by
-/// [`MODEL_PROBE_TIMEOUT`]. Verdict:
+/// the configured bounded timeout. Verdict:
 /// - exit 0 → `ProbeOutcome::Available`;
 /// - non-zero exit → unavailable, carrying the trimmed stderr tail as
 ///   the cause (e.g. the `model_not_found` message);
@@ -6491,6 +6533,7 @@ fn probe_claude_model(
     model: &str,
     config_dir: Option<&str>,
     identity: cosmon_core::root_spawn_policy::PreflightIdentity,
+    timeout: std::time::Duration,
 ) -> cosmon_core::model_chain::ProbeOutcome {
     use cosmon_core::model_chain::ProbeOutcome;
     use std::process::{Command, Stdio};
@@ -6531,7 +6574,7 @@ fn probe_claude_model(
     };
 
     // std has no wait-with-timeout; poll try_wait until the deadline.
-    let deadline = std::time::Instant::now() + MODEL_PROBE_TIMEOUT;
+    let deadline = std::time::Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -6563,8 +6606,9 @@ fn probe_claude_model(
                     let _ = child.wait();
                     return ProbeOutcome::Unavailable(format!(
                         "probe timed out after {}s (model did not answer — the \
-                         false-active symptom)",
-                        MODEL_PROBE_TIMEOUT.as_secs()
+                         false-active symptom; set {MODEL_PROBE_TIMEOUT_ENV} to a \
+                         higher positive value if host load delayed Claude Code startup)",
+                        timeout.as_secs()
                     ));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -12151,10 +12195,58 @@ mod tests {
             "claude-fable-5",
             None,
             cosmon_core::root_spawn_policy::PreflightIdentity::AsIs,
+            DEFAULT_MODEL_PROBE_TIMEOUT,
         );
         match outcome {
             ProbeOutcome::Unavailable(reason) => assert!(reason.contains("probe spawn failed")),
             ProbeOutcome::Available => panic!("a missing binary cannot be available"),
+        }
+    }
+
+    /// A loaded host can delay CLI startup without making the model
+    /// unavailable. The probe must honour a larger supplied budget, while a
+    /// shorter supplied budget still refuses a process that does not answer.
+    #[cfg(unix)]
+    #[test]
+    fn model_probe_budget_distinguishes_slow_startup_from_a_hung_model() {
+        use cosmon_core::model_chain::ProbeOutcome;
+
+        let dir = TempDir::new().unwrap();
+        let claude = dir.path().join("slow-claude");
+        std::fs::write(&claude, "#!/bin/sh\nsleep 1\nexit 0\n").unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let binary = claude.to_str().expect("temporary paths are UTF-8");
+
+        let timed_out = probe_claude_model(
+            binary,
+            "claude-sonnet-5",
+            None,
+            cosmon_core::root_spawn_policy::PreflightIdentity::AsIs,
+            std::time::Duration::from_millis(100),
+        );
+        assert!(matches!(timed_out, ProbeOutcome::Unavailable(ref reason)
+            if reason.contains(MODEL_PROBE_TIMEOUT_ENV)));
+
+        let available = probe_claude_model(
+            binary,
+            "claude-sonnet-5",
+            None,
+            cosmon_core::root_spawn_policy::PreflightIdentity::AsIs,
+            std::time::Duration::from_secs(2),
+        );
+        assert_eq!(available, ProbeOutcome::Available);
+    }
+
+    /// The environment parser refuses values that would silently erase the
+    /// probe's bounded-hang guarantee.
+    #[test]
+    fn model_probe_timeout_requires_positive_whole_seconds() {
+        assert_eq!(
+            parse_model_probe_timeout("90").unwrap(),
+            std::time::Duration::from_secs(90)
+        );
+        for invalid in ["", "0", "-1", "1.5", "slow"] {
+            assert!(parse_model_probe_timeout(invalid).is_err(), "{invalid}");
         }
     }
 

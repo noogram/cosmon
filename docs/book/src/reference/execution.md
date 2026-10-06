@@ -83,6 +83,8 @@ SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).
    **Strong is never inherited.** Every dispatch resolves the model fresh; a strong (frontier) model is reachable only from this flag, a child pin, or a formula-step pin — a positive per-molecule act — never from a config/env *default* that could silently make an entire fleet expensive (the `/model`-hack leak this axis exists to close).
 
    The id is carried **opaquely**: cosmon keeps no model allowlist. When both the resolved adapter and model identify different named provider families, however, the pair is refused before spawn because the stock adapter cannot run it. Self-hosted endpoints and unrecognised model ids remain opaque and pass through. Config `default_model` rows are scoped per adapter because a model id only has meaning inside its adapter.
+
+   For the Claude adapter, the availability probe waits up to 60 seconds by default. Set `COSMON_MODEL_PROBE_TIMEOUT_SECS` to a positive number of seconds when host load makes Claude Code start more slowly. The bound remains mandatory: a model that does not answer before the selected budget is refused rather than dispatched.
 * `--role-hint <ROLE>` — Forensic-only role-of-origin hint propagated through to [`EventV2::AdapterSelected`](cosmon_core::event_v2::EventV2::AdapterSelected) (ADR-097 / C6).
 
    Cosmon does not interpret this value — it is the academy-shim's channel for preserving the driver's vocabulary (a `--role researcher` invocation on the driver side becomes `role_hint: "researcher"` on the cosmon event), so the role of origin survives the seam between driver (roles) and cosmon (adapters). Optional; absent for direct operator invocations.
