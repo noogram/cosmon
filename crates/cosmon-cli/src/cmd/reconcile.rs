@@ -203,8 +203,31 @@ struct SurfacePlan<'a> {
 ///
 /// Wired to both `cs project` (canonical) and `cs reconcile` (deprecated
 /// alias, via [`run_reconcile_alias`]).
-#[allow(clippy::too_many_lines)]
+///
+/// A `state.json` the rebuild pass refuses (content that does not parse, or
+/// no content and no events) is reported and left untouched; the projection
+/// still completes for every other molecule, then the command exits non-zero
+/// naming each refused file.
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
+    let mut refused = Vec::new();
+    run_projection(ctx, args, &mut refused)?;
+    if refused.is_empty() {
+        return Ok(());
+    }
+    let paths: Vec<String> = refused.into_iter().map(|(_, reason)| reason).collect();
+    anyhow::bail!(
+        "{} state file(s) refused and left unmodified:\n  {}",
+        paths.len(),
+        paths.join("\n  ")
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_projection(
+    ctx: &Context,
+    args: &Args,
+    refused: &mut Vec<(cosmon_core::id::MoleculeId, String)>,
+) -> anyhow::Result<()> {
     let state_dir = ctx.state_dir();
 
     // Galaxy-level files (surfaces.toml, the surfaces themselves) resolve from
@@ -479,6 +502,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let fleets_root = state_dir.join("fleets");
     let rebuild_results = cosmon_state::rebuild_all_missing(&events_path, &fleets_root)?;
     report_cache_rebuild(ctx, &rebuild_results);
+    for (id, result) in rebuild_results {
+        if let Err(error) = result {
+            refused.push((id, error.to_string()));
+        }
+    }
 
     let fleet = store.load_fleet()?;
     let molecules = store.list_molecules(&MoleculeFilter::default())?;
@@ -596,6 +624,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             "written": written,
             "overwritten_diverged": diverged,
             "molecules": molecules.len(),
+            "refused_state_files": refused
+                .iter()
+                .map(|(id, reason)| serde_json::json!({"molecule": id.as_str(), "reason": reason}))
+                .collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -624,27 +656,37 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 /// operators see the recovery happen.
 fn report_cache_rebuild(
     ctx: &Context,
-    results: &[(cosmon_core::id::MoleculeId, cosmon_state::RebuildOutcome)],
+    results: &[(
+        cosmon_core::id::MoleculeId,
+        Result<cosmon_state::RebuildOutcome, cosmon_core::error::CosmonError>,
+    )],
 ) {
-    if results.is_empty() {
-        return;
-    }
+    use cosmon_state::RebuildOutcome;
+
     let mut created = Vec::new();
+    let mut rebuilt = Vec::new();
+    let mut refused = Vec::new();
     let mut ok = 0usize;
-    for (id, outcome) in results {
-        match outcome {
-            cosmon_state::RebuildOutcome::CreatedFromEvents => created.push(id.as_str().to_owned()),
-            cosmon_state::RebuildOutcome::UpToDate
-            | cosmon_state::RebuildOutcome::NoEventsForMolecule => ok += 1,
+    for (id, result) in results {
+        match result {
+            Ok(RebuildOutcome::CreatedFromEvents) => created.push(id.as_str().to_owned()),
+            Ok(RebuildOutcome::RebuiltFromEvents) => rebuilt.push(id.as_str().to_owned()),
+            Ok(_) => ok += 1,
+            Err(error) => refused.push((id.as_str().to_owned(), error.to_string())),
         }
     }
-    if created.is_empty() {
+    if created.is_empty() && rebuilt.is_empty() && refused.is_empty() {
         return;
     }
     if ctx.json {
         let payload = serde_json::json!({
             "cache_rebuild": {
                 "created": created,
+                "rebuilt_from_empty": rebuilt,
+                "refused": refused
+                    .iter()
+                    .map(|(id, reason)| serde_json::json!({"molecule": id, "reason": reason}))
+                    .collect::<Vec<_>>(),
                 "up_to_date": ok,
             }
         });
@@ -653,7 +695,9 @@ fn report_cache_rebuild(
             "{}",
             serde_json::to_string_pretty(&payload).unwrap_or_default()
         );
-    } else if !created.is_empty() {
+        return;
+    }
+    if !created.is_empty() {
         println!(
             "Rebuilt {} missing state.json from events.jsonl:",
             created.len()
@@ -661,6 +705,18 @@ fn report_cache_rebuild(
         for id in &created {
             println!("  🧬 {id}");
         }
+    }
+    if !rebuilt.is_empty() {
+        println!(
+            "Rebuilt {} empty state.json from events.jsonl (original bytes kept in state.json.broken.<n>):",
+            rebuilt.len()
+        );
+        for id in &rebuilt {
+            println!("  🧬 {id}");
+        }
+    }
+    for (id, reason) in &refused {
+        eprintln!("  ✖ {id}: {reason}");
     }
 }
 

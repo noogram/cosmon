@@ -6,9 +6,30 @@
 //! durable, seal-carrying). `state.json` is a **derivable cache** — the live
 //! hot view the CLI reads on every invocation. When the cache is missing,
 //! [`project_molecules_from_events`] reconstructs every molecule's state by
-//! folding the event stream. An existing cache that cannot be parsed is
-//! refused without modification: a projection cannot safely preserve its
-//! operator-authored fields.
+//! folding the event stream.
+//!
+//! # Which unparseable caches are rebuilt
+//!
+//! A cache that fails to parse falls in one of two classes, decided by its
+//! bytes alone:
+//!
+//! - **No content**: every byte is `0x00` or ASCII whitespace (including a
+//!   zero-length file). Cosmon writes `state.json` as `.tmp` + `rename` with
+//!   no fsync, so a power loss can leave exactly this file and nothing else.
+//!   It holds nothing to lose, so it is rebuilt from events — after its bytes
+//!   are copied to a fresh `state.json.broken.<n>` archive that never
+//!   overwrites an earlier one. A molecule with no events is refused and the
+//!   file is left untouched.
+//! - **Anything else** (truncated prefix, binary garbage, merge-conflict
+//!   markers, a missing or wrong-typed field): refused with
+//!   [`CosmonError::StateParse`] and left untouched. Cosmon's writers do not
+//!   produce these, so another writer did, and the file may be someone's
+//!   authored state that a projection cannot preserve.
+//!
+//! This amends delib-20261005-5bb2 Q3a: *a state file whose bytes carry
+//! content and fail to parse is never rewritten by a projection or rebuild; a
+//! file whose bytes carry no content is crash damage and is rebuilt from
+//! events.*
 //!
 //! # Why rebuild exists
 //!
@@ -74,10 +95,20 @@ use crate::event_log::read_all;
 use crate::MoleculeData;
 
 /// Outcome of a single-molecule rebuild.
+///
+/// A refusal is not an outcome: it is the `Err` of [`rebuild_molecule_state`]
+/// (and, per molecule, of [`rebuild_all_missing`]), so a caller cannot read a
+/// refused file as a healthy one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebuildOutcome {
     /// The cache was absent; a fresh file was written from events.
     CreatedFromEvents,
+    /// The cache held no content (zero-length, all-NUL or whitespace-only);
+    /// its bytes were archived to a new `state.json.broken.<n>` and a fresh
+    /// file was written from events. Distinct from
+    /// [`RebuildOutcome::CreatedFromEvents`] so a report can say that crash
+    /// damage was repaired and that an archive exists.
+    RebuiltFromEvents,
     /// The cache was valid and consistent with the event log — no write.
     UpToDate,
     /// No molecule directory was found to seed the rebuild (empty galaxy,
@@ -123,8 +154,12 @@ pub fn project_molecules_from_events(envelopes: &[Envelope]) -> HashMap<Molecule
 /// The contract is therefore strict:
 ///
 /// 1. `Missing` cache → write a fresh projection.
-/// 2. Unparseable cache → return [`CosmonError::StateParse`], no write.
-/// 3. `Valid` cache → return [`RebuildOutcome::UpToDate`], no I/O.
+/// 2. `NoContent` cache (zero-length, all-NUL or whitespace-only) with events
+///    for the molecule → archive the bytes to a new `state.json.broken.<n>`
+///    (exclusive create, never overwrites), write a fresh projection.
+/// 3. Any other unparseable cache, or a `NoContent` cache with no events →
+///    return [`CosmonError::StateParse`], no write, no archive.
+/// 4. `Valid` cache → return [`RebuildOutcome::UpToDate`], no I/O.
 ///
 /// Detection of cache↔events drift on a valid cache is a separate concern —
 /// see `cs verify` for the audit path. `cs reconcile` stays a pure
@@ -136,8 +171,9 @@ pub fn project_molecules_from_events(envelopes: &[Envelope]) -> HashMap<Molecule
 ///
 /// # Errors
 ///
-/// Returns [`CosmonError::StateStore`] if reading the event log or writing
-/// the cache fails. A missing events file is **not** an error: if the log
+/// Returns [`CosmonError::StateParse`] for a refused cache, and
+/// [`CosmonError::StateStore`] (naming the path) if reading the state file or
+/// the event log, or writing the cache, fails. A missing events file is **not** an error: if the log
 /// does not exist, the rebuild returns [`RebuildOutcome::NoEventsForMolecule`]
 /// so the caller can decide what to do (typically: leave the cache alone).
 pub fn rebuild_molecule_state(
@@ -157,17 +193,73 @@ pub fn rebuild_molecule_state(
             Ok(RebuildOutcome::UpToDate)
         }
         CacheState::Missing => {
-            if !events_path.exists() {
+            let Some(projected) = project_from_log(events_path, molecule_id)? else {
                 return Ok(RebuildOutcome::NoEventsForMolecule);
-            }
-            let envelopes = load_envelopes(events_path)?;
-            if let Some(projected) = project_single(molecule_id, &envelopes) {
-                write_state(state_path, &projected)?;
-                Ok(RebuildOutcome::CreatedFromEvents)
-            } else {
-                Ok(RebuildOutcome::NoEventsForMolecule)
-            }
+            };
+            write_state(state_path, &projected)?;
+            Ok(RebuildOutcome::CreatedFromEvents)
         }
+        CacheState::NoContent(bytes) => {
+            let Some(projected) = project_from_log(events_path, molecule_id)? else {
+                return Err(CosmonError::StateParse {
+                    path: state_path.display().to_string(),
+                    reason: "the file holds no content and events.jsonl has no events \
+                             for this molecule, so there is nothing to rebuild it from"
+                        .to_owned(),
+                });
+            };
+            archive_bytes(state_path, &bytes)?;
+            write_state(state_path, &projected)?;
+            Ok(RebuildOutcome::RebuiltFromEvents)
+        }
+    }
+}
+
+fn project_from_log(
+    events_path: &Path,
+    molecule_id: &MoleculeId,
+) -> Result<Option<MoleculeData>, CosmonError> {
+    if !events_path.exists() {
+        return Ok(None);
+    }
+    let envelopes = load_envelopes(events_path)?;
+    Ok(project_single(molecule_id, &envelopes))
+}
+
+/// Copy `bytes` to the first free `state.json.broken.<n>` next to `state_path`.
+///
+/// The create is exclusive, so an archive from an earlier recovery is never
+/// overwritten, even when two recoveries race.
+fn archive_bytes(state_path: &Path, bytes: &[u8]) -> Result<PathBuf, CosmonError> {
+    use std::io::Write;
+
+    for n in 1u32.. {
+        let mut name = state_path.as_os_str().to_owned();
+        name.push(format!(".broken.{n}"));
+        let candidate = PathBuf::from(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                file.write_all(bytes)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|e| io_error("write archive", &candidate, &e))?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(io_error("create archive", &candidate, &e)),
+        }
+    }
+    Err(CosmonError::StateStore {
+        reason: format!("no free archive name next to {}", state_path.display()),
+    })
+}
+
+fn io_error(action: &str, path: &Path, error: &std::io::Error) -> CosmonError {
+    CosmonError::StateStore {
+        reason: format!("failed to {action} {}: {error}", path.display()),
     }
 }
 
@@ -180,29 +272,31 @@ pub fn rebuild_molecule_state(
 /// whose events never appeared in the log yield [`RebuildOutcome::NoEventsForMolecule`]
 /// and are left alone — a rebuild without a source would be a silent lie.
 ///
-/// Returns the list of (id, outcome) pairs in molecule-id order so `cs
-/// reconcile` can print a deterministic report.
+/// Returns the list of (id, result) pairs in molecule-id order so `cs
+/// reconcile` can print a deterministic report. A molecule whose cache is
+/// refused yields an `Err` entry; it never stops the sweep, so one bad file
+/// does not hide the others and every refused path is reported in one run.
 ///
 /// # Errors
 ///
-/// Returns [`CosmonError::StateStore`] on filesystem failures. Individual
-/// molecule failures short-circuit; the caller can retry after fixing the
-/// cause.
+/// Returns [`CosmonError::StateStore`] only when the fleet tree itself cannot
+/// be listed. Per-molecule failures are entries of the returned list.
 pub fn rebuild_all_missing(
     events_path: &Path,
     fleets_root: &Path,
-) -> Result<Vec<(MoleculeId, RebuildOutcome)>, CosmonError> {
+) -> Result<Vec<(MoleculeId, Result<RebuildOutcome, CosmonError>)>, CosmonError> {
     let mut results = Vec::new();
     if !fleets_root.is_dir() {
         return Ok(results);
     }
     let mut molecule_dirs: Vec<(MoleculeId, PathBuf)> = Vec::new();
-    for fleet_entry in std::fs::read_dir(fleets_root)?.flatten() {
+    let list = |dir: &Path| std::fs::read_dir(dir).map_err(|e| io_error("list", dir, &e));
+    for fleet_entry in list(fleets_root)?.flatten() {
         let mols_dir = fleet_entry.path().join("molecules");
         if !mols_dir.is_dir() {
             continue;
         }
-        for mol_entry in std::fs::read_dir(&mols_dir)?.flatten() {
+        for mol_entry in list(&mols_dir)?.flatten() {
             if !mol_entry.file_type()?.is_dir() {
                 continue;
             }
@@ -218,7 +312,7 @@ pub fn rebuild_all_missing(
     molecule_dirs.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
     for (id, dir) in molecule_dirs {
         let state_path = dir.join("state.json");
-        let outcome = rebuild_molecule_state(events_path, &id, &state_path)?;
+        let outcome = rebuild_molecule_state(events_path, &id, &state_path);
         results.push((id, outcome));
     }
     Ok(results)
@@ -227,15 +321,20 @@ pub fn rebuild_all_missing(
 enum CacheState {
     Valid(Box<MoleculeData>),
     Missing,
+    /// Every byte is `0x00` or ASCII whitespace; carries the bytes to archive.
+    NoContent(Vec<u8>),
 }
 
 fn classify_cache(state_path: &Path) -> Result<CacheState, CosmonError> {
     if !state_path.exists() {
         return Ok(CacheState::Missing);
     }
-    let bytes = std::fs::read(state_path)?;
+    let bytes = std::fs::read(state_path).map_err(|e| io_error("read", state_path, &e))?;
     match serde_json::from_slice::<MoleculeData>(&bytes) {
         Ok(data) => Ok(CacheState::Valid(Box::new(data))),
+        Err(_) if bytes.iter().all(|b| *b == 0 || b.is_ascii_whitespace()) => {
+            Ok(CacheState::NoContent(bytes))
+        }
         Err(error) => Err(CosmonError::StateParse {
             path: state_path.display().to_string(),
             reason: error.to_string(),
@@ -769,11 +868,12 @@ mod tests {
         assert!(message.contains("state.json"), "{message}");
         assert!(message.contains("missing field"), "{message}");
         assert!(message.contains("nothing was modified"), "{message}");
-        assert_eq!(std::fs::read(&state_path).unwrap(), legacy);
         assert!(
-            !state_path.with_extension("json.broken").exists(),
-            "refusal must not archive or replace the legacy file"
+            message.contains("move it aside"),
+            "remedy missing: {message}"
         );
+        assert_eq!(std::fs::read(&state_path).unwrap(), legacy);
+        assert_no_archive(&mol_dir);
     }
 
     #[test]
@@ -799,7 +899,9 @@ mod tests {
         let legacy = br#"{"id":"task-20260509-d0d0"}"#;
         std::fs::write(&state_path, legacy).unwrap();
 
-        let error = rebuild_all_missing(&events_path, &dir.path().join("fleets")).unwrap_err();
+        let results = rebuild_all_missing(&events_path, &dir.path().join("fleets")).unwrap();
+        assert_eq!(results.len(), 1);
+        let error = results[0].1.as_ref().unwrap_err();
         assert!(error.to_string().contains("nothing was modified"));
         assert_eq!(std::fs::read(&state_path).unwrap(), legacy);
     }
@@ -871,7 +973,10 @@ mod tests {
         let results = rebuild_all_missing(&events_path, &fleets_root).unwrap();
         assert_eq!(results.len(), 2, "both molecules discovered");
         for (_, outcome) in &results {
-            assert_eq!(*outcome, RebuildOutcome::CreatedFromEvents);
+            assert_eq!(
+                outcome.as_ref().unwrap(),
+                &RebuildOutcome::CreatedFromEvents
+            );
         }
         assert!(mol_a.join("state.json").exists());
         assert!(mol_b.join("state.json").exists());
@@ -1119,12 +1224,259 @@ mod tests {
 
         let results = rebuild_all_missing(&events_path, &fleets_root).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].1, RebuildOutcome::UpToDate);
+        assert_eq!(results[0].1.as_ref().unwrap(), &RebuildOutcome::UpToDate);
         let bytes_after = std::fs::read(&state_path).unwrap();
         assert_eq!(
             bytes_before, bytes_after,
             "sweep must not write any valid state.json"
         );
+    }
+
+    // ---- no-content caches (crash damage) vs everything else ----------
+
+    /// A molecule directory with a nucleated-and-running molecule in the log
+    /// and `state.json` holding exactly `bytes`.
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        events_path: PathBuf,
+        fleets_root: PathBuf,
+        mol_dir: PathBuf,
+        state_path: PathBuf,
+        id: MoleculeId,
+    }
+
+    fn fixture(id: &str, bytes: Option<&[u8]>, with_events: bool) -> Fixture {
+        let dir = tempdir().unwrap();
+        let events_path = dir.path().join("events.jsonl");
+        let id = mid(id);
+        if with_events {
+            write_log(
+                &events_path,
+                vec![
+                    EventV2::MoleculeNucleated {
+                        molecule_id: id.clone(),
+                        formula_id: "task-work".into(),
+                        parent_id: None,
+                        blocks: vec![],
+                    },
+                    EventV2::MoleculeStatusChanged {
+                        molecule_id: id.clone(),
+                        from: "pending".into(),
+                        to: "running".into(),
+                    },
+                ],
+            );
+        }
+        let fleets_root = dir.path().join("fleets");
+        let mol_dir = fleets_root
+            .join("default")
+            .join("molecules")
+            .join(id.as_str());
+        std::fs::create_dir_all(&mol_dir).unwrap();
+        let state_path = mol_dir.join("state.json");
+        if let Some(bytes) = bytes {
+            std::fs::write(&state_path, bytes).unwrap();
+        }
+        Fixture {
+            _dir: dir,
+            events_path,
+            fleets_root,
+            mol_dir,
+            state_path,
+            id,
+        }
+    }
+
+    fn archives(mol_dir: &Path) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(mol_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("state.json.broken"))
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    fn assert_no_archive(mol_dir: &Path) {
+        assert_eq!(
+            archives(mol_dir),
+            Vec::<PathBuf>::new(),
+            "no archive expected"
+        );
+    }
+
+    fn assert_rebuilt(fx: &Fixture, original: &[u8]) {
+        let outcome = rebuild_molecule_state(&fx.events_path, &fx.id, &fx.state_path).unwrap();
+        assert_eq!(outcome, RebuildOutcome::RebuiltFromEvents);
+        let archived = archives(&fx.mol_dir);
+        assert_eq!(archived.len(), 1, "{archived:?}");
+        assert_eq!(std::fs::read(&archived[0]).unwrap(), original);
+        let data: MoleculeData =
+            serde_json::from_slice(&std::fs::read(&fx.state_path).unwrap()).unwrap();
+        assert_eq!(data.id, fx.id);
+        assert_eq!(data.status, MoleculeStatus::Running);
+    }
+
+    #[test]
+    fn zero_length_cache_is_archived_and_rebuilt() {
+        let fx = fixture("task-20261006-e000", Some(b""), true);
+        assert_rebuilt(&fx, b"");
+    }
+
+    #[test]
+    fn all_nul_cache_is_archived_and_rebuilt() {
+        let nul = [0u8; 4096];
+        let fx = fixture("task-20261006-e001", Some(&nul), true);
+        assert_rebuilt(&fx, &nul);
+    }
+
+    #[test]
+    fn whitespace_only_cache_is_archived_and_rebuilt() {
+        let ws = b" \n\t\r\n  \x0c";
+        let fx = fixture("task-20261006-e002", Some(ws), true);
+        assert_rebuilt(&fx, ws);
+    }
+
+    #[test]
+    fn empty_cache_without_events_is_refused_and_untouched() {
+        for bytes in [&b""[..], &[0u8; 64][..]] {
+            let fx = fixture("task-20261006-e003", Some(bytes), false);
+            let error =
+                rebuild_molecule_state(&fx.events_path, &fx.id, &fx.state_path).unwrap_err();
+            assert!(matches!(error, CosmonError::StateParse { .. }), "{error}");
+            assert!(error.to_string().contains("state.json"), "{error}");
+            assert_eq!(std::fs::read(&fx.state_path).unwrap(), bytes);
+            assert_no_archive(&fx.mol_dir);
+        }
+    }
+
+    #[test]
+    fn empty_cache_with_a_log_that_omits_the_molecule_is_refused() {
+        let fx = fixture("task-20261006-e004", Some(b""), true);
+        let other = mid("task-20261006-e0ff");
+        let error = rebuild_molecule_state(&fx.events_path, &other, &fx.state_path).unwrap_err();
+        assert!(matches!(error, CosmonError::StateParse { .. }), "{error}");
+        assert_eq!(std::fs::read(&fx.state_path).unwrap(), b"");
+        assert_no_archive(&fx.mol_dir);
+    }
+
+    #[test]
+    fn a_second_recovery_never_overwrites_the_first_archive() {
+        let fx = fixture("task-20261006-e005", Some(b""), true);
+        rebuild_molecule_state(&fx.events_path, &fx.id, &fx.state_path).unwrap();
+        let first = archives(&fx.mol_dir);
+        assert_eq!(first.len(), 1);
+
+        // The recovered file is damaged again, this time with NULs.
+        let second_damage = [0u8; 16];
+        std::fs::write(&fx.state_path, second_damage).unwrap();
+        let outcome = rebuild_molecule_state(&fx.events_path, &fx.id, &fx.state_path).unwrap();
+        assert_eq!(outcome, RebuildOutcome::RebuiltFromEvents);
+
+        let both = archives(&fx.mol_dir);
+        assert_eq!(both.len(), 2, "{both:?}");
+        assert_eq!(
+            std::fs::read(&first[0]).unwrap(),
+            b"",
+            "first archive intact"
+        );
+        let newer = both.iter().find(|p| **p != first[0]).unwrap();
+        assert_eq!(std::fs::read(newer).unwrap(), second_damage);
+    }
+
+    #[test]
+    fn content_bearing_unparseable_caches_are_refused_untouched() {
+        let wrong_type = {
+            // A well-formed object whose `status` has the wrong type.
+            let fx = fixture("task-20261006-e0a0", None, true);
+            rebuild_molecule_state(&fx.events_path, &fx.id, &fx.state_path).unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&fx.state_path).unwrap()).unwrap();
+            value["status"] = serde_json::json!(7);
+            serde_json::to_vec_pretty(&value).unwrap()
+        };
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            (
+                "truncated prefix",
+                br#"{"id":"task-20261006-e0a1","fleet_id":"def"#.to_vec(),
+            ),
+            ("non-utf8 garbage", vec![0xff, 0xfe, 0x00, 0x80, 0xc3, 0x28]),
+            (
+                "merge-conflict markers",
+                b"<<<<<<< HEAD\n{}\n=======\n{}\n>>>>>>> other\n".to_vec(),
+            ),
+            ("missing field", br#"{"id":"task-20261006-e0a4"}"#.to_vec()),
+            ("wrong-typed field", wrong_type),
+        ];
+        for (name, bytes) in cases {
+            let fx = fixture("task-20261006-e0a1", Some(&bytes), true);
+            let error =
+                rebuild_molecule_state(&fx.events_path, &fx.id, &fx.state_path).unwrap_err();
+            assert!(
+                matches!(error, CosmonError::StateParse { .. }),
+                "{name}: {error}"
+            );
+            assert!(error.to_string().contains("state.json"), "{name}: {error}");
+            assert_eq!(std::fs::read(&fx.state_path).unwrap(), bytes, "{name}");
+            assert_no_archive(&fx.mol_dir);
+        }
+    }
+
+    #[test]
+    fn unreadable_state_path_names_the_path() {
+        let fx = fixture("task-20261006-e006", None, true);
+        std::fs::create_dir(&fx.state_path).unwrap();
+        let error = rebuild_molecule_state(&fx.events_path, &fx.id, &fx.state_path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&fx.state_path.display().to_string()),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn sweep_rebuilds_the_empty_file_and_reports_the_refused_one() {
+        let empty = fixture("task-20261006-e007", Some(b""), true);
+        // A second molecule in the same galaxy and log, with a legacy file.
+        let legacy_id = mid("task-20261006-e008");
+        write_log(
+            &empty.events_path,
+            vec![EventV2::MoleculeNucleated {
+                molecule_id: legacy_id.clone(),
+                formula_id: "task-work".into(),
+                parent_id: None,
+                blocks: vec![],
+            }],
+        );
+        let legacy_dir = empty
+            .fleets_root
+            .join("default/molecules")
+            .join(legacy_id.as_str());
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_bytes = br#"{"id":"task-20261006-e008"}"#;
+        std::fs::write(legacy_dir.join("state.json"), legacy_bytes).unwrap();
+
+        let results = rebuild_all_missing(&empty.events_path, &empty.fleets_root).unwrap();
+        assert_eq!(results.len(), 2, "both outcomes returned");
+        let by_id = |id: &MoleculeId| &results.iter().find(|(i, _)| i == id).unwrap().1;
+        assert_eq!(
+            by_id(&empty.id).as_ref().unwrap(),
+            &RebuildOutcome::RebuiltFromEvents
+        );
+        assert!(by_id(&legacy_id).is_err());
+        assert_eq!(
+            std::fs::read(legacy_dir.join("state.json")).unwrap(),
+            legacy_bytes
+        );
+        assert_no_archive(&legacy_dir);
+        assert_eq!(archives(&empty.mol_dir).len(), 1);
+        serde_json::from_slice::<MoleculeData>(&std::fs::read(&empty.state_path).unwrap()).unwrap();
     }
 
     #[test]
