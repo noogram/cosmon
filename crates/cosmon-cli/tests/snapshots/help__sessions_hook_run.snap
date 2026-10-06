@@ -11,7 +11,7 @@ Arguments:
 
 Options:
       --config <PATH>    Path to the state directory (default: the galaxy's .cosmon/state/)
-      --event <EVENT>    Which moment fired: `session-start`, `turn-start`, `turn-end`, `waiting` or `asking`
+      --event <EVENT>    Which moment fired: `session-start`, `turn-start`, `turn-end`, `waiting`, `asking` or `answered`
       --provider <NAME>  The pilot this hook runs inside. Inferred from the payload when it names one; `claude` otherwise
   -v, --verbose          Enable verbose output
       --json             Output in JSON format

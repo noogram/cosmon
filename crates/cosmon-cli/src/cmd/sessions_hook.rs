@@ -125,7 +125,7 @@ pub struct StatusArgs {
 /// Arguments for `cs sessions hook run`.
 #[derive(clap::Args, Default)]
 pub struct RunArgs {
-    /// Which moment fired: `session-start`, `turn-start`, `turn-end`, `waiting` or `asking`.
+    /// Which moment fired: `session-start`, `turn-start`, `turn-end`, `waiting`, `asking` or `answered`.
     #[arg(long, value_name = "EVENT")]
     pub event: String,
     /// The pilot this hook runs inside. Inferred from the payload when it
@@ -604,7 +604,7 @@ fn notification_message(payload: &str) -> Option<String> {
 fn session_state(event: HookEvent, notification_type: Option<&str>) -> SessionState {
     match event {
         HookEvent::SessionStart => SessionState::SessionStart,
-        HookEvent::TurnStart => SessionState::Working,
+        HookEvent::TurnStart | HookEvent::Answered => SessionState::Working,
         HookEvent::TurnEnd => SessionState::Idle,
         HookEvent::Waiting => match notification_type {
             Some("idle_prompt") => SessionState::IdleInput,
@@ -660,9 +660,28 @@ fn beat_presence(
     let headline = worker_molecule
         .as_ref()
         .map(|_| format!("worker: {}", event.as_str()));
-    let state = session_state(event, notification_type(payload).as_deref());
+    // The state-change test reads the record the ping is about to overwrite,
+    // so it has to run before the ping.
+    let state_dir = ctx.state_dir();
+    let prior_state = presence::store(ctx)
+        .load(&sid)
+        .ok()
+        .flatten()
+        .and_then(|p| p.state);
+    let mut state = session_state(event, notification_type(payload).as_deref());
+    // Claude fires a `permission_prompt` Notification for the question dialog
+    // too, a few seconds after the `PreToolUse` that published `asking`. Left
+    // alone it would turn the question back into a permission prompt; the
+    // `answered` moment (the tool's `PostToolUse`) ends the hold.
+    let held_question = matches!(event, HookEvent::Waiting)
+        && state == SessionState::WaitingPermission
+        && prior_state == Some(SessionState::Asking);
+    if held_question {
+        state = SessionState::Asking;
+    }
     let detail = if matches!(provider, HookProvider::Claude)
         && matches!(event, HookEvent::Waiting)
+        && !held_question
         && matches!(
             state,
             SessionState::WaitingPermission | SessionState::IdleInput | SessionState::Asking
@@ -679,14 +698,6 @@ fn beat_presence(
         SessionKind::Pilot
     };
 
-    // The state-change test reads the record the ping is about to overwrite,
-    // so it has to run before the ping.
-    let state_dir = ctx.state_dir();
-    let prior_state = presence::store(ctx)
-        .load(&sid)
-        .ok()
-        .flatten()
-        .and_then(|p| p.state);
     if prior_state != Some(state) {
         crate::operator_event::emit_session_presence(
             &state_dir,
