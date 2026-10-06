@@ -482,7 +482,7 @@ async fn concurrent_refresh_is_single_flight() {
         let k = k.clone();
         handles.push(tokio::spawn(async move {
             let http = reqwest::Client::new();
-            match oidc::refresh_credential(&http, &store, &k, &cfg, leeway)
+            match oidc::ensure_token(&http, &store, &k, &cfg, Utc::now(), leeway)
                 .await
                 .unwrap()
             {

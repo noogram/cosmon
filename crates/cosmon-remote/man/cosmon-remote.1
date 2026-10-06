@@ -49,6 +49,9 @@ Sign in to cosmon via the real OAuth 2.0 PKCE browser flow against the deploymen
 cosmon\-remote\-logout(1)
 Forget the persisted cosmon credential for the active profile (the reverse of "login"). Idempotent — logging out when already signed out is a no\-op. Does not touch the Claude/Anthropic session
 .TP
+cosmon\-remote\-token(1)
+Print a current access token from the credential saved by `login`
+.TP
 cosmon\-remote\-events(1)
 Server\-Sent Events stream of molecule lifecycle events (`GET /v1/events`)
 .TP
@@ -96,6 +99,9 @@ AUTHENTICATION — two independent badges:
   1. The API badge (JWT). From the OIDC credential recorded by
      `login`, refreshed silently, or supplied via
      \-\-token / $COSMON_REMOTE_TOKEN.
+  `token \-\-confirm` writes the saved API bearer to stdout for a local
+    consumer. It does not read \-\-token or $COSMON_REMOTE_TOKEN, and the
+    confirmation is required because stdout can be captured.
   2. The worker badge (Claude credential). Posed once with `auth login`
      (a guided three\-step flow — see `auth login \-\-help`). Without it,
      a tackled worker has nothing to spend.
