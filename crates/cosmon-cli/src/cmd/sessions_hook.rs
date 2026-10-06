@@ -604,7 +604,7 @@ fn notification_message(payload: &str) -> Option<String> {
 fn session_state(event: HookEvent, notification_type: Option<&str>) -> SessionState {
     match event {
         HookEvent::SessionStart => SessionState::SessionStart,
-        HookEvent::TurnStart => SessionState::Working,
+        HookEvent::TurnStart | HookEvent::Answered => SessionState::Working,
         HookEvent::TurnEnd => SessionState::Idle,
         HookEvent::Waiting => match notification_type {
             Some("idle_prompt") => SessionState::IdleInput,
@@ -612,7 +612,6 @@ fn session_state(event: HookEvent, notification_type: Option<&str>) -> SessionSt
             _ => SessionState::WaitingPermission,
         },
         HookEvent::Asking => SessionState::Asking,
-        HookEvent::Answered => SessionState::Working,
     }
 }
 
