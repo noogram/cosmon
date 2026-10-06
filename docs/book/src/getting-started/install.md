@@ -74,7 +74,7 @@ shared machine, in CI, or the first time you install cosmon anywhere, download
 the versioned asset, verify it, then run it:
 
 ```sh
-ver=0.7.2                                   # the release you want
+ver=0.7.3                                   # the release you want
 base="https://github.com/noogram/cosmon/releases/download/v${ver}"
 curl -fsSLO "${base}/cosmon-install-${ver}.sh"
 curl -fsSLO "${base}/cosmon-install-${ver}.sh.sig"

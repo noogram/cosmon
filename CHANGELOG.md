@@ -19,6 +19,29 @@ this stage.
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-10-06
+
+### Breaking changes and operator actions on upgrade
+
+- A `state.json` that does not parse is now refused, with the file and the
+  reason named, and is never rewritten. Move the file aside and run
+  `cs reconcile`, which rebuilds it from the molecule's events. A file that
+  holds only NUL bytes or whitespace is archived to `state.json.broken.<n>` and
+  rebuilt automatically when events exist. `cs reconcile` names every refused
+  path and exits non-zero after processing the rest. (#171)
+- `--config` must name a state directory. A path to a file is refused before
+  any I/O. (#171)
+- `cs project` now fails when its frontier or snapshot write fails, before it
+  touches tracked surfaces, where it previously continued. Scripts that ignored
+  the exit status will see the failure. (#171)
+- Read-only commands (`status`, `observe`, `peek`, `project --check`) no longer
+  append `operator_present` events. A consumer that counted those events as
+  activity from them must stop. (#171)
+- To keep an intentional `COSMON_STATE_DIR` override that differs from the
+  walk-up galaxy, declare it with `<state-dir>/galaxy.toml`
+  (`project_id = "<the galaxy's project_id>"`). Without it, the shadowing
+  warning is printed once per command. (#171)
+
 ### Added
 
 - **EXPERIMENTAL: Linux and WSL2 as a supported host.** The public installer
@@ -4496,7 +4519,8 @@ release **is**, not how it was built.
   `#![deny(missing_docs)]` on the core, and CI gates on build, test, clippy,
   and fmt.
 
-[Unreleased]: https://github.com/noogram/cosmon/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/noogram/cosmon/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/noogram/cosmon/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/noogram/cosmon/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/noogram/cosmon/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/noogram/cosmon/compare/v0.6.0...v0.7.0
