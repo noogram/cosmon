@@ -107,6 +107,13 @@ A reader must carry that through to its own total and not substitute `0`.
 
 A reader detects log rotation by a size decrease or an inode change.
 
+**`cs tail --all-galaxies --json`.** Each emitted JSON object retains the
+event-log fields and adds `source_galaxy`, the name of the project whose ledger
+supplied that row. The field is reader metadata rather than a mutation of the
+authoritative ledger, so a consumer can use it to select the source for a
+re-read without overwriting an event field. Fleet-local `cs tail --json` also
+emits `source_galaxy` for a uniform stream shape.
+
 ## Reading the ledger over HTTP
 
 `GET /v1/ledger` serves `events.jsonl` to a program that cannot read the file,

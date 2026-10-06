@@ -98,7 +98,7 @@ SEE ALSO: cs events (one-shot dump), cs ensemble (snapshot view).
 
 ###### **Options:**
 
-* `--all-galaxies` — Scan every project under `$COSMON_CLUSTER_ROOT`. Opt-in — cross-project reach is never implicit
+* `--all-galaxies` — Scan every project under `$COSMON_CLUSTER_ROOT`. Opt-in — cross-project reach is never implicit. JSON output adds the source galaxy to every row
 * `-f`, `--follow` — Stay attached and stream new events via `notify`
 * `--since <SINCE>` — Only show events at or after this timestamp. Accepts ISO-8601 (`2026-04-24T12:00:00Z`) or relative (`-5m`, `-1h`, `-2d`). `allow_hyphen_values` lets the relative form be written without `--since=`
 * `--kind <KIND>` — Only show events whose `type` tag matches (e.g. `molecule_nucleated`)

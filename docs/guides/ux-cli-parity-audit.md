@@ -2,6 +2,15 @@
 
 # CLI and UI parity audit
 
+## Cross-galaxy event origin (issue #183)
+
+| Capability | CLI | Native UI | Other CLI views |
+|---|---|---|---|
+| Attribute each JSON event in a cross-galaxy tail to its source | `cs tail --all-galaxies --json` adds `source_galaxy` without changing the authoritative ledger row | No cross-galaxy event-tail view audited | No matching multiplexed event stream audited |
+
+The `source_galaxy` key is reader metadata for selecting the source ledger again; it
+does not change the append-only event log.
+
 ## Spore admission (ADR-183)
 
 | Capability | CLI | Native UI | Remote service |
