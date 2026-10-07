@@ -152,7 +152,11 @@ where
     // no trust root pinned honours no grant, so building one here made every
     // leased mission read back as unleased and turned this whole guard into a
     // no-op. See that function for the exercise that caught it.
-    let Some(lease) = leases_at(state_root)?.current(mission)? else {
+    let leases = leases_at(state_root)?;
+    if leases.has_unverifiable_grant_ledger(mission)? {
+        return refuse_unverifiable_grant_ledger(mission, gesture);
+    }
+    let Some(lease) = leases.current(mission)? else {
         return Ok(());
     };
 
@@ -185,6 +189,21 @@ where
         None => Ok(()),
         Some(reason) => refuse(RefusalReason::explain(reason)),
     }
+}
+
+/// Refuse a lifecycle gesture when a nonempty ledger cannot be verified.
+fn refuse_unverifiable_grant_ledger(
+    mission: &MoleculeId,
+    gesture: &'static str,
+) -> anyhow::Result<()> {
+    use cosmon_core::pilot_lease::RefusalReason;
+
+    Err(UnleasedPilotGesture {
+        gesture,
+        mol_id: mission.as_str().to_owned(),
+        why: RefusalReason::UnverifiableGrantLedger.explain(),
+    }
+    .into())
 }
 
 /// Resolve the session id this `cs` invocation speaks for, or `None`.
