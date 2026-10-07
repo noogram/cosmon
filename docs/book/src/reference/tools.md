@@ -380,6 +380,13 @@ and publishes a *staged* checkpoint at a transition. It never claims a
 seat and never writes a checkpoint's content: a hand-over record is the
 pilot's own words, and only its moment is the hook's.
 
+For a Codex 0.161 legacy `notify`, a pilot's identity is the payload's
+native `thread-id`. The hook ignores an inherited `COSMON_SESSION_ID` for
+that pilot, so concurrent Codex threads cannot share a presence row. A
+Codex pilot payload without a usable `thread-id` publishes no row and reports
+the limitation on stderr. Worker hooks retain their dispatch-provided Cosmon
+session identity.
+
 The canonical name of a session is `<provider>:<native-session-id>`, and
 nothing else ever breaks a tie: a title, a cwd and a modification time
 help you recognise a session, never choose one. A selector that matches
@@ -822,7 +829,7 @@ The hook body — invoked by the provider, not usually by a human
 
 * `--event <EVENT>` — Which moment fired: `session-start`, `turn-start`, `turn-end`, `waiting`, `asking` or `answered`
 * `--provider <NAME>` — The pilot this hook runs inside: `claude` or `codex`. The payload is not consulted, so a Codex hook passes `codex`; `claude` otherwise
-* `--session <SID>` — This session's cosmon id. Defaults to `$COSMON_SESSION_ID`
+* `--session <SID>` — This worker hook's cosmon id. Codex pilot hooks instead require the native `thread-id` in their notify payload and never use an inherited `$COSMON_SESSION_ID`
 
 
 

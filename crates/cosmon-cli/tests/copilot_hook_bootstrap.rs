@@ -654,7 +654,7 @@ fn codex_hook_chains_behind_computer_use_and_records_codex() {
     let previous: Vec<String> = serde_json::from_str(&notify[3]).expect("json argv");
 
     // A Codex `agent-turn-complete` payload: it does not name a provider.
-    let payload = r#"{"type":"agent-turn-complete","turn-id":"t1","cwd":"/tmp","input-messages":[],"last-assistant-message":""}"#;
+    let payload = r#"{"type":"agent-turn-complete","thread-id":"thread-codex","turn-id":"t1","cwd":"/tmp","input-messages":[],"last-assistant-message":""}"#;
     let mut args: Vec<&str> = previous[1..].iter().map(String::as_str).collect();
     args.push(payload);
     let (_, err, code) = run(state, "pilot-codex", &args, None);
@@ -662,7 +662,11 @@ fn codex_hook_chains_behind_computer_use_and_records_codex() {
 
     let (out, err, code) = run(state, "pilot-other", &["sessions", "peers", "--json"], None);
     assert_eq!(code, 0, "peers: {err}");
-    assert!(out.contains("pilot-codex"), "presence recorded:\n{out}");
+    assert!(out.contains("thread-codex"), "presence recorded:\n{out}");
+    assert!(
+        !out.contains("pilot-codex"),
+        "a Codex pilot must not use the inherited session id:\n{out}"
+    );
     assert!(out.contains("\"codex\""), "recorded as codex:\n{out}");
     assert!(
         !out.contains("\"claude\""),

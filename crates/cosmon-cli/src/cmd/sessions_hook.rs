@@ -62,6 +62,7 @@ use cosmon_core::copilot_hook::{self, HookEdit, HookEvent, HookProvider, HOOK_TI
 use cosmon_core::id::SessionId;
 use cosmon_core::presence::{SessionKind, SessionState};
 use cosmon_pilot_checkpoint::{CheckpointStore, PilotCheckpoint};
+use serde::Deserialize;
 
 use super::presence;
 use super::Context;
@@ -133,7 +134,9 @@ pub struct RunArgs {
     /// consulted, so a Codex hook passes `codex`; `claude` otherwise.
     #[arg(long, value_name = "NAME")]
     pub provider: Option<String>,
-    /// This session's cosmon id. Defaults to `$COSMON_SESSION_ID`.
+    /// This worker hook's cosmon id. Codex pilot hooks instead require the
+    /// native `thread-id` in their notify payload and never use an inherited
+    /// `$COSMON_SESSION_ID`.
     #[arg(long, value_name = "SID")]
     pub session: Option<String>,
     /// The provider's payload. Codex passes it as this trailing argument;
@@ -561,39 +564,63 @@ fn read_payload(args: &RunArgs) -> String {
     buf
 }
 
-/// What the payload tells us about the session it came from.
+/// The admitted identity and notification fields from a provider hook payload.
 ///
-/// The native session id is half the canonical selector and is not conversation
-/// content; see [`notification_type`] and [`notification_message`] for the two
-/// other admitted fields. This is the confidentiality ceiling ADR-168 sets for
-/// the whole mission.
-fn native_session_id(payload: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
-    v.get("session_id")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
+/// This is deliberately a projection, rather than a generic JSON lookup: each
+/// provider owns its payload spelling. The projection therefore keeps the
+/// ADR-168 confidentiality ceiling while preventing one provider's fallback
+/// field from becoming another provider's identity.
+#[derive(Default)]
+struct HookPayload {
+    native_session_id: Option<String>,
+    notification_type: Option<String>,
+    notification_message: Option<String>,
 }
 
-/// The `notification_type` string of a Claude `Notification` payload.
-///
-/// A short enumerated kind admitted alongside `session_id` and the redacted
-/// notification message (ADR-168 confidentiality ceiling).
-fn notification_type(payload: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
-    v.get("notification_type")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
+/// Claude's documented hook envelope. Only these three non-conversation
+/// fields are admitted to the presence hook.
+#[derive(Deserialize)]
+struct ClaudeHookPayload {
+    session_id: Option<String>,
+    notification_type: Option<String>,
+    message: Option<String>,
 }
 
-/// The provider-authored `message` of a Claude `Notification` payload.
+/// Codex 0.161 legacy `notify` envelope.
 ///
-/// Callers admit this field only for the `waiting` hook moment and pass it
-/// through the core redactor before storage. No other payload content is read.
-fn notification_message(payload: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
-    v.get("message")
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
+/// Codex calls the native conversation identity `thread-id`; it does not emit
+/// Claude's `session_id` field. Fixtures use anonymous identifiers because a
+/// native thread identifier is private harness metadata.
+#[derive(Deserialize)]
+struct CodexLegacyNotifyPayload {
+    #[serde(rename = "thread-id")]
+    thread_id: Option<String>,
+}
+
+fn usable_identity(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_owned())
+    })
+}
+
+/// Parse a provider payload through its provider-specific typed adapter.
+fn hook_payload(provider: HookProvider, payload: &str) -> HookPayload {
+    match provider {
+        HookProvider::Claude => serde_json::from_str::<ClaudeHookPayload>(payload)
+            .map(|payload| HookPayload {
+                native_session_id: usable_identity(payload.session_id),
+                notification_type: payload.notification_type,
+                notification_message: payload.message,
+            })
+            .unwrap_or_default(),
+        HookProvider::Codex => serde_json::from_str::<CodexLegacyNotifyPayload>(payload)
+            .map(|payload| HookPayload {
+                native_session_id: usable_identity(payload.thread_id),
+                ..HookPayload::default()
+            })
+            .unwrap_or_default(),
+    }
 }
 
 /// The typed state a hook moment puts the session in.
@@ -616,6 +643,55 @@ fn session_state(event: HookEvent, notification_type: Option<&str>) -> SessionSt
     }
 }
 
+/// Resolve the Cosmon record key for a provider hook.
+///
+/// A Codex pilot must be keyed by its native thread identity: an inherited
+/// generic session id belongs to the launching process and can be shared by
+/// concurrent pilots. Workers retain their dispatch/session identity.
+fn resolve_hook_session_id(
+    args: &RunArgs,
+    provider: HookProvider,
+    native: Option<&str>,
+    worker_molecule: Option<&cosmon_core::id::MoleculeId>,
+) -> Option<SessionId> {
+    if provider == HookProvider::Codex && worker_molecule.is_none() {
+        let Some(native) = native else {
+            eprintln!(
+                "cs sessions hook: Codex pilot payload has no usable native identity — \
+                 no presence row published"
+            );
+            return None;
+        };
+        return match SessionId::new(native) {
+            Ok(sid) => Some(sid),
+            Err(e) => {
+                eprintln!(
+                    "cs sessions hook: Codex pilot native identity is invalid ({e}) — \
+                     no presence row published"
+                );
+                None
+            }
+        };
+    }
+
+    // Claude keeps its established explicit-or-exported behavior. Workers
+    // follow the same path so a dispatch remains identifiable without a
+    // provider-native payload identity.
+    let explicit = args.session.clone().or_else(|| {
+        let exported = ["COSMON_SESSION_ID", "CLAUDE_SESSION_ID"]
+            .iter()
+            .any(|key| std::env::var(key).is_ok_and(|value| !value.trim().is_empty()));
+        (!exported).then(|| native.map(ToOwned::to_owned)).flatten()
+    });
+    match presence::resolve_or_derive_sid(explicit.as_deref()) {
+        Ok(sid) => Some(sid),
+        Err(e) => {
+            eprintln!("cs sessions hook: no session id ({e}) — nothing to be present as");
+            None
+        }
+    }
+}
+
 /// Resolve this session's id and emit its presence heartbeat.
 ///
 /// Returns `None` when no id can be resolved, after saying so on stderr.
@@ -624,31 +700,8 @@ fn beat_presence(
     args: &RunArgs,
     event: HookEvent,
     provider: HookProvider,
-    payload: &str,
+    payload: &HookPayload,
 ) -> Option<SessionId> {
-    // A hook has no controlling tty, so without an explicit id or an exported
-    // one every session would hash to the same fallback and overwrite each
-    // other's record. The provider's own session id, from the payload, is the
-    // next best identity and is distinct per session.
-    let native = native_session_id(payload);
-    let explicit = args.session.clone().or_else(|| {
-        let exported = ["COSMON_SESSION_ID", "CLAUDE_SESSION_ID"]
-            .iter()
-            .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()));
-        if exported {
-            None
-        } else {
-            native.clone()
-        }
-    });
-    let Ok(sid) = presence::resolve_or_derive_sid(explicit.as_deref()) else {
-        eprintln!(
-            "cs sessions hook: no session id ($COSMON_SESSION_ID unset and no tty) — \
-             nothing to be present as"
-        );
-        return None;
-    };
-
     // 1. Presence. No role, no follows, no capabilities: every co-pilotage
     //    field is carried forward from the snapshot the operator wrote. This
     //    heartbeat says "still here", never "I am in command". A worker (the
@@ -658,6 +711,8 @@ fn beat_presence(
     let worker_molecule = std::env::var("COSMON_PARENT_MOL_ID")
         .ok()
         .and_then(|raw| raw.trim().parse::<cosmon_core::id::MoleculeId>().ok());
+    let native = payload.native_session_id.clone();
+    let sid = resolve_hook_session_id(args, provider, native.as_deref(), worker_molecule.as_ref())?;
     let headline = worker_molecule
         .as_ref()
         .map(|_| format!("worker: {}", event.as_str()));
@@ -669,7 +724,7 @@ fn beat_presence(
         .ok()
         .flatten()
         .and_then(|p| p.state);
-    let mut state = session_state(event, notification_type(payload).as_deref());
+    let mut state = session_state(event, payload.notification_type.as_deref());
     // Claude fires a `permission_prompt` Notification for the question dialog
     // too, a few seconds after the `PreToolUse` that published `asking`. Left
     // alone it would turn the question back into a permission prompt; the
@@ -687,7 +742,8 @@ fn beat_presence(
             state,
             SessionState::WaitingPermission | SessionState::IdleInput | SessionState::Asking
         ) {
-        notification_message(payload)
+        payload
+            .notification_message
             .as_deref()
             .and_then(cosmon_core::presence::redact_presence_detail)
     } else {
@@ -760,7 +816,7 @@ fn run_hook(ctx: &Context, args: &RunArgs) {
         },
         None => HookProvider::Claude,
     };
-    let payload = read_payload(args);
+    let payload = hook_payload(provider, &read_payload(args));
 
     let Some(sid) = beat_presence(ctx, args, event, provider, &payload) else {
         return;
