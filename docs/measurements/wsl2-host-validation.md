@@ -1,9 +1,57 @@
-# WSL2 candidate host validation
+# WSL2 host validation
+
+## Release v0.7.3
+
+Date: 2026-10-08. The post-release rerun used a new `release-0.7.3` run and
+downloaded the served installer from `https://noogram.org/cosmon/install.sh`.
+The exact installer bytes had SHA-256
+`1f5a84c5e4a715e3d8b9db4b2ff1e6a2a2f50b6e496a86ffc68a4f49383d22ff`.
+The installer was invoked with `--version v0.7.3 --with-services` and a separate
+installation directory.
+
+| Published asset | SHA-256 |
+| --- | --- |
+| `cosmon-0.7.3-x86_64-unknown-linux-musl.tar.gz` | `a649d4b41406e4b1a2fc33d7aa5863d07f9dc193caaf1e626a6045c348f2f1eb` |
+| `cosmon-service-0.7.3-x86_64-unknown-linux-musl.tar.gz` | `19198282500bd4db691f4f941da7ee83d460ab4b3a6520ca864b9d1bea9c8c73` |
+
+The installer verified both archives before installation. `cs`,
+`cosmon-remote`, `cosmon-daemon-supervisor`, and `cosmon-scheduler` each
+reported version 0.7.3. The replacement user units were active, with
+`KillMode=mixed` for the supervisor and `KillMode=process` for the scheduler.
+
+One lifecycle task created and committed the requested small file, reached
+`completed`, and was harvested. Its commit was on `main`; its worker session,
+worktree, and branch were absent after harvest. Killing the supervisor main
+process produced a replacement supervisor and child. Killing that child
+produced one replacement child with a fresh heartbeat. A new timer firing was
+observed within the 90-second bound. The services remained active at handoff.
+
+The release run did not execute last-shell logout, distribution shutdown,
+host reboot, or host sleep. Those power-boundary observations remain candidate
+evidence only and are not promoted to release v0.7.3 evidence. The pilot can
+resume this run, without reinstalling or repeating the paid lifecycle task, in
+this order:
+
+```sh
+bash "$verify" before-logout
+# Close every distribution shell, wait 30 seconds, reconnect.
+bash "$verify" after-logout
+bash "$verify" before-distribution
+# Shut down the distribution and relaunch it explicitly.
+bash "$verify" after-distribution
+bash "$verify" before-reboot
+# Restart the host and launch the distribution explicitly.
+bash "$verify" after-reboot
+bash "$verify" before-sleep
+# Sleep and wake the host, keeping a distribution client attached.
+bash "$verify" after-sleep
+bash "$verify" final
+```
+
+## Candidate
 
 Date: 2026-10-06. Scope: candidate evidence for issue #143, not a published
 release witness.
-
-## Candidate
 
 The candidate was built from revision
 `649dcf240882a20233e925fd4a5776deb2035868` for

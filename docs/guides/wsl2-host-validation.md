@@ -1,14 +1,14 @@
 # WSL2 host validation
 
 This runbook produces a bounded, resumable witness for the Linux user-service
-release candidate. It does not turn candidate evidence into a release claim. A
-second run against the served installer and the exact published archives is
-required after release.
+release candidate or a pinned published release. Candidate evidence does not
+become a release claim until the same phases run through the served installer
+against the exact published archives.
 
 The lane uses an ordinary, disposable test account on Ubuntu 24.04 under WSL2.
 The account must have systemd enabled, lingering enabled, its home on the Linux
 filesystem, an existing Git identity, and a configured execution adapter. The
-test never changes Git identity or linger policy. It leaves the candidate
+test never changes Git identity or linger policy. It leaves the selected
 services installed and running for the power-boundary phases.
 
 The identity may be global or local to an existing repository. If it is
@@ -84,6 +84,35 @@ lifecycle phase is the only paid execution task in this procedure: it creates
 one file, commits it, completes its molecule, and is then harvested from the
 repository root outside the worker. The phase verifies merge ancestry, artifact
 content, worktree removal, and the absence of a registered worker worktree.
+
+For a post-release witness on an account that already holds the candidate
+services, select the release source and a new run id. This mode permits existing
+units and configuration because the pinned release is expected to replace the
+units while preserving configuration:
+
+```sh
+export COSMON_WSL2_RUN_ID=release-<version>
+export COSMON_WSL2_INSTALL_SOURCE=release
+export COSMON_WSL2_RELEASE_VERSION=v<version>
+export COSMON_WSL2_ADAPTER=<configured-adapter>
+export COSMON_WSL2_MODEL=<approved-small-model>
+export COSMON_WSL2_IDENTITY_REPO="$HOME/<existing-repository>"
+verify="$HOME/<verifier-directory>/verify-wsl2-host.sh"
+
+bash "$verify" preflight
+bash "$verify" release-install
+bash "$verify" service-baseline
+bash "$verify" lifecycle
+bash "$verify" supervisor-crash
+bash "$verify" child-crash
+bash "$verify" timer
+```
+
+`release-install` downloads the served installer, records its exact byte hash,
+pins the requested tag, preserves the published `SHA256SUMS`, and requires all
+four installed binaries to report that version. The normal run uses the default
+installer and release-asset URLs; URL overrides exist only for the offline
+contract test.
 
 ## External-driver phases
 
