@@ -121,6 +121,45 @@ async fn nucleate_sends_bearer_and_decodes_envelope() {
 }
 
 #[tokio::test]
+async fn rate_limit_error_names_the_server_retry_delay() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/molecules"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "7")
+                .set_body_json(json!({
+                    "error": "rate_limited",
+                    "retry_after_seconds": 7,
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    let client = Client::new(&profile_for(&server), Some("fake-jwt".into())).unwrap();
+    let err = client
+        .nucleate(&NucleateRequest {
+            formula: "task-work".into(),
+            ..NucleateRequest::default()
+        })
+        .await
+        .expect_err("rate limit must not be hidden");
+
+    match &err {
+        cosmon_remote::error::Error::Api {
+            status,
+            retry_after_seconds,
+            ..
+        } => {
+            assert_eq!(*status, 429);
+            assert_eq!(*retry_after_seconds, Some(7));
+        }
+        other => panic!("expected API rate limit, got {other:?}"),
+    }
+    assert_eq!(err.to_string(), "rate limited, retry in 7 s");
+}
+
+#[tokio::test]
 async fn list_molecules_passes_filters_as_query_params() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -605,7 +644,7 @@ async fn converse_surfaces_the_stable_refusal_codes() {
         .await
         .unwrap_err();
     match err {
-        cosmon_remote::error::Error::Api { status, body } => {
+        cosmon_remote::error::Error::Api { status, body, .. } => {
             assert_eq!(status, 503);
             assert_eq!(body["error"], json!("no_binding"));
         }
@@ -625,7 +664,7 @@ async fn api_error_carries_status_and_body() {
     let client = Client::new(&profile_for(&server), Some("fake".into())).unwrap();
     let err = client.get_molecule("ghost").await.unwrap_err();
     match err {
-        cosmon_remote::error::Error::Api { status, body } => {
+        cosmon_remote::error::Error::Api { status, body, .. } => {
             assert_eq!(status, 404);
             assert_eq!(body["error"], json!("not_found"));
         }
@@ -669,6 +708,7 @@ async fn phone_home_header_rides_when_enabled_and_stops_on_opt_out() {
             "cosmon-remote",
             &cosmon_remote::error::Error::Api {
                 status: 503,
+                retry_after_seconds: None,
                 body: json!({"error": "tackle_unavailable", "request_id": "req-fail"}),
             },
             chrono::Utc::now(),

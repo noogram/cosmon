@@ -78,10 +78,12 @@ pub enum Error {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 
-    #[error("API error ({status}): {body}")]
+    #[error("{message}", message = self.api_message())]
     Api {
         status: u16,
         body: serde_json::Value,
+        /// Server-provided wait, in whole seconds, when admission rate-limits.
+        retry_after_seconds: Option<u64>,
     },
 
     #[error("config error: {0}")]
@@ -136,6 +138,22 @@ pub enum Error {
     /// signal the caller acts on.
     #[error(transparent)]
     Oidc(#[from] crate::oidc::OidcError),
+}
+
+impl Error {
+    fn api_message(&self) -> String {
+        match self {
+            Self::Api {
+                status: _,
+                body,
+                retry_after_seconds: Some(seconds),
+            } if body.get("error").and_then(serde_json::Value::as_str) == Some("rate_limited") => {
+                format!("rate limited, retry in {seconds} s")
+            }
+            Self::Api { status, body, .. } => format!("API error ({status}): {body}"),
+            _ => "internal error rendering API failure".to_owned(),
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

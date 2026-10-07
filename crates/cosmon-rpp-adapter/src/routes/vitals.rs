@@ -51,6 +51,7 @@ pub async fn get_vitals(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
@@ -78,6 +79,7 @@ pub async fn get_vitals(
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "store_unavailable",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         },
     })?;
 

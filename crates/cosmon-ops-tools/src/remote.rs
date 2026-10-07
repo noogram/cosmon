@@ -517,6 +517,7 @@ mod tests {
     fn map_remote_err_routes_client_input_errors_to_invalid_arguments() {
         let bad_request = cosmon_remote::Error::Api {
             status: 400,
+            retry_after_seconds: None,
             body: serde_json::json!({"error": "bad"}),
         };
         assert!(matches!(
@@ -526,6 +527,7 @@ mod tests {
 
         let not_found = cosmon_remote::Error::Api {
             status: 404,
+            retry_after_seconds: None,
             body: serde_json::json!({"error": "absent"}),
         };
         assert!(matches!(

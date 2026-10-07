@@ -149,6 +149,7 @@ pub async fn list_workers(
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "store_unavailable",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         })?;
 
     let mut workers: Vec<WorkerEntry> = molecules
@@ -213,6 +214,7 @@ fn authorise_worker_read(state: &Arc<AppState>, jwt: &ValidatedJwt) -> Result<()
             status: StatusCode::FORBIDDEN,
             label: "forbidden",
             request_id: None,
+            retry_after_seconds: None,
         })
     }
 }

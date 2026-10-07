@@ -625,7 +625,7 @@ async fn main() {
             // Actionable hint (smithy C1): when the wire label is one
             // the binary understands, say the probable cause and THE
             // repair command under the raw error — never instead of it.
-            if let Error::Api { status, body } = &err {
+            if let Error::Api { status, body, .. } = &err {
                 if let Some((reason, gesture)) = hints::for_harvest_authorization(body) {
                     let request_id = body.get("request_id").and_then(|v| v.as_str());
                     eprintln!("  ↳ {reason}: {gesture}");
@@ -1652,6 +1652,7 @@ async fn run_molecule(
                 cosmon_remote::client::StatusPoll::NotModified { .. } => {
                     return Err(Error::Api {
                         status: 304,
+                        retry_after_seconds: None,
                         body: serde_json::json!({
                             "error": "unexpected_not_modified",
                             "detail": "the server answered 304 to an unconditional request",

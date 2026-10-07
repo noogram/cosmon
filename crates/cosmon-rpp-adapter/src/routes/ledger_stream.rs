@@ -253,6 +253,7 @@ pub async fn ledger_stream(
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     let ledger_path = cosmon_state::event_log::resolve_events_log_path(
@@ -265,6 +266,7 @@ pub async fn ledger_stream(
             status: StatusCode::TOO_MANY_REQUESTS,
             label: "ledger_stream_open",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         })?;
 
     // 6. Position: the header (a reconnect) wins over the query.
@@ -279,6 +281,7 @@ pub async fn ledger_stream(
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "store_unavailable",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         })?;
 
     // 7. One task owns the reader; the channel is the

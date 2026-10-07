@@ -190,6 +190,7 @@ pub async fn list_artifacts(
         status: StatusCode::INTERNAL_SERVER_ERROR,
         label: e,
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
 
     Ok(Json(json!({
@@ -227,11 +228,13 @@ pub async fn fetch_artifact(
         status: StatusCode::INTERNAL_SERVER_ERROR,
         label: e,
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
     let matched = entries.iter().find(|e| e.token == token).ok_or(ApiError {
         status: StatusCode::NOT_FOUND,
         label: "artifact_not_found",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
 
     let file_path = dir.join(&matched.name);
@@ -239,6 +242,7 @@ pub async fn fetch_artifact(
         status: StatusCode::NOT_FOUND,
         label: "artifact_not_found",
         request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
     })?;
 
     let mut response = Response::new(Body::from(bytes));
@@ -295,6 +299,7 @@ pub async fn push_artifact(
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "artifact_dir_unavailable",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         })?;
 
     // RFC 9530 — `Digest` header carries `blake3=<hex>`. If absent
@@ -315,6 +320,7 @@ pub async fn push_artifact(
                 status: StatusCode::BAD_REQUEST,
                 label: "digest_mismatch",
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             });
         }
     }
@@ -337,6 +343,7 @@ pub async fn push_artifact(
                     status: StatusCode::PRECONDITION_FAILED,
                     label: "if_match_failed",
                     request_id: Some(spark.request_id.clone()),
+                    retry_after_seconds: None,
                 });
             }
         }
@@ -348,6 +355,7 @@ pub async fn push_artifact(
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "artifact_write_failed",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         })?;
 
     let content_type = headers
@@ -439,6 +447,7 @@ fn reject_unsafe_segment(segment: &str, spark: &Spark) -> Result<(), ApiError> {
             status: StatusCode::BAD_REQUEST,
             label: "invalid_path_segment",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     Ok(())
@@ -503,6 +512,7 @@ fn authorise_artifact_scope(
             status: StatusCode::FORBIDDEN,
             label: "forbidden",
             request_id: None,
+            retry_after_seconds: None,
         })
     }
 }

@@ -573,7 +573,7 @@ async fn armed_without_key_reports_key_missing_to_the_real_client() {
         )
         .await
         .expect_err("no trust root");
-    let Error::Api { status, body } = err else {
+    let Error::Api { status, body, .. } = err else {
         panic!("expected API error")
     };
     assert_eq!(status, 403, "{body}");
@@ -600,7 +600,7 @@ async fn missing_molecule_has_no_harvest_diagnostic() {
         )
         .await
         .expect_err("missing molecule");
-    let Error::Api { status, body } = err else {
+    let Error::Api { status, body, .. } = err else {
         panic!("expected API error")
     };
     assert_eq!(status, 404);
@@ -630,7 +630,7 @@ async fn conflicting_policy_is_a_typed_configuration_fault() {
         )
         .await
         .expect_err("invalid policy");
-    let Error::Api { status, body } = err else {
+    let Error::Api { status, body, .. } = err else {
         panic!("expected API error")
     };
     assert_eq!(status, 503);
@@ -650,7 +650,7 @@ async fn conflicting_policy_is_a_typed_configuration_fault() {
         )
         .await
         .expect_err("missing molecule under conflicting policy");
-    let Error::Api { status, body } = err else {
+    let Error::Api { status, body, .. } = err else {
         panic!("expected API error")
     };
     assert_eq!(status, 404, "{body}");
@@ -680,7 +680,7 @@ async fn explicit_policy_requires_the_dedicated_scope_with_a_typed_cause() {
         )
         .await
         .expect_err("write is not harvest scope");
-    let Error::Api { status, body } = err else {
+    let Error::Api { status, body, .. } = err else {
         panic!("expected API error")
     };
     assert_eq!(status, 403);
@@ -709,7 +709,7 @@ async fn unreadable_authority_config_is_a_fault_without_path_on_the_wire() {
         )
         .await
         .expect_err("config cannot be read");
-    let Error::Api { status, body } = err else {
+    let Error::Api { status, body, .. } = err else {
         panic!("expected API error")
     };
     assert_eq!(status, 503);
@@ -750,7 +750,7 @@ async fn the_unavailable_sealed_effect_reaches_the_client_as_a_named_refusal() {
         .await
         .expect_err("this deployment declares no harvest effect");
 
-    let Error::Api { status, body } = err else {
+    let Error::Api { status, body, .. } = err else {
         panic!("the effect refusal reached the client as {err:?}, not a structured API error");
     };
     assert_eq!(status, 501);
@@ -850,7 +850,7 @@ async fn every_named_refusal_reaches_the_client_with_its_name_and_status() {
             .await
             .expect_err("a refusal must not decode as a success envelope");
 
-        let Error::Api { status, body } = err else {
+        let Error::Api { status, body, .. } = err else {
             panic!("{refusal:?} reached the client as {err:?}, not a structured API error");
         };
         assert_eq!(
@@ -892,7 +892,7 @@ async fn an_unarmed_galaxy_refuses_not_authorized_at_the_client() {
         .await
         .expect_err("an unarmed galaxy has granted nobody anything");
 
-    let Error::Api { status, body } = err else {
+    let Error::Api { status, body, .. } = err else {
         panic!("not_authorized reached the client as {err:?}, not a structured API error");
     };
     assert_eq!(body["error"], DoorRefusal::NotAuthorized.as_str());

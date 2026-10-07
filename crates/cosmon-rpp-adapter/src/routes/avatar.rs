@@ -119,12 +119,14 @@ pub async fn converse(
         status: StatusCode::BAD_REQUEST,
         label: "invalid_json_body",
         request_id: None,
+        retry_after_seconds: None,
     })?;
     if body.avatar_id.trim().is_empty() {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
             label: "missing_avatar_id",
             request_id: None,
+            retry_after_seconds: None,
         });
     }
     if body.message.is_null() {
@@ -132,6 +134,7 @@ pub async fn converse(
             status: StatusCode::BAD_REQUEST,
             label: "missing_message",
             request_id: None,
+            retry_after_seconds: None,
         });
     }
 
@@ -149,6 +152,7 @@ pub async fn converse(
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "tenant_unavailable",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
 
@@ -159,6 +163,7 @@ pub async fn converse(
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "no_binding",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
 
@@ -174,6 +179,7 @@ pub async fn converse(
                 status: StatusCode::CONFLICT,
                 label: "max_hops_exceeded",
                 request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
             });
         }
     }
@@ -248,12 +254,14 @@ pub async fn perceive(
         status: StatusCode::BAD_REQUEST,
         label: "invalid_json_body",
         request_id: None,
+        retry_after_seconds: None,
     })?;
     if body.source.trim().is_empty() {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
             label: "missing_source",
             request_id: None,
+            retry_after_seconds: None,
         });
     }
     if body.data.is_null() {
@@ -261,6 +269,7 @@ pub async fn perceive(
             status: StatusCode::BAD_REQUEST,
             label: "missing_data",
             request_id: None,
+            retry_after_seconds: None,
         });
     }
     if body.integrity.trim().is_empty() {
@@ -268,6 +277,7 @@ pub async fn perceive(
             status: StatusCode::BAD_REQUEST,
             label: "missing_integrity",
             request_id: None,
+            retry_after_seconds: None,
         });
     }
 
@@ -280,6 +290,7 @@ pub async fn perceive(
             status: StatusCode::BAD_REQUEST,
             label: "integrity_mismatch",
             request_id: None,
+            retry_after_seconds: None,
         });
     }
 
@@ -296,6 +307,7 @@ pub async fn perceive(
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "tenant_unavailable",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
     let source_flag = tenant_root
@@ -309,6 +321,7 @@ pub async fn perceive(
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "source_not_enabled",
             request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
         });
     }
 
@@ -369,6 +382,7 @@ fn authorise_scope(
             status: StatusCode::FORBIDDEN,
             label: "forbidden",
             request_id: None,
+            retry_after_seconds: None,
         })
     }
 }
@@ -529,6 +543,7 @@ pub async fn avatar_incarnate(
         status: StatusCode::BAD_REQUEST,
         label: "invalid_json_body",
         request_id: None,
+        retry_after_seconds: None,
     })?;
 
     let instance_dir = state
@@ -548,6 +563,7 @@ pub async fn avatar_incarnate(
                 status: StatusCode::CONFLICT,
                 label: "already_incarnated",
                 request_id: Some(spark.request_id),
+                retry_after_seconds: None,
             });
         }
     }
@@ -556,23 +572,27 @@ pub async fn avatar_incarnate(
         status: StatusCode::BAD_REQUEST,
         label: "invalid_pilote_id",
         request_id: Some(format!("{}: {e}", spark.request_id)),
+        retry_after_seconds: None,
     })?;
     let juridiction =
         cosmon_core::avatar::JurisdictionCode::new(&body.juridiction).map_err(|e| ApiError {
             status: StatusCode::BAD_REQUEST,
             label: "invalid_juridiction",
             request_id: Some(format!("{}: {e}", spark.request_id)),
+            retry_after_seconds: None,
         })?;
     let tenant_id = cosmon_core::auth::TenantId::new(&body.tenant_id).map_err(|e| ApiError {
         status: StatusCode::BAD_REQUEST,
         label: "invalid_tenant_id",
         request_id: Some(format!("{}: {e}", spark.request_id)),
+        retry_after_seconds: None,
     })?;
     let instance_id_typed =
         cosmon_core::avatar::InstanceId::new(&instance_id).map_err(|e| ApiError {
             status: StatusCode::BAD_REQUEST,
             label: "invalid_instance_id",
             request_id: Some(format!("{}: {e}", spark.request_id)),
+            retry_after_seconds: None,
         })?;
 
     let moule_sha_hex = "0".repeat(64);
@@ -597,12 +617,14 @@ pub async fn avatar_incarnate(
         status: StatusCode::INTERNAL_SERVER_ERROR,
         label: "serialization_error",
         request_id: Some(format!("{}: {e}", spark.request_id)),
+        retry_after_seconds: None,
     })?;
 
     std::fs::create_dir_all(&instance_dir).map_err(|e| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         label: "io_error",
         request_id: Some(format!("{}: {e}", spark.request_id)),
+        retry_after_seconds: None,
     })?;
 
     let mut f = std::fs::OpenOptions::new()
@@ -613,11 +635,13 @@ pub async fn avatar_incarnate(
             status: StatusCode::INTERNAL_SERVER_ERROR,
             label: "io_error",
             request_id: Some(format!("{}: {e}", spark.request_id)),
+            retry_after_seconds: None,
         })?;
     writeln!(f, "{line}").map_err(|e| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
         label: "io_error",
         request_id: Some(format!("{}: {e}", spark.request_id)),
+        retry_after_seconds: None,
     })?;
 
     let canonical = cosmon_hash::canonical_serialize(&incarnation).unwrap_or_default();
@@ -662,6 +686,7 @@ pub async fn avatar_grant(
         status: StatusCode::BAD_REQUEST,
         label: "invalid_json_body",
         request_id: None,
+        retry_after_seconds: None,
     })?;
 
     let valid_canals = ["b", "c", "d"];
@@ -670,6 +695,7 @@ pub async fn avatar_grant(
             status: StatusCode::BAD_REQUEST,
             label: "invalid_canal",
             request_id: Some(spark.request_id),
+            retry_after_seconds: None,
         });
     }
 
@@ -687,6 +713,7 @@ pub async fn avatar_grant(
             status: StatusCode::NOT_FOUND,
             label: "instance_not_found",
             request_id: Some(spark.request_id),
+            retry_after_seconds: None,
         });
     }
     let raw = std::fs::read(&events_path).unwrap_or_default();
@@ -696,6 +723,7 @@ pub async fn avatar_grant(
             status: StatusCode::CONFLICT,
             label: "not_incarnated",
             request_id: Some(spark.request_id),
+            retry_after_seconds: None,
         });
     }
 
@@ -704,6 +732,7 @@ pub async fn avatar_grant(
         status: StatusCode::INTERNAL_SERVER_ERROR,
         label: "io_error",
         request_id: Some(format!("{}: {e}", spark.request_id)),
+        retry_after_seconds: None,
     })?;
     let binding_file = binding_dir.join(format!(
         "canal-{}-{}.toml",
@@ -723,6 +752,7 @@ pub async fn avatar_grant(
         status: StatusCode::INTERNAL_SERVER_ERROR,
         label: "io_error",
         request_id: Some(format!("{}: {e}", spark.request_id)),
+        retry_after_seconds: None,
     })?;
 
     Ok(Json(json!({
@@ -762,6 +792,7 @@ pub async fn avatar_audit(
             status: StatusCode::NOT_FOUND,
             label: "instance_not_found",
             request_id: Some(spark.request_id),
+            retry_after_seconds: None,
         });
     }
 
@@ -829,6 +860,7 @@ pub async fn avatar_mould_info(
                 status: StatusCode::CONFLICT,
                 label: "already_incarnated",
                 request_id: Some(spark.request_id),
+                retry_after_seconds: None,
             });
         }
     }

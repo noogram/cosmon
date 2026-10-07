@@ -4113,6 +4113,17 @@ components:
           description: |
             Optional correlation id; present on errors that
             materialise an audit envelope.
+        retry_after_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Present only when `error` is `rate_limited`. The number of
+            whole seconds to wait before retrying, rounded up from the
+            admission boundary's precise delay. The `Retry-After` response
+            header carries this same decimal value; clients may use either
+            representation and MUST NOT retry a non-idempotent mutation
+            without an idempotency key.
 
     QuotaResponse:
       type: object
