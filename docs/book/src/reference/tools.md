@@ -822,7 +822,7 @@ The hook body — invoked by the provider, not usually by a human
 
 * `--event <EVENT>` — Which moment fired: `session-start`, `turn-start`, `turn-end`, `waiting`, `asking` or `answered`
 * `--provider <NAME>` — The pilot this hook runs inside: `claude` or `codex`. The payload is not consulted, so a Codex hook passes `codex`; `claude` otherwise
-* `--session <SID>` — This session's cosmon id. Defaults to `$COSMON_SESSION_ID`
+* `--session <SID>` — This worker hook's cosmon id. Codex pilot hooks instead require the native `thread_id` in their notify payload and never use an inherited `$COSMON_SESSION_ID`
 
 
 

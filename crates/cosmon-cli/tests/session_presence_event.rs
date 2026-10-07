@@ -38,6 +38,18 @@ fn fire_with(
     worker_molecule: Option<&str>,
     payload: &str,
 ) {
+    fire_provider_with(state, session, event, worker_molecule, None, payload);
+}
+
+/// Like [`fire_with`], with the provider named as its installed hook does.
+fn fire_provider_with(
+    state: &Path,
+    session: &str,
+    event: &str,
+    worker_molecule: Option<&str>,
+    provider: Option<&str>,
+    payload: &str,
+) -> std::process::Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
     cmd.arg("--config")
         .arg(state)
@@ -52,6 +64,9 @@ fn fire_with(
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
+    if let Some(provider) = provider {
+        cmd.args(["--provider", provider]);
+    }
     if let Some(mol) = worker_molecule {
         cmd.env("COSMON_PARENT_MOL_ID", mol);
     }
@@ -68,6 +83,7 @@ fn fire_with(
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    out
 }
 
 /// The `session_presence` rows of the galaxy ledger, in order.
@@ -350,4 +366,86 @@ fn an_unknown_or_absent_notification_type_stays_waiting_permission() {
         "waiting_permission"
     );
     assert_eq!(state_after_notification(None), "waiting_permission");
+}
+
+#[test]
+fn codex_notify_uses_thread_id_over_an_inherited_generic_session_id() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = galaxy(tmp.path());
+
+    for thread_id in ["thread-alpha", "thread-bravo"] {
+        fire_provider_with(
+            &state,
+            "shared-inherited-session",
+            "turn-end",
+            None,
+            Some("codex"),
+            &serde_json::json!({ "thread_id": thread_id }).to_string(),
+        );
+    }
+
+    let records =
+        ["thread-alpha", "thread-bravo"].map(|thread_id| presence_record(&state, thread_id));
+    assert_eq!(records[0]["provider"], "codex");
+    assert_eq!(records[0]["native_session_id"], "thread-alpha");
+    assert_eq!(records[1]["native_session_id"], "thread-bravo");
+    assert!(
+        !state
+            .join("presence")
+            .join("session-shared-inherited-session.json")
+            .exists(),
+        "a generic inherited id must not collapse Codex pilots"
+    );
+}
+
+#[test]
+fn codex_pilot_without_a_thread_id_publishes_no_ambiguous_presence() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = galaxy(tmp.path());
+
+    let output = fire_provider_with(
+        &state,
+        "shared-inherited-session",
+        "turn-end",
+        None,
+        Some("codex"),
+        r#"{"session_id":"not-a-codex-thread"}"#,
+    );
+
+    assert!(
+        presence_rows(&state).is_empty(),
+        "a payload without the native Codex identity must not publish"
+    );
+    assert!(
+        !state.join("presence").exists(),
+        "a payload without the native Codex identity must not create a row"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("native identity"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn codex_worker_keeps_its_dispatch_session_identity_when_thread_id_is_absent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = galaxy(tmp.path());
+
+    fire_provider_with(
+        &state,
+        "worker-dispatch-session",
+        "turn-end",
+        Some("task-20261003-0d5c"),
+        Some("codex"),
+        r#"{}"#,
+    );
+
+    let record = presence_record(&state, "worker-dispatch-session");
+    assert_eq!(record["provider"], "codex");
+    assert!(record.get("native_session_id").is_none(), "{record}");
+    let rows = presence_rows(&state);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["role"], "worker");
+    assert_eq!(rows[0]["molecule_id"], "task-20261003-0d5c");
 }
