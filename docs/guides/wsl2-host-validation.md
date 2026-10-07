@@ -133,8 +133,8 @@ Host sleep and resume with a patrol in flight:
 
 ```sh
 bash "$verify" before-sleep
-# Keep a WSL client attached while the external driver sleeps and resumes the
-# host. An idle distribution without a client can stop before sleep.
+# An external driver sleeps and resumes the host. A WSL client attached across
+# the sleep did not keep the distribution alive on the measured host.
 bash "$verify" after-sleep
 ```
 

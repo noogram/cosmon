@@ -69,12 +69,21 @@ the supervisor service and scheduler timer were active. Remote test access also
 needed its listener decoupled from a late-arriving network address. That was a
 remote-access boot-order issue, not a cosmon service failure.
 
-The sleep checkpoint did not pass. The host entered and left sleep, but the
-distribution had already stopped while idle with no WSL client attached. Its
-boot time after wake was later than the before-sleep boot time, the in-flight
-probe never completed, and a later probe was a new timer firing. This measures
-an idle-distribution stop, not survival through sleep. A rerun must keep a WSL
-client attached across the power boundary.
+The sleep checkpoint did not pass, in two attempts. In the first, the host
+entered and left sleep, but the distribution had already stopped while idle with
+no WSL client attached; its boot time after wake was later than the before-sleep
+boot time, the in-flight probe never completed, and a later probe was a new
+timer firing.
+
+The rerun kept a WSL client window open. The host entered Modern Standby for
+about 26 minutes. The distribution boot time after wake was still later than the
+before-sleep value, so the distribution was restarted during the standby despite
+the attached client. The services were active again afterwards, restarted with
+the distribution. Work in flight at the time of the sleep was lost.
+`after-sleep` refused with `distribution stopped before or during sleep`, and
+`final` refused for the missing `after-sleep` phase. On this host, host sleep is
+therefore not held, and keeping a client attached was not sufficient. Not
+measured: a short standby, and what restarted the distribution.
 
 The measured candidate matrix is therefore: install, lifecycle, supervisor
 crash recovery, child crash recovery, timer firing, last-shell logout,
