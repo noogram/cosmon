@@ -369,7 +369,7 @@ fn an_unknown_or_absent_notification_type_stays_waiting_permission() {
 }
 
 #[test]
-fn codex_notify_uses_thread_id_over_an_inherited_generic_session_id() {
+fn codex_notify_uses_hyphenated_thread_id_over_an_inherited_generic_session_id() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = galaxy(tmp.path());
 
@@ -380,7 +380,7 @@ fn codex_notify_uses_thread_id_over_an_inherited_generic_session_id() {
             "turn-end",
             None,
             Some("codex"),
-            &serde_json::json!({ "thread_id": thread_id }).to_string(),
+            &serde_json::json!({ "thread-id": thread_id }).to_string(),
         );
     }
 
@@ -420,6 +420,28 @@ fn codex_pilot_without_a_thread_id_publishes_no_ambiguous_presence() {
         !state.join("presence").exists(),
         "a payload without the native Codex identity must not create a row"
     );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("native identity"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn codex_pilot_does_not_admit_an_underscore_thread_id() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = galaxy(tmp.path());
+
+    let output = fire_provider_with(
+        &state,
+        "shared-inherited-session",
+        "turn-end",
+        None,
+        Some("codex"),
+        r#"{"thread_id":"underscore-only-thread"}"#,
+    );
+
+    assert!(presence_rows(&state).is_empty());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("native identity"),
         "{}",
