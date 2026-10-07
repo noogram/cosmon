@@ -5,8 +5,8 @@ accepts `--with-services`. The measured baseline is WSL2 on x86_64 Ubuntu
 24.04, with systemd enabled and the repository, home directory, and cosmon
 state on the Linux filesystem. The candidate passed installation, lifecycle,
 crash recovery, timer, logout, distribution restart, and real host reboot
-checks. Host sleep has not passed: the first attempt observed an idle
-distribution stop instead. The exact v0.7.3 published assets and served
+checks. Host sleep has not passed: on the measured host a Modern Standby of
+about 26 minutes restarted the distribution, with a WSL client attached. The exact v0.7.3 published assets and served
 installer still need the same host run, so this is a measured candidate
 contract rather than a completed release witness.
 
@@ -82,9 +82,15 @@ services. Use the host's **Restart** action for this check. A shutdown followed
 by power-on can retain the previous host boot through Fast Startup and is not a
 reboot witness.
 
-An idle distribution can stop when no client is attached. For a sleep/resume
-check, keep a WSL client attached across the sleep. Treat a changed
-distribution boot time as a distribution restart, not service survival.
+Host sleep is not held on the measured host. After a Modern Standby of about
+26 minutes the distribution had been restarted during the standby, although a
+WSL client window stayed open. The services came back with the distribution.
+A distribution restart ends every process running in it, so work in flight
+during a sleep should be expected lost; the test probe had already finished,
+so that loss was not observed directly. Keeping a client attached was not
+sufficient there. Not measured: a short standby, and what restarted the
+distribution. Treat a changed distribution boot time as a distribution restart,
+not service survival, and inspect recorded molecule state before redispatching.
 
 The scheduler timer does not replay missed cron slots. An overdue interval job
 runs on a later tick according to the scheduler's ordinary wall-time rules.
