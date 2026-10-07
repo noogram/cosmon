@@ -2,7 +2,7 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Wire this pilot's provider to run the co-pilotage hook
+Wire this pilot's provider to run the co-pilotage hook. A Codex `notify` held by Computer Use is chained behind, not replaced
 
 Usage: cs sessions hook install [OPTIONS] --provider <NAME>
 

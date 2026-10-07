@@ -543,7 +543,9 @@ fn prune_empty_hooks(doc: &mut Value) {
 ///
 /// Codex appends its own JSON payload as a final argument, which is why
 /// `cs sessions hook run` takes an optional trailing positional payload as
-/// well as reading stdin.
+/// well as reading stdin. The provider is spelled out because a Codex payload
+/// does not name one, and `hook run` would otherwise record the session as
+/// Claude's.
 #[must_use]
 pub fn codex_notify_argv(cs_bin: &str) -> Vec<String> {
     vec![
@@ -553,26 +555,101 @@ pub fn codex_notify_argv(cs_bin: &str) -> Vec<String> {
         "run".to_owned(),
         "--event".to_owned(),
         HookEvent::TurnEnd.as_str().to_owned(),
+        "--provider".to_owned(),
+        HookProvider::Codex.as_str().to_owned(),
     ]
 }
 
-/// Is this `notify` value one this crate wrote?
-fn codex_notify_is_ours(item: &toml_edit::Item) -> bool {
-    let Some(arr) = item.as_array() else {
-        return false;
-    };
-    let joined = arr
+/// The flag Codex Computer Use's client takes to run one earlier notifier
+/// after its own.
+const PREVIOUS_NOTIFY_FLAG: &str = "--previous-notify";
+
+/// The subcommand of the Computer Use client that Codex invokes as `notify`.
+const COMPUTER_USE_SUBCOMMAND: &str = "turn-ended";
+
+/// The file name of the Computer Use client binary.
+const COMPUTER_USE_CLIENT: &str = "SkyComputerUseClient";
+
+/// What a Codex `notify` value is, as far as cosmon is concerned.
+enum CodexNotify {
+    /// Cosmon's program, directly in the slot.
+    Ours,
+    /// The Computer Use client, with cosmon's program as its previous notifier.
+    ChainedOurs,
+    /// The Computer Use client with no previous notifier: cosmon may take that
+    /// place.
+    FreeChain,
+    /// Anything else, including a Computer Use client chained to another
+    /// program.
+    Foreign,
+}
+
+fn notify_strings(item: &toml_edit::Item) -> Option<Vec<String>> {
+    item.as_array()?
         .iter()
-        .filter_map(toml_edit::Value::as_str)
-        .collect::<Vec<_>>()
-        .join(" ");
-    joined.contains(HOOK_MARKER)
+        .map(|v| v.as_str().map(ToOwned::to_owned))
+        .collect()
+}
+
+fn is_computer_use_client(argv: &[String]) -> bool {
+    argv.first()
+        .and_then(|p| p.rsplit('/').next())
+        .is_some_and(|name| name == COMPUTER_USE_CLIENT)
+        && argv.get(1).is_some_and(|a| a == COMPUTER_USE_SUBCOMMAND)
+}
+
+/// The JSON argv after `--previous-notify`, when the client has one.
+fn previous_notify(argv: &[String]) -> Option<(usize, Vec<String>)> {
+    let at = argv.iter().position(|a| a == PREVIOUS_NOTIFY_FLAG)?;
+    let parsed = serde_json::from_str::<Vec<String>>(argv.get(at + 1)?).ok()?;
+    Some((at, parsed))
+}
+
+fn classify_notify(item: &toml_edit::Item) -> CodexNotify {
+    let Some(argv) = notify_strings(item) else {
+        return CodexNotify::Foreign;
+    };
+    if is_computer_use_client(&argv) {
+        if !argv.iter().any(|a| a == PREVIOUS_NOTIFY_FLAG) {
+            return CodexNotify::FreeChain;
+        }
+        return match previous_notify(&argv) {
+            Some((_, prev)) if prev.join(" ").contains(HOOK_MARKER) => CodexNotify::ChainedOurs,
+            _ => CodexNotify::Foreign,
+        };
+    }
+    if argv.join(" ").contains(HOOK_MARKER) {
+        CodexNotify::Ours
+    } else {
+        CodexNotify::Foreign
+    }
+}
+
+fn string_array(tokens: Vec<String>) -> toml_edit::Array {
+    let mut arr = toml_edit::Array::new();
+    for token in tokens {
+        arr.push(token);
+    }
+    arr
+}
+
+/// The Computer Use client's argv with cosmon's program as its previous
+/// notifier, keeping any arguments the client already had before the flag.
+fn chained_argv(client_args: &[String], cs_bin: &str) -> Vec<String> {
+    let mut argv = client_args.to_vec();
+    argv.push(PREVIOUS_NOTIFY_FLAG.to_owned());
+    // Serialising a `Vec<String>` cannot fail.
+    argv.push(serde_json::to_string(&codex_notify_argv(cs_bin)).unwrap_or_default());
+    argv
 }
 
 /// Wire the hook into a Codex `config.toml`.
 ///
-/// Codex has exactly one program slot, so unlike Claude there is no room to
-/// append beside a foreign entry. A `notify` that is not ours is therefore a
+/// Codex has exactly one program slot. When it is empty, or already holds
+/// cosmon's program, cosmon takes it. When it holds the Computer Use client
+/// without a previous notifier, cosmon is added behind it with
+/// `--previous-notify`, which that client runs after its own work; a client
+/// already chained to cosmon is rewritten in place. Any other occupant is a
 /// [`HookWiringError::Occupied`] naming what is there — never a replacement.
 /// The edit is made with `toml_edit`, so comments, ordering and formatting the
 /// operator wrote survive it.
@@ -589,21 +666,30 @@ pub fn install_codex(
     let mut doc = read_toml(path, existing)?;
     let before = doc.to_string();
 
-    if let Some(item) = doc.get("notify") {
-        if !codex_notify_is_ours(item) {
+    let state = doc.get("notify").map(classify_notify);
+    let value = match (state, doc.get("notify").and_then(notify_strings)) {
+        (None | Some(CodexNotify::Ours), _) => string_array(codex_notify_argv(cs_bin)),
+        (Some(CodexNotify::FreeChain), Some(argv)) => string_array(chained_argv(&argv, cs_bin)),
+        (Some(CodexNotify::ChainedOurs), Some(argv)) => {
+            let at = argv
+                .iter()
+                .position(|a| a == PREVIOUS_NOTIFY_FLAG)
+                .unwrap_or(argv.len());
+            string_array(chained_argv(&argv[..at], cs_bin))
+        }
+        _ => {
+            let found = doc
+                .get("notify")
+                .map(|i| i.to_string().trim().to_owned())
+                .unwrap_or_default();
             return Err(HookWiringError::Occupied {
                 path: path.to_owned(),
                 key: "notify",
-                found: item.to_string().trim().to_owned(),
+                found,
             });
         }
-    }
-
-    let mut arr = toml_edit::Array::new();
-    for token in codex_notify_argv(cs_bin) {
-        arr.push(token);
-    }
-    doc["notify"] = toml_edit::value(arr);
+    };
+    doc["notify"] = toml_edit::value(value);
 
     let document = doc.to_string();
     Ok(HookEdit {
@@ -616,7 +702,9 @@ pub fn install_codex(
 /// Remove this crate's `notify` program from a Codex `config.toml`.
 ///
 /// A foreign `notify` is left exactly as it is — uninstalling cosmon's hook is
-/// not licence to clear a slot cosmon does not own.
+/// not licence to clear a slot cosmon does not own. When cosmon is chained
+/// behind the Computer Use client, only that link goes: the client's own
+/// `notify` stays.
 ///
 /// # Errors
 ///
@@ -625,9 +713,23 @@ pub fn uninstall_codex(path: &str, existing: Option<&str>) -> Result<HookEdit, H
     let mut doc = read_toml(path, existing)?;
     let before = doc.to_string();
 
-    let ours = doc.get("notify").is_some_and(codex_notify_is_ours);
-    if ours {
-        doc.remove("notify");
+    let mut ours = false;
+    match doc.get("notify").map(classify_notify) {
+        Some(CodexNotify::Ours) => {
+            doc.remove("notify");
+            ours = true;
+        }
+        Some(CodexNotify::ChainedOurs) => {
+            if let Some(argv) = doc.get("notify").and_then(notify_strings) {
+                if let Some((at, _)) = previous_notify(&argv) {
+                    let mut kept = argv;
+                    kept.drain(at..=at + 1);
+                    doc["notify"] = toml_edit::value(string_array(kept));
+                    ours = true;
+                }
+            }
+        }
+        _ => {}
     }
 
     let document = doc.to_string();
@@ -652,10 +754,9 @@ pub fn installed_codex(
     existing: Option<&str>,
 ) -> Result<Vec<HookEvent>, HookWiringError> {
     let doc = read_toml(path, existing)?;
-    Ok(if doc.get("notify").is_some_and(codex_notify_is_ours) {
-        vec![HookEvent::TurnEnd]
-    } else {
-        Vec::new()
+    Ok(match doc.get("notify").map(classify_notify) {
+        Some(CodexNotify::Ours | CodexNotify::ChainedOurs) => vec![HookEvent::TurnEnd],
+        _ => Vec::new(),
     })
 }
 
@@ -838,5 +939,85 @@ mod tests {
         assert!(HookEvent::parse("turn-middle").is_err());
         assert_eq!(HookProvider::parse("codex"), Ok(HookProvider::Codex));
         assert_eq!(HookEvent::parse("turn-end"), Ok(HookEvent::TurnEnd));
+    }
+
+    const CLIENT: &str = "/Applications/Sky.app/Contents/SkyComputerUseClient";
+
+    fn chained_config(previous: &str) -> String {
+        format!(
+            "model = \"gpt-5\"\nnotify = [\"{CLIENT}\", \"turn-ended\", \"--previous-notify\", {}]\n",
+            toml_edit::value(previous)
+        )
+    }
+
+    fn notify_of(document: &str) -> Vec<String> {
+        let doc = document.parse::<toml_edit::DocumentMut>().expect("toml");
+        doc["notify"]
+            .as_array()
+            .expect("notify is an array")
+            .iter()
+            .map(|v| v.as_str().expect("string").to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_computer_use_client_is_chained_not_refused() {
+        let theirs = format!("notify = [\"{CLIENT}\", \"turn-ended\"]\n");
+        let edit = install_codex("config.toml", Some(&theirs), CS).expect("chain");
+        assert!(edit.changed);
+        let argv = notify_of(&edit.document);
+        assert_eq!(&argv[..2], [CLIENT, "turn-ended"]);
+        assert_eq!(argv[2], "--previous-notify");
+        let previous: Vec<String> = serde_json::from_str(&argv[3]).expect("json argv");
+        assert_eq!(previous, codex_notify_argv(CS));
+
+        let again = install_codex("config.toml", Some(&edit.document), CS).expect("again");
+        assert!(!again.changed, "idempotent");
+        assert_eq!(
+            installed_codex("config.toml", Some(&edit.document)).expect("status"),
+            vec![HookEvent::TurnEnd]
+        );
+    }
+
+    #[test]
+    fn a_moved_binary_rewrites_the_chained_link() {
+        let first = install_codex(
+            "config.toml",
+            Some(&format!("notify = [\"{CLIENT}\", \"turn-ended\"]\n")),
+            CS,
+        )
+        .expect("chain");
+        let moved = install_codex("config.toml", Some(&first.document), "/opt/cs").expect("move");
+        let argv = notify_of(&moved.document);
+        assert_eq!(argv.len(), 4, "no second link: {argv:?}");
+        assert!(argv[3].contains("/opt/cs"));
+    }
+
+    #[test]
+    fn the_computer_use_client_chained_to_someone_else_is_refused() {
+        let theirs = chained_config("[\"/usr/bin/say\", \"done\"]");
+        let err = install_codex("config.toml", Some(&theirs), CS).expect_err("occupied");
+        assert!(matches!(err, HookWiringError::Occupied { .. }), "{err}");
+        let removed = uninstall_codex("config.toml", Some(&theirs)).expect("uninstall");
+        assert!(!removed.changed);
+    }
+
+    #[test]
+    fn uninstall_removes_only_cosmons_link_from_the_chain() {
+        let original = format!("model = \"gpt-5\"\nnotify = [\"{CLIENT}\", \"turn-ended\"]\n");
+        let installed = install_codex("config.toml", Some(&original), CS).expect("chain");
+        let removed = uninstall_codex("config.toml", Some(&installed.document)).expect("remove");
+        assert!(removed.changed);
+        assert_eq!(notify_of(&removed.document), [CLIENT, "turn-ended"]);
+        assert_eq!(
+            installed_codex("config.toml", Some(&removed.document)).expect("status"),
+            Vec::<HookEvent>::new()
+        );
+    }
+
+    #[test]
+    fn the_installed_codex_command_names_its_provider() {
+        let argv = codex_notify_argv(CS);
+        assert_eq!(&argv[argv.len() - 2..], ["--provider", "codex"]);
     }
 }

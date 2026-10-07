@@ -610,3 +610,79 @@ fn the_hook_never_blocks_a_turn() {
         assert_eq!(code, 0, "exit 0 for {args:?}");
     }
 }
+
+/// Codex Computer Use occupies `notify`. Install chains cosmon behind it, the
+/// command it writes is run the way Codex's payload reaches it (trailing
+/// argument, no provider named in the payload), and the session is recorded as
+/// Codex's. Uninstall then leaves the client's own `notify` as it was.
+#[test]
+fn codex_hook_chains_behind_computer_use_and_records_codex() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = tmp.path();
+    let config = state.join("config.toml");
+    let client = "/Applications/Sky.app/Contents/SkyComputerUseClient";
+    let theirs = format!("model = \"gpt-5\"\nnotify = [\"{client}\", \"turn-ended\"]\n");
+    std::fs::write(&config, &theirs).expect("seed config");
+    let path = config.to_str().expect("utf-8 path");
+
+    let (_, err, code) = run(
+        state,
+        "pilot-codex",
+        &[
+            "sessions",
+            "hook",
+            "install",
+            "--provider",
+            "codex",
+            "--settings",
+            path,
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "install: {err}");
+
+    let doc: toml::Table =
+        toml::from_str(&std::fs::read_to_string(&config).expect("read")).expect("toml");
+    let notify: Vec<String> = doc["notify"]
+        .as_array()
+        .expect("notify array")
+        .iter()
+        .map(|v| v.as_str().expect("string").to_owned())
+        .collect();
+    assert_eq!(&notify[..2], [client, "turn-ended"], "client stays first");
+    assert_eq!(notify[2], "--previous-notify");
+    let previous: Vec<String> = serde_json::from_str(&notify[3]).expect("json argv");
+
+    // A Codex `agent-turn-complete` payload: it does not name a provider.
+    let payload = r#"{"type":"agent-turn-complete","turn-id":"t1","cwd":"/tmp","input-messages":[],"last-assistant-message":""}"#;
+    let mut args: Vec<&str> = previous[1..].iter().map(String::as_str).collect();
+    args.push(payload);
+    let (_, err, code) = run(state, "pilot-codex", &args, None);
+    assert_eq!(code, 0, "chained hook: {err}");
+
+    let (out, err, code) = run(state, "pilot-other", &["sessions", "peers", "--json"], None);
+    assert_eq!(code, 0, "peers: {err}");
+    assert!(out.contains("pilot-codex"), "presence recorded:\n{out}");
+    assert!(out.contains("\"codex\""), "recorded as codex:\n{out}");
+    assert!(
+        !out.contains("\"claude\""),
+        "not defaulted to claude:\n{out}"
+    );
+
+    let (_, err, code) = run(
+        state,
+        "pilot-codex",
+        &[
+            "sessions",
+            "hook",
+            "uninstall",
+            "--provider",
+            "codex",
+            "--settings",
+            path,
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "uninstall: {err}");
+    assert_eq!(std::fs::read_to_string(&config).expect("read"), theirs);
+}
