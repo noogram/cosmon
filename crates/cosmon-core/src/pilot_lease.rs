@@ -390,6 +390,9 @@ impl PilotLease {
 pub enum RefusalReason {
     /// No lease exists for this mission. Nobody is PRIMARY, so nobody may act.
     NoLease,
+    /// The ledger has grant lines, but no per-galaxy trust root can verify
+    /// them. Authority is unknown and therefore read-only, never unleased.
+    UnverifiableGrantLedger,
     /// A lease exists but the gesture presented no epoch. The rule is not
     /// "hold the lease" but "hold it and say so".
     EpochNotPresented,
@@ -421,6 +424,9 @@ impl RefusalReason {
         match self {
             Self::NoLease => {
                 "no lease on this mission — nobody is PRIMARY, so nobody may pilot".to_owned()
+            }
+            Self::UnverifiableGrantLedger => {
+                "grant lines cannot be verified — restore the per-galaxy .cosmon/takeover.pub trust root if it is missing, or repair the ledger; refusing rather than treating the mission as unleased".to_owned()
             }
             Self::EpochNotPresented => {
                 "no epoch presented — a gesture must carry the epoch it believes it holds"
@@ -867,6 +873,7 @@ mod tests {
     fn every_refusal_explains_itself_in_one_line() {
         for reason in [
             RefusalReason::NoLease,
+            RefusalReason::UnverifiableGrantLedger,
             RefusalReason::EpochNotPresented,
             RefusalReason::NotHolder {
                 holder: sid("claude"),

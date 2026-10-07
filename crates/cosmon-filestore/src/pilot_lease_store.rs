@@ -278,6 +278,22 @@ impl PilotLeaseStore {
         Ok(self.grants(mission)?.into_iter().max_by_key(|l| l.epoch))
     }
 
+    /// Whether grant lines exist but none can be verified.
+    ///
+    /// This is distinct from an absent or empty ledger. A nonempty ledger
+    /// without a current attested lease is an unknown authority record, which
+    /// must stay read-only rather than becoming an unleased mission.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CosmonError::StateStore`] when the ledger cannot be read.
+    pub fn has_unverifiable_grant_ledger(&self, mission: &MoleculeId) -> Result<bool, CosmonError> {
+        Ok(read_lines(&self.grants_path(mission))?
+            .iter()
+            .any(|line| !line.trim().is_empty())
+            && self.current(mission)?.is_none())
+    }
+
     /// The epoch a transfer should be granted at: one past the highest in the
     /// ledger, or [`LeaseEpoch::first`] on a mission with no grants.
     ///
@@ -415,6 +431,11 @@ impl PilotLeaseStore {
         presented_epoch: Option<LeaseEpoch>,
     ) -> Result<LeaseDecision, CosmonError> {
         let current = self.current(mission)?;
+        if current.is_none() && self.has_unverifiable_grant_ledger(mission)? {
+            return Ok(LeaseDecision::Refused(
+                cosmon_core::pilot_lease::RefusalReason::UnverifiableGrantLedger,
+            ));
+        }
         Ok(authorize(current.as_ref(), now, session, presented_epoch))
     }
 }
@@ -822,7 +843,7 @@ mod tests {
         assert_eq!(
             s.authorize(&mission(), t0(), &sid("agent"), Some(LeaseEpoch::first()))
                 .unwrap(),
-            LeaseDecision::Refused(RefusalReason::NoLease)
+            LeaseDecision::Refused(RefusalReason::UnverifiableGrantLedger)
         );
     }
 
@@ -926,6 +947,42 @@ mod tests {
         assert_eq!(
             unpinned.audit(&mission()).unwrap()[0].verdict,
             Err(AttestationError::NoTrustRoot)
+        );
+    }
+
+    #[test]
+    fn an_unpinned_store_refuses_a_ledger_with_grant_lines() {
+        let (dir, s) = store();
+        s.grant(&lease("claude", LeaseEpoch::first())).unwrap();
+
+        let unpinned = PilotLeaseStore::new(dir.path());
+        assert_eq!(
+            unpinned
+                .authorize(
+                    &mission(),
+                    Utc::now(),
+                    &SessionId::new("claude").unwrap(),
+                    Some(LeaseEpoch::first()),
+                )
+                .unwrap(),
+            LeaseDecision::Refused(RefusalReason::UnverifiableGrantLedger),
+        );
+    }
+
+    #[test]
+    fn a_malformed_grant_line_does_not_restore_the_unleased_verdict() {
+        let (_dir, s) = store();
+        append_line(&s.grants_path(&mission()), "{ not json").unwrap();
+
+        assert_eq!(
+            s.authorize(
+                &mission(),
+                Utc::now(),
+                &SessionId::new("claude").unwrap(),
+                Some(LeaseEpoch::first()),
+            )
+            .unwrap(),
+            LeaseDecision::Refused(RefusalReason::UnverifiableGrantLedger),
         );
     }
 

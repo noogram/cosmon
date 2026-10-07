@@ -73,6 +73,7 @@ fn cs(cwd: &Path) -> Command {
         "CLAUDE_SESSION_ID",
         "COSMON_DEFAULT_ADAPTER",
         "COSMON_DEFAULT_MODEL",
+        "COSMON_TAKEOVER_PUBKEY",
         "CB_SESSION_ROLE",
         "CB_DEPTH",
         "ANTHROPIC_MODEL",
@@ -283,6 +284,52 @@ fn a_copilot_without_the_lease_is_refused_by_the_mechanism() {
         "a refused gesture is refused BEFORE it takes effect (ADR-168 §D6, \
          third bullet) — the mission must not have moved",
     );
+}
+
+#[test]
+fn removing_the_trust_root_refuses_the_ledger_in_checks_and_lifecycle_gestures() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = galaxy(tmp.path());
+    let mission = nucleate(&root);
+    seat_primary(&root, &mission);
+    fs::remove_file(root.join(".cosmon/takeover.pub")).unwrap();
+
+    let check = cs(&root)
+        .args([
+            "sessions",
+            "takeover",
+            "check",
+            "--mission",
+            &mission,
+            "--session",
+            PRIMARY,
+            "--epoch",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    let check_stdout = String::from_utf8_lossy(&check.stdout);
+    assert_eq!(check.status.code(), Some(1), "check: {check_stdout}");
+    assert!(
+        check_stdout.contains(".cosmon/takeover.pub")
+            && check_stdout.contains("grant lines cannot be verified"),
+        "the cockpit must name the missing per-galaxy trust root: {check_stdout}",
+    );
+
+    let out = gesture(
+        &root,
+        PRIMARY,
+        &mission,
+        &["collapse", "--reason", "no root"],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(UNLEASED_PILOT_GESTURE), "{stderr}");
+    assert!(
+        stderr.contains(".cosmon/takeover.pub")
+            && stderr.contains("grant lines cannot be verified"),
+        "the lifecycle guard must return the check's authority verdict: {stderr}",
+    );
+    assert_eq!(status(&root, &mission), "pending");
 }
 
 // ---------------------------------------------------------------------------
