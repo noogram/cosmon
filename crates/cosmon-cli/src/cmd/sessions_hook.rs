@@ -78,7 +78,8 @@ pub struct Args {
 /// The hook verbs.
 #[derive(clap::Subcommand)]
 pub enum Sub {
-    /// Wire this pilot's provider to run the co-pilotage hook.
+    /// Wire this pilot's provider to run the co-pilotage hook. A Codex
+    /// `notify` held by Computer Use is chained behind, not replaced.
     Install(InstallArgs),
     /// Remove the co-pilotage hook, leaving the rest of the file untouched.
     Uninstall(InstallArgs),
@@ -128,8 +129,8 @@ pub struct RunArgs {
     /// Which moment fired: `session-start`, `turn-start`, `turn-end`, `waiting`, `asking` or `answered`.
     #[arg(long, value_name = "EVENT")]
     pub event: String,
-    /// The pilot this hook runs inside. Inferred from the payload when it
-    /// names one; `claude` otherwise.
+    /// The pilot this hook runs inside: `claude` or `codex`. The payload is not
+    /// consulted, so a Codex hook passes `codex`; `claude` otherwise.
     #[arg(long, value_name = "NAME")]
     pub provider: Option<String>,
     /// This session's cosmon id. Defaults to `$COSMON_SESSION_ID`.

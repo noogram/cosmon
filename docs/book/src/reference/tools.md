@@ -757,7 +757,7 @@ Wire the routine gestures — take a seat, read the mailbox, leave a note — in
 
 ###### **Subcommands:**
 
-* `install` — Wire this pilot's provider to run the co-pilotage hook
+* `install` — Wire this pilot's provider to run the co-pilotage hook. A Codex `notify` held by Computer Use is chained behind, not replaced
 * `uninstall` — Remove the co-pilotage hook, leaving the rest of the file untouched
 * `status` — Report whether the hook is wired, and what it has cost
 * `run` — The hook body — invoked by the provider, not usually by a human
@@ -766,7 +766,7 @@ Wire the routine gestures — take a seat, read the mailbox, leave a note — in
 
 ## `cs sessions hook install`
 
-Wire this pilot's provider to run the co-pilotage hook
+Wire this pilot's provider to run the co-pilotage hook. A Codex `notify` held by Computer Use is chained behind, not replaced
 
 **Usage:** `cs sessions hook install [OPTIONS] --provider <NAME>`
 
@@ -821,7 +821,7 @@ The hook body — invoked by the provider, not usually by a human
 ###### **Options:**
 
 * `--event <EVENT>` — Which moment fired: `session-start`, `turn-start`, `turn-end`, `waiting`, `asking` or `answered`
-* `--provider <NAME>` — The pilot this hook runs inside. Inferred from the payload when it names one; `claude` otherwise
+* `--provider <NAME>` — The pilot this hook runs inside: `claude` or `codex`. The payload is not consulted, so a Codex hook passes `codex`; `claude` otherwise
 * `--session <SID>` — This session's cosmon id. Defaults to `$COSMON_SESSION_ID`
 
 
