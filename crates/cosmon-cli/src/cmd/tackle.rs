@@ -6515,27 +6515,24 @@ fn record_model_selection(mol_state_dir: &std::path::Path, value: &serde_json::V
     }
 }
 
-/// Probe whether `model` is usable by the worker's `claude` CLI.
+/// MCP configuration the model probe passes to Claude Code: no servers.
+const PROBE_EMPTY_MCP_CONFIG: &str = r#"{"mcpServers":{}}"#;
+
+/// Build the `claude` command line used by [`probe_claude_model`].
 ///
-/// Runs `claude --model <model> -p <trivial-prompt>` (print mode: one
-/// turn, then exit) under the resolved `CLAUDE_CONFIG_DIR`, bounded by
-/// the configured bounded timeout. Verdict:
-/// - exit 0 → `ProbeOutcome::Available`;
-/// - non-zero exit → unavailable, carrying the trimmed stderr tail as
-///   the cause (e.g. the `model_not_found` message);
-/// - timeout (killed) → unavailable, the false-active symptom itself;
-/// - spawn failure (binary missing) → unavailable, carrying the io error.
-///
-/// This is the production prober; the selection logic is independently
-/// unit-tested in `cosmon-core::model_chain` with an injected mock.
-fn probe_claude_model(
+/// The probe asks one question — can the worker's account reach `model`? —
+/// so it runs with `--strict-mcp-config` and an empty server list. Without
+/// that, Claude Code starts every MCP server of the user's configuration
+/// before answering, which dominated the probe's budget under load
+/// (29.9 s against 5.7 s measured for the same model and account).
+/// `CLAUDE_CONFIG_DIR` and the privilege-drop identity are left exactly as
+/// the worker gets them, so the verdict still reflects the worker's account.
+fn build_probe_command(
     claude_bin: &str,
     model: &str,
     config_dir: Option<&str>,
     identity: cosmon_core::root_spawn_policy::PreflightIdentity,
-    timeout: std::time::Duration,
-) -> cosmon_core::model_chain::ProbeOutcome {
-    use cosmon_core::model_chain::ProbeOutcome;
+) -> std::process::Command {
     use std::process::{Command, Stdio};
 
     // Under a root dispatcher the probe is demoted with the SAME `setpriv`
@@ -6560,6 +6557,9 @@ fn probe_claude_model(
         .arg(model)
         .arg("-p")
         .arg("ping")
+        .arg("--strict-mcp-config")
+        .arg("--mcp-config")
+        .arg(PROBE_EMPTY_MCP_CONFIG)
         .env("ANTHROPIC_MODEL", model)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -6567,6 +6567,32 @@ fn probe_claude_model(
     if let Some(dir) = config_dir {
         cmd.env("CLAUDE_CONFIG_DIR", dir);
     }
+    cmd
+}
+
+/// Probe whether `model` is usable by the worker's `claude` CLI.
+///
+/// Runs `claude --model <model> -p <trivial-prompt>` (print mode: one
+/// turn, then exit) under the resolved `CLAUDE_CONFIG_DIR`, bounded by
+/// the configured bounded timeout. Verdict:
+/// - exit 0 → `ProbeOutcome::Available`;
+/// - non-zero exit → unavailable, carrying the trimmed stderr tail as
+///   the cause (e.g. the `model_not_found` message);
+/// - timeout (killed) → unavailable, the false-active symptom itself;
+/// - spawn failure (binary missing) → unavailable, carrying the io error.
+///
+/// This is the production prober; the selection logic is independently
+/// unit-tested in `cosmon-core::model_chain` with an injected mock.
+fn probe_claude_model(
+    claude_bin: &str,
+    model: &str,
+    config_dir: Option<&str>,
+    identity: cosmon_core::root_spawn_policy::PreflightIdentity,
+    timeout: std::time::Duration,
+) -> cosmon_core::model_chain::ProbeOutcome {
+    use cosmon_core::model_chain::ProbeOutcome;
+
+    let mut cmd = build_probe_command(claude_bin, model, config_dir, identity);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -12201,6 +12227,46 @@ mod tests {
             ProbeOutcome::Unavailable(reason) => assert!(reason.contains("probe spawn failed")),
             ProbeOutcome::Available => panic!("a missing binary cannot be available"),
         }
+    }
+
+    /// The probe must not start the user's MCP servers: it carries
+    /// `--strict-mcp-config` with an empty server list, while the account
+    /// (`CLAUDE_CONFIG_DIR`) and the model stay exactly as the worker's.
+    #[test]
+    fn probe_command_skips_mcp_servers_and_keeps_account_and_model() {
+        let cmd = build_probe_command(
+            "claude",
+            "claude-sonnet-5-5",
+            Some("/cfg/account"),
+            cosmon_core::root_spawn_policy::PreflightIdentity::AsIs,
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"), "{args:?}");
+        let at = args
+            .iter()
+            .position(|a| a == "--mcp-config")
+            .unwrap_or_else(|| panic!("no --mcp-config in {args:?}"));
+        let config: serde_json::Value = serde_json::from_str(&args[at + 1]).unwrap();
+        assert_eq!(config, serde_json::json!({"mcpServers": {}}));
+        assert_eq!(args[..4], ["--model", "claude-sonnet-5-5", "-p", "ping"]);
+
+        let envs: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(envs["CLAUDE_CONFIG_DIR"].as_deref(), Some("/cfg/account"));
+        assert_eq!(
+            envs["ANTHROPIC_MODEL"].as_deref(),
+            Some("claude-sonnet-5-5")
+        );
     }
 
     /// A loaded host can delay CLI startup without making the model
