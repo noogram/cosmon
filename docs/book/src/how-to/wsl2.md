@@ -84,9 +84,11 @@ reboot witness.
 
 Host sleep is not held on the measured host. After a Modern Standby of about
 26 minutes the distribution had been restarted during the standby, although a
-WSL client window stayed open. The services came back with the distribution,
-and work in flight at the time of the sleep was lost. Keeping a client attached
-was not sufficient there. Not measured: a short standby, and what restarted the
+WSL client window stayed open. The services came back with the distribution.
+A distribution restart ends every process running in it, so work in flight
+during a sleep should be expected lost; the test probe had already finished,
+so that loss was not observed directly. Keeping a client attached was not
+sufficient there. Not measured: a short standby, and what restarted the
 distribution. Treat a changed distribution boot time as a distribution restart,
 not service survival, and inspect recorded molecule state before redispatching.
 

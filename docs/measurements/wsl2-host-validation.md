@@ -79,7 +79,9 @@ The rerun kept a WSL client window open. The host entered Modern Standby for
 about 26 minutes. The distribution boot time after wake was still later than the
 before-sleep value, so the distribution was restarted during the standby despite
 the attached client. The services were active again afterwards, restarted with
-the distribution. Work in flight at the time of the sleep was lost.
+the distribution. The test probe had already finished before the standby began,
+so loss of in-flight work was not observed directly; a distribution restart ends
+every process running in it.
 `after-sleep` refused with `distribution stopped before or during sleep`, and
 `final` refused for the missing `after-sleep` phase. On this host, host sleep is
 therefore not held, and keeping a client attached was not sufficient. Not
