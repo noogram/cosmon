@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible, resumable witness for the Linux user-service release candidate.
+# Reproducible, resumable witness for the Linux user-service release.
 set -euo pipefail
 
 phase="${1:-${COSMON_WSL2_PHASE:-}}"
@@ -11,6 +11,10 @@ log_dir="$run_root/logs"
 install_dir="$run_root/bin"
 candidate_dir="${COSMON_CANDIDATE_DIR:-}"
 identity_repo="${COSMON_WSL2_IDENTITY_REPO:-}"
+install_source="${COSMON_WSL2_INSTALL_SOURCE:-candidate}"
+release_version="${COSMON_WSL2_RELEASE_VERSION:-}"
+installer_url="${COSMON_WSL2_INSTALLER_URL:-https://noogram.org/cosmon/install.sh}"
+release_base_url="${COSMON_WSL2_RELEASE_BASE_URL:-}"
 
 fail() {
     echo "verify-wsl2-host: $*" >&2
@@ -25,6 +29,7 @@ Inside-distribution phases:
   preflight             record platform and prerequisite facts
   published-red         prove the published installer lacks service assets
   candidate-install     install candidate archives through install.sh
+  release-install       install a pinned release through the served installer
   service-baseline      configure and prove the supervisor child and timer
   lifecycle             run one real tackle-to-done lifecycle
   supervisor-crash      kill the supervisor main process and prove recovery
@@ -46,7 +51,11 @@ External-driver boundaries (this script never performs them):
 
 Environment:
   COSMON_WSL2_RUN_ID       stable run name (default: candidate)
+  COSMON_WSL2_INSTALL_SOURCE candidate (default) or release
   COSMON_CANDIDATE_DIR     directory containing install.sh, SHA256SUMS, archives
+  COSMON_WSL2_RELEASE_VERSION pinned release tag required for release installs
+  COSMON_WSL2_INSTALLER_URL served installer URL (default: noogram.org endpoint)
+  COSMON_WSL2_RELEASE_BASE_URL release asset base override (tests only)
   COSMON_WSL2_ADAPTER      configured adapter for the single lifecycle probe
   COSMON_WSL2_MODEL        configured model for the single lifecycle probe
   COSMON_WSL2_IDENTITY_REPO existing repository supplying Git identity when
@@ -119,6 +128,14 @@ report_distribution_transition() {
 
 require_checkpoint() {
     [[ -s "$checkpoint_dir/$1" ]] || fail "phase '$1' has not completed"
+}
+
+require_install_checkpoint() {
+    case "$install_source" in
+        candidate) require_checkpoint candidate-install ;;
+        release) require_checkpoint release-install ;;
+        *) fail "COSMON_WSL2_INSTALL_SOURCE must be candidate or release" ;;
+    esac
 }
 
 bounded_wait() {
@@ -194,6 +211,7 @@ record_service_snapshot() {
 case "$phase" in
 preflight)
     require_inside_host
+    case "$install_source" in candidate|release) ;; *) fail "COSMON_WSL2_INSTALL_SOURCE must be candidate or release" ;; esac
     [[ "$(id -u)" -ne 0 ]] || fail "run as an ordinary user, not root"
     for tool in git tmux curl tar sha256sum python3; do
         command -v "$tool" >/dev/null || fail "missing prerequisite: $tool"
@@ -203,14 +221,16 @@ preflight)
     git_identity user.email >/dev/null
     fs_type="$(findmnt -n -o FSTYPE -T "$HOME")"
     case "$fs_type" in 9p|drvfs) fail "HOME is not on the Linux filesystem ($fs_type)" ;; esac
-    [[ ! -e "$HOME/.config/systemd/user/cosmon-daemon-supervisor.service" ]] \
-        || fail "supervisor unit already exists; use a clean test account"
-    [[ ! -e "$HOME/.config/systemd/user/cosmon-scheduler.service" ]] \
-        || fail "scheduler unit already exists; use a clean test account"
-    [[ ! -e "$HOME/.config/cosmon/daemons.toml" ]] \
-        || fail "daemon config already exists; use a clean test account"
-    [[ ! -e "$HOME/.config/cosmon/patrols.toml" ]] \
-        || fail "patrol config already exists; use a clean test account"
+    if [[ "$install_source" == candidate ]]; then
+        [[ ! -e "$HOME/.config/systemd/user/cosmon-daemon-supervisor.service" ]] \
+            || fail "supervisor unit already exists; use a clean test account"
+        [[ ! -e "$HOME/.config/systemd/user/cosmon-scheduler.service" ]] \
+            || fail "scheduler unit already exists; use a clean test account"
+        [[ ! -e "$HOME/.config/cosmon/daemons.toml" ]] \
+            || fail "daemon config already exists; use a clean test account"
+        [[ ! -e "$HOME/.config/cosmon/patrols.toml" ]] \
+            || fail "patrol config already exists; use a clean test account"
+    fi
     {
         uname -a
         cat /etc/os-release
@@ -226,6 +246,8 @@ preflight)
     ;;
 
 published-red)
+    [[ "$install_source" == candidate ]] \
+        || fail "published-red belongs to the candidate witness"
     require_checkpoint preflight
     require_inside_host
     published_tmp="$(mktemp -d /tmp/cosmon-wsl2-published.XXXXXX)"
@@ -246,6 +268,8 @@ published-red)
     ;;
 
 candidate-install)
+    [[ "$install_source" == candidate ]] \
+        || fail "candidate-install requires COSMON_WSL2_INSTALL_SOURCE=candidate"
     require_checkpoint published-red
     require_inside_host
     [[ -n "$candidate_dir" ]] || fail "COSMON_CANDIDATE_DIR is required"
@@ -267,8 +291,56 @@ candidate-install)
     checkpoint candidate-install
     ;;
 
+release-install)
+    [[ "$install_source" == release ]] \
+        || fail "release-install requires COSMON_WSL2_INSTALL_SOURCE=release"
+    require_checkpoint preflight
+    require_inside_host
+    [[ "$release_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+        || fail "COSMON_WSL2_RELEASE_VERSION must be a pinned vMAJOR.MINOR.PATCH tag"
+    release_tmp="$(mktemp -d /tmp/cosmon-wsl2-release.XXXXXX)"
+    trap 'find "$release_tmp" -depth -delete' EXIT
+    curl -fsSL "$installer_url" -o "$release_tmp/install.sh"
+    printf '%s  %s\n' "$(sha256sum "$release_tmp/install.sh" | awk '{print $1}')" \
+        "$installer_url" >"$run_root/release-installer.sha256"
+    if [[ -z "$release_base_url" ]]; then
+        release_base_url="https://github.com/noogram/cosmon/releases/download/$release_version"
+    fi
+    curl -fsSL "$release_base_url/SHA256SUMS" -o "$run_root/release-SHA256SUMS"
+    plain_version="${release_version#v}"
+    target=x86_64-unknown-linux-musl
+    for asset in \
+        "cosmon-$plain_version-$target.tar.gz" \
+        "cosmon-service-$plain_version-$target.tar.gz"
+    do
+        grep -Eq "^[[:xdigit:]]{64}  ${asset}$" "$run_root/release-SHA256SUMS" \
+            || fail "published SHA256SUMS does not contain $asset"
+    done
+    if [[ -n "${COSMON_WSL2_RELEASE_BASE_URL:-}" ]]; then
+        COSMON_RELEASE_BASE_URL="$release_base_url" \
+            sh "$release_tmp/install.sh" --version "$release_version" \
+                --dir "$install_dir" --with-services \
+                |& tee "$run_root/release-install.txt"
+    else
+        sh "$release_tmp/install.sh" --version "$release_version" \
+            --dir "$install_dir" --with-services \
+            |& tee "$run_root/release-install.txt"
+    fi
+    : >"$run_root/release-versions.txt"
+    for binary in cs cosmon-remote cosmon-daemon-supervisor cosmon-scheduler; do
+        [[ -x "$install_dir/$binary" ]] || fail "release did not install $binary"
+        version_output="$("$install_dir/$binary" --version)"
+        printf '%s\n' "$version_output" | tee -a "$run_root/release-versions.txt"
+        [[ "$(printf '%s\n' "$version_output" | awk '{print $2}')" == "$plain_version" ]] \
+            || fail "$binary did not report version $plain_version"
+    done
+    systemctl --user is-active --quiet cosmon-daemon-supervisor.service
+    systemctl --user is-active --quiet cosmon-scheduler.timer
+    checkpoint release-install
+    ;;
+
 service-baseline)
-    require_checkpoint candidate-install
+    require_install_checkpoint
     require_inside_host
     mkdir -p "$run_root/probes"
     cat >"$run_root/probes/supervised-child" <<EOF
@@ -344,14 +416,14 @@ lifecycle)
     [[ ! -e "$repo" ]] || fail "lifecycle repository already exists; choose a new run id"
     mkdir -p "$repo"
     git -C "$repo" init -b main
-    printf '# Candidate lifecycle witness\n' >"$repo/README.md"
+    printf '# WSL2 lifecycle witness\n' >"$repo/README.md"
     git -C "$repo" add README.md
-    git -C "$repo" commit -s -m 'test: initialize candidate lifecycle witness'
+    git -C "$repo" commit -s -m 'test: initialize WSL2 lifecycle witness'
     (
         cd "$repo"
         PATH="$install_dir:$HOME/.local/bin:$PATH" cs init .
         PATH="$install_dir:$HOME/.local/bin:$PATH" cs nucleate task-work --json \
-            --var 'topic=Create wsl2-candidate-witness.txt containing exactly candidate-witness followed by a newline, commit the change with sign-off, then complete the molecule. Do not harvest or run done.' \
+            --var 'topic=Create wsl2-host-witness.txt containing exactly host-witness followed by a newline, commit the change with sign-off, then complete the molecule. Do not harvest or run done.' \
             >"$run_root/lifecycle-nucleate.json"
     )
     molecule="$(grep -Eo 'task-[0-9]{8}-[[:alnum:]]{4}' "$run_root/lifecycle-nucleate.json" | head -1)"
@@ -395,9 +467,9 @@ print(args[args.index("-L") + 1])
         $1 == "worktree" { path=$2 }
         $1 == "branch" && $2 == branch { print path }
     ')"
-    [[ -n "$worktree" && -f "$worktree/wsl2-candidate-witness.txt" ]] \
+    [[ -n "$worktree" && -f "$worktree/wsl2-host-witness.txt" ]] \
         || fail "worker artifact was not recorded in its worktree"
-    [[ "$(cat "$worktree/wsl2-candidate-witness.txt")" == candidate-witness ]] \
+    [[ "$(cat "$worktree/wsl2-host-witness.txt")" == host-witness ]] \
         || fail "worker artifact content is wrong"
     (
         cd "$repo"
@@ -406,7 +478,7 @@ print(args[args.index("-L") + 1])
     )
     git -C "$repo" merge-base --is-ancestor "$worker_head" main \
         || fail "worker commit is not an ancestor of main after done"
-    [[ "$(cat "$repo/wsl2-candidate-witness.txt")" == candidate-witness ]] \
+    [[ "$(cat "$repo/wsl2-host-witness.txt")" == host-witness ]] \
         || fail "merged artifact content is wrong"
     [[ ! -e "$worktree" ]] || fail "worker worktree remains after done"
     git -C "$repo" worktree list --porcelain | grep -qF "refs/heads/feat/$molecule" \

@@ -102,6 +102,54 @@ wait_for_text() {
     return 1
 }
 
+# A served-release install pins the requested version, records the exact served
+# installer bytes and published asset hashes, and verifies all installed lanes.
+release_fixture="$work/release"
+mkdir -p "$release_fixture"
+cat >"$work/served-install.sh" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >"$MOCK_INSTALL_ARGS"
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --version) version="$2"; shift 2 ;;
+        --dir) dir="$2"; shift 2 ;;
+        --with-services) shift ;;
+        *) exit 2 ;;
+    esac
+done
+mkdir -p "$dir"
+for binary in cs cosmon-remote cosmon-daemon-supervisor cosmon-scheduler; do
+    cat >"$dir/$binary" <<INNER
+#!/bin/sh
+echo "$binary ${version#v}"
+INNER
+    chmod +x "$dir/$binary"
+done
+EOF
+chmod +x "$work/served-install.sh"
+cat >"$release_fixture/SHA256SUMS" <<'EOF'
+1111111111111111111111111111111111111111111111111111111111111111  cosmon-0.7.3-x86_64-unknown-linux-musl.tar.gz
+2222222222222222222222222222222222222222222222222222222222222222  cosmon-service-0.7.3-x86_64-unknown-linux-musl.tar.gz
+EOF
+printf 'x\n' >"$run_root/checkpoints/preflight"
+env HOME="$home" PATH="$tools:$PATH" COSMON_WSL2_STATE_ROOT="$state" \
+    COSMON_WSL2_RUN_ID="$run_id" COSMON_WSL2_INSTALL_SOURCE=release \
+    COSMON_WSL2_RELEASE_VERSION=v0.7.3 \
+    COSMON_WSL2_INSTALLER_URL="file://$work/served-install.sh" \
+    COSMON_WSL2_RELEASE_BASE_URL="file://$release_fixture" \
+    COSMON_WSL2_TEST_DIRECT_OUTPUT=1 MOCK_INSTALL_ARGS="$work/install.args" \
+    "$verify_script" release-install >"$work/release-install.out"
+grep -Fxq -- '--version v0.7.3 --dir '"$run_root"'/bin --with-services' "$work/install.args"
+installer_sha="$(sha256sum "$work/served-install.sh" | awk '{print $1}')"
+grep -Fxq "$installer_sha  file://$work/served-install.sh" "$run_root/release-installer.sha256"
+grep -Fxq '1111111111111111111111111111111111111111111111111111111111111111  cosmon-0.7.3-x86_64-unknown-linux-musl.tar.gz' "$run_root/release-SHA256SUMS"
+grep -Fxq '2222222222222222222222222222222222222222222222222222222222222222  cosmon-service-0.7.3-x86_64-unknown-linux-musl.tar.gz' "$run_root/release-SHA256SUMS"
+for binary in cs cosmon-remote cosmon-daemon-supervisor cosmon-scheduler; do
+    grep -Fxq "$binary 0.7.3" "$run_root/release-versions.txt"
+done
+test -s "$run_root/checkpoints/release-install"
+
 # A host reboot is witnessed by a strictly newer host boot epoch.
 run_phase '2026-10-06 10:00:00' 100 before-reboot >"$work/before-reboot.out"
 if run_phase '2026-10-06 11:00:00' 100 after-reboot >"$work/same-reboot.out" 2>&1; then
