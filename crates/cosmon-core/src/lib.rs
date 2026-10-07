@@ -257,6 +257,7 @@ pub mod pope;
 pub mod preempt;
 #[doc(hidden)]
 pub mod presence;
+pub mod caller_identity;
 #[doc(hidden)]
 pub mod presence_sensor;
 #[doc(hidden)]

@@ -1458,35 +1458,20 @@ pub(crate) fn seat_caveat(
 /// `$COSMON_SESSION_ID`, then `$CLAUDE_SESSION_ID`, then a stable
 /// tty-hash fallback so two shells in different tabs get distinct ids.
 pub(crate) fn resolve_or_derive_sid(explicit: Option<&str>) -> anyhow::Result<SessionId> {
-    if let Some(s) = explicit {
-        return Ok(SessionId::new(s)?);
-    }
-    for env_var in ["COSMON_SESSION_ID", "CLAUDE_SESSION_ID"] {
-        if let Ok(s) = std::env::var(env_var) {
-            let trimmed = s.trim();
-            if !trimmed.is_empty() {
-                return Ok(SessionId::new(trimmed)?);
-            }
-        }
-    }
-    Ok(SessionId::new(derive_stable_sid())?)
+    Ok(cosmon_core::caller_identity::resolve(explicit, None, |name| {
+        std::env::var(name).ok()
+    })?
+    .unwrap_or(SessionId::new(derive_stable_sid())?))
 }
 
 /// Resolve a session id for `poll` — same precedence as `ping` but the
 /// tty-hash fallback is not used (poll is always driven by a hook that
 /// already knows the id).
 pub(crate) fn resolve_sid_for_poll(args: &PollArgs) -> anyhow::Result<SessionId> {
-    if let Some(s) = &args.session {
-        return Ok(SessionId::new(s.clone())?);
-    }
-    for env_var in ["COSMON_SESSION_ID", "CLAUDE_SESSION_ID"] {
-        if let Ok(s) = std::env::var(env_var) {
-            if !s.trim().is_empty() {
-                return Ok(SessionId::new(s)?);
-            }
-        }
-    }
-    Err(anyhow::anyhow!(
+    cosmon_core::caller_identity::resolve(args.session.as_deref(), None, |name| {
+        std::env::var(name).ok()
+    })?
+    .ok_or_else(|| anyhow::anyhow!(
         "no session id — pass --session <SID> or export COSMON_SESSION_ID"
     ))
 }

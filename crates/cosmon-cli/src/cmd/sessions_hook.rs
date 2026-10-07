@@ -662,8 +662,9 @@ fn resolve_hook_session_id(
             );
             return None;
         };
-        return match SessionId::new(native) {
-            Ok(sid) => Some(sid),
+        return match cosmon_core::caller_identity::resolve(args.session.as_deref(), Some(native), |name| std::env::var(name).ok()) {
+            Ok(Some(sid)) => Some(sid),
+            Ok(None) => None,
             Err(e) => {
                 eprintln!(
                     "cs sessions hook: Codex pilot native identity is invalid ({e}) — \
@@ -677,14 +678,9 @@ fn resolve_hook_session_id(
     // Claude keeps its established explicit-or-exported behavior. Workers
     // follow the same path so a dispatch remains identifiable without a
     // provider-native payload identity.
-    let explicit = args.session.clone().or_else(|| {
-        let exported = ["COSMON_SESSION_ID", "CLAUDE_SESSION_ID"]
-            .iter()
-            .any(|key| std::env::var(key).is_ok_and(|value| !value.trim().is_empty()));
-        (!exported).then(|| native.map(ToOwned::to_owned)).flatten()
-    });
-    match presence::resolve_or_derive_sid(explicit.as_deref()) {
-        Ok(sid) => Some(sid),
+    match cosmon_core::caller_identity::resolve(args.session.as_deref(), native, |name| std::env::var(name).ok()) {
+        Ok(Some(sid)) => Some(sid),
+        Ok(None) => presence::resolve_or_derive_sid(None).ok(),
         Err(e) => {
             eprintln!("cs sessions hook: no session id ({e}) — nothing to be present as");
             None
