@@ -66,6 +66,7 @@ use cosmon_core::id::{MoleculeId, SessionId};
 use cosmon_core::operator_attestation::{GrantChallenge, OperatorGestureVerifier};
 use cosmon_core::pilot_lease::{LeaseDecision, LeaseEpoch, RefusalReason, RequestId};
 use cosmon_core::presence::Presence;
+use cosmon_filestore::{FileStore, PresenceStore};
 use cosmon_filestore::{MinisignOperatorVerifier, TAKEOVER_PUBKEY_ENV, TAKEOVER_PUBKEY_REL};
 use cosmon_pilot_checkpoint::{
     compare, CheckpointStore, Claim, EvidenceRef, MissionId, PilotCheckpoint, Scope,
@@ -75,7 +76,8 @@ use cosmon_session_probe::{
     ClaudeProbe, CodexProbe, Cursor, DiscoveryFilter, ProbeRegistry, ProviderSessionRef,
     RepoIdentity, RepoKind, SessionEventKind, SessionSelector,
 };
-use serde::Deserialize;
+use cosmon_state::{MoleculeFilter, StateStore};
+use serde::{Deserialize, Serialize};
 
 use super::presence;
 use super::Context;
@@ -128,6 +130,8 @@ pub enum Sub {
     Discover(DiscoverArgs),
     /// Which of them have taken a seat, and in which role.
     List(ListArgs),
+    /// Ledger-derived pilot authority in one versioned JSON document.
+    Seats(SeatsArgs),
     /// Look inside one conversation — its last events, read-only.
     Show(ShowArgs),
     /// Take a seat: say "I am here, in this role". Until you do, the others
@@ -189,6 +193,51 @@ pub struct ListArgs {
     /// Include snapshots whose heartbeat has gone stale.
     #[arg(long)]
     pub all: bool,
+}
+
+/// Arguments for `cs sessions seats`.
+#[derive(clap::Args, Default)]
+pub struct SeatsArgs {
+    /// Scan every project under `$COSMON_CLUSTER_ROOT` using the `cs tail`
+    /// cross-galaxy perimeter.
+    #[arg(long)]
+    pub all_galaxies: bool,
+}
+
+/// The versioned read contract emitted by `cs sessions seats --json`.
+#[derive(Debug, Serialize)]
+struct SeatsDocument {
+    schema_version: u32,
+    galaxies: Vec<GalaxySeats>,
+}
+
+/// Seat findings for one galaxy.  Readable adverse findings remain data.
+#[derive(Debug, Serialize)]
+struct GalaxySeats {
+    galaxy: String,
+    state: &'static str,
+    missions: Vec<MissionSeats>,
+}
+
+/// Authority and claims for one pilot mission.
+#[derive(Debug, Serialize)]
+struct MissionSeats {
+    mission: String,
+    verdict: &'static str,
+    seats: Vec<SeatRow>,
+}
+
+/// One presence claim, deliberately retained even when it is stale or wrong.
+#[derive(Debug, Serialize)]
+struct SeatRow {
+    session: String,
+    provider: Option<String>,
+    native_id: Option<String>,
+    claimed_role: &'static str,
+    epoch: Option<u64>,
+    liveness: bool,
+    heartbeat: DateTime<Utc>,
+    standing: &'static str,
 }
 
 /// Arguments for `cs sessions show`.
@@ -567,6 +616,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     match &args.command {
         Sub::Discover(a) => run_discover(ctx, a),
         Sub::List(a) => run_list(ctx, a),
+        Sub::Seats(a) => run_seats(ctx, a),
         Sub::Show(a) => run_show(ctx, a),
         Sub::Attach(a) => run_attach(ctx, a),
         Sub::Peers(a) => run_peers(ctx, a),
@@ -1100,6 +1150,194 @@ fn run_list(ctx: &Context, args: &ListArgs) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// Render the cross-galaxy seat projection.
+///
+/// Presence is intentionally projected as a claim.  The ledger chooses a
+/// holder; a heartbeat only supplies liveness and makes conflicting claims
+/// visible to an operator.
+fn run_seats(ctx: &Context, args: &SeatsArgs) -> anyhow::Result<()> {
+    if !ctx.json {
+        return Err(anyhow::anyhow!(
+            "cs sessions seats is a machine-readable contract; pass --json"
+        ));
+    }
+    let now = Utc::now();
+    let galaxies = super::tail::enumerate_galaxies(ctx, args.all_galaxies, None)
+        .into_iter()
+        .map(|source| seats_for_galaxy(source.label, &source.state_dir, now))
+        .collect::<Vec<_>>();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&SeatsDocument {
+            schema_version: 1,
+            galaxies
+        })?
+    );
+    Ok(())
+}
+
+fn seats_for_galaxy(
+    galaxy: String,
+    state_dir: &std::path::Path,
+    now: DateTime<Utc>,
+) -> GalaxySeats {
+    let missions_from_molecules = FileStore::new(state_dir)
+        .list_molecules(&MoleculeFilter::default())
+        .map(|molecules| {
+            molecules
+                .into_iter()
+                .filter(|m| m.tags.iter().any(|tag| tag.as_str() == "pilot-mission"))
+                .map(|m| m.id)
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+    let leases = presence::leases_at(state_dir);
+    let (Ok(mut missions), Ok(leases)) = (missions_from_molecules, leases) else {
+        return GalaxySeats {
+            galaxy,
+            state: "unreadable",
+            missions: Vec::new(),
+        };
+    };
+    let trust_root = leases.trusted_key_id().is_some();
+    match leases.missions() {
+        Ok(ledger_missions) => missions.extend(ledger_missions),
+        Err(_) => {
+            return GalaxySeats {
+                galaxy,
+                state: "unreadable",
+                missions: Vec::new(),
+            }
+        }
+    }
+    if missions.is_empty() {
+        return GalaxySeats {
+            galaxy,
+            state: "no mission",
+            missions: Vec::new(),
+        };
+    }
+    let state = if missions.len() > 1 {
+        "ambiguous mission"
+    } else if !trust_root {
+        "no trust root"
+    } else {
+        "ok"
+    };
+    let Ok(presences) = PresenceStore::new(state_dir).scan() else {
+        return GalaxySeats {
+            galaxy,
+            state: "unreadable",
+            missions: Vec::new(),
+        };
+    };
+    let mut findings = Vec::with_capacity(missions.len());
+    for mission in missions {
+        let Some(finding) = seats_for_mission(&leases, &mission, &presences, now) else {
+            return GalaxySeats {
+                galaxy,
+                state: "unreadable",
+                missions: Vec::new(),
+            };
+        };
+        findings.push(finding);
+    }
+    GalaxySeats {
+        galaxy,
+        state,
+        missions: findings,
+    }
+}
+
+fn seats_for_mission(
+    leases: &cosmon_filestore::PilotLeaseStore,
+    mission: &MoleculeId,
+    presences: &[Presence],
+    now: DateTime<Utc>,
+) -> Option<MissionSeats> {
+    let claims = presences
+        .iter()
+        .filter(|p| p.mission.as_ref() == Some(mission))
+        .collect::<Vec<_>>();
+    let audit = leases.audit(mission).ok()?;
+    let verified = audit
+        .into_iter()
+        .filter(|grant| grant.verdict.is_ok())
+        .map(|grant| grant.lease)
+        .collect::<Vec<_>>();
+    let highest = verified.iter().map(|lease| lease.epoch).max();
+    let holders = highest
+        .map(|epoch| {
+            verified
+                .iter()
+                .filter(|lease| lease.epoch == epoch)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let conflict = holders.len() > 1
+        && holders
+            .iter()
+            .map(|lease| &lease.holder_session_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            > 1;
+    let holder = (!conflict).then(|| holders.first().copied()).flatten();
+    let primary_claims = claims.iter().filter(|p| p.role.is_primary()).count();
+    let holder_seated = holder.is_some_and(|lease| {
+        claims.iter().any(|p| {
+            p.role.is_primary()
+                && p.session_id == lease.holder_session_id
+                && p.lease_epoch == Some(lease.epoch)
+                && !(p.provider.as_deref() == Some("codex") && p.native_session_id.is_none())
+        })
+    });
+    let verdict = if conflict {
+        "epoch conflict"
+    } else if holder.is_none() {
+        "none"
+    } else if primary_claims > 1 {
+        "contested"
+    } else if !holder_seated {
+        "granted-unseated"
+    } else {
+        "one"
+    };
+    let mut seats = claims
+        .into_iter()
+        .map(|presence| {
+            let matching = holder.is_some_and(|lease| {
+                presence.role.is_primary()
+                    && presence.session_id == lease.holder_session_id
+                    && presence.lease_epoch == Some(lease.epoch)
+                    && !(presence.provider.as_deref() == Some("codex")
+                        && presence.native_session_id.is_none())
+            });
+            let standing = if matching {
+                "holder"
+            } else if presence.role.is_primary() {
+                "claimant"
+            } else {
+                "copilot"
+            };
+            SeatRow {
+                session: presence.session_id.to_string(),
+                provider: presence.provider.clone(),
+                native_id: presence.native_session_id.clone(),
+                claimed_role: presence.role.as_str(),
+                epoch: presence.lease_epoch.map(LeaseEpoch::get),
+                liveness: presence.is_live(now),
+                heartbeat: presence.heartbeat_at,
+                standing,
+            }
+        })
+        .collect::<Vec<_>>();
+    seats.sort_by(|a, b| a.session.cmp(&b.session));
+    Some(MissionSeats {
+        mission: mission.to_string(),
+        verdict,
+        seats,
+    })
 }
 
 fn run_attach(ctx: &Context, args: &AttachArgs) -> anyhow::Result<()> {
@@ -2246,8 +2484,30 @@ fn run_takeover_check(ctx: &Context, args: &TakeoverCheckArgs) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use cosmon_core::operator_attestation::{AttestationError, OperatorAttestation, OperatorKeyId};
+    use cosmon_core::pilot_lease::PilotLease;
+
     use std::path::Path;
     use tempfile::tempdir;
+
+    #[derive(Debug)]
+    struct FixtureVerifier;
+
+    impl OperatorGestureVerifier for FixtureVerifier {
+        fn verify(
+            &self,
+            _: &GrantChallenge,
+            _: &OperatorAttestation,
+        ) -> Result<(), AttestationError> {
+            Ok(())
+        }
+
+        fn trusted_key_id(&self) -> OperatorKeyId {
+            OperatorKeyId::from_bytes([1; 8])
+        }
+    }
 
     fn ctx_for(dir: &Path) -> Context {
         Context {
@@ -2255,6 +2515,218 @@ mod tests {
             json: false,
             config: Some(dir.to_path_buf()),
         }
+    }
+
+    #[test]
+    fn seats_reports_no_mission_as_readable_data() {
+        let dir = tempdir().unwrap();
+        let finding = seats_for_galaxy("fixture".to_owned(), dir.path(), Utc::now());
+        assert_eq!(finding.state, "no mission");
+        assert!(finding.missions.is_empty());
+    }
+
+    fn fixture_mission() -> MoleculeId {
+        MoleculeId::new("task-20261008-seat").unwrap()
+    }
+
+    fn fixture_lease(holder: &str, epoch: u64) -> PilotLease {
+        let mut lease = PilotLease::new(
+            fixture_mission(),
+            SessionId::new(holder).unwrap(),
+            LeaseEpoch::new(epoch).unwrap(),
+            "operator",
+            Utc::now(),
+            None,
+        );
+        lease.attestation = Some(OperatorAttestation {
+            key_id: OperatorKeyId::from_bytes([1; 8]),
+            signature: "fixture".to_owned(),
+            global_signature: "fixture".to_owned(),
+            trusted_comment: "fixture".to_owned(),
+            untrusted_comment: String::new(),
+        });
+        lease
+    }
+
+    fn fixture_store(dir: &Path) -> cosmon_filestore::PilotLeaseStore {
+        cosmon_filestore::PilotLeaseStore::new(dir).trusting(Arc::new(FixtureVerifier))
+    }
+
+    fn primary(session: &str, epoch: u64, heartbeat: DateTime<Utc>) -> Presence {
+        let mut presence = Presence::new(
+            SessionId::new(session).unwrap(),
+            "fixture",
+            "/tmp",
+            0,
+            heartbeat,
+        );
+        presence.role = cosmon_core::presence::PilotRole::Primary;
+        presence.mission = Some(fixture_mission());
+        presence.lease_epoch = Some(LeaseEpoch::new(epoch).unwrap());
+        presence
+    }
+
+    #[test]
+    fn seats_verdicts_keep_ledger_authority_over_fresh_claims() {
+        let dir = tempdir().unwrap();
+        let store = fixture_store(dir.path());
+        store.grant(&fixture_lease("old", 1)).unwrap();
+        store.grant(&fixture_lease("current", 2)).unwrap();
+        let old = primary("old", 1, Utc::now());
+        let current = primary("current", 2, Utc::now() - chrono::Duration::minutes(1));
+        let contested =
+            seats_for_mission(&store, &fixture_mission(), &[old, current], Utc::now()).unwrap();
+        assert_eq!(contested.verdict, "contested");
+        assert_eq!(
+            contested
+                .seats
+                .iter()
+                .find(|seat| seat.session == "current")
+                .unwrap()
+                .standing,
+            "holder"
+        );
+        assert_eq!(
+            contested
+                .seats
+                .iter()
+                .find(|seat| seat.session == "old")
+                .unwrap()
+                .standing,
+            "claimant"
+        );
+        let one = seats_for_mission(
+            &store,
+            &fixture_mission(),
+            &[primary("current", 2, Utc::now())],
+            Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(one.verdict, "one");
+        assert!(one.seats[0].liveness);
+
+        let empty = seats_for_mission(
+            &fixture_store(tempdir().unwrap().path()),
+            &fixture_mission(),
+            &[],
+            Utc::now(),
+        );
+        assert_eq!(empty.unwrap().verdict, "none");
+        let unseated = seats_for_mission(&store, &fixture_mission(), &[], Utc::now()).unwrap();
+        assert_eq!(unseated.verdict, "granted-unseated");
+    }
+
+    #[test]
+    fn codex_without_native_id_cannot_stand_as_holder() {
+        let dir = tempdir().unwrap();
+        let store = fixture_store(dir.path());
+        store.grant(&fixture_lease("codex", 1)).unwrap();
+        let mut claimant = primary("codex", 1, Utc::now());
+        claimant.provider = Some("codex".to_owned());
+        let finding =
+            seats_for_mission(&store, &fixture_mission(), &[claimant], Utc::now()).unwrap();
+        assert_eq!(finding.verdict, "granted-unseated");
+        assert_eq!(finding.seats[0].standing, "claimant");
+    }
+
+    #[test]
+    fn duplicate_highest_epoch_is_an_epoch_conflict() {
+        let dir = tempdir().unwrap();
+        let store = fixture_store(dir.path());
+        let first = fixture_lease("first", 1);
+        let second = fixture_lease("second", 1);
+        std::fs::create_dir_all(store.grants_path(&fixture_mission()).parent().unwrap()).unwrap();
+        std::fs::write(
+            store.grants_path(&fixture_mission()),
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&first).unwrap(),
+                serde_json::to_string(&second).unwrap()
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            seats_for_mission(&store, &fixture_mission(), &[], Utc::now())
+                .unwrap()
+                .verdict,
+            "epoch conflict"
+        );
+    }
+
+    #[test]
+    fn seats_requires_global_json() {
+        let dir = tempdir().unwrap();
+        let err = run_seats(&ctx_for(dir.path()), &SeatsArgs::default()).unwrap_err();
+        assert!(err.to_string().contains("--json"));
+    }
+
+    #[test]
+    fn seats_distinguishes_every_galaxy_state() {
+        let empty = tempdir().unwrap();
+        assert_eq!(
+            seats_for_galaxy("empty".to_owned(), empty.path(), Utc::now()).state,
+            "no mission"
+        );
+
+        let no_root = tempdir().unwrap();
+        std::fs::create_dir_all(no_root.path().join("pilot-lease")).unwrap();
+        std::fs::write(
+            no_root
+                .path()
+                .join("pilot-lease/task-20261008-seat.requests.jsonl"),
+            "",
+        )
+        .unwrap();
+        assert_eq!(
+            seats_for_galaxy("no-root".to_owned(), no_root.path(), Utc::now()).state,
+            "no trust root"
+        );
+
+        let trusted_root = tempdir().unwrap();
+        let trusted_state = trusted_root.path().join(".cosmon/state");
+        std::fs::create_dir_all(trusted_state.join("pilot-lease")).unwrap();
+        std::fs::write(
+            trusted_root.path().join(".cosmon/takeover.pub"),
+            cosmon_minisign_testkit::Operator::from_seed(7).public_key_file(),
+        )
+        .unwrap();
+        std::fs::write(
+            trusted_state.join("pilot-lease/task-20261008-seat.requests.jsonl"),
+            "",
+        )
+        .unwrap();
+        assert_eq!(
+            seats_for_galaxy("trusted".to_owned(), &trusted_state, Utc::now()).state,
+            "ok"
+        );
+
+        let ambiguous = tempdir().unwrap();
+        std::fs::create_dir_all(ambiguous.path().join("pilot-lease")).unwrap();
+        std::fs::write(
+            ambiguous
+                .path()
+                .join("pilot-lease/task-20261008-seat.requests.jsonl"),
+            "",
+        )
+        .unwrap();
+        std::fs::write(
+            ambiguous
+                .path()
+                .join("pilot-lease/task-20261008-other.requests.jsonl"),
+            "",
+        )
+        .unwrap();
+        assert_eq!(
+            seats_for_galaxy("ambiguous".to_owned(), ambiguous.path(), Utc::now()).state,
+            "ambiguous mission"
+        );
+
+        let unreadable = tempdir().unwrap();
+        std::fs::write(unreadable.path().join("pilot-lease"), "not a directory").unwrap();
+        assert_eq!(
+            seats_for_galaxy("broken".to_owned(), unreadable.path(), Utc::now()).state,
+            "unreadable"
+        );
     }
 
     /// Write a minimal Codex rollout log the probe can discover, and return

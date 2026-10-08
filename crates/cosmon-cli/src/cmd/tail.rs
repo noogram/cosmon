@@ -28,6 +28,69 @@ use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMod
 
 use super::Context;
 
+/// A galaxy selected by the shared cross-galaxy perimeter rule.
+///
+/// The state directory is the durable boundary every cross-galaxy reader
+/// needs.  `tail` filters these sources down to event logs; other readers,
+/// such as `sessions seats`, read their own state beneath the same roots.
+#[derive(Debug, Clone)]
+pub(crate) struct GalaxySource {
+    /// Display label, derived from the project directory name.
+    pub(crate) label: String,
+    /// The project's `.cosmon/state` directory.
+    pub(crate) state_dir: PathBuf,
+}
+
+/// Enumerate the same galaxy perimeter used by `cs tail --all-galaxies`.
+///
+/// A missing cluster root falls back to the fleet-local state directory.  The
+/// caller decides which artifact inside each state directory it needs; this
+/// avoids giving every cross-galaxy command its own discovery rule.
+pub(crate) fn enumerate_galaxies(
+    ctx: &Context,
+    all_galaxies: bool,
+    cluster_root: Option<&Path>,
+) -> Vec<GalaxySource> {
+    if !all_galaxies {
+        let state_dir = ctx
+            .config
+            .clone()
+            .unwrap_or_else(|| cosmon_filestore::resolve_state_dir(None));
+        return vec![GalaxySource {
+            label: galaxy_label_for(&state_dir.join("events.jsonl")),
+            state_dir,
+        }];
+    }
+
+    let root = cluster_root
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("COSMON_CLUSTER_ROOT").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("galaxies")));
+    let Some(root) = root else {
+        return enumerate_galaxies(ctx, false, None);
+    };
+    let Ok(iter) = std::fs::read_dir(&root) else {
+        eprintln!(
+            "cs tail: cluster root {} unreachable — falling back to fleet-local",
+            root.display()
+        );
+        return enumerate_galaxies(ctx, false, None);
+    };
+    let mut out = iter
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|ft| ft.is_dir()))
+        .filter_map(|entry| {
+            let state_dir = entry.path().join(".cosmon").join("state");
+            state_dir.is_dir().then(|| GalaxySource {
+                label: entry.file_name().to_string_lossy().into_owned(),
+                state_dir,
+            })
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|a, b| a.label.cmp(&b.label));
+    out
+}
+
 /// Arguments for the `cs tail` subcommand.
 #[derive(clap::Args)]
 pub struct Args {
@@ -225,58 +288,13 @@ fn emit<W: Write>(out: &mut W, line: &Line, raw: &str, json: bool) -> anyhow::Re
 /// when the cluster root is absent so `cs tail --all-galaxies` never
 /// hard-fails in a fresh environment.
 fn resolve_sources(ctx: &Context, args: &Args) -> Vec<(PathBuf, String)> {
-    let _ = ctx; // reserved for future `--config`-aware resolution.
-    if !args.all_galaxies {
-        let path = cosmon_filestore::resolve_state_dir(None).join("events.jsonl");
-        let galaxy = galaxy_label_for(&path);
-        return if path.exists() {
-            vec![(path, galaxy)]
-        } else {
-            Vec::new()
-        };
-    }
-
-    let root = args
-        .cluster_root
-        .clone()
-        .or_else(|| std::env::var_os("COSMON_CLUSTER_ROOT").map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("galaxies")))
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    let Ok(iter) = std::fs::read_dir(&root) else {
-        eprintln!(
-            "cs tail: cluster root {} unreachable — falling back to fleet-local",
-            root.display()
-        );
-        return resolve_sources(
-            ctx,
-            &Args {
-                all_galaxies: false,
-                follow: args.follow,
-                since: args.since.clone(),
-                kind: args.kind.clone(),
-                tail: args.tail,
-                cluster_root: None,
-            },
-        );
-    };
-    let mut out = Vec::new();
-    for entry in iter.flatten() {
-        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-            continue;
-        }
-        let candidate = entry
-            .path()
-            .join(".cosmon")
-            .join("state")
-            .join("events.jsonl");
-        if candidate.exists() {
-            let galaxy = entry.file_name().to_string_lossy().into_owned();
-            out.push((candidate, galaxy));
-        }
-    }
-    out.sort_by(|a, b| a.1.cmp(&b.1));
-    out
+    enumerate_galaxies(ctx, args.all_galaxies, args.cluster_root.as_deref())
+        .into_iter()
+        .filter_map(|source| {
+            let events = source.state_dir.join("events.jsonl");
+            events.exists().then_some((events, source.label))
+        })
+        .collect()
 }
 
 /// Derive the galaxy label for a single fleet-local source.

@@ -29,6 +29,7 @@ Commands:
   launch      Launch Claude or Codex with a fresh identity shared by hooks and tools
   discover    Which agent conversations exist on this machine, and the exact name to refer to one by
   list        Which of them have taken a seat, and in which role
+  seats       Ledger-derived pilot authority in one versioned JSON document
   show        Look inside one conversation — its last events, read-only
   attach      Take a seat: say "I am here, in this role". Until you do, the others cannot see you
   peers       Who is seated around this session, and which way each one faces

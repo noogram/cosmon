@@ -432,6 +432,7 @@ cs pilot (cognitive REPL), cs diverge.
 * `launch` — Launch Claude or Codex with a fresh identity shared by hooks and tools
 * `discover` — Which agent conversations exist on this machine, and the exact name to refer to one by
 * `list` — Which of them have taken a seat, and in which role
+* `seats` — Ledger-derived pilot authority in one versioned JSON document
 * `show` — Look inside one conversation — its last events, read-only
 * `attach` — Take a seat: say "I am here, in this role". Until you do, the others cannot see you
 * `peers` — Who is seated around this session, and which way each one faces
@@ -491,6 +492,18 @@ Which of them have taken a seat, and in which role
 * `--role <ROLE>` — Show only pilots in this seat (`primary` or `copilot`)
 * `--follows <SID>` — Show only pilots co-piloting this session
 * `--all` — Include snapshots whose heartbeat has gone stale
+
+
+
+## `cs sessions seats`
+
+Ledger-derived pilot authority in one versioned JSON document
+
+**Usage:** `cs sessions seats [OPTIONS]`
+
+###### **Options:**
+
+* `--all-galaxies` — Scan every project under `$COSMON_CLUSTER_ROOT` using the `cs tail` cross-galaxy perimeter
 
 
 
