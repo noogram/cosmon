@@ -5,7 +5,9 @@ and [ADR-168](../adr/168-a-co-pilot-inherits-the-session-substrate-not-its-deliv
 
 Moving the PRIMARY seat from one pilot to another is the one thing in cosmon an
 agent may never do for itself. This page is how you do it: one command when your
-key is on this machine, three when it is not.
+key is on this machine, three when it is not. For the per-galaxy setup and the
+full provider-to-provider sequence around this signature, see
+[pilot-galaxy-setup-and-transfer.md](pilot-galaxy-setup-and-transfer.md).
 
 ## Why it is not just `--by yourname`
 
