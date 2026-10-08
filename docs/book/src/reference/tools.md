@@ -621,6 +621,7 @@ Publish this pilot's hand-over record for a mission
 * `--question <TEXT>` — A question the pilot could not answer. Repeatable — this is where uncertainty belongs, never inside a stance
 * `--evidence <SUBJECT=LOCATOR>` — Evidence for one claim, as `SUBJECT=LOCATOR[#DIGEST]`. Repeatable
 * `--checkpoint-evidence <LOCATOR>` — Evidence for the checkpoint as a whole, as `LOCATOR[#DIGEST]`. Repeatable
+* `--from-file <PATH|->` — Read versioned checkpoint content from a JSON file, or `-` for stdin. Cosmon, rather than the file, stamps all publication provenance
 
 
 
@@ -645,6 +646,7 @@ Write the same record as a draft, for the hook to publish at the next natural tr
 * `--question <TEXT>` — A question the pilot could not answer. Repeatable — this is where uncertainty belongs, never inside a stance
 * `--evidence <SUBJECT=LOCATOR>` — Evidence for one claim, as `SUBJECT=LOCATOR[#DIGEST]`. Repeatable
 * `--checkpoint-evidence <LOCATOR>` — Evidence for the checkpoint as a whole, as `LOCATOR[#DIGEST]`. Repeatable
+* `--from-file <PATH|->` — Read versioned checkpoint content from a JSON file, or `-` for stdin. Cosmon, rather than the file, stamps all publication provenance
 
 
 
@@ -672,6 +674,7 @@ Show one checkpoint in full
 * `--mission <MOLECULE_ID>` — The mission the checkpoint belongs to
 * `--id <ID>` — The checkpoint id. Omit to take the latest published by `--session`
 * `--session <SID>` — The publishing session, when selecting by recency rather than by id
+* `--of-holder` — Select only the newest checkpoint matching the current verified lease holder and epoch. Requires `--json` so absence is a typed null
 
 
 

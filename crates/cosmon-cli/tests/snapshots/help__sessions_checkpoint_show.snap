@@ -13,4 +13,5 @@ Options:
   -v, --verbose                Enable verbose output
       --json                   Output in JSON format
       --session <SID>          The publishing session, when selecting by recency rather than by id
+      --of-holder              Select only the newest checkpoint matching the current verified lease holder and epoch. Requires `--json` so absence is a typed null
   -h, --help                   Print help

@@ -18,8 +18,9 @@
 //! - **the three verdicts** — `drift` exits 0 / 1 / 2, and a missing checkpoint
 //!   is 2, never 0.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use cosmon_minisign_testkit::Operator;
 
@@ -139,6 +140,49 @@ impl World {
             .args(args);
         cmd.output().expect("spawn cs")
     }
+
+    fn cs_json_without_trust_root(&self, args: &[&str]) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
+        cmd.current_dir(&self.repo)
+            .env_remove("COSMON_PARENT_MOL_ID")
+            .env_remove("COSMON_MOL_DIR")
+            .env_remove("COSMON_TAKEOVER_PUBKEY")
+            .env("COSMON_SESSIONS_CODEX_ROOT", &self.codex_root)
+            .env("COSMON_SESSIONS_CLAUDE_ROOT", &self.claude_root)
+            .arg("--config")
+            .arg(&self.state)
+            .arg("--json")
+            .arg("sessions")
+            .args(args);
+        cmd.output().expect("spawn cs without trust root")
+    }
+
+    /// Run `cs sessions` with stdin attached, for the documented `--from-file
+    /// -` boundary rather than a parser-only approximation.
+    fn cs_with_stdin(&self, args: &[&str], input: &str) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
+        cmd.current_dir(&self.repo)
+            .env_remove("COSMON_PARENT_MOL_ID")
+            .env_remove("COSMON_MOL_DIR")
+            .env("COSMON_SESSIONS_CODEX_ROOT", &self.codex_root)
+            .env("COSMON_SESSIONS_CLAUDE_ROOT", &self.claude_root)
+            .env("COSMON_TAKEOVER_PUBKEY", &self.pubkey)
+            .arg("--config")
+            .arg(&self.state)
+            .arg("sessions")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn cs with stdin");
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin pipe")
+            .write_all(input.as_bytes())
+            .expect("write checkpoint draft");
+        child.wait_with_output().expect("collect cs output")
+    }
 }
 
 fn stdout(out: &Output) -> String {
@@ -165,6 +209,183 @@ fn json_lines(text: &str) -> Vec<serde_json::Value> {
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not json: {l} ({e})")))
         .collect()
+}
+
+fn grant_holder(w: &World, session: &str) {
+    let requested = ok(
+        &w.cs(&[
+            "takeover",
+            "request",
+            "--mission",
+            MISSION,
+            "--from",
+            session,
+            "--reason",
+            "test holder",
+        ]),
+        "request holder lease",
+    );
+    let request_id = requested
+        .split_whitespace()
+        .nth(1)
+        .expect("request id")
+        .to_owned();
+    let attestation = w.sign_takeover(&request_id);
+    ok(
+        &w.cs(&[
+            "takeover",
+            "grant",
+            "--mission",
+            MISSION,
+            "--request",
+            &request_id,
+            "--by",
+            "test-operator",
+            "--attestation",
+            &attestation.display().to_string(),
+        ]),
+        "grant holder lease",
+    );
+}
+
+fn checkpoint_count(w: &World) -> usize {
+    let path = w.state.join("pilot/checkpoints").join(MISSION);
+    std::fs::read_dir(path).map_or(0, |entries| entries.count())
+}
+
+#[test]
+fn checkpoint_draft_admission_is_real_cli_boundary_and_never_writes_on_refusal() {
+    let w = world();
+    grant_holder(&w, "sess-codex");
+    let valid = r#"{"schema":"cosmon.checkpoint-draft/v1","scope":{"includes":["contract"]},"hypotheses":[],"evidence":[],"completed_actions":[],"intended_next_actions":[],"risks":[],"unresolved_questions":[]}"#;
+    let file = w.repo.join("draft.json");
+    std::fs::write(&file, valid).expect("write draft file");
+    let file_path = file.display().to_string();
+
+    ok(
+        &w.cs(&[
+            "checkpoint",
+            "publish",
+            "--mission",
+            MISSION,
+            "--session",
+            "sess-codex",
+            "--from-file",
+            &file_path,
+        ]),
+        "publish draft file",
+    );
+    ok(
+        &w.cs_with_stdin(
+            &[
+                "checkpoint",
+                "publish",
+                "--mission",
+                MISSION,
+                "--session",
+                "sess-codex",
+                "--from-file",
+                "-",
+            ],
+            valid,
+        ),
+        "publish draft stdin",
+    );
+    let admitted = checkpoint_count(&w);
+    assert_eq!(admitted, 2, "file and stdin each publish one record");
+
+    for (name, draft) in [
+        ("schema", r#"{"schema":"cosmon.checkpoint-draft/v2"}"#),
+        (
+            "intruder",
+            r#"{"schema":"cosmon.checkpoint-draft/v1","intruder":true}"#,
+        ),
+        (
+            "id",
+            r#"{"schema":"cosmon.checkpoint-draft/v1","id":"forged"}"#,
+        ),
+        (
+            "mission_id",
+            r#"{"schema":"cosmon.checkpoint-draft/v1","mission_id":"forged"}"#,
+        ),
+        (
+            "session_id",
+            r#"{"schema":"cosmon.checkpoint-draft/v1","session_id":"forged"}"#,
+        ),
+        (
+            "lease_epoch",
+            r#"{"schema":"cosmon.checkpoint-draft/v1","lease_epoch":99}"#,
+        ),
+        (
+            "created_at",
+            r#"{"schema":"cosmon.checkpoint-draft/v1","created_at":"2026-01-01T00:00:00Z"}"#,
+        ),
+    ] {
+        let out = w.cs_with_stdin(
+            &[
+                "checkpoint",
+                "publish",
+                "--mission",
+                MISSION,
+                "--session",
+                "sess-codex",
+                "--from-file",
+                "-",
+            ],
+            draft,
+        );
+        assert!(!out.status.success(), "{name} must be refused");
+        let text = format!("{}{}", stdout(&out), stderr(&out));
+        assert!(
+            text.contains(name),
+            "{name} refusal must name the field: {text}"
+        );
+        assert_eq!(checkpoint_count(&w), admitted, "{name} wrote a record");
+    }
+
+    for args in [
+        vec!["--epoch", "1"],
+        vec!["--id", "forged"],
+        vec!["--include", "scope"],
+        vec!["--exclude", "scope"],
+        vec!["--hypothesis", "x=yes"],
+        vec!["--next", "x=yes"],
+        vec!["--done", "done"],
+        vec!["--risk", "risk"],
+        vec!["--question", "question"],
+        vec!["--evidence", "x=file"],
+        vec!["--checkpoint-evidence", "file"],
+    ] {
+        let mut command = vec![
+            "checkpoint",
+            "publish",
+            "--mission",
+            MISSION,
+            "--session",
+            "sess-codex",
+            "--from-file",
+            &file_path,
+        ];
+        command.extend(args);
+        let out = w.cs(&command);
+        assert!(!out.status.success(), "conflict {command:?} must fail");
+        assert_eq!(checkpoint_count(&w), admitted, "conflict wrote a record");
+    }
+
+    // The ledger still has a grant, but removing its trust root makes it
+    // unverifiable. That is a typed absence, never a fallback to a publication.
+    std::fs::remove_file(&w.pubkey).expect("remove trust root");
+    let selected = json_lines(&ok(
+        &w.cs_json_without_trust_root(&["checkpoint", "show", "--mission", MISSION, "--of-holder"]),
+        "unverifiable ledger holder selection",
+    ));
+    assert_eq!(selected[0]["checkpoint"], serde_json::Value::Null);
+    assert_eq!(selected[0]["selected_by"]["kind"], "verified_lease_holder");
+    assert_eq!(
+        selected[0]["selected_by"]["holder_session"],
+        serde_json::Value::Null
+    );
+    assert_eq!(selected[0]["selected_by"]["epoch"], serde_json::Value::Null);
 }
 
 /// Discovery keys on the provider's own id, and the selector it prints is the
@@ -231,6 +452,22 @@ fn an_unresolvable_selector_offers_candidates_and_refuses() {
 #[test]
 fn the_operator_walk_runs_end_to_end() {
     let w = world();
+
+    // A holder-scoped read is always one JSON wrapper. Before a verified lease
+    // exists it reports typed absence rather than choosing a checkpoint by
+    // filename, publication time, or session.
+    let absent = json_lines(&ok(
+        &w.cs_json(&["checkpoint", "show", "--mission", MISSION, "--of-holder"]),
+        "holder checkpoint with no lease",
+    ));
+    assert_eq!(absent.len(), 1);
+    assert_eq!(absent[0]["checkpoint"], serde_json::Value::Null);
+    assert_eq!(absent[0]["selected_by"]["kind"], "verified_lease_holder");
+    assert_eq!(
+        absent[0]["selected_by"]["holder_session"],
+        serde_json::Value::Null
+    );
+    assert_eq!(absent[0]["selected_by"]["epoch"], serde_json::Value::Null);
 
     // ── attach: a primary and a co-pilot that follows it ────────────────
     ok(
@@ -473,6 +710,66 @@ fn the_operator_walk_runs_end_to_end() {
         ]),
         "attach as the granted primary",
     );
+
+    // Existing inline publications recorded epoch zero, so the new strict
+    // selector must not silently pick one after a lease appears.
+    let no_match = json_lines(&ok(
+        &w.cs_json(&["checkpoint", "show", "--mission", MISSION, "--of-holder"]),
+        "holder checkpoint with no exact epoch",
+    ));
+    assert_eq!(no_match[0]["checkpoint"], serde_json::Value::Null);
+    assert_eq!(no_match[0]["selected_by"]["holder_session"], "sess-codex");
+    assert_eq!(no_match[0]["selected_by"]["epoch"], 1);
+
+    let draft = w.repo.join("checkpoint-draft.json");
+    std::fs::write(
+        &draft,
+        r#"{"schema":"cosmon.checkpoint-draft/v1","scope":{"includes":["the cockpit"]},"hypotheses":[],"evidence":[],"completed_actions":["verified lease"],"intended_next_actions":[],"risks":[],"unresolved_questions":[]}"#,
+    )
+    .expect("write checkpoint draft");
+    let draft_path = draft.display().to_string();
+    let published = json_lines(&ok(
+        &w.cs_json(&[
+            "checkpoint",
+            "publish",
+            "--mission",
+            MISSION,
+            "--session",
+            "sess-codex",
+            "--from-file",
+            &draft_path,
+        ]),
+        "publish holder draft",
+    ));
+    let holder_id = published[0]["id"]
+        .as_str()
+        .expect("checkpoint id")
+        .to_owned();
+
+    // A later co-pilot checkpoint is deliberately irrelevant to the holder
+    // selector; only the exact session-and-epoch pair is admissible.
+    ok(
+        &w.cs(&[
+            "checkpoint",
+            "publish",
+            "--mission",
+            MISSION,
+            "--session",
+            "sess-claude",
+            "--id",
+            "later-copilot",
+            "--done",
+            "later but not holder",
+        ]),
+        "later copilot checkpoint",
+    );
+    let selected = json_lines(&ok(
+        &w.cs_json(&["checkpoint", "show", "--mission", MISSION, "--of-holder"]),
+        "exact holder checkpoint",
+    ));
+    assert_eq!(selected[0]["checkpoint"]["id"], holder_id);
+    assert_eq!(selected[0]["selected_by"]["holder_session"], "sess-codex");
+    assert_eq!(selected[0]["selected_by"]["epoch"], 1);
 }
 
 /// A grant seats nobody by itself, and `takeover check` must say so.

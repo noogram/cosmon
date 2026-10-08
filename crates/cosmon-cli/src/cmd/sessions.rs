@@ -58,7 +58,7 @@
 //!   knows how many providers exist (mission falsifier 10).
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -75,6 +75,7 @@ use cosmon_session_probe::{
     ClaudeProbe, CodexProbe, Cursor, DiscoveryFilter, ProbeRegistry, ProviderSessionRef,
     RepoIdentity, RepoKind, SessionEventKind, SessionSelector,
 };
+use serde::Deserialize;
 
 use super::presence;
 use super::Context;
@@ -365,6 +366,17 @@ pub struct CheckpointPublishArgs {
     /// Repeatable.
     #[arg(long = "checkpoint-evidence", value_name = "LOCATOR")]
     pub checkpoint_evidence: Vec<String>,
+    /// Read versioned checkpoint content from a JSON file, or `-` for stdin.
+    /// Cosmon, rather than the file, stamps all publication provenance.
+    #[arg(
+        long,
+        value_name = "PATH|-",
+        conflicts_with_all = [
+            "epoch", "id", "includes", "excludes", "hypotheses", "next_actions", "completed",
+            "risks", "questions", "evidence", "checkpoint_evidence"
+        ]
+    )]
+    pub from_file: Option<PathBuf>,
 }
 
 /// Arguments for `cs sessions checkpoint list`.
@@ -390,6 +402,10 @@ pub struct CheckpointShowArgs {
     /// The publishing session, when selecting by recency rather than by id.
     #[arg(long, value_name = "SID")]
     pub session: Option<String>,
+    /// Select only the newest checkpoint matching the current verified lease
+    /// holder and epoch. Requires `--json` so absence is a typed null.
+    #[arg(long, conflicts_with_all = ["id", "session"])]
+    pub of_holder: bool,
 }
 
 /// Arguments for `cs sessions drift`.
@@ -1372,6 +1388,103 @@ fn parse_evidence(raw: &str) -> EvidenceRef {
     }
 }
 
+/// The only external checkpoint draft shape accepted by `--from-file`.
+///
+/// This deliberately has no publication identity or authority fields. Those
+/// facts come from Cosmon's session and lease stores at publication time, not
+/// from bytes supplied by a pilot.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointDraft {
+    schema: String,
+    #[serde(default)]
+    scope: DraftScope,
+    #[serde(default)]
+    hypotheses: Vec<DraftClaim>,
+    #[serde(default)]
+    evidence: Vec<DraftEvidenceRef>,
+    #[serde(default)]
+    completed_actions: Vec<String>,
+    #[serde(default)]
+    intended_next_actions: Vec<DraftClaim>,
+    #[serde(default)]
+    risks: Vec<String>,
+    #[serde(default)]
+    unresolved_questions: Vec<String>,
+}
+
+/// JSON-only draft scope, kept separate so unknown external fields fail.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftScope {
+    #[serde(default)]
+    includes: Vec<String>,
+    #[serde(default)]
+    excludes: Vec<String>,
+}
+
+/// JSON-only draft claim, with the existing checkpoint claim cardinality.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftClaim {
+    id: String,
+    subject: String,
+    stance: Stance,
+    statement: String,
+    #[serde(default)]
+    evidence: Vec<DraftEvidenceRef>,
+}
+
+/// JSON-only draft evidence reference.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftEvidenceRef {
+    locator: String,
+    #[serde(default)]
+    digest: Option<String>,
+}
+
+impl From<DraftEvidenceRef> for EvidenceRef {
+    fn from(value: DraftEvidenceRef) -> Self {
+        Self {
+            locator: value.locator,
+            digest: value.digest,
+        }
+    }
+}
+
+impl TryFrom<DraftClaim> for Claim {
+    type Error = cosmon_pilot_checkpoint::CheckpointError;
+
+    fn try_from(value: DraftClaim) -> Result<Self, Self::Error> {
+        Ok(
+            Claim::new(value.id, value.subject, value.stance, value.statement)?
+                .with_evidence(value.evidence.into_iter().map(Into::into)),
+        )
+    }
+}
+
+/// Read and validate a versioned draft from a file or standard input.
+fn read_checkpoint_draft(path: &std::path::Path) -> anyhow::Result<CheckpointDraft> {
+    let mut bytes = Vec::new();
+    if path.as_os_str() == "-" {
+        std::io::stdin().read_to_end(&mut bytes)?;
+    } else {
+        bytes = std::fs::read(path).map_err(|e| {
+            anyhow::anyhow!("could not read checkpoint draft {}: {e}", path.display())
+        })?;
+    }
+    let draft: CheckpointDraft = serde_json::from_slice(&bytes)
+        .map_err(|e| anyhow::anyhow!("invalid checkpoint draft: {e}"))?;
+    if draft.schema != "cosmon.checkpoint-draft/v1" {
+        return Err(anyhow::anyhow!(
+            "unsupported checkpoint draft schema {:?}; expected \"cosmon.checkpoint-draft/v1\"",
+            draft.schema
+        ));
+    }
+    Ok(draft)
+}
+
 /// Attach `--evidence SUBJECT=LOCATOR` rows to the claims that carry the
 /// subject, in both lists.
 ///
@@ -1420,7 +1533,11 @@ fn default_checkpoint_id(session: &str, now: DateTime<Utc>) -> String {
         use std::fmt::Write as _;
         let _ = write!(hex, "{b:02x}");
     }
-    format!("cp-{}-{hex}", now.format("%Y%m%dT%H%M%SZ"))
+    format!(
+        "cp-{}-{:09}-{hex}",
+        now.format("%Y%m%dT%H%M%S"),
+        now.timestamp_subsec_nanos()
+    )
 }
 
 fn run_checkpoint(ctx: &Context, sub: &CheckpointSub) -> anyhow::Result<()> {
@@ -1446,6 +1563,41 @@ fn build_checkpoint(
         session: args.session.clone(),
     })?;
     let now = Utc::now();
+
+    if let Some(path) = &args.from_file {
+        let draft = read_checkpoint_draft(path)?;
+        let mission = MissionId::new(args.mission.clone())?;
+        let lease = presence::leases(ctx)?.current(&MoleculeId::new(args.mission.clone())?)?;
+        let Some(lease) = lease else {
+            return Err(anyhow::anyhow!(
+                "cannot publish checkpoint draft: mission {mission} has no verified lease"
+            ));
+        };
+        if lease.holder_session_id.as_str() != sid.as_str() || !lease.is_valid_at(now) {
+            return Err(anyhow::anyhow!(
+                "cannot publish checkpoint draft: session {sid} is not the current verified lease holder"
+            ));
+        }
+        let id = default_checkpoint_id(sid.as_str(), now);
+        let mut cp =
+            PilotCheckpoint::new(id, mission.as_str(), sid.as_str(), lease.epoch.get(), now)?;
+        cp.scope = Scope::new(draft.scope.includes, draft.scope.excludes);
+        cp.current_hypotheses = draft
+            .hypotheses
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<_, _>>()?;
+        cp.evidence_refs = draft.evidence.into_iter().map(Into::into).collect();
+        cp.completed_actions = draft.completed_actions;
+        cp.intended_next_actions = draft
+            .intended_next_actions
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<_, _>>()?;
+        cp.open_risks = draft.risks;
+        cp.unresolved_questions = draft.unresolved_questions;
+        return Ok(cp);
+    }
 
     // The epoch a checkpoint records is what the publisher *believed* it held.
     // Reading it off the pilot's own presence snapshot is what makes the
@@ -1612,8 +1764,54 @@ fn load_checkpoint(
 }
 
 fn run_checkpoint_show(ctx: &Context, args: &CheckpointShowArgs) -> anyhow::Result<()> {
+    if args.of_holder && !ctx.json {
+        return Err(anyhow::anyhow!(
+            "--of-holder is a typed selection; pass --json to preserve its null result"
+        ));
+    }
     let mission = MissionId::new(args.mission.clone())?;
-    let found = load_checkpoint(ctx, &mission, args.id.as_ref(), args.session.as_ref())?;
+    let (found, selected_by) = if args.of_holder {
+        let lease_mission = MoleculeId::new(args.mission.clone())?;
+        let lease = presence::leases(ctx)?.current(&lease_mission)?;
+        match lease {
+            Some(lease) if lease.is_valid_at(Utc::now()) => {
+                let holder = CheckpointSessionId::new(lease.holder_session_id.as_str())?;
+                (
+                    checkpoints(ctx).latest_for_session_epoch(
+                        &mission,
+                        &holder,
+                        lease.epoch.get(),
+                    )?,
+                    serde_json::json!({
+                        "kind": "verified_lease_holder",
+                        "holder_session": holder.as_str(),
+                        "epoch": lease.epoch.get(),
+                    }),
+                )
+            }
+            _ => (
+                None,
+                serde_json::json!({
+                    "kind": "verified_lease_holder",
+                    "holder_session": serde_json::Value::Null,
+                    "epoch": serde_json::Value::Null,
+                }),
+            ),
+        }
+    } else {
+        (
+            load_checkpoint(ctx, &mission, args.id.as_ref(), args.session.as_ref())?,
+            serde_json::Value::Null,
+        )
+    };
+
+    if args.of_holder && ctx.json {
+        println!(
+            "{}",
+            serde_json::json!({"checkpoint": found, "selected_by": selected_by})
+        );
+        return Ok(());
+    }
 
     let Some(cp) = found else {
         return Err(anyhow::anyhow!(
