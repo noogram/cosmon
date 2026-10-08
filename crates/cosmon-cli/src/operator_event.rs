@@ -42,7 +42,9 @@ use cosmon_state::event_log::{emit_one, resolve_events_log_path};
 /// State and optional context observed together at one hook moment.
 pub(crate) struct SessionPresenceObservation {
     /// Typed lifecycle state at this moment.
-    pub(crate) state: cosmon_core::presence::SessionState,
+    pub(crate) state: Option<cosmon_core::presence::SessionState>,
+    /// Capability of the source that produced this reading.
+    pub(crate) source: cosmon_core::provider_lifecycle::LifecycleSource,
     /// Redacted notification context, when this moment admits it.
     pub(crate) detail: Option<String>,
 }
@@ -126,6 +128,7 @@ pub(crate) fn emit_session_presence(
         worker_id,
         molecule_id,
         state: observation.state,
+        source: observation.source,
         detail: observation.detail,
         ts: Utc::now(),
     };

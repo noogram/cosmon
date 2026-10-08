@@ -662,6 +662,22 @@ Launch an interactive pilot through the supported identity boundary:
   cs sessions launch claude -- --model sonnet
   cs sessions launch codex -- --model gpt-6-sol
 
+A client that owns a Codex app-server connection forwards only lifecycle kind
+and a per-session monotone sequence:
+  cs sessions lifecycle --session <sid> --sequence 41 --event turn-start
+  cs sessions lifecycle --session <sid> --sequence 42 --event approval-request
+  cs sessions lifecycle --session <sid> --sequence 43 --event turn-complete
+  cs sessions lifecycle --session <sid> --sequence 44 --event disconnect
+
+The sequence must continue across reconnects. Duplicate and lower sequences
+are no-ops. Disconnect records `unavailable` with no state; it is never idle.
+Before forwarding its first event, the connected client must establish the
+session's presence row with `sessions attach` or a provider hook. Lifecycle
+ingress refuses to invent the provider session's pid or cwd. On the existing
+row it updates heartbeat, state, source, and sequence, clears lifecycle detail,
+and initializes only an absent provider to `codex`. Cosmon does not own or
+reconnect the app-server transport.
+
 Codex tool subprocesses use the provider's native `CODEX_THREAD_ID` or
 `CODEX_SESSION_ID`. When both are present they must agree. A Codex callback's
 `thread-id` must agree with that environment identity too; disagreement

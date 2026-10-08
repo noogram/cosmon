@@ -15,8 +15,10 @@ quota, timeout or heuristic moves them.
 
 The verbs come in the order you meet them: find a session (discover, show),
 take a seat (attach, list, peers), talk (send, inbox), hand over (checkpoint,
-drift, takeover). `hook` wires the routine ones into the agent itself, so
-they happen without being typed.
+drift, takeover). `hook` wires the routine ones into the agent itself.
+`lifecycle` accepts content-free observations from a client that already owns
+a Codex app-server connection; cosmon does not open that connection. It
+requires a presence row previously established by attach or a provider hook.
 
 Both seats are live sessions of the SAME mission, and only a human signature
 moves the controls between them. For separate molecules — each with its own
@@ -27,6 +29,7 @@ Usage: cs sessions [OPTIONS] <COMMAND>
 
 Commands:
   launch      Launch Claude or Codex with a fresh identity shared by hooks and tools
+  lifecycle   Record a content-free lifecycle event from a connected provider client
   discover    Which agent conversations exist on this machine, and the exact name to refer to one by
   list        Which of them have taken a seat, and in which role
   seats       Ledger-derived pilot authority in one versioned JSON document
@@ -102,6 +105,22 @@ pilot's own words, and only its moment is the hook's.
 Launch an interactive pilot through the supported identity boundary:
   cs sessions launch claude -- --model sonnet
   cs sessions launch codex -- --model gpt-6-sol
+
+A client that owns a Codex app-server connection forwards only lifecycle kind
+and a per-session monotone sequence:
+  cs sessions lifecycle --session <sid> --sequence 41 --event turn-start
+  cs sessions lifecycle --session <sid> --sequence 42 --event approval-request
+  cs sessions lifecycle --session <sid> --sequence 43 --event turn-complete
+  cs sessions lifecycle --session <sid> --sequence 44 --event disconnect
+
+The sequence must continue across reconnects. Duplicate and lower sequences
+are no-ops. Disconnect records `unavailable` with no state; it is never idle.
+Before forwarding its first event, the connected client must establish the
+session's presence row with `sessions attach` or a provider hook. Lifecycle
+ingress refuses to invent the provider session's pid or cwd. On the existing
+row it updates heartbeat, state, source, and sequence, clears lifecycle detail,
+and initializes only an absent provider to `codex`. Cosmon does not own or
+reconnect the app-server transport.
 
 Codex tool subprocesses use the provider's native `CODEX_THREAD_ID` or
 `CODEX_SESSION_ID`. When both are present they must agree. A Codex callback's

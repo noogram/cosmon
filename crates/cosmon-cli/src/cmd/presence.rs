@@ -267,6 +267,15 @@ pub struct PingArgs {
     /// from the command line; a ping that omits it carries the previous one.
     #[arg(skip)]
     pub state: Option<cosmon_core::presence::SessionState>,
+    /// Lifecycle source capability to publish. Set by provider adapters only.
+    #[arg(skip)]
+    pub(crate) lifecycle_source: Option<cosmon_core::provider_lifecycle::LifecycleSource>,
+    /// Last accepted provider-event sequence. Set by provider adapters only.
+    #[arg(skip)]
+    pub(crate) lifecycle_sequence: Option<cosmon_core::provider_lifecycle::ProviderEventSequence>,
+    /// Clear the previous lifecycle state for an unavailable reading.
+    #[arg(skip)]
+    pub(crate) clear_state: bool,
     /// Whether to preserve or replace the redacted notification detail.
     #[arg(skip)]
     pub(crate) detail: PresenceDetailUpdate,
@@ -559,7 +568,18 @@ pub(crate) fn ping(ctx: &Context, args: &PingArgs) -> anyhow::Result<Presence> {
         ),
         mission,
         lease_epoch,
-        state: args.state.or_else(|| prior.as_ref().and_then(|p| p.state)),
+        state: if args.clear_state {
+            None
+        } else {
+            args.state.or_else(|| prior.as_ref().and_then(|p| p.state))
+        },
+        lifecycle_source: args
+            .lifecycle_source
+            .or_else(|| prior.as_ref().map(|p| p.lifecycle_source))
+            .unwrap_or_default(),
+        lifecycle_sequence: args
+            .lifecycle_sequence
+            .or_else(|| prior.as_ref().and_then(|p| p.lifecycle_sequence)),
         detail: match &args.detail {
             PresenceDetailUpdate::Replace(detail) => detail.clone(),
             PresenceDetailUpdate::Preserve => prior.as_ref().and_then(|p| p.detail.clone()),

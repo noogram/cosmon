@@ -705,6 +705,10 @@ fn beat_presence(
         .flatten()
         .and_then(|p| p.state);
     let mut state = session_state(event, payload.notification_type.as_deref());
+    let lifecycle_source = match provider {
+        HookProvider::Claude => cosmon_core::provider_lifecycle::LifecycleSource::LiveLifecycle,
+        HookProvider::Codex => cosmon_core::provider_lifecycle::LifecycleSource::TurnEndOnly,
+    };
     // Claude fires a `permission_prompt` Notification for the question dialog
     // too, a few seconds after the `PreToolUse` that published `asking`. Left
     // alone it would turn the question back into a permission prompt; the
@@ -735,7 +739,12 @@ fn beat_presence(
         SessionKind::Pilot
     };
 
-    if prior_state != Some(state) {
+    let prior_source = presence::store(ctx)
+        .load(&sid)
+        .ok()
+        .flatten()
+        .map(|p| p.lifecycle_source);
+    if prior_state != Some(state) || prior_source != Some(lifecycle_source) {
         crate::operator_event::emit_session_presence(
             &state_dir,
             &sid,
@@ -746,7 +755,8 @@ fn beat_presence(
                 .filter(|v| !v.trim().is_empty()),
             worker_molecule.clone(),
             crate::operator_event::SessionPresenceObservation {
-                state,
+                state: Some(state),
+                source: lifecycle_source,
                 detail: detail.clone(),
             },
         );
@@ -763,6 +773,7 @@ fn beat_presence(
             galaxy: cosmon_core::presence::galaxy_name_from_state_dir(&state_dir)
                 .unwrap_or_else(|| "unknown".to_owned()),
             state: Some(state),
+            lifecycle_source: Some(lifecycle_source),
             detail: presence::PresenceDetailUpdate::Replace(detail),
             ..presence::PingArgs::default()
         },
