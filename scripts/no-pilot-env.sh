@@ -35,9 +35,9 @@
 # this list rotting silently, and what covers the pilot variable nobody has
 # invented yet.
 #
-# GATE_ONLY_VARS are different: operator controls which are legitimate at
-# runtime but must not steer a test process. A tmux server can retain one long
-# after the shell that set it has gone away. Keep this list small and pin every
+# GATE_ONLY_VARS are different: operator controls and provider/session identity
+# which are legitimate at runtime but must not steer a test process. A tmux
+# server can retain one long after the shell that set it has gone away. Keep this list small and pin every
 # entry with the same negative-control test as the pilot variables.
 #
 # Usage:  ./scripts/no-pilot-env.sh cargo test --workspace
@@ -60,6 +60,11 @@ PILOT_VARS=(
 
 GATE_ONLY_VARS=(
     COSMON_SPAWN_POSTCONDITION_SECS
+    CODEX_THREAD_ID
+    CODEX_SESSION_ID
+    COSMON_SESSION_ID
+    COSMON_SESSION_LAUNCH_ID
+    CLAUDE_SESSION_ID
 )
 
 if [[ $# -eq 0 ]]; then

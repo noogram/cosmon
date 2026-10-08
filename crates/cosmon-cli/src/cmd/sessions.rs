@@ -1996,14 +1996,9 @@ fn run_takeover_grant(ctx: &Context, args: &TakeoverGrantArgs) -> anyhow::Result
 }
 
 fn run_takeover_check(ctx: &Context, args: &TakeoverCheckArgs) -> anyhow::Result<()> {
-    let session = match &args.session {
-        Some(s) => SessionId::new(s.clone())?,
-        None => {
-            presence::resolve_sid_for_poll(&presence::PollArgs { session: None }).map_err(|_| {
-                anyhow::anyhow!("no session — pass --session <SID> or export COSMON_SESSION_ID")
-            })?
-        }
-    };
+    let session = presence::resolve_sid_for_poll(&presence::PollArgs {
+        session: args.session.clone(),
+    })?;
     let epoch = match args.epoch {
         Some(raw) => Some(LeaseEpoch::new(raw)?),
         None => None,

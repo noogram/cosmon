@@ -102,21 +102,31 @@ Launch an interactive pilot through the supported identity boundary:
   cs sessions launch claude -- --model sonnet
   cs sessions launch codex -- --model gpt-6-sol
 
-Each launch creates a fresh anonymous `COSMON_SESSION_ID` and sets the
-matching `COSMON_SESSION_LAUNCH_ID` marker, replacing inherited pilot ids.
-Hooks and tool subprocesses inherit both values. Presence, takeover checks
-and lifecycle guards then resolve the same Cosmon identity. Provider arguments
-are passed verbatim, without shell interpolation; the provider owns its exit
-status. A second launch receives a different id, including a resumed provider
-conversation. Launching does not install the hooks: wire them as shown above.
+Codex tool subprocesses use the provider's native `CODEX_THREAD_ID` or
+`CODEX_SESSION_ID`. When both are present they must agree. A Codex callback's
+`thread-id` must agree with that environment identity too; disagreement
+refuses the identity and publishes no presence row. This native identity takes
+precedence over a launch marker for presence, takeover checks and lifecycle
+guards. Workers retain their dispatch identity instead of an inherited native id.
 
-Outside this launch boundary, pilot callbacks use their native payload id:
-Codex 0.161 legacy `notify` uses `thread-id`; Claude uses `session_id`.
-An unmarked inherited `COSMON_SESSION_ID` cannot override that payload.
-A callback without a usable identity publishes no row and reports the
-limitation on stderr. Native callback identity alone does not establish
-identity parity with tool subprocesses. Worker hooks retain their dispatch
-identity. A hook outside a Cosmon galaxy exits successfully without writing.
+Each launch also creates a fresh anonymous `COSMON_SESSION_ID` and matching
+`COSMON_SESSION_LAUNCH_ID` marker. It replaces inherited pilot ids and clears
+inherited Codex native ids before starting the provider. The provider may then
+supply its own native identity. When no native environment identity is
+available, hooks and tool subprocesses use the marked launch id. This is the
+supported Claude tool identity boundary; no Claude native tool environment
+binding has been verified. A second launch receives a different anonymous
+fallback id, including a resumed provider conversation. Provider arguments pass
+verbatim without shell interpolation, and the provider retains its exit status.
+Launching does not install hooks: wire them as shown above.
+
+Without a native environment identity or marked launch, pilot callbacks use
+the payload's native id: Codex 0.161 legacy `notify` uses `thread-id`; Claude
+uses `session_id`. An unmarked inherited `COSMON_SESSION_ID` cannot override
+that payload. This callback fallback alone does not establish identity parity
+with tool subprocesses. A callback without a usable identity publishes no row
+and reports the limitation on stderr. A hook outside a Cosmon galaxy exits
+successfully without writing.
 
 The canonical name of a session is `<provider>:<native-session-id>`, and
 nothing else ever breaks a tie: a title, a cwd and a modification time

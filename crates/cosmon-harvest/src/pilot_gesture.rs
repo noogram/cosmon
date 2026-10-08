@@ -208,17 +208,21 @@ fn refuse_unverifiable_grant_ledger(
 
 /// Resolve the session id this `cs` invocation speaks for, or `None`.
 ///
-/// Mirrors the two variables `cs presence` reads, in the same order, so a
-/// pilot is the same pilot to the guard as it is to the cockpit. A blank or
+/// Uses the same typed native/launch/dispatch contract as `cs presence`, so a
+/// pilot is the same pilot to the guard as it is to the cockpit. A conflicting or
 /// malformed value is `None` and not an error: the guard's caller turns that
 /// into a refusal, which is stricter than an error would be.
 fn resolve_pilot_session<F>(env_lookup: &F) -> Option<cosmon_core::id::SessionId>
 where
     F: Fn(&str) -> Option<String>,
 {
-    cosmon_core::caller_identity::resolve(None, None, env_lookup)
-        .ok()
-        .flatten()
+    cosmon_core::caller_identity::resolve(
+        None,
+        cosmon_core::caller_identity::Caller::Shell,
+        env_lookup,
+    )
+    .ok()
+    .flatten()
 }
 
 /// The process environment, as [`refuse_unleased_pilot_gesture`] wants it.

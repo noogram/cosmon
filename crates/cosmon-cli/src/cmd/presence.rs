@@ -1454,23 +1454,27 @@ pub(crate) fn seat_caveat(
 // Session id resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve a session id for `ping`: explicit `--session` wins, then
-/// `$COSMON_SESSION_ID`, then `$CLAUDE_SESSION_ID`, then a stable
-/// tty-hash fallback so two shells in different tabs get distinct ids.
+/// Resolve `ping` through the shared dispatch/native/launch identity contract.
+/// Only an unidentified shell uses a stable tty-hash fallback. Conflicting
+/// native metadata is an error and never falls back to a derived identity.
 pub(crate) fn resolve_or_derive_sid(explicit: Option<&str>) -> anyhow::Result<SessionId> {
-    Ok(
-        cosmon_core::caller_identity::resolve(explicit, None, |name| std::env::var(name).ok())?
-            .unwrap_or(SessionId::new(derive_stable_sid())?),
-    )
+    Ok(cosmon_core::caller_identity::resolve(
+        explicit,
+        cosmon_core::caller_identity::Caller::Shell,
+        |name| std::env::var(name).ok(),
+    )?
+    .unwrap_or(SessionId::new(derive_stable_sid())?))
 }
 
 /// Resolve a session id for `poll` — same precedence as `ping` but the
 /// tty-hash fallback is not used (poll is always driven by a hook that
 /// already knows the id).
 pub(crate) fn resolve_sid_for_poll(args: &PollArgs) -> anyhow::Result<SessionId> {
-    cosmon_core::caller_identity::resolve(args.session.as_deref(), None, |name| {
-        std::env::var(name).ok()
-    })?
+    cosmon_core::caller_identity::resolve(
+        args.session.as_deref(),
+        cosmon_core::caller_identity::Caller::Shell,
+        |name| std::env::var(name).ok(),
+    )?
     .ok_or_else(|| {
         anyhow::anyhow!("no session id — pass --session <SID> or export COSMON_SESSION_ID")
     })

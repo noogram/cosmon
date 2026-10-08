@@ -24,6 +24,8 @@ fn cs(root: &Path) -> Command {
         "COSMON_SESSION_ID",
         "COSMON_SESSION_LAUNCH_ID",
         "CLAUDE_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
         "COSMON_STATE_DIR",
         "COSMON_TAKEOVER_PUBKEY",
         "COSMON_NO_OPERATOR_EVENTS",
@@ -163,8 +165,8 @@ fn grant(root: &Path, mission: &str, sid: &str) {
 }
 
 #[test]
-fn hook_takeover_check_and_lifecycle_guard_share_the_launched_identity() {
-    for name in ["claude", "codex"] {
+fn hook_takeover_check_and_lifecycle_guard_share_the_resolved_identity() {
+    for (name, native_environment) in [("claude", false), ("codex", false), ("codex", true)] {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         galaxy(root);
@@ -196,9 +198,15 @@ description = "One step"
             root,
             name,
             r#"
-printf '%s\n' "$COSMON_SESSION_ID"
+if test "$TEST_NATIVE_ENVIRONMENT" = yes; then
+    export CODEX_THREAD_ID=native-codex-fixture
+    export CODEX_SESSION_ID=native-codex-fixture
+    printf '%s\n' "$CODEX_THREAD_ID"
+else
+    printf '%s\n' "$COSMON_SESSION_ID"
+fi
 read -r ready
-"$TEST_CS" presence ping --session "$COSMON_SESSION_ID" --role primary --mission "$TEST_MISSION" --epoch 1 >/dev/null
+"$TEST_CS" presence ping --role primary --mission "$TEST_MISSION" --epoch 1 >/dev/null
 printf '%s' '{"session_id":"native-claude-fixture","thread-id":"native-codex-fixture"}' | "$TEST_CS" sessions hook run --provider "$TEST_PROVIDER" --event turn-end
 "$TEST_CS" sessions takeover check --mission "$TEST_MISSION" --epoch 1
 "$TEST_CS" collapse "$TEST_MISSION" --reason 'launch identity accepted'
@@ -206,6 +214,10 @@ printf '%s' '{"session_id":"native-claude-fixture","thread-id":"native-codex-fix
         );
         let mut child = launch(root, name)
             .env("TEST_MISSION", mission)
+            .env(
+                "TEST_NATIVE_ENVIRONMENT",
+                if native_environment { "yes" } else { "no" },
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -261,7 +273,9 @@ fn hook(root: &Path, provider: &str, worker: bool) {
     .stderr(Stdio::piped());
     if worker {
         cmd.env("COSMON_PARENT_MOL_ID", "task-20261007-abcd")
-            .env("COSMON_SESSION_LAUNCH_ID", "stale-pilot-marker");
+            .env("COSMON_SESSION_LAUNCH_ID", "stale-pilot-marker")
+            .env("CODEX_THREAD_ID", "native-worker-one")
+            .env("CODEX_SESSION_ID", "native-worker-two");
     }
     let mut child = cmd.spawn().expect("hook");
     child
@@ -398,5 +412,137 @@ read -r ready
             .write_all(b"done\n")
             .expect("finish provider");
         success(child.wait_with_output().expect("provider exit"));
+    }
+}
+
+#[test]
+fn launcher_clears_both_inherited_codex_native_variables_before_provider_entry() {
+    for name in ["claude", "codex"] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        provider(
+            tmp.path(),
+            name,
+            r#"
+test "${CODEX_THREAD_ID+x}" != x
+test "${CODEX_SESSION_ID+x}" != x
+"#,
+        );
+        success(
+            launch(tmp.path(), name)
+                .env("CODEX_THREAD_ID", "stale-native-thread")
+                .env("CODEX_SESSION_ID", "stale-native-session")
+                .output()
+                .expect("launch with stale native identity"),
+        );
+    }
+}
+
+#[test]
+fn codex_native_environment_replaces_the_launch_identity_for_callbacks() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    galaxy(root);
+    provider(
+        root,
+        "codex",
+        r#"
+export CODEX_THREAD_ID=native-codex-fixture
+export CODEX_SESSION_ID=native-codex-fixture
+printf '%s' '{"thread-id":"native-codex-fixture"}' | "$TEST_CS" sessions hook run --provider codex --event turn-end
+printf '%s' "$COSMON_SESSION_ID"
+"#,
+    );
+    let out = success(launch(root, "codex").output().expect("native provider"));
+    let launch_sid = String::from_utf8(out.stdout).expect("launch identity");
+    let native = record(root, "native-codex-fixture");
+    assert_eq!(native["native_session_id"], "native-codex-fixture");
+    assert!(
+        !root
+            .join(".cosmon/state/presence")
+            .join(format!("session-{launch_sid}.json"))
+            .exists(),
+        "native environment must outrank the still-inherited launch marker"
+    );
+}
+
+#[test]
+fn contradictory_codex_native_identity_does_not_publish_presence_or_pass_check() {
+    for (thread, session, payload) in [
+        ("native-one", "native-two", "native-one"),
+        ("native-one", "native-one", "native-other"),
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        galaxy(root);
+        let mut child = cs(root)
+            .args([
+                "sessions",
+                "hook",
+                "run",
+                "--provider",
+                "codex",
+                "--event",
+                "turn-end",
+            ])
+            .env("COSMON_SESSION_ID", "marked-launch")
+            .env("COSMON_SESSION_LAUNCH_ID", "marked-launch")
+            .env("CODEX_THREAD_ID", thread)
+            .env("CODEX_SESSION_ID", session)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("contradictory hook");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(
+                serde_json::json!({"thread-id": payload})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .expect("payload");
+        let out = success(child.wait_with_output().expect("hook exit"));
+        let presence = root.join(".cosmon/state/presence");
+        assert!(
+            !presence.exists() || fs::read_dir(presence).expect("presence dir").count() == 0,
+            "contradictory identity must not write a presence row"
+        );
+        assert!(
+            !out.stderr.is_empty(),
+            "identity refusal must be diagnosable"
+        );
+        if thread != session {
+            let check = cs(root)
+                .args([
+                    "sessions",
+                    "takeover",
+                    "check",
+                    "--mission",
+                    "task-20261007-abcd",
+                    "--epoch",
+                    "1",
+                ])
+                .env("COSMON_SESSION_ID", "marked-launch")
+                .env("COSMON_SESSION_LAUNCH_ID", "marked-launch")
+                .env("CODEX_THREAD_ID", thread)
+                .env("CODEX_SESSION_ID", session)
+                .output()
+                .expect("contradictory check");
+            assert!(
+                !check.status.success(),
+                "conflicting native identities must refuse check"
+            );
+            let diagnostic = format!(
+                "{}{}",
+                String::from_utf8_lossy(&check.stdout),
+                String::from_utf8_lossy(&check.stderr)
+            );
+            assert!(
+                diagnostic.contains("CODEX_THREAD_ID") && diagnostic.contains("CODEX_SESSION_ID"),
+                "check must refuse the native conflict, not an unrelated guard: {diagnostic}"
+            );
+        }
     }
 }

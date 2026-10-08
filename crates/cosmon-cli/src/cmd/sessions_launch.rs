@@ -53,7 +53,9 @@ impl Launcher for ProcessLauncher {
             // A new pilot is not the worker or leased pilot that launched it.
             .env_remove("COSMON_PARENT_MOL_ID")
             .env_remove("COSMON_WORKER_ID")
-            .env_remove("CLAUDE_SESSION_ID");
+            .env_remove("CLAUDE_SESSION_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("CODEX_SESSION_ID");
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;

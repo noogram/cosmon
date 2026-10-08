@@ -134,8 +134,9 @@ pub struct RunArgs {
     /// consulted, so a Codex hook passes `codex`; `claude` otherwise.
     #[arg(long, value_name = "NAME")]
     pub provider: Option<String>,
-    /// Explicit Cosmon identity override. Marked launches otherwise use their
-    /// fresh id; unmarked callbacks use the provider-native payload identity.
+    /// Explicit identity override after native consistency checks. Workers
+    /// retain dispatch identity; otherwise Codex native environment, marked
+    /// launch fallback, then callback payload determine the default.
     #[arg(long, value_name = "SID")]
     pub session: Option<String>,
     /// The provider's payload. Codex passes it as this trailing argument;
@@ -644,33 +645,28 @@ fn session_state(event: HookEvent, notification_type: Option<&str>) -> SessionSt
 
 /// Resolve the Cosmon record key for a provider hook.
 ///
-/// Marked launches share their anonymous identity with shell commands. Other
-/// callbacks use their native identity. Workers retain their dispatch identity.
+/// Codex native environment and callbacks must agree. Otherwise marked launches
+/// share a fallback identity with tools. Workers retain dispatch identity.
 fn resolve_hook_session_id(
     args: &RunArgs,
     provider: HookProvider,
     native: Option<&str>,
-    worker_molecule: Option<&cosmon_core::id::MoleculeId>,
 ) -> Option<SessionId> {
-    let env = |name: &str| std::env::var(name).ok();
-    // Dispatch identity is independent of provider-native callback metadata.
-    let native = if worker_molecule.is_some() {
-        None
-    } else {
-        native
+    use cosmon_core::caller_identity::{resolve, Caller};
+    let caller = match provider {
+        HookProvider::Claude => Caller::ClaudeCallback(native),
+        HookProvider::Codex => Caller::CodexCallback(native),
     };
-    if worker_molecule.is_none()
-        && native.is_none()
-        && cosmon_core::caller_identity::marked_launch_id(&env).is_none()
-    {
-        eprintln!("cs sessions hook: {} pilot payload has no usable native identity — no presence row published", provider.as_str());
-        return None;
-    }
-    match cosmon_core::caller_identity::resolve(args.session.as_deref(), native, env) {
+    match resolve(args.session.as_deref(), caller, |name| {
+        std::env::var(name).ok()
+    }) {
         Ok(Some(sid)) => Some(sid),
-        Ok(None) => None,
+        Ok(None) => {
+            eprintln!("cs sessions hook: no usable native identity or launch identity — no presence row published");
+            None
+        }
         Err(e) => {
-            eprintln!("cs sessions hook: no session id ({e}) — nothing to be present as");
+            eprintln!("cs sessions hook: {e} — no presence row published");
             None
         }
     }
@@ -696,7 +692,7 @@ fn beat_presence(
         .ok()
         .and_then(|raw| raw.trim().parse::<cosmon_core::id::MoleculeId>().ok());
     let native = payload.native_session_id.clone();
-    let sid = resolve_hook_session_id(args, provider, native.as_deref(), worker_molecule.as_ref())?;
+    let sid = resolve_hook_session_id(args, provider, native.as_deref())?;
     let headline = worker_molecule
         .as_ref()
         .map(|_| format!("worker: {}", event.as_str()));
