@@ -1,0 +1,31 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Launch Claude or Codex with a fresh identity shared by hooks and tools
+
+Usage: cs sessions launch [OPTIONS] <PROVIDER> [-- <ARGS>...]
+
+Arguments:
+  <PROVIDER>
+          Provider executable to resolve on PATH
+
+          Possible values:
+          - claude: Claude Code
+          - codex:  Codex CLI
+
+  [ARGS]...
+          Provider arguments, passed verbatim after `--`
+
+Options:
+      --config <PATH>
+          Path to the state directory (default: the galaxy's .cosmon/state/)
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+  -h, --help
+          Print help (see a summary with '-h')

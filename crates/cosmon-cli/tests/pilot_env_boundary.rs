@@ -63,7 +63,14 @@ const KNOWN_POISONS: &[(&str, &str)] = &[
 
 /// Runtime controls that are not pilot variables but must not leak into a
 /// verification gate from an operator shell or tmux server.
-const GATE_ONLY_POISONS: &[(&str, &str)] = &[("COSMON_SPAWN_POSTCONDITION_SECS", "90")];
+const GATE_ONLY_POISONS: &[(&str, &str)] = &[
+    ("COSMON_SPAWN_POSTCONDITION_SECS", "90"),
+    ("CODEX_THREAD_ID", "synthetic-gate-native"),
+    ("CODEX_SESSION_ID", "synthetic-gate-native"),
+    ("COSMON_SESSION_ID", "synthetic-gate-pilot"),
+    ("COSMON_SESSION_LAUNCH_ID", "synthetic-gate-pilot"),
+    ("CLAUDE_SESSION_ID", "synthetic-gate-claude"),
+];
 
 /// The shell projection is exactly the Rust manifest, in order.
 ///
@@ -365,6 +372,15 @@ fn canary_names_the_breach_and_the_remedy() {
 fn this_test_process_is_outside_the_pilotage_environment() {
     let found = pilot_env::detect_in(|k| std::env::var(k).ok());
     assert!(found.is_empty(), "{}", pilot_env::canary_message(&found));
+    let ambient_gate_controls: Vec<&str> = GATE_ONLY_POISONS
+        .iter()
+        .filter_map(|(name, _)| std::env::var_os(name).map(|_| *name))
+        .collect();
+    assert!(
+        ambient_gate_controls.is_empty(),
+        "gate-only environment reached the test process: {ambient_gate_controls:?}; \
+         run through scripts/no-pilot-env.sh"
+    );
 }
 
 /// Classify one `git grep -n` hit: does this line *apply* the boundary from a

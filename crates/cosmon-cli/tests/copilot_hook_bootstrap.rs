@@ -36,6 +36,15 @@ fn run(state: &Path, session: &str, args: &[&str], stdin: Option<&str>) -> (Stri
         .arg(state)
         .args(args)
         .env("COSMON_SESSION_ID", session)
+        // This fixture models the supported launcher, shared by hooks and tools.
+        .env(
+            "COSMON_SESSION_LAUNCH_ID",
+            if args.windows(2).any(|pair| pair == ["--provider", "codex"]) {
+                ""
+            } else {
+                session
+            },
+        )
         // The probe registry walks a provider's log root; pointing both at an
         // empty directory keeps this test off whatever this host happens to
         // have in `~/.claude` and `~/.codex`.

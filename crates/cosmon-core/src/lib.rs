@@ -199,6 +199,7 @@ pub mod remote_harvest;
 // a `///` here: an outer doc comment on the declaration merges with the inner
 // one and drags intra-doc link resolution up into *this* module's scope, which
 // silently breaks every `[`Item`]` the module writes about itself.
+pub mod caller_identity;
 #[doc(hidden)]
 pub mod injection;
 #[doc(hidden)]

@@ -120,6 +120,8 @@ pub struct Args {
 /// take a seat beside it, talk to it, hand over from it.
 #[derive(clap::Subcommand)]
 pub enum Sub {
+    /// Launch Claude or Codex with a fresh identity shared by hooks and tools.
+    Launch(super::sessions_launch::Args),
     /// Which agent conversations exist on this machine, and the exact name
     /// to refer to one by.
     Discover(DiscoverArgs),
@@ -557,6 +559,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         Sub::Checkpoint(a) => run_checkpoint(ctx, a),
         Sub::Drift(a) => run_drift(ctx, a),
         Sub::Takeover(a) => run_takeover(ctx, a),
+        Sub::Launch(a) => super::sessions_launch::run(a),
         Sub::Hook(a) => super::sessions_hook::run(ctx, a),
     }
 }
@@ -1993,14 +1996,9 @@ fn run_takeover_grant(ctx: &Context, args: &TakeoverGrantArgs) -> anyhow::Result
 }
 
 fn run_takeover_check(ctx: &Context, args: &TakeoverCheckArgs) -> anyhow::Result<()> {
-    let session = match &args.session {
-        Some(s) => SessionId::new(s.clone())?,
-        None => {
-            presence::resolve_sid_for_poll(&presence::PollArgs { session: None }).map_err(|_| {
-                anyhow::anyhow!("no session — pass --session <SID> or export COSMON_SESSION_ID")
-            })?
-        }
-    };
+    let session = presence::resolve_sid_for_poll(&presence::PollArgs {
+        session: args.session.clone(),
+    })?;
     let epoch = match args.epoch {
         Some(raw) => Some(LeaseEpoch::new(raw)?),
         None => None,
