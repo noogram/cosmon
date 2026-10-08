@@ -190,6 +190,27 @@ impl CheckpointStore {
             .into_iter()
             .rfind(|c| &c.session_id == session))
     }
+
+    /// The newest checkpoint for one exact publisher session and lease epoch.
+    ///
+    /// The pair is intentionally inseparable: a session can regain a lease at
+    /// a later epoch, and resuming its earlier hand-over would cross an
+    /// authority boundary.
+    ///
+    /// # Errors
+    ///
+    /// As [`CheckpointStore::list`].
+    pub fn latest_for_session_epoch(
+        &self,
+        mission: &MissionId,
+        session: &SessionId,
+        epoch: u64,
+    ) -> Result<Option<PilotCheckpoint>, CheckpointError> {
+        Ok(self
+            .list(mission)?
+            .into_iter()
+            .rfind(|c| &c.session_id == session && c.lease_epoch == epoch))
+    }
 }
 
 fn read_record(path: &Path) -> Result<PilotCheckpoint, CheckpointError> {
@@ -231,6 +252,30 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_v1_record_without_schema_loads_as_v1_without_rewrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(tmp.path());
+        let checkpoint = cp("legacy", "sess-a", 100);
+        let path = store.path_of(&checkpoint.mission_id, &checkpoint.id);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut record = serde_json::to_value(&checkpoint).unwrap();
+        record.as_object_mut().unwrap().remove("schema");
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+        let loaded = store
+            .load(&checkpoint.mission_id, &checkpoint.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.schema, crate::CHECKPOINT_SCHEMA_V1);
+        assert!(
+            !std::fs::read_to_string(path)
+                .unwrap()
+                .contains("\"schema\""),
+            "loading is not a migration or rewrite"
+        );
+    }
+
+    #[test]
     fn republishing_the_same_id_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::new(tmp.path());
@@ -242,6 +287,35 @@ mod tests {
             again,
             Err(CheckpointError::AlreadyPublished { .. })
         ));
+    }
+
+    #[test]
+    fn latest_for_session_epoch_never_falls_back_to_another_epoch_or_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(tmp.path());
+        let mission = MissionId::new("task-20260731-67f2").unwrap();
+        let old = cp("old", "holder", 100);
+        let mut current = cp("current", "holder", 200);
+        current.lease_epoch = 2;
+        let mut copilot = cp("later-copilot", "copilot", 300);
+        copilot.lease_epoch = 2;
+        store.publish(&old).unwrap();
+        store.publish(&current).unwrap();
+        store.publish(&copilot).unwrap();
+
+        assert_eq!(
+            store
+                .latest_for_session_epoch(&mission, &SessionId::new("holder").unwrap(), 2)
+                .unwrap()
+                .unwrap()
+                .id
+                .as_str(),
+            "current"
+        );
+        assert!(store
+            .latest_for_session_epoch(&mission, &SessionId::new("holder").unwrap(), 3)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -2,6 +2,18 @@
 
 # CLI and UI parity audit
 
+## Checkpoint draft publication and holder selection (issue #196)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Publish a versioned hand-over draft and retrieve the current lease holder's hand-over | `cs sessions checkpoint publish --from-file <PATH\|->` accepts only `cosmon.checkpoint-draft/v1`, stamps provenance from the verified lease, and refuses unknown or authority fields. `cs sessions checkpoint show --mission M --of-holder --json` returns `{checkpoint, selected_by}` and admits only the newest record with the verified holder's exact session and epoch. | No checkpoint draft editor or holder-scoped reader audited | No remote checkpoint route audited |
+
+The holder selector does not infer authority from publication order: an absent
+lease and an absent exact match both retain the wrapper and return a null
+`checkpoint`. Inline checkpoint publication remains available for compatibility;
+new stored records carry `cosmon.checkpoint/v1`, while legacy records missing
+that field read as v1 without rewrite.
+
 ## Interactive provider launch identity (issue #195)
 
 | Capability | CLI | Native UI | Remote service |

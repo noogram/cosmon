@@ -23,4 +23,5 @@ Options:
       --question <TEXT>                A question the pilot could not answer. Repeatable — this is where uncertainty belongs, never inside a stance
       --evidence <SUBJECT=LOCATOR>     Evidence for one claim, as `SUBJECT=LOCATOR[#DIGEST]`. Repeatable
       --checkpoint-evidence <LOCATOR>  Evidence for the checkpoint as a whole, as `LOCATOR[#DIGEST]`. Repeatable
+      --from-file <PATH|->             Read versioned checkpoint content from a JSON file, or `-` for stdin. Cosmon, rather than the file, stamps all publication provenance
   -h, --help                           Print help

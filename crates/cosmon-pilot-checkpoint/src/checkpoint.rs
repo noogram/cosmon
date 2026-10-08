@@ -28,6 +28,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::{CheckpointId, ClaimId, MissionId, SessionId};
 
+/// Schema written on every checkpoint record produced by this version.
+///
+/// Older checkpoint files predate an explicit schema field and deserialize as
+/// this version through [`checkpoint_schema_v1`].
+pub const CHECKPOINT_SCHEMA_V1: &str = "cosmon.checkpoint/v1";
+
+/// The schema assumed for a legacy checkpoint record that omitted it.
+#[must_use]
+pub fn checkpoint_schema_v1() -> String {
+    CHECKPOINT_SCHEMA_V1.to_owned()
+}
+
 /// A pointer to something that can be re-read: a file, a molecule, a commit, a
 /// URL.
 ///
@@ -190,8 +202,13 @@ impl Scope {
 /// Invariant CHECKPOINT-NOT-SCROLLBACK in one struct. Everything a takeover
 /// needs is here and is compact; nothing here is conversation content, which
 /// stays with the provider (ADR-168 D3.3).
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PilotCheckpoint {
+    /// Versioned record schema. Missing only on legacy v1 files, where it
+    /// defaults to [`CHECKPOINT_SCHEMA_V1`] without rewriting the file.
+    #[serde(default = "checkpoint_schema_v1")]
+    pub schema: String,
     /// Identifies this checkpoint within the mission.
     pub id: CheckpointId,
     /// The mission being flown.
@@ -249,6 +266,7 @@ impl PilotCheckpoint {
         created_at: DateTime<Utc>,
     ) -> Result<Self, crate::CheckpointError> {
         Ok(Self {
+            schema: checkpoint_schema_v1(),
             id: CheckpointId::new(id)?,
             mission_id: MissionId::new(mission_id)?,
             session_id: SessionId::new(session_id)?,

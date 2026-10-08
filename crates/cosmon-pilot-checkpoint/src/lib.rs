@@ -94,7 +94,9 @@ pub mod error;
 pub mod id;
 pub mod store;
 
-pub use checkpoint::{Claim, EvidenceRef, PilotCheckpoint, Scope, Stance};
+pub use checkpoint::{
+    checkpoint_schema_v1, Claim, EvidenceRef, PilotCheckpoint, Scope, Stance, CHECKPOINT_SCHEMA_V1,
+};
 pub use drift::{compare, CitedClaim, DriftClass, DriftFinding, DriftReport, Side, Verdict};
 pub use error::CheckpointError;
 pub use id::{CheckpointId, ClaimId, FindingId, MissionId, SessionId};
