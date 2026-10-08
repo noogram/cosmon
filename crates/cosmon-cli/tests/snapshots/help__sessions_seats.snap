@@ -1,0 +1,14 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Ledger-derived pilot authority in one versioned JSON document
+
+Usage: cs sessions seats [OPTIONS]
+
+Options:
+      --all-galaxies   Scan every project under `$COSMON_CLUSTER_ROOT` using the `cs tail` cross-galaxy perimeter
+      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

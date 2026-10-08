@@ -116,6 +116,15 @@ A reader must carry that through to its own total and not substitute `0`.
 
 A reader detects log rotation by a size decrease or an inode change.
 
+**`cs sessions seats --json`.** Requires the global `--json` flag and emits one `schema_version: 1` document rather
+than the NDJSON used by `cs sessions list`. Each galaxy carries a readable
+state (`ok`, `unreadable`, `no mission`, `ambiguous mission`, or `no trust
+root`); each mission carries a verdict (`one`, `none`, `granted-unseated`,
+`contested`, or `epoch conflict`). `seats` retain every presence claim with
+its liveness and heartbeat, but only a current verified lease holder has
+`standing: "holder"`. A Codex claim without `native_id` cannot be a holder.
+`--all-galaxies` uses the same perimeter enumeration as `cs tail`.
+
 **`cs tail --all-galaxies --json`.** Each emitted JSON object retains the
 event-log fields and adds `source_galaxy`, the name of the project whose ledger
 supplied that row. The field is reader metadata rather than a mutation of the

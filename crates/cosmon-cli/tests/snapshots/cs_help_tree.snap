@@ -71,6 +71,7 @@ sessions
 sessions launch
 sessions discover
 sessions list
+sessions seats
 sessions show
 sessions attach
 sessions peers

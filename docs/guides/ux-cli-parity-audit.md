@@ -68,6 +68,15 @@ retain their prior parity status.
 The `source_galaxy` key is reader metadata for selecting the source ledger again; it
 does not change the append-only event log.
 
+## Ledger-derived pilot seats (issue #197)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Inspect pilot authority across galaxies | `cs sessions seats --json [--all-galaxies]` emits one versioned document; verified lease authority and presence claims remain distinct | No native seat dashboard audited | No remote route; the local lease and presence files are host-bound |
+
+The CLI never derives authority from heartbeat recency. Multiple primary
+claims remain visible, including stale claims after a transfer.
+
 ## Spore admission (ADR-183)
 
 | Capability | CLI | Native UI | Remote service |
