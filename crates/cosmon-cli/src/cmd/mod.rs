@@ -104,6 +104,7 @@ pub mod session_reclaim;
 pub mod sessions;
 pub mod sessions_hook;
 pub mod sessions_launch;
+pub mod sessions_lifecycle;
 pub mod spark;
 pub mod spec_audit;
 pub mod spore;

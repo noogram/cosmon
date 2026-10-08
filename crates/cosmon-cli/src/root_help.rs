@@ -85,7 +85,11 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              lifecycle, branch and permissions, visible in 'cs peek' and \
              harvested on its own, exchanging bounded findings with no \
              authority over each other. Neither replaces 'cs whisper' \
-             (pilot-to-worker steering only).\n\n\
+             (pilot-to-worker steering only). A client that already owns a \
+             Codex app-server connection may forward content-free lifecycle \
+             observations with 'cs sessions lifecycle'; disconnect is typed \
+             unavailable, and cosmon never owns that connection. An existing \
+             presence row from attach or a provider hook is required.\n\n\
              Pilots NEVER poll 'cs observe' by hand — always use 'cs wait'. \
              Pilots NEVER skip 'cs done' — without it the branch never merges. \
              A failed 'cs done' names the merge error and dirty checkout paths. \

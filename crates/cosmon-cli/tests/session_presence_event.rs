@@ -120,6 +120,54 @@ fn presence_record(state: &Path, session: &str) -> serde_json::Value {
         .expect("presence json")
 }
 
+fn fire_lifecycle(state: &Path, session: &str, sequence: u64, event: &str) {
+    let output = Command::new(env!("CARGO_BIN_EXE_cs"))
+        .arg("--config")
+        .arg(state)
+        .args([
+            "sessions",
+            "lifecycle",
+            "--session",
+            session,
+            "--sequence",
+            &sequence.to_string(),
+            "--event",
+            event,
+        ])
+        .env_remove("COSMON_NO_OPERATOR_EVENTS")
+        .env_remove("COSMON_PARENT_MOL_ID")
+        .env_remove("COSMON_WORKER_ID")
+        .output()
+        .expect("run lifecycle ingress");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn seed_providerless_presence(state: &Path, session: &str) {
+    let row = serde_json::json!({
+        "session_id": session,
+        "galaxy": "orchard",
+        "cwd": "/fixture/provider-session",
+        "pid": 4242,
+        "started_at": "2026-10-08T08:00:00Z",
+        "heartbeat_at": "2026-10-08T08:01:00Z",
+        "headline": "",
+        "role": "primary",
+        "capabilities": []
+    });
+    let dir = state.join("presence");
+    std::fs::create_dir_all(&dir).expect("presence dir");
+    std::fs::write(
+        dir.join(format!("session-{session}.json")),
+        serde_json::to_vec_pretty(&row).expect("json"),
+    )
+    .expect("fixture snapshot");
+}
+
 #[test]
 fn a_state_change_lands_in_the_galaxy_ledger_with_its_contract_fields() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -134,9 +182,230 @@ fn a_state_change_lands_in_the_galaxy_ledger_with_its_contract_fields() {
     assert_eq!(row["role"], "pilot");
     assert_eq!(row["session_id"], "pilot-a");
     assert_eq!(row["provider"], "claude");
+    assert_eq!(row["source"], "live_lifecycle");
     assert_eq!(row["schema_version"], 1);
     assert!(row["timestamp"].is_string(), "{row}");
     assert!(row.get("molecule_id").is_none(), "{row}");
+}
+
+#[test]
+fn codex_lifecycle_ingress_orders_events_and_degrades_on_disconnect() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = galaxy(tmp.path());
+    seed_providerless_presence(&state, "pilot-live");
+
+    fire_lifecycle(&state, "pilot-live", 1, "turn-start");
+    fire_lifecycle(&state, "pilot-live", 1, "turn-complete");
+    fire_lifecycle(&state, "pilot-live", 0, "turn-complete");
+    fire_lifecycle(&state, "pilot-live", 2, "approval-request");
+    fire_lifecycle(&state, "pilot-live", 3, "turn-complete");
+    fire_lifecycle(&state, "pilot-live", 4, "disconnect");
+    // A reconnect continues the client-owned sequence; resetting it to one is
+    // stale and cannot overwrite the disconnect reading.
+    fire_lifecycle(&state, "pilot-live", 1, "turn-start");
+    fire_lifecycle(&state, "pilot-live", 5, "turn-start");
+
+    let rows = presence_rows(&state);
+    assert_eq!(rows.len(), 5, "{rows:?}");
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["source"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        [
+            "live_lifecycle",
+            "live_lifecycle",
+            "live_lifecycle",
+            "unavailable",
+            "live_lifecycle"
+        ]
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.get("state").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>(),
+        [
+            Some("working"),
+            Some("waiting_permission"),
+            Some("idle"),
+            None,
+            Some("working")
+        ]
+    );
+
+    let record = presence_record(&state, "pilot-live");
+    assert_eq!(record["lifecycle_source"], "live_lifecycle");
+    assert_eq!(record["lifecycle_sequence"], 5);
+    assert_eq!(record["state"], "working");
+    assert_eq!(record["provider"], "codex");
+}
+
+#[test]
+fn codex_lifecycle_refuses_to_invent_presence_provenance() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = galaxy(tmp.path());
+    let path = state
+        .join("presence")
+        .join("session-never-established.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cs"))
+        .arg("--config")
+        .arg(&state)
+        .args([
+            "sessions",
+            "lifecycle",
+            "--session",
+            "never-established",
+            "--sequence",
+            "1",
+            "--event",
+            "turn-start",
+        ])
+        .output()
+        .expect("run lifecycle ingress");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(
+            "no presence row; establish it with sessions attach or a provider hook first"
+        ),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!path.exists(), "lifecycle ingress invented a presence row");
+    assert!(presence_rows(&state).is_empty());
+}
+
+#[test]
+fn lifecycle_ingress_preserves_every_non_lifecycle_presence_field() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = galaxy(tmp.path());
+    let before = serde_json::json!({
+        "session_id": "metadata-session",
+        "galaxy": "forwarded-galaxy",
+        "cwd": "/forwarded/worktree",
+        "pid": 4242,
+        "started_at": "2026-10-08T08:00:00Z",
+        "heartbeat_at": "2026-10-08T08:01:00Z",
+        "current_molecule": "task-20261008-abcd",
+        "headline": "preserve me",
+        "tty": "ttys099",
+        "provider": "codex",
+        "native_session_id": "anonymous-native-fixture",
+        "role": "primary",
+        "follows": "peer-fixture",
+        "capabilities": ["observe", "message"],
+        "checkpoint_id": "checkpoint-fixture",
+        "mission": "task-20261008-cdef",
+        "lease_epoch": 7,
+        "state": "idle",
+        "lifecycle_source": "turn_end_only",
+        "detail": "old detail"
+    });
+    let dir = state.join("presence");
+    std::fs::create_dir_all(&dir).expect("presence dir");
+    std::fs::write(
+        dir.join("session-metadata-session.json"),
+        serde_json::to_vec_pretty(&before).expect("json"),
+    )
+    .expect("fixture snapshot");
+
+    fire_lifecycle(&state, "metadata-session", 1, "approval-request");
+    let after = presence_record(&state, "metadata-session");
+    for key in [
+        "session_id",
+        "galaxy",
+        "cwd",
+        "pid",
+        "started_at",
+        "current_molecule",
+        "headline",
+        "tty",
+        "provider",
+        "native_session_id",
+        "role",
+        "follows",
+        "capabilities",
+        "checkpoint_id",
+        "mission",
+        "lease_epoch",
+    ] {
+        assert_eq!(after[key], before[key], "field {key} changed");
+    }
+    assert_ne!(after["heartbeat_at"], before["heartbeat_at"]);
+    assert_eq!(after["state"], "waiting_permission");
+    assert_eq!(after["lifecycle_source"], "live_lifecycle");
+    assert_eq!(after["lifecycle_sequence"], 1);
+    assert!(after.get("detail").is_none(), "{after}");
+}
+
+#[test]
+fn codex_lifecycle_refuses_a_presence_row_owned_by_another_provider() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = galaxy(tmp.path());
+    let row = serde_json::json!({
+        "session_id": "claude-owned",
+        "galaxy": "orchard",
+        "cwd": "/fixture",
+        "pid": 4242,
+        "started_at": "2026-10-08T08:00:00Z",
+        "heartbeat_at": "2026-10-08T08:01:00Z",
+        "headline": "unchanged",
+        "provider": "claude",
+        "role": "copilot",
+        "capabilities": [],
+        "state": "idle",
+        "lifecycle_source": "live_lifecycle"
+    });
+    let dir = state.join("presence");
+    std::fs::create_dir_all(&dir).expect("presence dir");
+    let path = dir.join("session-claude-owned.json");
+    let bytes = serde_json::to_vec_pretty(&row).expect("json");
+    std::fs::write(&path, &bytes).expect("fixture snapshot");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cs"))
+        .arg("--config")
+        .arg(&state)
+        .args([
+            "sessions",
+            "lifecycle",
+            "--session",
+            "claude-owned",
+            "--sequence",
+            "1",
+            "--event",
+            "turn-start",
+        ])
+        .output()
+        .expect("run lifecycle ingress");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("presence provider is 'claude'"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&path).expect("snapshot"), bytes);
+    assert!(presence_rows(&state).is_empty());
+}
+
+#[test]
+fn codex_notify_is_explicitly_turn_end_only() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = galaxy(tmp.path());
+    fire_provider_with(
+        &state,
+        "ignored-launch-id",
+        "turn-end",
+        None,
+        Some("codex"),
+        r#"{"thread-id":"native-codex-fixture"}"#,
+    );
+
+    let rows = presence_rows(&state);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["state"], "idle");
+    assert_eq!(rows[0]["source"], "turn_end_only");
+    let record = presence_record(&state, "native-codex-fixture");
+    assert_eq!(record["lifecycle_source"], "turn_end_only");
 }
 
 #[test]

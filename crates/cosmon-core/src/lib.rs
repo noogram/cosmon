@@ -269,6 +269,8 @@ pub mod protected_paths;
 #[doc(hidden)]
 pub mod provider_diversity;
 #[doc(hidden)]
+pub mod provider_lifecycle;
+#[doc(hidden)]
 pub mod quality_band;
 #[doc(hidden)]
 pub mod query;

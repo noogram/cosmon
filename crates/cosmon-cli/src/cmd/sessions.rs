@@ -102,8 +102,10 @@ quota, timeout or heuristic moves them.
 
 The verbs come in the order you meet them: find a session (discover, show),
 take a seat (attach, list, peers), talk (send, inbox), hand over (checkpoint,
-drift, takeover). `hook` wires the routine ones into the agent itself, so
-they happen without being typed.
+drift, takeover). `hook` wires the routine ones into the agent itself.
+`lifecycle` accepts content-free observations from a client that already owns
+a Codex app-server connection; cosmon does not open that connection. It
+requires a presence row previously established by attach or a provider hook.
 
 Both seats are live sessions of the SAME mission, and only a human signature
 moves the controls between them. For separate molecules — each with its own
@@ -125,6 +127,8 @@ pub struct Args {
 pub enum Sub {
     /// Launch Claude or Codex with a fresh identity shared by hooks and tools.
     Launch(super::sessions_launch::Args),
+    /// Record a content-free lifecycle event from a connected provider client.
+    Lifecycle(super::sessions_lifecycle::Args),
     /// Which agent conversations exist on this machine, and the exact name
     /// to refer to one by.
     Discover(DiscoverArgs),
@@ -626,6 +630,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         Sub::Drift(a) => run_drift(ctx, a),
         Sub::Takeover(a) => run_takeover(ctx, a),
         Sub::Launch(a) => super::sessions_launch::run(a),
+        Sub::Lifecycle(a) => super::sessions_lifecycle::run(ctx, a),
         Sub::Hook(a) => super::sessions_hook::run(ctx, a),
     }
 }
@@ -1381,6 +1386,9 @@ fn run_attach(ctx: &Context, args: &AttachArgs) -> anyhow::Result<()> {
         mission: args.mission.clone(),
         epoch: args.epoch,
         state: None,
+        lifecycle_source: None,
+        lifecycle_sequence: None,
+        clear_state: false,
         detail: presence::PresenceDetailUpdate::Preserve,
     };
     let presence = presence::ping(ctx, &ping_args)?;

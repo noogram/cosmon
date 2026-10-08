@@ -1,0 +1,4 @@
+{"sequence":1,"method":"turn/started"}
+{"sequence":2,"method":"item/commandExecution/requestApproval"}
+{"sequence":3,"method":"turn/completed"}
+{"sequence":4,"method":"transport/disconnected"}

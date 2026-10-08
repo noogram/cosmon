@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::{MoleculeId, SessionId};
 use crate::pilot_lease::LeaseEpoch;
+use crate::provider_lifecycle::{LifecycleSource, ProviderEventSequence};
 
 /// Which seat a pilot session occupies on a mission (ADR-168 §D6).
 ///
@@ -357,6 +358,15 @@ pub struct Presence {
     /// field existed, and on a session that has not reported one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<SessionState>,
+    /// Capability of the provider lifecycle source behind [`Self::state`].
+    ///
+    /// Old snapshots decode as `unavailable`, so absence never becomes an
+    /// inferred idle reading.
+    #[serde(default)]
+    pub lifecycle_source: LifecycleSource,
+    /// Last accepted sequence from a live provider event source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_sequence: Option<ProviderEventSequence>,
     /// Redacted provider-authored context for the current notification state.
     ///
     /// Present only for an admitted notification moment, bounded by
@@ -401,6 +411,8 @@ impl Presence {
             mission: None,
             lease_epoch: None,
             state: None,
+            lifecycle_source: LifecycleSource::Unavailable,
+            lifecycle_sequence: None,
             detail: None,
         }
     }

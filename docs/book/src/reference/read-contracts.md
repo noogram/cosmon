@@ -60,29 +60,52 @@ Fields by event type:
 | `worker_spawned`, `adapter_selected`, `model_selected`, `model_observed` | `worker_id` or `mol_id`, `adapter_name`, `model` where the type has them |
 | `energy_tick` | `worker_id`, `input_tokens`, `output_tokens`, `cost_usd` (legacy; current writers emit `usage_observed`) |
 | `usage_observed` | `usage` (see below) |
-| `session_presence` | `session_id`, `provider`, `role`, `worker_id`, `molecule_id`, `state`, `detail`, `ts` |
+| `session_presence` | `session_id`, `provider`, `role`, `worker_id`, `molecule_id`, `state`, `source`, `detail`, `ts` |
 
 **Session presence.** `session_presence` is appended to the galaxy's
-`events.jsonl` by `cs sessions hook run`, once per change of session state; a
-hook that reports the state the session already holds appends nothing. `role`
+`events.jsonl` by `cs sessions hook run` or `cs sessions lifecycle`, once per
+change of session state or source capability; an identical reading appends
+nothing. `role`
 is `pilot` or `worker`. `state` is one of `session_start`, `working`, `idle`,
 `waiting_permission`, `idle_input`, `asking`. `idle_input` (an additive value)
 is a session idle at its prompt after Claude's idle reminder, as opposed to
 `waiting_permission`, a real permission prompt. `provider` (`claude`, `codex`),
 `worker_id` and `molecule_id` are absent when unknown; `molecule_id` is set for
-a worker session. `detail` is optional, redacted, at most 160 characters and
+a worker session. `source` is `live_lifecycle`, `turn_end_only`, or
+`unavailable`. `state` is absent when `source` is `unavailable`; absence is
+unknown, never inferred idle. Events written before `source` existed decode as
+`unavailable` while retaining their legacy `state`. `detail` is optional,
+redacted, at most 160 characters and
 present only for a Claude `Notification` moment; a detail-only change does not
 append another event. `operator_present` is a different event: it is per `cs`
 call, not per session.
 
 **Provider coverage.** The state vocabulary is not a promise that every
-provider can publish every state. A provider configured through its single
-`notify` callback can publish only `idle` at turn end; it does not publish
-`session_start`, `working`, `waiting_permission`, `idle_input`, or `asking`.
-Its local rollout files are a discovery and post-turn observation source, not
-a live lifecycle stream. Its experimental app-server protocol has turn and
-approval notifications for a connected client, but it is not a callback for
-independently launched sessions, so it does not enlarge this hook contract.
+provider can publish every state. Codex configured through its single `notify`
+callback publishes `source: turn_end_only` and only `idle` at turn end. It does
+not publish `session_start`, `working`, `waiting_permission`, `idle_input`, or
+`asking`. Its local rollout files remain discovery and post-turn evidence, not
+a live lifecycle stream.
+
+A client that already owns a Codex app-server connection may forward only
+`turn/started`, an `item/*/requestApproval` request, `turn/completed`, and
+disconnect through `cs sessions lifecycle`. They map respectively to
+`working`, `waiting_permission`, `idle`, and `source: unavailable` with no
+state. The client assigns a sequence that is strictly increasing per provider
+session and continues it across reconnects. Equal delivery is idempotent;
+lower delivery is stale; neither refreshes presence nor overwrites a newer
+reading. Before forwarding its first event, the connected client must establish
+the session's presence row with `sessions attach` or a provider hook. Ingress
+refuses to invent provider-session pid or cwd provenance. It preserves every
+non-lifecycle presence field and refuses a row that names a provider other than
+`codex`, while an absent provider on an existing row is initialized to `codex`.
+It does not inspect conversation content, process age, quota, terminal contents,
+or silence, and it does not make cosmon the owner of the app-server connection.
+
+The presence snapshot exposed by `cs sessions list --json` carries the same
+`lifecycle_source`, optional `state`, and the last accepted
+`lifecycle_sequence`. A snapshot from before these fields existed reads as
+`lifecycle_source: unavailable` with no invented sequence.
 
 **Usage.** `usage_observed` carries one `usage` object per answered model
 request, with its own `schema_version` (currently `1`) that moves independently

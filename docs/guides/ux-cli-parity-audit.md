@@ -2,6 +2,22 @@
 
 # CLI and UI parity audit
 
+## Codex live lifecycle observations (issue #193)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Forward an observed Codex app-server lifecycle event without transferring connection ownership | `cs sessions lifecycle --session SID --sequence N --event <turn-start\|approval-request\|turn-complete\|disconnect>` folds a client-owned monotone sequence and updates only lifecycle fields plus heartbeat | Pupitre may own the connection and invoke the same ingress; no native lifecycle rendering is audited | No resident broker or remote lifecycle route is added |
+
+Presence and ledger consumers distinguish `live_lifecycle`, `turn_end_only`,
+and `unavailable`. Disconnect is unavailable with no state, not idle. The
+client sequence continues across reconnects; duplicate and stale deliveries
+are no-ops. The legacy Codex `notify` callback remains a compatible
+turn-end-only source. Ingress refuses a presence row owned by another provider;
+an absent provider on an existing row is initialized to `codex`. Before its
+first forwarded event, the connected client must establish a row with
+`sessions attach` or a provider hook; lifecycle ingress refuses to invent
+provider-session pid or cwd provenance.
+
 ## Checkpoint draft publication and holder selection (issue #196)
 
 | Capability | CLI | Native UI | Remote service |

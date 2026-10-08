@@ -1335,8 +1335,12 @@ pub enum EventV2 {
         /// Molecule the session works on, when it is a worker.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         molecule_id: Option<MoleculeId>,
-        /// The state the session moved into.
-        state: crate::presence::SessionState,
+        /// The observed state, absent when the source is unavailable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<crate::presence::SessionState>,
+        /// Capability of the source behind this reading.
+        #[serde(default)]
+        source: crate::provider_lifecycle::LifecycleSource,
         /// Bounded, redacted context for an admitted notification moment.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
@@ -4293,7 +4297,8 @@ mod tests {
                 role: crate::presence::SessionKind::Worker,
                 worker_id: None,
                 molecule_id: Some(mid("task-20260731-9cf4")),
-                state: crate::presence::SessionState::WaitingPermission,
+                state: Some(crate::presence::SessionState::WaitingPermission),
+                source: crate::provider_lifecycle::LifecycleSource::LiveLifecycle,
                 detail: Some("Permission required".to_owned()),
                 ts: DateTime::parse_from_rfc3339("2026-05-09T10:00:00Z")
                     .unwrap()
@@ -5011,7 +5016,8 @@ mod tests {
             role: crate::presence::SessionKind::Pilot,
             worker_id: None,
             molecule_id: None,
-            state: crate::presence::SessionState::Idle,
+            state: Some(crate::presence::SessionState::Idle),
+            source: crate::provider_lifecycle::LifecycleSource::TurnEndOnly,
             detail: None,
             ts: Utc::now(),
         };
@@ -5021,9 +5027,32 @@ mod tests {
         assert_eq!(value["schema_version"], EVENT_SCHEMA_VERSION);
         assert_eq!(value["role"], "pilot");
         assert_eq!(value["state"], "idle");
+        assert_eq!(value["source"], "turn_end_only");
         assert_eq!(value["provider"], "codex");
         assert!(value.get("molecule_id").is_none());
         assert!(value.get("detail").is_none());
+    }
+
+    #[test]
+    fn legacy_session_presence_without_source_stays_readable() {
+        let legacy = r#"{
+            "type":"session_presence",
+            "session_id":"legacy-session",
+            "role":"pilot",
+            "state":"idle",
+            "ts":"2026-10-08T08:00:00Z"
+        }"#;
+        let event: EventV2 = serde_json::from_str(legacy).unwrap();
+        match event {
+            EventV2::SessionPresence { state, source, .. } => {
+                assert_eq!(state, Some(crate::presence::SessionState::Idle));
+                assert_eq!(
+                    source,
+                    crate::provider_lifecycle::LifecycleSource::Unavailable
+                );
+            }
+            other => panic!("wrong legacy event: {other:?}"),
+        }
     }
 
     #[test]
