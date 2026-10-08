@@ -2,6 +2,21 @@
 
 # CLI and UI parity audit
 
+## Interactive provider launch identity (issue #195)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Launch a pilot whose hooks and tool subprocesses share one identity | `cs sessions launch <claude\|codex> -- <ARGS>` mints a fresh anonymous `COSMON_SESSION_ID` and equal `COSMON_SESSION_LAUNCH_ID` marker before starting the provider executable | No provider launch control audited | No provider launch endpoint added |
+
+The marked launch identity names hook presence, interactive takeover checks and
+lifecycle guards. Every launch replaces inherited pilot identity, including a
+provider resume; provider arguments pass without shell interpolation and the
+provider retains its exit status. Hooks must already be installed separately.
+Workers retain their dispatch identity. Unmarked callbacks use Codex `thread-id`
+or Claude `session_id`, ignoring stale inherited pilot ids; this fallback alone
+provides no identity parity with tool subprocesses. A user hook outside a Cosmon
+galaxy succeeds without writing state.
+
 ## Remote bearer hand-off (issue #188)
 
 | Capability | CLI | Native UI | Remote service |

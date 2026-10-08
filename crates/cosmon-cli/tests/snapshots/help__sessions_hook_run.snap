@@ -15,5 +15,5 @@ Options:
       --provider <NAME>  The pilot this hook runs inside: `claude` or `codex`. The payload is not consulted, so a Codex hook passes `codex`; `claude` otherwise
   -v, --verbose          Enable verbose output
       --json             Output in JSON format
-      --session <SID>    This worker hook's cosmon id. Codex pilot hooks instead require the native `thread-id` in their notify payload and never use an inherited `$COSMON_SESSION_ID`
+      --session <SID>    Explicit Cosmon identity override. Marked launches otherwise use their fresh id; unmarked callbacks use the provider-native payload identity
   -h, --help             Print help

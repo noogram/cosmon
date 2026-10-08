@@ -134,9 +134,8 @@ pub struct RunArgs {
     /// consulted, so a Codex hook passes `codex`; `claude` otherwise.
     #[arg(long, value_name = "NAME")]
     pub provider: Option<String>,
-    /// This worker hook's cosmon id. Codex pilot hooks instead require the
-    /// native `thread-id` in their notify payload and never use an inherited
-    /// `$COSMON_SESSION_ID`.
+    /// Explicit Cosmon identity override. Marked launches otherwise use their
+    /// fresh id; unmarked callbacks use the provider-native payload identity.
     #[arg(long, value_name = "SID")]
     pub session: Option<String>,
     /// The provider's payload. Codex passes it as this trailing argument;
@@ -645,42 +644,31 @@ fn session_state(event: HookEvent, notification_type: Option<&str>) -> SessionSt
 
 /// Resolve the Cosmon record key for a provider hook.
 ///
-/// A Codex pilot must be keyed by its native thread identity: an inherited
-/// generic session id belongs to the launching process and can be shared by
-/// concurrent pilots. Workers retain their dispatch/session identity.
+/// Marked launches share their anonymous identity with shell commands. Other
+/// callbacks use their native identity. Workers retain their dispatch identity.
 fn resolve_hook_session_id(
     args: &RunArgs,
     provider: HookProvider,
     native: Option<&str>,
     worker_molecule: Option<&cosmon_core::id::MoleculeId>,
 ) -> Option<SessionId> {
-    if provider == HookProvider::Codex && worker_molecule.is_none() {
-        let Some(native) = native else {
-            eprintln!(
-                "cs sessions hook: Codex pilot payload has no usable native identity — \
-                 no presence row published"
-            );
-            return None;
-        };
-        return match cosmon_core::caller_identity::resolve(args.session.as_deref(), Some(native), |name| std::env::var(name).ok()) {
-            Ok(Some(sid)) => Some(sid),
-            Ok(None) => None,
-            Err(e) => {
-                eprintln!(
-                    "cs sessions hook: Codex pilot native identity is invalid ({e}) — \
-                     no presence row published"
-                );
-                None
-            }
-        };
+    let env = |name: &str| std::env::var(name).ok();
+    // Dispatch identity is independent of provider-native callback metadata.
+    let native = if worker_molecule.is_some() {
+        None
+    } else {
+        native
+    };
+    if worker_molecule.is_none()
+        && native.is_none()
+        && cosmon_core::caller_identity::marked_launch_id(&env).is_none()
+    {
+        eprintln!("cs sessions hook: {} pilot payload has no usable native identity — no presence row published", provider.as_str());
+        return None;
     }
-
-    // Claude keeps its established explicit-or-exported behavior. Workers
-    // follow the same path so a dispatch remains identifiable without a
-    // provider-native payload identity.
-    match cosmon_core::caller_identity::resolve(args.session.as_deref(), native, |name| std::env::var(name).ok()) {
+    match cosmon_core::caller_identity::resolve(args.session.as_deref(), native, env) {
         Ok(Some(sid)) => Some(sid),
-        Ok(None) => presence::resolve_or_derive_sid(None).ok(),
+        Ok(None) => None,
         Err(e) => {
             eprintln!("cs sessions hook: no session id ({e}) — nothing to be present as");
             None

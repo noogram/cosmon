@@ -120,6 +120,8 @@ pub struct Args {
 /// take a seat beside it, talk to it, hand over from it.
 #[derive(clap::Subcommand)]
 pub enum Sub {
+    /// Launch Claude or Codex with a fresh identity shared by hooks and tools.
+    Launch(super::sessions_launch::Args),
     /// Which agent conversations exist on this machine, and the exact name
     /// to refer to one by.
     Discover(DiscoverArgs),
@@ -557,6 +559,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         Sub::Checkpoint(a) => run_checkpoint(ctx, a),
         Sub::Drift(a) => run_drift(ctx, a),
         Sub::Takeover(a) => run_takeover(ctx, a),
+        Sub::Launch(a) => super::sessions_launch::run(a),
         Sub::Hook(a) => super::sessions_hook::run(ctx, a),
     }
 }

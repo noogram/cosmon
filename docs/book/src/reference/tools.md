@@ -380,12 +380,25 @@ and publishes a *staged* checkpoint at a transition. It never claims a
 seat and never writes a checkpoint's content: a hand-over record is the
 pilot's own words, and only its moment is the hook's.
 
-For a Codex 0.161 legacy `notify`, a pilot's identity is the payload's
-native `thread-id`. The hook ignores an inherited `COSMON_SESSION_ID` for
-that pilot, so concurrent Codex threads cannot share a presence row. A
-Codex pilot payload without a usable `thread-id` publishes no row and reports
-the limitation on stderr. Worker hooks retain their dispatch-provided Cosmon
-session identity.
+Launch an interactive pilot through the supported identity boundary:
+  cs sessions launch claude -- --model sonnet
+  cs sessions launch codex -- --model gpt-6-sol
+
+Each launch creates a fresh anonymous `COSMON_SESSION_ID` and sets the
+matching `COSMON_SESSION_LAUNCH_ID` marker, replacing inherited pilot ids.
+Hooks and tool subprocesses inherit both values. Presence, takeover checks
+and lifecycle guards then resolve the same Cosmon identity. Provider arguments
+are passed verbatim, without shell interpolation; the provider owns its exit
+status. A second launch receives a different id, including a resumed provider
+conversation. Launching does not install the hooks: wire them as shown above.
+
+Outside this launch boundary, pilot callbacks use their native payload id:
+Codex 0.161 legacy `notify` uses `thread-id`; Claude uses `session_id`.
+An unmarked inherited `COSMON_SESSION_ID` cannot override that payload.
+A callback without a usable identity publishes no row and reports the
+limitation on stderr. Native callback identity alone does not establish
+identity parity with tool subprocesses. Worker hooks retain their dispatch
+identity. A hook outside a Cosmon galaxy exits successfully without writing.
 
 The canonical name of a session is `<provider>:<native-session-id>`, and
 nothing else ever breaks a tie: a title, a cwd and a modification time
@@ -406,6 +419,7 @@ cs pilot (cognitive REPL), cs diverge.
 
 ###### **Subcommands:**
 
+* `launch` — Launch Claude or Codex with a fresh identity shared by hooks and tools
 * `discover` — Which agent conversations exist on this machine, and the exact name to refer to one by
 * `list` — Which of them have taken a seat, and in which role
 * `show` — Look inside one conversation — its last events, read-only
@@ -417,6 +431,26 @@ cs pilot (cognitive REPL), cs diverge.
 * `drift` — Compare what two sessions concluded — `AGREE`, `FINDING` or `INCONCLUSIVE`, never a score
 * `takeover` — The controls: who may change the mission, who asked for them, and the signature that hands them over
 * `hook` — Wire the routine gestures — take a seat, read the mailbox, leave a note — into the agent itself, so they happen without being typed
+
+
+
+## `cs sessions launch`
+
+Launch Claude or Codex with a fresh identity shared by hooks and tools
+
+**Usage:** `cs sessions launch <PROVIDER> [-- <ARGS>...]`
+
+###### **Arguments:**
+
+* `<PROVIDER>` — Provider executable to resolve on PATH
+
+  Possible values:
+  - `claude`:
+    Claude Code
+  - `codex`:
+    Codex CLI
+
+* `<ARGS>` — Provider arguments, passed verbatim after `--`
 
 
 
@@ -829,7 +863,7 @@ The hook body — invoked by the provider, not usually by a human
 
 * `--event <EVENT>` — Which moment fired: `session-start`, `turn-start`, `turn-end`, `waiting`, `asking` or `answered`
 * `--provider <NAME>` — The pilot this hook runs inside: `claude` or `codex`. The payload is not consulted, so a Codex hook passes `codex`; `claude` otherwise
-* `--session <SID>` — This worker hook's cosmon id. Codex pilot hooks instead require the native `thread-id` in their notify payload and never use an inherited `$COSMON_SESSION_ID`
+* `--session <SID>` — Explicit Cosmon identity override. Marked launches otherwise use their fresh id; unmarked callbacks use the provider-native payload identity
 
 
 

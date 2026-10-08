@@ -672,6 +672,19 @@ fn main() {
         Err(err) => err.exit(),
     };
 
+    // User-level provider callbacks outside a configured galaxy are a no-op,
+    // even if the parent exported another galaxy's state path.
+    if matches!(&cli.command, Command::Sessions(args)
+        if matches!(&args.command, cmd::sessions::Sub::Hook(hook)
+            if matches!(&hook.command, cmd::sessions_hook::Sub::Run(_))))
+        && std::env::current_dir()
+            .ok()
+            .and_then(|cwd| cosmon_filestore::walk_up_find_cosmon_dir_from(&cwd))
+            .is_none()
+    {
+        return;
+    }
+
     // ADR-080 §3.5, the second lock. The adapter refuses to *route* to an
     // operator-only verb (`cosmon_rpp_adapter::admission`); this refuses to
     // *run* one, so a single mis-wired route no longer traverses the whole

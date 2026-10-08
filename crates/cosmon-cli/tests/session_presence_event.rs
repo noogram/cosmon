@@ -55,6 +55,16 @@ fn fire_provider_with(
         .arg(state)
         .args(["sessions", "hook", "run", "--event", event])
         .env("COSMON_SESSION_ID", session)
+        // Claude state-transition fixtures model a marked launch. The Codex
+        // regressions below deliberately exercise unmarked native fallback.
+        .env(
+            "COSMON_SESSION_LAUNCH_ID",
+            if provider == Some("codex") {
+                ""
+            } else {
+                session
+            },
+        )
         .env("COSMON_SESSIONS_CLAUDE_ROOT", state.join("no-claude"))
         .env("COSMON_SESSIONS_CODEX_ROOT", state.join("no-codex"))
         .env_remove("COSMON_NO_OPERATOR_EVENTS")

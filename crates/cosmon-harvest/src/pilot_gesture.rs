@@ -216,7 +216,9 @@ fn resolve_pilot_session<F>(env_lookup: &F) -> Option<cosmon_core::id::SessionId
 where
     F: Fn(&str) -> Option<String>,
 {
-    cosmon_core::caller_identity::resolve(None, None, env_lookup).ok().flatten()
+    cosmon_core::caller_identity::resolve(None, None, env_lookup)
+        .ok()
+        .flatten()
 }
 
 /// The process environment, as [`refuse_unleased_pilot_gesture`] wants it.
