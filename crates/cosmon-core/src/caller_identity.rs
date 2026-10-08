@@ -45,7 +45,9 @@ fn identity(value: Option<&str>) -> Result<Option<SessionId>, ResolutionError> {
 /// Resolve a caller without reading ambient state.
 ///
 /// Workers (nonempty `COSMON_PARENT_MOL_ID`) use dispatch `COSMON_SESSION_ID`,
-/// falling back only to an explicit worker id. Other explicit overrides remain
+/// falling back to an explicit worker id or the worker callback payload when
+/// dispatch has not exported an id. Inherited native variables are never worker
+/// identity. Other explicit overrides remain
 /// available after native consistency checks. Codex exports must agree with each other and,
 /// for a Codex callback, its payload. Native exports precede a matching launch
 /// marker. Without native exports, marked launch identity precedes callback
@@ -65,7 +67,15 @@ where
 {
     if nonempty(env_lookup("COSMON_PARENT_MOL_ID").as_deref()).is_some() {
         let dispatch = env_lookup("COSMON_SESSION_ID");
-        return identity(nonempty(dispatch.as_deref()).or(explicit));
+        let callback = match caller {
+            Caller::Shell => None,
+            Caller::ClaudeCallback(native) | Caller::CodexCallback(native) => nonempty(native),
+        };
+        return identity(
+            nonempty(dispatch.as_deref())
+                .or(nonempty(explicit))
+                .or(callback),
+        );
     }
     if !matches!(caller, Caller::ClaudeCallback(_)) {
         let thread = env_lookup("CODEX_THREAD_ID");
