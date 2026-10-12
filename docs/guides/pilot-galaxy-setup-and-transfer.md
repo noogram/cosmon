@@ -154,13 +154,16 @@ is the contract it relies on.
    |---|---|---|
    | `one` | the verified holder is seated and no other session claims primary | yes |
    | `granted-unseated` | a grant exists, nobody holds the seat yet | no, wait for step 6 |
-   | `contested` | the holder is seated but another session still claims primary | no |
+   | `contested` | the holder is seated and another session claims primary at the lease epoch or with a claim the lease cannot verify | no |
    | `none`, `epoch conflict` | no verified holder, or two holders at the top epoch | no |
 
    Authority comes from the lease ledger, never from heartbeat age: until the
-   outgoing session's heartbeat demotes it, it is shown as a `claimant` and the
-   verdict stays `contested`; a stale claim from a session that never beats
-   again stays visible. Pupitre therefore reads the verdict and does not close
+   outgoing session's heartbeat demotes it, its primary claim at the older
+   epoch is shown as `superseded` and the verdict is already `one`: the
+   ledger backs only the incoming holder. A superseded claim from a session
+   that never beats again stays visible but never contests. `contested` is
+   kept for a second claim the lease cannot rule out: same epoch, a higher
+   epoch, or no epoch. Pupitre therefore reads the verdict and does not close
    on a timer. A Codex session counts as
    seated only when its presence carries the native Codex thread id; without it
    the verdict stays `granted-unseated`.
