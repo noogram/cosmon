@@ -316,6 +316,8 @@ struct MolLookup {
     /// "inprocess stale" when a `Running` in-process worker has not
     /// emitted progress for longer than [`INPROCESS_STALE_TTL`].
     last_event_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When `cs tackle` bound the worker; feeds [`settle_spawn_grace`].
+    tackled_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Freshness window for an in-process worker's last event. A `Running`
@@ -508,6 +510,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     has_blockers,
                     supervision,
                     last_event_at,
+                    tackled_at: m.tackled_at,
                 },
             )
         })
@@ -522,7 +525,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .values()
         .map(|w| {
             // 1. Observe transport: is the tmux session alive?
-            let (raw_transport, raw_session_str) = observe_transport(&backends, &w.id);
+            let (probed_transport, raw_session_str) = observe_transport(&backends, &w.id);
 
             // 2. Observe cognitive: agent self-declared status.
             let (cognitive, cognitive_display) = observe_cognitive(&cognitive_dir, w.id.as_str());
@@ -548,6 +551,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             // bypasses the tmux probe for in-process workers and
             // synthesises a transport state from the molecule's status
             // + event freshness instead.
+            let raw_transport = settle_spawn_grace(
+                probed_transport,
+                mol_lookup.and_then(|ml| ml.tackled_at),
+                chrono::Utc::now(),
+            );
             let supervision = mol_lookup.map_or(SupervisionMode::TmuxPane, |ml| ml.supervision);
             let (transport, session_str, inprocess_effective_override) = match supervision {
                 SupervisionMode::InProcess => {
@@ -1356,17 +1364,51 @@ fn observe_transport(
     backends: &[cosmon_transport::TmuxBackend],
     worker_id: &cosmon_core::id::WorkerId,
 ) -> (TransportState, Option<String>) {
+    let mut probe_failed = false;
     for be in backends {
-        if let Ok(true) = be.is_alive(worker_id) {
-            // Alive — try to get session status for the live column.
-            let session_str = cosmon_transport::readiness::detect_status(be, worker_id)
-                .ok()
-                .map(|s| s.to_string());
-            return (TransportState::Alive, session_str);
+        match be.is_alive(worker_id) {
+            Ok(true) => {
+                // Alive — try to get session status for the live column.
+                let session_str = cosmon_transport::readiness::detect_status(be, worker_id)
+                    .ok()
+                    .map(|s| s.to_string());
+                return (TransportState::Alive, session_str);
+            }
+            Ok(false) => {}
+            Err(_) => probe_failed = true,
         }
     }
-    // No backend found it alive.
-    (TransportState::Dead, None)
+    // A backend that could not answer is not evidence of death: the pane may
+    // sit on exactly that socket (issue #204). Only a full set of negative
+    // answers is `Dead`.
+    if probe_failed {
+        (TransportState::Unknown, None)
+    } else {
+        (TransportState::Dead, None)
+    }
+}
+
+/// How long after `cs tackle` a missing pane is still "starting", not "gone".
+///
+/// `cs tackle` binds the worker to the fleet before the tmux session exists,
+/// so a probe inside that window finds a registered worker and no pane. The
+/// same grace guards patrol (`--dead-worker-grace-secs`, issue #117); the
+/// observers must not call dead what patrol is forbidden to act on.
+const SPAWN_GRACE: Duration = Duration::seconds(120);
+
+/// Downgrade a `Dead` probe to `Unknown` while the molecule is inside the
+/// post-tackle [`SPAWN_GRACE`]. Any other reading is returned unchanged.
+pub(super) fn settle_spawn_grace(
+    transport: TransportState,
+    tackled_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> TransportState {
+    let starting = tackled_at.is_some_and(|at| now.signed_duration_since(at) < SPAWN_GRACE);
+    if transport == TransportState::Dead && starting {
+        TransportState::Unknown
+    } else {
+        transport
+    }
 }
 
 /// ADR-052 ghost classification of one molecule, given its transport probe.
@@ -1400,8 +1442,13 @@ pub(super) fn is_dead_ghost(ghost: Option<cosmon_core::run_state::GhostKind>) ->
 pub(super) fn probe_transport(
     backends: &[cosmon_transport::TmuxBackend],
     worker_id: &cosmon_core::id::WorkerId,
+    tackled_at: Option<DateTime<Utc>>,
 ) -> TransportState {
-    observe_transport(backends, worker_id).0
+    settle_spawn_grace(
+        observe_transport(backends, worker_id).0,
+        tackled_at,
+        Utc::now(),
+    )
 }
 
 /// Observe cognitive state from the agent's self-declaration file.
@@ -2498,6 +2545,7 @@ mod tests {
             has_blockers: false,
             supervision,
             last_event_at,
+            tackled_at: None,
         }
     }
 

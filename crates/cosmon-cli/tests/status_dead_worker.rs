@@ -236,3 +236,176 @@ mod unsubmitted_brief {
         );
     }
 }
+
+/// Issue #204 — `cs ensemble` called a live spore worker DEAD and advised
+/// `cs purge`. A worker is dead only when every probe answered "no pane" and
+/// the molecule is past its post-tackle grace; a live pane on the galaxy's
+/// own tmux socket is never dead, and neither is a worker whose probe could
+/// not answer.
+mod issue_204 {
+    use super::*;
+
+    struct Tmux {
+        socket: String,
+    }
+
+    impl Tmux {
+        fn run(&self, args: &[&str]) -> std::process::Output {
+            Command::new("tmux")
+                .args(["-L", &self.socket])
+                .args(args)
+                .output()
+                .expect("run tmux")
+        }
+    }
+
+    impl Drop for Tmux {
+        fn drop(&mut self) {
+            let _ = self.run(&["kill-server"]);
+        }
+    }
+
+    /// A galaxy whose `config.toml` names its own tmux socket, with a
+    /// running molecule tackled `tackled_ago` seconds ago. No fleet spec is
+    /// written: the galaxy socket is the only one the probe may rely on.
+    fn seed_galaxy(state_dir: &Path, socket: &str, tackled_ago: i64) {
+        std::fs::create_dir_all(state_dir).expect("state dir");
+        std::fs::write(
+            state_dir.join("config.toml"),
+            format!("[project]\nproject_id = \"{socket}\"\n"),
+        )
+        .expect("config");
+        let worker_id = WorkerId::new(WORKER).expect("valid worker id");
+        let mut molecule = running_molecule(MOL, &worker_id);
+        molecule.tackled_at = Some(Utc::now() - chrono::Duration::seconds(tackled_ago));
+        molecule.project_id = Some(cosmon_core::id::ProjectId::new(socket).expect("project id"));
+        let mut fleet = Fleet::default();
+        fleet.workers.insert(
+            worker_id.clone(),
+            WorkerData::new(
+                worker_id,
+                AgentId::new("tackle").expect("valid agent id"),
+                AgentRole::Implementation,
+                Clearance::Write,
+                WorkerStatus::Active,
+            )
+            .with_molecule(molecule.id.clone()),
+        );
+        let store = FileStore::new(state_dir);
+        store.save_fleet(&fleet).expect("save fleet");
+        store
+            .save_molecule(&molecule.id, &molecule)
+            .expect("save molecule");
+    }
+
+    /// One socket per test: the tests run in parallel and a shared name
+    /// would let one test's live pane answer another's probe.
+    fn socket_name(test: &str) -> String {
+        format!("g204{test}{}-ab12", std::process::id())
+    }
+
+    fn live_pane(socket: &str) -> Tmux {
+        let tmux = Tmux {
+            socket: socket.to_owned(),
+        };
+        let started = tmux.run(&["new-session", "-d", "-s", WORKER, "cat"]);
+        assert!(started.status.success(), "tmux new-session failed");
+        tmux
+    }
+
+    fn run_cs(tmp: &Path, state_dir: &Path, path: Option<&str>, args: &[&str]) -> String {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
+        cmd.current_dir(tmp)
+            .env_remove("COSMON_PARENT_MOL_ID")
+            .env_remove("COSMON_MOL_DIR");
+        if let Some(path) = path {
+            cmd.env("PATH", path);
+        }
+        cmd.args(["--config", state_dir.to_str().expect("utf-8 state dir")])
+            .args(args);
+        let out = cmd.output().expect("run cs");
+        assert!(
+            out.status.success(),
+            "cs {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Assert the ensemble and the status verdicts both say "not dead".
+    fn assert_not_dead(tmp: &Path, state_dir: &Path, path: Option<&str>) {
+        let ensemble: serde_json::Value =
+            serde_json::from_str(&run_cs(tmp, state_dir, path, &["--json", "ensemble"]))
+                .expect("ensemble JSON");
+        assert_eq!(
+            ensemble["stall_alert"]["dead_workers"],
+            serde_json::json!([]),
+            "{ensemble}"
+        );
+        assert_ne!(ensemble["workers"][0]["effective"], "dead", "{ensemble}");
+        let text = run_cs(tmp, state_dir, path, &["ensemble"]);
+        assert!(!text.contains("DEAD"), "{text}");
+        assert!(!text.contains("cs purge"), "never advise purging: {text}");
+        let status: serde_json::Value =
+            serde_json::from_str(&run_cs(tmp, state_dir, path, &["--json", "status"]))
+                .expect("status JSON");
+        assert_eq!(status["molecules"]["dead_workers"], 0, "{status}");
+    }
+
+    #[test]
+    fn live_pane_on_the_galaxy_socket_is_never_dead() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        let socket = socket_name("live");
+        seed_galaxy(&state_dir, &socket, 3600);
+        let _tmux = live_pane(&socket);
+        assert_not_dead(tmp.path(), &state_dir, None);
+    }
+
+    /// A probe that cannot answer is not a "no pane" answer.
+    #[test]
+    fn a_failing_probe_is_not_a_dead_verdict() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        seed_galaxy(&state_dir, &socket_name("probe"), 3600);
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("bin dir");
+        let fake = bin.join("tmux");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho 'protocol version mismatch' >&2\nexit 1\n",
+        )
+        .expect("fake tmux");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        assert_not_dead(tmp.path(), &state_dir, Some(&path));
+    }
+
+    /// `cs tackle` binds the worker before the pane exists (issue #117).
+    #[test]
+    fn a_just_tackled_worker_without_a_pane_yet_is_not_dead() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        seed_galaxy(&state_dir, &socket_name("fresh"), 5);
+        assert_not_dead(tmp.path(), &state_dir, None);
+    }
+
+    /// Control: past the grace, with every probe answering "no pane", the
+    /// verdict and the reclaim gesture are still emitted.
+    #[test]
+    fn an_old_worker_without_a_pane_is_still_dead() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state_dir = tmp.path().join("state");
+        seed_galaxy(&state_dir, &socket_name("old"), 3600);
+        let text = run_cs(tmp.path(), &state_dir, None, &["ensemble"]);
+        assert!(text.contains("DEAD"), "{text}");
+        assert!(text.contains("cs purge"), "{text}");
+    }
+}
