@@ -250,6 +250,7 @@ quick:
     ./scripts/no-pilot-env.sh python3 scripts/check-collaboration-contract.py
     ./scripts/no-pilot-env.sh ./scripts/check-collaboration-contract.test.sh
     ./scripts/no-pilot-env.sh ./scripts/check-book-links.sh
+    ./scripts/no-pilot-env.sh ./scripts/model-ladder-drift.test.sh
     ./scripts/no-pilot-env.sh ./scripts/check-book-links.test.sh
     ./scripts/no-pilot-env.sh ./scripts/source-provenance.test.sh
     ./scripts/no-pilot-env.sh ./scripts/telegram-listen.test.sh

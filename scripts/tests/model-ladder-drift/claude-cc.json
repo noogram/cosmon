@@ -1,0 +1,8 @@
+{
+  "fetchedAt": "2026-01-02T10:00:00Z",
+  "staleAt": "2026-01-04T10:00:00Z",
+  "catalog": {"config": {"models": [
+    {"id": "claude-sonnet-0", "name": "Synthetic current", "section": "main", "disabled": false},
+    {"id": "claude-opus-0", "name": "Synthetic overflow", "section": "overflow", "disabled": true}
+  ]}}
+}
