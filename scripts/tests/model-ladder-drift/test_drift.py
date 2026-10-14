@@ -113,6 +113,23 @@ class DriftTests(unittest.TestCase):
         self.consumer.write_text('model = "gpt-0-unknown"\n')
         self.assertEqual(self.run_audit(1)["consumers"][0]["classification"], "unknown")
 
+    def test_model_family_wildcards_are_not_ids(self):
+        self.consumer.write_text("families = ['gpt-5.6-*', 'gpt-6-*', 'gpt-6.1-*']\\n")
+        report = self.run_audit(0)
+        self.assertEqual(report["consumers"], [])
+
+    def test_historical_line_is_informational(self):
+        self.consumer.write_text('old = "gpt-0-previous" # model-ladder: historical\\n')
+        report = self.run_audit(0)
+        self.assertEqual(report["consumers"], [])
+        self.assertEqual(len(report["historical"]), 1)
+        self.assertEqual(report["historical"][0]["id"], "gpt-0-previous")
+
+    def test_old_id_without_historical_marker_still_drifts(self):
+        self.consumer.write_text('old = "gpt-0-previous"\\n')
+        report = self.run_audit(1)
+        self.assertEqual(report["consumers"][0]["classification"], "older")
+
     def test_newest_per_config_uses_fetch_time(self):
         old = json.loads(self.catalog.read_text())
         old["fetchedAt"] = "2026-01-01T10:00:00Z"

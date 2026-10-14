@@ -28,6 +28,7 @@ import sys
 MODEL = re.compile(r"(?<![\w-])(?:gpt-\d(?:[\w.-]*\w)?|claude-(?:[a-z]+-)+\d(?:[\w.-]*\w)?)(?![\w-])")
 OLDER = re.compile(r"\b(?:older|previous)\b", re.I)
 FRONTIER = re.compile(r"\b(?:frontier|most capable)\b|(?:^|-)opus-|(?:^|-)fable-", re.I)
+HISTORICAL = "model-ladder: historical"
 
 
 def timestamp(value):
@@ -118,7 +119,11 @@ def uncovered_defaults(text, models):
 
 def main():
     """Run the detect-only audit and emit a machine-readable proposal/report."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=("Consumer lines containing 'model-ladder: historical' are reported under "
+                "historical for context and excluded from drift. Model-family wildcards "
+                "such as gpt-6-* are ignored as model IDs."))
     parser.add_argument("--codex-cache", required=True, type=Path)
     parser.add_argument("--claude-config-dir", required=True, action="append", type=Path)
     parser.add_argument("--consumer", required=True, action="append", type=Path)
@@ -142,7 +147,7 @@ def main():
     except (OSError, ValueError) as error:
         parser.error(str(error))
     report = {"status": "proposed", "measured_at": now.isoformat(),
-              "providers": {"codex": [], "claude": []}, "consumers": [],
+              "providers": {"codex": [], "claude": []}, "consumers": [], "historical": [],
               "unmeasured": [], "findings": []}
     sources = [("codex", args.codex_cache)]
     for config in args.claude_config_dir:
@@ -166,12 +171,20 @@ def main():
             report["unmeasured"].append({"source": str(path), "reason": str(error)})
             continue
         for number, line in enumerate(text.splitlines(), 1):
-            for ident in sorted(set(MODEL.findall(line))):
+            ids = set()
+            for match in MODEL.finditer(line):
+                # A trailing wildcard makes this a family pattern, not a pin.
+                if re.match(r"[\w.-]*(?:-\*|\.\*|\*)", line[match.end():]):
+                    continue
+                ids.add(match.group())
+            historical = HISTORICAL in line
+            for ident in sorted(ids):
                 matches = [m for m in models if m["id"] == ident]
                 classification = ("older" if any(m["classification"] == "older" for m in matches)
                                   else "current" if matches else "unknown")
-                report["consumers"].append({"source": str(path), "line": number, "id": ident,
-                                            "classification": classification, "evidence": matches})
+                record = {"source": str(path), "line": number, "id": ident,
+                          "classification": classification, "evidence": matches}
+                (report["historical"] if historical else report["consumers"]).append(record)
         for finding in uncovered_defaults(text, models):
             report["findings"].append({"source": str(path), **finding})
     drift = bool(report["findings"]) or any(c["classification"] != "current" for c in report["consumers"])
