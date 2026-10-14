@@ -1,0 +1,7 @@
+{
+  "fetched_at": "2026-01-02T10:00:00Z",
+  "models": [
+    {"slug": "gpt-0-current", "description": "Current synthetic model", "priority": 0, "visibility": "list"},
+    {"slug": "gpt-0-previous", "description": "Previous synthetic model", "priority": 1, "visibility": "list"}
+  ]
+}
