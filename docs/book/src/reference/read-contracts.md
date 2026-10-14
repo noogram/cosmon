@@ -148,7 +148,13 @@ its liveness and heartbeat, but only a current verified lease holder has
 `standing: "holder"`. A primary claim at an epoch below the verified lease
 epoch has `standing: "superseded"` and does not count toward `contested`; a
 claim at or above the lease epoch, or without an epoch, is a `claimant` and does. A Codex claim without `native_id` cannot be a holder.
-`--all-galaxies` uses the same perimeter enumeration as `cs tail`.
+`--all-galaxies` uses the same perimeter enumeration as `cs tail` and derives
+each entry with the same rules as the single-galaxy document. Each galaxy
+carries `galaxy` (its name) and `root` (the project directory holding
+`.cosmon`, or `null` when the state directory is not laid out that way).
+A pilot session whose hooks are installed seats itself as a `copilot` of the
+galaxy's sole mission at session start; `primary` comes only from a signed
+grant.
 
 **`cs sessions takeover challenge --json`.** Emits one `schema_version: 1`
 document describing exactly one proposed transfer. Within version 1, changes

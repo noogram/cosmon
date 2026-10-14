@@ -36,6 +36,9 @@ fn run(state: &Path, session: &str, args: &[&str], stdin: Option<&str>) -> (Stri
         .arg(state)
         .args(args)
         .env("COSMON_SESSION_ID", session)
+        // A pilot fixture must not inherit a worker's identity from the
+        // environment the suite happens to run in.
+        .env_remove("COSMON_PARENT_MOL_ID")
         // This fixture models the supported launcher, shared by hooks and tools.
         .env(
             "COSMON_SESSION_LAUNCH_ID",
@@ -698,4 +701,42 @@ fn codex_hook_chains_behind_computer_use_and_records_codex() {
     );
     assert_eq!(code, 0, "uninstall: {err}");
     assert_eq!(std::fs::read_to_string(&config).expect("read"), theirs);
+}
+
+// ---------------------------------------------------------------------------
+// 6. a pilot attaches itself as a co-pilot at session start (issue #201)
+// ---------------------------------------------------------------------------
+
+/// A session start through the real hook seats the pilot as a `copilot` of the
+/// galaxy's mission, visible to `cs sessions seats`, and never as `primary`:
+/// primary comes only from a signed grant.
+#[test]
+fn session_start_attaches_a_copilot_never_a_primary() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = tmp.path();
+    let mission = "task-20261008-seat";
+    std::fs::create_dir_all(state.join("pilot-lease")).expect("lease dir");
+    std::fs::write(
+        state.join(format!("pilot-lease/{mission}.requests.jsonl")),
+        "",
+    )
+    .expect("mission ledger");
+
+    let (_, err, code) = fire(
+        state,
+        "pilot-new",
+        HookEvent::SessionStart,
+        &payload_for("native-new"),
+    );
+    assert_eq!(code, 0, "hook: {err}");
+
+    let (out, err, code) = run(state, "pilot-new", &["--json", "sessions", "seats"], None);
+    assert_eq!(code, 0, "seats: {err}");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("seats json");
+    let seats = &doc["galaxies"][0]["missions"][0]["seats"];
+    assert_eq!(doc["galaxies"][0]["missions"][0]["mission"], mission);
+    assert_eq!(seats.as_array().map(Vec::len), Some(1), "{out}");
+    assert_eq!(seats[0]["session"], "pilot-new");
+    assert_eq!(seats[0]["claimed_role"], "copilot", "{out}");
+    assert_eq!(seats[0]["standing"], "copilot", "{out}");
 }
