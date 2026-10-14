@@ -781,7 +781,7 @@ pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<(), CosmonError> 
     write_via_tmp(path, data, false)
 }
 
-/// Like [`atomic_write`], but fsyncs the tmp file before the rename and the
+/// Like the crate-private `atomic_write`, but fsyncs the tmp file before the rename and the
 /// parent directory after it.
 ///
 /// Why it exists: a conditional collapse must not acknowledge a transition
