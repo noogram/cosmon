@@ -54,6 +54,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use cosmon_core::auth::{JwtClaims, Subject};
 use cosmon_core::error::CosmonError;
+use cosmon_core::event_v2::CollapseReason;
 use cosmon_core::harvest_door::HarvestOptions;
 use cosmon_core::id::{FleetId, MoleculeId};
 use cosmon_core::remote_harvest::{EffectiveRemotePolicy, PolicyProvenance, RemoteAuthoritySource};
@@ -1107,6 +1108,12 @@ pub struct CollapseBody {
     /// Quota currency name (only with `cause = rate_limit`).
     #[serde(default)]
     pub kind: Option<String>,
+    /// Operator-facing collapse classification (`worker_crashed`,
+    /// `gate_failed`, `blocker_stuck`, …, or a free-form string), recorded on
+    /// the molecule and in the `collapsed` event so `cs errors` can aggregate
+    /// API-driven collapses the same way it does CLI ones.
+    #[serde(default)]
+    pub reason_kind: Option<String>,
 }
 
 fn collapse_work_location(
@@ -1226,7 +1233,7 @@ pub async fn collapse_molecule(
         cause: body.cause,
         account: body.account,
         kind: body.kind,
-        reason_kind: None,
+        reason_kind: body.reason_kind.map(CollapseReason::from),
     };
     let view =
         ops::collapse(&store, &tenant_state_dir, &subject, &molecule_id, request).map_err(|e| {

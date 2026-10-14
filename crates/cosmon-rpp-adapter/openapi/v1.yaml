@@ -3425,6 +3425,13 @@ components:
           description: |
             Quota currency name (only meaningful with
             `cause = "rate_limit"` — e.g. `anthropic-tokens`).
+        reason_kind:
+          type: string
+          description: |
+            Operator-facing collapse classification recorded on the molecule
+            and its `collapsed` event: `worker_crashed`, `gate_failed`,
+            `blocker_stuck`, `manual_abort`, `resource_exhausted`,
+            `agent_loop_failed`, or any free-form string.
 
     FreezeBody:
       type: object

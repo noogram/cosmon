@@ -333,6 +333,58 @@ fn removing_the_trust_root_refuses_the_ledger_in_checks_and_lifecycle_gestures()
 }
 
 // ---------------------------------------------------------------------------
+// `--ops-dir`: the lease is read from the directory the verb mutates.
+// ---------------------------------------------------------------------------
+
+/// `cs collapse --ops-dir <A>` run from galaxy B mutates A, so it must honour
+/// A's lease ledger. Before the fix it read B's ledger (the ambient state
+/// dir), found no lease for the mission, and let an unleased co-pilot through.
+#[test]
+fn collapse_ops_dir_reads_the_lease_of_the_dir_it_mutates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = galaxy(tmp.path());
+    let mission = nucleate(&root);
+    seat_primary(&root, &mission);
+    let leased_state = root.join(".cosmon").join("state");
+
+    // A second galaxy: ambient state dir with no lease for `mission`.
+    let other = tmp.path().join("other");
+    fs::create_dir_all(&other).unwrap();
+    assert!(cs(&other).arg("init").status().unwrap().success());
+
+    let ops = |session: &str| {
+        let mut cmd = cs(&other);
+        cmd.env("COSMON_SESSION_ID", session);
+        cmd.args(["collapse", "--ops-dir"])
+            .arg(&leased_state)
+            .args(["--reason", "via ops-dir", &mission]);
+        cmd.output().unwrap()
+    };
+
+    let refused = ops(COPILOT);
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert_eq!(
+        refused.status.code(),
+        Some(UNLEASED_PILOT_GESTURE),
+        "an unleased co-pilot must be refused by the lease of the mutated dir.\nstderr: {stderr}",
+    );
+    assert_eq!(
+        status(&root, &mission),
+        "pending",
+        "a refused gesture writes nothing"
+    );
+
+    // Counter-test: the holder is not refused by the same path.
+    let allowed = ops(PRIMARY);
+    assert!(
+        allowed.status.success(),
+        "the lease holder must still collapse through --ops-dir: {}",
+        String::from_utf8_lossy(&allowed.stderr),
+    );
+    assert_eq!(status(&root, &mission), "collapsed");
+}
+
+// ---------------------------------------------------------------------------
 // Counter-tests: without these, the one above is satisfied by a guard that
 // refuses everything, which would be a worse bug than the one it fixes.
 // ---------------------------------------------------------------------------

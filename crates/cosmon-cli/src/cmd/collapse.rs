@@ -204,8 +204,12 @@ fn collapse_molecule(
     // ADR-168 §D6 — authority guard. Terminating a co-piloted mission is the
     // most irreversible piloting gesture there is; a co-pilot without the
     // lease is refused before the terminal transition, not compensated after.
+    //
+    // The lease is read from `ops_dir`, the directory this call mutates: with
+    // `--ops-dir` pointing elsewhere than the ambient state dir, checking the
+    // ambient ledger would clear a gesture against a mission it does not hold.
     super::guard::refuse_unleased_pilot_gesture(
-        &ctx.state_dir(),
+        &ops_dir,
         &mol_id,
         "cs collapse",
         &super::guard::process_env,
