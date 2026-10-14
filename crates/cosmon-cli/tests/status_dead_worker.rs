@@ -237,7 +237,7 @@ mod unsubmitted_brief {
     }
 }
 
-/// Issue #204 — `cs ensemble` called a live spore worker DEAD and advised
+/// Issue #206 — `cs ensemble` called a live spore worker DEAD and advised
 /// `cs purge`. A worker is dead only when every probe answered "no pane" and
 /// the molecule is past its post-tackle grace; a live pane on the galaxy's
 /// own tmux socket is never dead, and neither is a worker whose probe could

@@ -1379,7 +1379,7 @@ fn observe_transport(
         }
     }
     // A backend that could not answer is not evidence of death: the pane may
-    // sit on exactly that socket (issue #204). Only a full set of negative
+    // sit on exactly that socket (issue #206). Only a full set of negative
     // answers is `Dead`.
     if probe_failed {
         (TransportState::Unknown, None)
