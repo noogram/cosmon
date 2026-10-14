@@ -23,11 +23,15 @@
 //! It publishes a *staged* checkpoint at a natural transition. Then it appends
 //! one line to a cost ledger and exits 0.
 //!
-//! **It never claims a seat.** The ping carries no `--role`, so
+//! **It never claims the primary seat.** The ping carries no `--role`, so
 //! `cs presence`'s carry-forward keeps whatever the operator set by hand. A
 //! hook that pinged `--role primary` would let a process nobody watches take
 //! the authority D6 reserves for an operator gesture — and it would do it
 //! every thirty seconds, which is the shape of a takeover nobody decided.
+//! The one seat it does take is `copilot`: at `SessionStart`, a pilot with no
+//! presence row yet attaches itself as a read-only co-pilot of the galaxy's
+//! sole mission, so `cs sessions seats` and `peers` see it without a manual
+//! `attach`. Primary comes only from a signed grant (ADR-171, ADR-172).
 //!
 //! **It never writes a checkpoint's content.** A checkpoint is the pilot's
 //! hypotheses, next moves and open questions; a hook knows none of those, and
@@ -738,6 +742,20 @@ fn beat_presence(
     } else {
         SessionKind::Pilot
     };
+    // A pilot's first session start seats it as a co-pilot of the galaxy's
+    // sole mission. Never `primary`, and never over a row that already exists:
+    // whatever seat the operator or a grant gave it is carried forward.
+    let first_pilot_start = matches!(event, HookEvent::SessionStart)
+        && kind == SessionKind::Pilot
+        && presence::store(ctx).load(&sid).ok().flatten().is_none();
+    let (seat_role, seat_mission) = if first_pilot_start {
+        (
+            Some("copilot".to_owned()),
+            super::sessions::sole_mission(&state_dir),
+        )
+    } else {
+        (None, None)
+    };
 
     let prior_source = presence::store(ctx)
         .load(&sid)
@@ -770,6 +788,8 @@ fn beat_presence(
             native_session_id: native,
             molecule: worker_molecule,
             headline,
+            role: seat_role,
+            mission: seat_mission,
             galaxy: cosmon_core::presence::galaxy_name_from_state_dir(&state_dir)
                 .unwrap_or_else(|| "unknown".to_owned()),
             state: Some(state),

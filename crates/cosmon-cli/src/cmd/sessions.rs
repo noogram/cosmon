@@ -219,6 +219,8 @@ struct SeatsDocument {
 #[derive(Debug, Serialize)]
 struct GalaxySeats {
     galaxy: String,
+    /// Project root of the galaxy (the directory holding `.cosmon`).
+    root: Option<PathBuf>,
     state: &'static str,
     missions: Vec<MissionSeats>,
 }
@@ -1168,39 +1170,67 @@ fn run_seats(ctx: &Context, args: &SeatsArgs) -> anyhow::Result<()> {
             "cs sessions seats is a machine-readable contract; pass --json"
         ));
     }
-    let now = Utc::now();
-    let galaxies = super::tail::enumerate_galaxies(ctx, args.all_galaxies, None)
-        .into_iter()
-        .map(|source| seats_for_galaxy(source.label, &source.state_dir, now))
-        .collect::<Vec<_>>();
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&SeatsDocument {
-            schema_version: 1,
-            galaxies
-        })?
-    );
+    let sources = super::tail::enumerate_galaxies(ctx, args.all_galaxies, None);
+    let document = seats_document(sources, Utc::now());
+    println!("{}", serde_json::to_string_pretty(&document)?);
     Ok(())
 }
 
-fn seats_for_galaxy(
-    galaxy: String,
+/// One entry per galaxy source, each derived by [`seats_for_galaxy`] — the
+/// all-galaxies document is the single-galaxy document repeated, with no
+/// authority rule of its own.
+fn seats_document(sources: Vec<super::tail::GalaxySource>, now: DateTime<Utc>) -> SeatsDocument {
+    let galaxies = sources
+        .into_iter()
+        .map(|source| {
+            let root = source.root();
+            seats_for_galaxy(source.label, root, &source.state_dir, now)
+        })
+        .collect();
+    SeatsDocument {
+        schema_version: 1,
+        galaxies,
+    }
+}
+
+/// Pilot-mission molecules recorded in a galaxy's state directory.
+fn molecule_missions(
     state_dir: &std::path::Path,
-    now: DateTime<Utc>,
-) -> GalaxySeats {
-    let missions_from_molecules = FileStore::new(state_dir)
+) -> Result<std::collections::BTreeSet<MoleculeId>, cosmon_core::error::CosmonError> {
+    FileStore::new(state_dir)
         .list_molecules(&MoleculeFilter::default())
         .map(|molecules| {
             molecules
                 .into_iter()
                 .filter(|m| m.tags.iter().any(|tag| tag.as_str() == "pilot-mission"))
                 .map(|m| m.id)
-                .collect::<std::collections::BTreeSet<_>>()
-        });
+                .collect()
+        })
+}
+
+/// The one pilot mission a galaxy has, if it has exactly one.
+///
+/// Uses the same derivation as `seats_for_galaxy` (tagged molecules plus the
+/// lease ledger) so a session start seats itself where `seats` will look.
+pub(crate) fn sole_mission(state_dir: &std::path::Path) -> Option<MoleculeId> {
+    let mut missions = molecule_missions(state_dir).ok()?;
+    let leases = presence::leases_at(state_dir).ok()?;
+    missions.extend(leases.missions().ok()?);
+    (missions.len() == 1).then(|| missions.into_iter().next())?
+}
+
+fn seats_for_galaxy(
+    galaxy: String,
+    root: Option<PathBuf>,
+    state_dir: &std::path::Path,
+    now: DateTime<Utc>,
+) -> GalaxySeats {
+    let missions_from_molecules = molecule_missions(state_dir);
     let leases = presence::leases_at(state_dir);
     let (Ok(mut missions), Ok(leases)) = (missions_from_molecules, leases) else {
         return GalaxySeats {
             galaxy,
+            root,
             state: "unreadable",
             missions: Vec::new(),
         };
@@ -1211,6 +1241,7 @@ fn seats_for_galaxy(
         Err(_) => {
             return GalaxySeats {
                 galaxy,
+                root,
                 state: "unreadable",
                 missions: Vec::new(),
             }
@@ -1219,6 +1250,7 @@ fn seats_for_galaxy(
     if missions.is_empty() {
         return GalaxySeats {
             galaxy,
+            root,
             state: "no mission",
             missions: Vec::new(),
         };
@@ -1233,6 +1265,7 @@ fn seats_for_galaxy(
     let Ok(presences) = PresenceStore::new(state_dir).scan() else {
         return GalaxySeats {
             galaxy,
+            root,
             state: "unreadable",
             missions: Vec::new(),
         };
@@ -1242,6 +1275,7 @@ fn seats_for_galaxy(
         let Some(finding) = seats_for_mission(&leases, &mission, &presences, now) else {
             return GalaxySeats {
                 galaxy,
+                root,
                 state: "unreadable",
                 missions: Vec::new(),
             };
@@ -1250,6 +1284,7 @@ fn seats_for_galaxy(
     }
     GalaxySeats {
         galaxy,
+        root,
         state,
         missions: findings,
     }
@@ -2544,7 +2579,7 @@ mod tests {
     #[test]
     fn seats_reports_no_mission_as_readable_data() {
         let dir = tempdir().unwrap();
-        let finding = seats_for_galaxy("fixture".to_owned(), dir.path(), Utc::now());
+        let finding = seats_for_galaxy("fixture".to_owned(), None, dir.path(), Utc::now());
         assert_eq!(finding.state, "no mission");
         assert!(finding.missions.is_empty());
     }
@@ -2739,7 +2774,7 @@ mod tests {
     fn seats_distinguishes_every_galaxy_state() {
         let empty = tempdir().unwrap();
         assert_eq!(
-            seats_for_galaxy("empty".to_owned(), empty.path(), Utc::now()).state,
+            seats_for_galaxy("empty".to_owned(), None, empty.path(), Utc::now()).state,
             "no mission"
         );
 
@@ -2753,7 +2788,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            seats_for_galaxy("no-root".to_owned(), no_root.path(), Utc::now()).state,
+            seats_for_galaxy("no-root".to_owned(), None, no_root.path(), Utc::now()).state,
             "no trust root"
         );
 
@@ -2771,7 +2806,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            seats_for_galaxy("trusted".to_owned(), &trusted_state, Utc::now()).state,
+            seats_for_galaxy("trusted".to_owned(), None, &trusted_state, Utc::now()).state,
             "ok"
         );
 
@@ -2792,14 +2827,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            seats_for_galaxy("ambiguous".to_owned(), ambiguous.path(), Utc::now()).state,
+            seats_for_galaxy("ambiguous".to_owned(), None, ambiguous.path(), Utc::now()).state,
             "ambiguous mission"
         );
 
         let unreadable = tempdir().unwrap();
         std::fs::write(unreadable.path().join("pilot-lease"), "not a directory").unwrap();
         assert_eq!(
-            seats_for_galaxy("broken".to_owned(), unreadable.path(), Utc::now()).state,
+            seats_for_galaxy("broken".to_owned(), None, unreadable.path(), Utc::now()).state,
             "unreadable"
         );
     }

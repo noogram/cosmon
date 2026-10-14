@@ -41,6 +41,14 @@ pub(crate) struct GalaxySource {
     pub(crate) state_dir: PathBuf,
 }
 
+impl GalaxySource {
+    /// The project root: the directory that holds `.cosmon/state`.
+    pub(crate) fn root(&self) -> Option<PathBuf> {
+        let cosmon = self.state_dir.parent()?;
+        (cosmon.file_name()? == ".cosmon").then(|| cosmon.parent().map(PathBuf::from))?
+    }
+}
+
 /// Enumerate the same galaxy perimeter used by `cs tail --all-galaxies`.
 ///
 /// A missing cluster root falls back to the fleet-local state directory.  The
