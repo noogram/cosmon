@@ -19,6 +19,15 @@ this stage.
 
 ## [Unreleased]
 
+### Breaking changes and operator actions on upgrade
+
+- RPP adapter: a binding that declares `[scopes]` is the scope ceiling; token
+  scopes cannot widen it. Its `allowed` list is the complete grant for every
+  scope, and `allowed = []` grants nothing. A binding without a `[scopes]`
+  section keeps admission on the token's scopes, as before. Before upgrading,
+  check that every binding with a `[scopes]` section lists each scope its
+  holder uses. (task-20261014-ae1c)
+
 ## [0.7.3] — 2026-10-06
 
 ### Breaking changes and operator actions on upgrade

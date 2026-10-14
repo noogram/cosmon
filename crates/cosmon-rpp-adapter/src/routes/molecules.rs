@@ -99,7 +99,6 @@ pub use crate::auth::scopes::MOLECULE_HARVEST as SCOPE_MOLECULE_HARVEST;
 pub use crate::auth::scopes::MOLECULE_READ as SCOPE_MOLECULE_READ;
 pub use crate::auth::scopes::MOLECULE_WRITE as SCOPE_MOLECULE_WRITE;
 pub use crate::auth::scopes::WORKER_SPAWN as SCOPE_WORKER_SPAWN;
-use crate::auth::scopes::{GRANT_SOURCE_BINDING, GRANT_SOURCE_JWT};
 
 /// Hard per-noyau ceiling on **concurrently live workers**, checked at the
 /// pre-spawn seam of [`tackle_molecule`] (delib-20260709-943e M3, turing
@@ -179,40 +178,28 @@ fn recorded_process_is_live(pid: Option<u32>, pid_start_time: Option<u64>) -> bo
 }
 
 /// Compute the effective `(decision, grant_source)` pair for a scope
-/// check that consults both the JWT and the admin-nucleon binding.
+/// check, for the `(iss, sub, aud)` binding the token presents.
 ///
-/// Order of precedence:
+/// The rule itself is [`crate::auth::scopes::scope_decision`]: a binding
+/// that declares `[scopes]` is the complete grant and the token's scopes
+/// are ignored; a binding without the section falls back to the token's
+/// scopes. Every route scope check and the stream re-check go through
+/// this function, so no route can keep a different rule.
 ///
-/// 1. Any of `wanted_any` present in the JWT scopes → `Allow + "jwt"`.
-/// 2. Otherwise, any of `wanted_any` present in the binding-granted
-///    scopes → `Allow + "binding"`.
-/// 3. Otherwise → `Absent + None`.
-///
-/// The function is total and pure. It does **not** widen the tenant
-/// isolation invariant: the binding-granted scopes are read from the
-/// `(iss, sub)`-specific `Resolved` record, and the subsequent
-/// admission boundary still enforces the audience pin
-/// (`CrossTenantPivot`) before reaching the per-tenant store. The
-/// scope union therefore cannot grant access to a `noyau` other than
-/// the one the binding declares (ADR-080 §8j).
-fn effective_scope_decision(
+/// It does **not** widen the tenant isolation invariant: the grant is
+/// read from the audience-pinned binding, and the admission boundary
+/// still enforces the audience pin (`CrossTenantPivot`) before reaching
+/// the per-tenant store (ADR-080 §8j).
+pub(crate) fn effective_scope_decision(
+    nucleon_map: &crate::nucleon_map::HabilitationMap,
     jwt: &ValidatedJwt,
-    binding_scopes: &[String],
     wanted_any: &[&str],
 ) -> (AuthzDecision, Option<&'static str>) {
-    if wanted_any
-        .iter()
-        .any(|w| *w != SCOPE_MOLECULE_HARVEST && jwt.has_scope(w))
-    {
-        return (AuthzDecision::Allow, Some(GRANT_SOURCE_JWT));
+    let binding_grant = nucleon_map.allowed_scopes_for_audience(&jwt.iss, &jwt.sub, &jwt.aud);
+    match crate::auth::scopes::scope_decision(&jwt.scopes, binding_grant, wanted_any) {
+        Some(source) => (AuthzDecision::Allow, Some(source)),
+        None => (AuthzDecision::Absent, None),
     }
-    if wanted_any
-        .iter()
-        .any(|w| binding_scopes.iter().any(|b| b == w))
-    {
-        return (AuthzDecision::Allow, Some(GRANT_SOURCE_BINDING));
-    }
-    (AuthzDecision::Absent, None)
 }
 
 /// Public re-export of the private [`authorise_scope`] for the sibling
@@ -245,7 +232,7 @@ pub(crate) fn build_spark_public(
     build_spark(state, jwt, verb, target)
 }
 
-/// Authorise a verb against the JWT + binding-scope union and emit the
+/// Authorise a verb against the binding-or-token scope rule and emit the
 /// `AuthzDecisionEvaluated` event. Returns `Ok(())` when the scope
 /// check admits and `Err(ApiError)` on `Absent`. T23 — collapses what
 /// were 9 copy-pasted blocks across the route handlers into a single
@@ -257,9 +244,8 @@ fn authorise_scope(
     wanted_any: &[&str],
     audit_scope: &str,
 ) -> Result<(), ApiError> {
-    let nucleon_map = state.nucleon_map.load();
-    let binding_scopes = nucleon_map.allowed_scopes_for_audience(&jwt.iss, &jwt.sub, &jwt.aud);
-    let (decision, grant_source) = effective_scope_decision(jwt, binding_scopes, wanted_any);
+    let (decision, grant_source) =
+        effective_scope_decision(&state.nucleon_map.load(), jwt, wanted_any);
     emit_authz_decision_with_source(
         &state.state_dir,
         verb,
@@ -2589,20 +2575,27 @@ pub async fn done_molecule(
         )?;
     }
 
-    let authority_source =
-        if policy.provenance == PolicyProvenance::Legacy && jwt.has_scope(SCOPE_MOLECULE_WRITE) {
-            RemoteAuthoritySource::LegacyTokenWrite
-        } else if state
-            .nucleon_map
-            .load()
-            .allowed_scopes_for_audience(&jwt.iss, &jwt.sub, &jwt.aud)
-            .iter()
-            .any(|scope| scope == SCOPE_MOLECULE_HARVEST)
-        {
-            RemoteAuthoritySource::BindingHarvest
-        } else {
-            RemoteAuthoritySource::LegacyBindingWrite
-        };
+    // A binding that declares `[scopes]` is the scope ceiling: the token's
+    // `molecule:write` never selects `LegacyTokenWrite` for it.
+    let binding_grant = state
+        .nucleon_map
+        .load()
+        .allowed_scopes_for_audience(&jwt.iss, &jwt.sub, &jwt.aud)
+        .map(<[String]>::to_vec);
+    let authority_source = if policy.provenance == PolicyProvenance::Legacy
+        && binding_grant.is_none()
+        && jwt.has_scope(SCOPE_MOLECULE_WRITE)
+    {
+        RemoteAuthoritySource::LegacyTokenWrite
+    } else if binding_grant
+        .iter()
+        .flatten()
+        .any(|scope| scope == SCOPE_MOLECULE_HARVEST)
+    {
+        RemoteAuthoritySource::BindingHarvest
+    } else {
+        RemoteAuthoritySource::LegacyBindingWrite
+    };
     let admission = cosmon_core::remote_harvest::RemoteHarvestAdmission {
         issuer: jwt.iss.clone(),
         subject: jwt.sub.clone(),

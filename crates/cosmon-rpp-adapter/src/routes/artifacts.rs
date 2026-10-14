@@ -480,17 +480,11 @@ fn authorise_artifact_scope(
 ) -> Result<(), ApiError> {
     use cosmon_state::instrumentation::{emit_authz_decision_with_source, AuthzDecision};
 
-    use crate::auth::scopes::{GRANT_SOURCE_BINDING, GRANT_SOURCE_JWT};
-
-    let nucleon_map = state.nucleon_map.load();
-    let binding_scopes = nucleon_map.allowed_scopes_for_audience(&jwt.iss, &jwt.sub, &jwt.aud);
-    let (decision, grant_source) = if jwt.has_scope(wanted) {
-        (AuthzDecision::Allow, Some(GRANT_SOURCE_JWT))
-    } else if binding_scopes.iter().any(|b| b == wanted) {
-        (AuthzDecision::Allow, Some(GRANT_SOURCE_BINDING))
-    } else {
-        (AuthzDecision::Absent, None)
-    };
+    let (decision, grant_source) = crate::routes::molecules::effective_scope_decision(
+        &state.nucleon_map.load(),
+        jwt,
+        &[wanted],
+    );
 
     emit_authz_decision_with_source(
         &state.state_dir,

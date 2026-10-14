@@ -184,9 +184,63 @@ pub const ALL: &[&str] = &[
     SESSIONS_WRITE,
 ];
 
+/// Decide whether a caller holds one of `wanted_any`, and name the source.
+///
+/// This is the single scope rule of the RPP surface; every route check and
+/// every stream re-check calls it, so the rule cannot drift between copies.
+///
+/// - `binding_grant = Some(allowed)`: the binding declares `[scopes]`, and
+///   `allowed` is the complete grant. Token scopes are ignored, so a token
+///   can never widen what the operator wrote. An empty list grants nothing.
+/// - `binding_grant = None`: the binding has no `[scopes]` section (legacy).
+///   Admission falls back to the token's own scopes.
+///
+/// [`MOLECULE_HARVEST`] is binding-only in both cases (ADR-176): a token
+/// carrying the literal never grants it.
+///
+/// Returns the grant source ([`GRANT_SOURCE_BINDING`] or
+/// [`GRANT_SOURCE_JWT`]) when one wanted scope is held, `None` otherwise.
+#[must_use]
+pub fn scope_decision(
+    token_scopes: &[String],
+    binding_grant: Option<&[String]>,
+    wanted_any: &[&str],
+) -> Option<&'static str> {
+    match binding_grant {
+        Some(allowed) => wanted_any
+            .iter()
+            .any(|w| allowed.iter().any(|a| a == w))
+            .then_some(GRANT_SOURCE_BINDING),
+        None => wanted_any
+            .iter()
+            .any(|w| *w != MOLECULE_HARVEST && token_scopes.iter().any(|t| t == w))
+            .then_some(GRANT_SOURCE_JWT),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn owned(scopes: &[&str]) -> Vec<String> {
+        scopes.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// Without a `[scopes]` section the token decides, except for harvest,
+    /// which a token never grants.
+    #[test]
+    fn scope_decision_without_scopes_section_reads_the_token() {
+        let every_token_scope = owned(ALL);
+        for wanted in ALL {
+            let expected = (*wanted != MOLECULE_HARVEST).then_some(GRANT_SOURCE_JWT);
+            assert_eq!(
+                scope_decision(&every_token_scope, None, &[wanted]),
+                expected,
+                "{wanted}",
+            );
+            assert_eq!(scope_decision(&owned(&["openid"]), None, &[wanted]), None);
+        }
+    }
 
     #[test]
     fn all_scopes_have_stable_order() {

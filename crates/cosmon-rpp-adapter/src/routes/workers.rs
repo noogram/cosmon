@@ -66,7 +66,7 @@ use serde_json::{json, Value};
 
 use crate::admission::{http_request_to_spark, AdmissionRig, Spark, Verb};
 use crate::audit::new_request_id;
-use crate::auth::scopes::{GRANT_SOURCE_BINDING, GRANT_SOURCE_JWT, WORKER_READ};
+use crate::auth::scopes::WORKER_READ;
 use crate::error::{ApiError, RppRejectReason};
 use crate::jwt::{JwtVerifier, ValidatedJwt};
 use crate::AppState;
@@ -184,15 +184,11 @@ pub async fn list_workers(
 /// `AuthzDecisionEvaluated` event. Mirrors the per-module pattern in
 /// `routes::events_stream`.
 fn authorise_worker_read(state: &Arc<AppState>, jwt: &ValidatedJwt) -> Result<(), ApiError> {
-    let nucleon_map = state.nucleon_map.load();
-    let binding_scopes = nucleon_map.allowed_scopes_for_audience(&jwt.iss, &jwt.sub, &jwt.aud);
-    let (decision, grant_source) = if jwt.has_scope(WORKER_READ) {
-        (AuthzDecision::Allow, Some(GRANT_SOURCE_JWT))
-    } else if binding_scopes.iter().any(|s| s == WORKER_READ) {
-        (AuthzDecision::Allow, Some(GRANT_SOURCE_BINDING))
-    } else {
-        (AuthzDecision::Absent, None)
-    };
+    let (decision, grant_source) = crate::routes::molecules::effective_scope_decision(
+        &state.nucleon_map.load(),
+        jwt,
+        &[WORKER_READ],
+    );
 
     emit_authz_decision_with_source(
         &state.state_dir,

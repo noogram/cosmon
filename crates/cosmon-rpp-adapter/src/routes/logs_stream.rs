@@ -63,7 +63,7 @@ use tokio_stream::{Stream, StreamExt};
 
 use crate::admission::{http_request_to_spark, AdmissionRig, Spark, Verb};
 use crate::audit::new_request_id;
-use crate::auth::scopes::{GRANT_SOURCE_BINDING, GRANT_SOURCE_JWT, LOGS_SUBSCRIBE};
+use crate::auth::scopes::LOGS_SUBSCRIBE;
 use crate::error::{ApiError, RppRejectReason};
 use crate::jwt::{JwtVerifier, ValidatedJwt};
 use crate::routes::stream_guard::guard_stream;
@@ -390,15 +390,11 @@ fn extract_bearer(headers: &HeaderMap) -> Result<&str, RppRejectReason> {
 /// binding-granted scopes, emitting the matching
 /// `AuthzDecisionEvaluated` event.
 fn authorise_logs_subscribe(state: &Arc<AppState>, jwt: &ValidatedJwt) -> Result<(), ApiError> {
-    let nucleon_map = state.nucleon_map.load();
-    let binding_scopes = nucleon_map.allowed_scopes_for_audience(&jwt.iss, &jwt.sub, &jwt.aud);
-    let (decision, grant_source) = if jwt.has_scope(LOGS_SUBSCRIBE) {
-        (AuthzDecision::Allow, Some(GRANT_SOURCE_JWT))
-    } else if binding_scopes.iter().any(|s| s == LOGS_SUBSCRIBE) {
-        (AuthzDecision::Allow, Some(GRANT_SOURCE_BINDING))
-    } else {
-        (AuthzDecision::Absent, None)
-    };
+    let (decision, grant_source) = crate::routes::molecules::effective_scope_decision(
+        &state.nucleon_map.load(),
+        jwt,
+        &[LOGS_SUBSCRIBE],
+    );
 
     emit_authz_decision_with_source(
         &state.state_dir,
