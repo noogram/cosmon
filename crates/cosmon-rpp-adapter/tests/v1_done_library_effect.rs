@@ -274,7 +274,12 @@ fn stock_state(oidc: &OidcMock, tenants: &TenantWorkspaces, security_dir: &Path)
             HabilitationId::new("nuc-a"),
             Noyau::new("a"),
             "cosmon-rpp-a",
-            vec!["cosmon:molecule:harvest".to_owned()],
+            // A declared `[scopes]` is the complete grant: the result read
+            // after the harvest needs `molecule:read` from the binding.
+            vec![
+                "cosmon:molecule:read".to_owned(),
+                "cosmon:molecule:harvest".to_owned(),
+            ],
         )
         .build();
 

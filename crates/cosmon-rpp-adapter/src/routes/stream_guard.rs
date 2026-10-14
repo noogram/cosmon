@@ -103,7 +103,13 @@ fn admission_still_valid<S>(stream: &GuardedStream<S>) -> Result<(), &'static st
     {
         return Err("binding");
     }
-    if !jwt.has_scope(stream.scope) && !binding.allowed_scopes.iter().any(|s| s == stream.scope) {
+    if crate::auth::scopes::scope_decision(
+        &jwt.scopes,
+        binding.allowed_scopes.as_deref(),
+        &[stream.scope],
+    )
+    .is_none()
+    {
         return Err("scope");
     }
     let deny = stream.state.deny_list.snapshot();

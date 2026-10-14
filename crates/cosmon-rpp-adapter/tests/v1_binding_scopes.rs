@@ -5,9 +5,10 @@
 //! The upstream `IdP` (Forgejo `OAuth2`) cannot mint custom scopes like
 //! `cosmon:molecule:*` on its bearer tokens — it issues `openid` only.
 //! The §8j HTTPS+JWT admission boundary therefore consults the admin
-//! nucleon binding (`oidc-identity.toml` under `[scopes].allowed`) and
-//! unions its grants with the JWT's own scope set before deciding
-//! Allow/Absent. Cross-tenant isolation is **not** relaxed by this
+//! nucleon binding (`oidc-identity.toml` under `[scopes].allowed`). A
+//! binding that declares `[scopes]` is the complete grant; one without
+//! the section falls back to the JWT's own scope set
+//! (`tests/v1_scope_ceiling.rs` pins the ceiling). Cross-tenant isolation is **not** relaxed by this
 //! gate: the audience pin (`CrossTenantPivot`) still rejects pivot
 //! attempts independently.
 //!
@@ -17,8 +18,9 @@
 //!    → 201 Created on `POST /v1/molecules` (binding wins).
 //! 2. Audit trail records `grant_source = "binding"` on the same
 //!    request.
-//! 3. JWT carrying `molecule:write` + binding empty → 201 + audit
-//!    `grant_source = "jwt"` (backwards-compat fallback).
+//! 3. JWT carrying `molecule:write` + binding without a `[scopes]`
+//!    section → 201 + audit `grant_source = "jwt"` (backwards-compat
+//!    fallback).
 //! 4. Cross-tenant attempt — JWT for noyau A trying to use noyau B's
 //!    audience — still 4xx, regardless of binding grants.
 
@@ -37,7 +39,8 @@ use serde_json::json;
 use tower::ServiceExt;
 
 /// Binding entry: `(sub, nucleon, noyau, audience, allowed_scopes)`.
-type Binding<'a> = (&'a str, &'a str, &'a str, &'a str, &'a [&'a str]);
+/// `None` is a binding with no `[scopes]` section; `Some(list)` declares it.
+type Binding<'a> = (&'a str, &'a str, &'a str, &'a str, Option<&'a [&'a str]>);
 
 fn make_state(
     oidc: &OidcMock,
@@ -50,15 +53,23 @@ fn make_state(
 
     let mut builder = HabilitationMap::builder();
     for (sub, nucleon, noyau, audience, scopes) in nucleons {
-        let allowed: Vec<String> = scopes.iter().map(|s| (*s).to_owned()).collect();
-        builder = builder.insert_with_scopes(
-            oidc.issuer(),
-            sub,
-            HabilitationId::new(nucleon),
-            Noyau::new(noyau),
-            audience,
-            allowed,
-        );
+        builder = match scopes {
+            Some(scopes) => builder.insert_with_scopes(
+                oidc.issuer(),
+                sub,
+                HabilitationId::new(nucleon),
+                Noyau::new(noyau),
+                audience,
+                scopes.iter().map(|s| (*s).to_owned()).collect(),
+            ),
+            None => builder.insert(
+                oidc.issuer(),
+                sub,
+                HabilitationId::new(nucleon),
+                Noyau::new(noyau),
+                audience,
+            ),
+        };
     }
 
     let rate_limiter = IngressRateLimiter::new(security_dir.join("oidc-rate-limit"), 64.0, 0.0);
@@ -126,7 +137,7 @@ async fn binding_granted_scope_admits_request_with_openid_only_jwt() {
             "nuc-admin-a",
             "a",
             "cosmon-rpp-a",
-            &["cosmon:molecule:read", "cosmon:molecule:write"],
+            Some(&["cosmon:molecule:read", "cosmon:molecule:write"]),
         )],
         security_dir.path(),
     );
@@ -186,7 +197,7 @@ async fn audit_trail_records_grant_source_binding_when_binding_admits() {
             "nuc-admin-a",
             "a",
             "cosmon-rpp-a",
-            &["cosmon:molecule:write"],
+            Some(&["cosmon:molecule:write"]),
         )],
         security_dir.path(),
     );
@@ -251,11 +262,13 @@ async fn audit_trail_records_grant_source_jwt_when_jwt_admits() {
     .await;
 
     let security_dir = tempfile::tempdir().unwrap();
-    // Binding carries no granted scopes — must fall back to JWT scopes.
+    // Binding has no `[scopes]` section (legacy) — must fall back to JWT
+    // scopes. A declared `[scopes]` would be the ceiling instead
+    // (`tests/v1_scope_ceiling.rs`).
     let state = make_state(
         &oidc,
         &tenants,
-        vec![("sub-a", "nuc-a", "a", "cosmon-rpp-a", &[])],
+        vec![("sub-a", "nuc-a", "a", "cosmon-rpp-a", None)],
         security_dir.path(),
     );
     let app = router(state);
@@ -315,7 +328,7 @@ async fn empty_binding_and_empty_jwt_scope_returns_403_with_absent() {
     let state = make_state(
         &oidc,
         &tenants,
-        vec![("sub-a", "nuc-a", "a", "cosmon-rpp-a", &[])],
+        vec![("sub-a", "nuc-a", "a", "cosmon-rpp-a", Some(&[]))],
         security_dir.path(),
     );
     let app = router(state);
@@ -388,7 +401,7 @@ async fn cross_tenant_attempt_with_binding_grant_still_rejected() {
             "nuc-admin-a",
             "a",
             "cosmon-rpp-a",
-            &["cosmon:molecule:write"],
+            Some(&["cosmon:molecule:write"]),
         )],
         security_dir.path(),
     );
@@ -450,7 +463,7 @@ async fn token_harvest_scope_cannot_replace_exact_binding_grant() {
             "nuc-admin-a",
             "a",
             "cosmon-rpp-a",
-            &["cosmon:molecule:write"],
+            Some(&["cosmon:molecule:write"]),
         )],
         security_dir.path(),
     );
@@ -505,7 +518,7 @@ async fn a_binding_removed_after_admission_refuses_at_the_effect_port() {
             "nuc-admin-a",
             "a",
             "cosmon-rpp-a",
-            &["cosmon:molecule:harvest"],
+            Some(&["cosmon:molecule:harvest"]),
         )],
         security_dir.path(),
     ));
@@ -582,7 +595,7 @@ async fn effect_recheck_applies_issuer_scoped_policy() {
             "nuc-a",
             "a",
             "cosmon-rpp-a",
-            &["cosmon:molecule:harvest"],
+            Some(&["cosmon:molecule:harvest"]),
         )],
         dir.path(),
     ));

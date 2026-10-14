@@ -710,6 +710,16 @@ The OQ-1 decision in the contract §13 is **binding-only** for this scope:
 the exact issuer/subject/audience binding must grant it, and the effect
 boundary checks again. A bearer scope claim alone cannot grant harvest.
 
+**Note (2026-10-14, task-20261014-ae1c).** A binding that declares
+`[scopes]` is the scope ceiling for every row of this table: its
+`allowed` list is the complete grant, scopes carried by the token are
+ignored, and `allowed = []` grants nothing. A binding with no `[scopes]`
+section keeps admission on the token's scopes, except for
+`cosmon:molecule:harvest`, which stays binding-only. On a legacy sealed
+galaxy, remote `done` on the token's `cosmon:molecule:write` is likewise
+available only to a binding without the section. The rule is the single
+function `scope_decision` in `crates/cosmon-rpp-adapter/src/auth/scopes.rs`.
+
 ---
 
 ## 7. Kill-switch — disk deny-list

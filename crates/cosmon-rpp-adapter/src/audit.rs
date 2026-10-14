@@ -179,7 +179,7 @@ mod tests {
             nucleon_id: HabilitationId::new("nuc-a"),
             noyau: crate::nucleon_map::Noyau::new("tenant-demo"),
             audience: "cosmon-rpp-tenant".into(),
-            allowed_scopes: Vec::new(),
+            allowed_scopes: None,
             drain_bounds: crate::nucleon_map::DrainBounds::default(),
             federated: None,
         };

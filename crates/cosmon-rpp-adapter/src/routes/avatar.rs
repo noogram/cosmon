@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 
 use crate::admission::{http_request_to_spark, AdmissionRig, Spark, Verb};
 use crate::audit::new_request_id;
-use crate::auth::scopes::{GRANT_SOURCE_BINDING, GRANT_SOURCE_JWT, PILOTE_CONVERSE, WORLD_OBSERVE};
+use crate::auth::scopes::{PILOTE_CONVERSE, WORLD_OBSERVE};
 use crate::error::{ApiError, RppRejectReason};
 use crate::jwt::{JwtVerifier, ValidatedJwt};
 use crate::AppState;
@@ -344,7 +344,7 @@ pub async fn perceive(
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Authorise a scope against the JWT + binding union and emit the
+/// Authorise a scope against the binding-or-token scope rule and emit the
 /// `AuthzDecisionEvaluated` event.
 fn authorise_scope(
     state: &Arc<AppState>,
@@ -352,15 +352,11 @@ fn authorise_scope(
     verb: &'static str,
     wanted: &str,
 ) -> Result<(), ApiError> {
-    let nucleon_map = state.nucleon_map.load();
-    let binding_scopes = nucleon_map.allowed_scopes_for_audience(&jwt.iss, &jwt.sub, &jwt.aud);
-    let (decision, grant_source) = if jwt.has_scope(wanted) {
-        (AuthzDecision::Allow, Some(GRANT_SOURCE_JWT))
-    } else if binding_scopes.iter().any(|s| s == wanted) {
-        (AuthzDecision::Allow, Some(GRANT_SOURCE_BINDING))
-    } else {
-        (AuthzDecision::Absent, None)
-    };
+    let (decision, grant_source) = crate::routes::molecules::effective_scope_decision(
+        &state.nucleon_map.load(),
+        jwt,
+        &[wanted],
+    );
 
     emit_authz_decision_with_source(
         &state.state_dir,

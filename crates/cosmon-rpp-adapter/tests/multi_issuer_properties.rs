@@ -133,7 +133,10 @@ fn overlapping_subjects_keep_admission_and_binding_scopes_separate() -> TestResu
     ] {
         let jwt = JwtVerifier::validate(&jwks, &token(iss, key, json!(AUD))?, Posture::Active)?;
         assert_eq!(admit(&map, &jwt, td.path())?.noyau.as_str(), tenant);
-        assert_eq!(map.allowed_scopes_for_audience(iss, SUB, AUD), &[scope]);
+        assert_eq!(
+            map.allowed_scopes_for_audience(iss, SUB, AUD),
+            Some(&[scope.to_owned()][..])
+        );
     }
     Ok(())
 }

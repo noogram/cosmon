@@ -543,17 +543,21 @@ impl RemoteAdmissionValidator for AdapterRemoteValidator {
         if resolved.noyau.as_str() != admission.tenant {
             return Err(Cause::BindingChanged);
         }
-        let scopes = map.allowed_scopes_for_audience(
+        let declared = map.allowed_scopes_for_audience(
             &admission.issuer,
             &admission.subject,
             &admission.audience,
         );
+        let scopes = declared.unwrap_or(&[]);
         let granted = match admission.authority_source {
             RemoteAuthoritySource::BindingHarvest => scopes
                 .iter()
                 .any(|s| s == crate::auth::scopes::MOLECULE_HARVEST),
+            // A binding that declares `[scopes]` is the ceiling; the token's
+            // write scope cannot carry a harvest for it.
             RemoteAuthoritySource::LegacyTokenWrite => {
                 admission.policy.provenance == cosmon_core::remote_harvest::PolicyProvenance::Legacy
+                    && declared.is_none()
             }
             RemoteAuthoritySource::LegacyBindingWrite => {
                 admission.policy.provenance == cosmon_core::remote_harvest::PolicyProvenance::Legacy

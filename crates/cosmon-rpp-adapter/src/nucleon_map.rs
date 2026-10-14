@@ -110,7 +110,8 @@ pub struct OidcIdentity {
     /// Optional binding-granted scopes (T23).
     /// The upstream `IdP` (Forgejo `OAuth2`) cannot mint custom scopes
     /// like `cosmon:molecule:*`; the binding closes that gap by
-    /// granting the scopes implicitly for the bound `(iss, sub)`.
+    /// granting the scopes for the bound `(iss, sub)`. When present, the
+    /// section is the complete grant and token scopes are ignored.
     /// Absent on legacy bindings — admission falls back to the JWT's
     /// scopes alone (backwards-compat).
     #[serde(default)]
@@ -132,16 +133,22 @@ pub struct OidcIdentity {
 /// allowed = ["cosmon:molecule:read", "cosmon:molecule:write"]
 /// ```
 ///
-/// The list extends what the JWT itself carries — an admin nucleon
-/// can be granted `cosmon:molecule:write` even when the upstream
-/// `IdP` only issues `openid`. The grant is per-`(iss, sub)` and
+/// A binding that declares this section is the scope ceiling: `allowed`
+/// is the complete grant for every scope in the catalog, and scopes the
+/// JWT carries are ignored, so a token can never widen what the operator
+/// wrote. An admin nucleon can therefore be granted
+/// `cosmon:molecule:write` even when the upstream `IdP` only issues
+/// `openid`, and an observer binding stays read-only whatever the token
+/// carries. `allowed = []` grants nothing. A binding without the section
+/// keeps legacy admission on the JWT's scopes alone
+/// ([`crate::auth::scopes::scope_decision`]). The grant is per-`(iss, sub)` and
 /// per-`noyau`: cross-noyau pivot is still rejected by the audience
 /// pin (`CrossTenantPivot`), so binding-granted scopes never widen
 /// the tenant isolation invariant (ADR-080 §8j).
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ScopesGrant {
-    /// Scopes implicitly granted to this `(iss, sub)` pair, on top of
-    /// whatever scopes the JWT carries.
+    /// Every scope granted to this `(iss, sub, aud)` binding. Scopes the
+    /// JWT carries are not added to it.
     #[serde(default)]
     pub allowed: Vec<String>,
 }
@@ -280,7 +287,8 @@ pub struct BindingSummary {
     pub noyau: String,
     /// Pinned audience.
     pub audience: String,
-    /// Binding-granted scopes (T23), verbatim on-disk order.
+    /// Binding-granted scopes (T23), verbatim on-disk order. Empty both
+    /// for a declared-empty `[scopes]` section and for no section.
     pub allowed_scopes: Vec<String>,
 }
 
@@ -293,11 +301,15 @@ pub struct Resolved {
     pub noyau: Noyau,
     /// Pinned audience (must match the JWT's `aud`).
     pub audience: String,
-    /// Scopes the binding grants implicitly (T23). Stable order: the
-    /// list mirrors the on-disk `[scopes].allowed` array verbatim.
-    /// Empty when the binding does not carry a `[scopes]` section —
-    /// legacy bindings fall through to the JWT scope set alone.
-    pub allowed_scopes: Vec<String>,
+    /// Scopes the binding grants (T23). Stable order: the list mirrors
+    /// the on-disk `[scopes].allowed` array verbatim.
+    ///
+    /// `Some` when the binding declares a `[scopes]` section — the list
+    /// is then the complete grant and token scopes are ignored, and
+    /// `Some(vec![])` grants nothing. `None` when the section is absent —
+    /// legacy bindings fall through to the JWT scope set alone. See
+    /// [`crate::auth::scopes::scope_decision`].
+    pub allowed_scopes: Option<Vec<String>>,
     /// Effective drain bounds (B1/B2/B3) — binding overrides resolved
     /// against the server defaults. Always concrete: a tenant drain is
     /// never unbounded.
@@ -322,8 +334,7 @@ impl HabilitationMap {
     /// unknown principal.
     ///
     /// This is the *principal-level* lookup: it answers "does this
-    /// identity have any grant at all?" — used by informational callers
-    /// (`/v1/quota`, `/v1/auth/me`) and to distinguish
+    /// identity have any grant at all?" — used by admission to distinguish
     /// [`crate::RppRejectReason::UnknownSub`] (no grant) from
     /// [`crate::RppRejectReason::CrossTenantPivot`] (a grant exists, but
     /// not for the presented audience). For the admission hot path use
@@ -431,27 +442,37 @@ impl HabilitationMap {
 
     /// Scopes granted by the `(iss, sub)` binding, or an empty slice
     /// when the binding has no `[scopes]` section (or is absent
-    /// entirely). The accessor is read-only and side-effect-free; it
-    /// is consulted by the route handlers *after* admission so the
-    /// scope check can union JWT scopes with binding-granted scopes
-    /// before deciding Allow/Absent (T23).
+    /// entirely). Audience-blind and flattened: it cannot tell a
+    /// declared-empty section from no section, so it must not feed a
+    /// scope decision — use [`Self::allowed_scopes_for_audience`].
     #[must_use]
     pub fn allowed_scopes_for(&self, iss: &str, sub: &str) -> &[String] {
         self.resolve(iss, sub)
-            .map_or(&[], |r| r.allowed_scopes.as_slice())
+            .and_then(|r| r.allowed_scopes.as_deref())
+            .unwrap_or(&[])
     }
 
     /// Binding-granted scopes for an exact `(iss, sub, aud)` triple — the
-    /// per-galaxy scope grant. Use this when the caller knows the
-    /// presented audience (the admission-resolved galaxy) so that a
-    /// principal federated on two galaxies with different scope sets gets
-    /// the right slice. Falls back to an empty slice for an unknown
-    /// triple (deny-by-default). Mirror of [`Self::resolve_for_audience`]
+    /// per-galaxy scope grant, in the shape
+    /// [`crate::auth::scopes::scope_decision`] takes. Use this when the
+    /// caller knows the presented audience (the admission-resolved galaxy)
+    /// so that a principal federated on two galaxies with different scope
+    /// sets gets the right slice. Mirror of [`Self::resolve_for_audience`]
     /// for the scope dimension.
+    ///
+    /// `Some` when the binding declares `[scopes]` (the complete grant),
+    /// `None` when it has no such section or when no binding pins the
+    /// triple. An unknown triple never reaches a scope check: admission
+    /// refuses it first.
     #[must_use]
-    pub fn allowed_scopes_for_audience(&self, iss: &str, sub: &str, aud: &str) -> &[String] {
+    pub fn allowed_scopes_for_audience(
+        &self,
+        iss: &str,
+        sub: &str,
+        aud: &str,
+    ) -> Option<&[String]> {
         self.resolve_for_audience(iss, sub, aud)
-            .map_or(&[], |r| r.allowed_scopes.as_slice())
+            .and_then(|r| r.allowed_scopes.as_deref())
     }
 
     /// Owned, secret-free projection of every loaded binding, in stable
@@ -469,7 +490,7 @@ impl HabilitationMap {
                 habilitation_id: r.nucleon_id.as_str().to_owned(),
                 noyau: r.noyau.as_str().to_owned(),
                 audience: r.audience.clone(),
-                allowed_scopes: r.allowed_scopes.clone(),
+                allowed_scopes: r.allowed_scopes.clone().unwrap_or_default(),
             })
             .collect()
     }
@@ -530,11 +551,7 @@ impl HabilitationMap {
                         format!("duplicate binding at {}", path.display()),
                     ));
                 }
-                let allowed_scopes = parsed
-                    .scopes
-                    .as_ref()
-                    .map(|g| g.allowed.clone())
-                    .unwrap_or_default();
+                let allowed_scopes = parsed.scopes.as_ref().map(|g| g.allowed.clone());
                 out.by_key.insert(
                     key,
                     Resolved {
@@ -634,7 +651,7 @@ impl HabilitationMapBuilder {
                 nucleon_id,
                 noyau,
                 audience: audience.into(),
-                allowed_scopes: Vec::new(),
+                allowed_scopes: None,
                 drain_bounds: DrainBounds::default(),
                 federated: None,
             },
@@ -642,9 +659,10 @@ impl HabilitationMapBuilder {
         self
     }
 
-    /// Insert a binding with explicit `[scopes].allowed` grants
-    /// (T23). Used by tests that exercise the
-    /// admin-binding scope-union path.
+    /// Insert a binding that declares `[scopes]` with these `allowed`
+    /// grants (T23) — the binding is then the scope ceiling, and an empty
+    /// list grants nothing. [`Self::insert`] builds a binding with no
+    /// `[scopes]` section (legacy token admission).
     #[must_use]
     pub fn insert_with_scopes(
         mut self,
@@ -662,7 +680,7 @@ impl HabilitationMapBuilder {
                 nucleon_id,
                 noyau,
                 audience: audience.into(),
-                allowed_scopes,
+                allowed_scopes: Some(allowed_scopes),
                 drain_bounds: DrainBounds::default(),
                 federated: None,
             },
@@ -1022,7 +1040,7 @@ audience = "client-id-a"
         assert!(map.allowed_scopes_for("https://idp/git", "1").is_empty());
         assert!(map
             .allowed_scopes_for_audience("https://idp/git", "1", "client-id-a")
-            .is_empty());
+            .is_none());
 
         // Nor does a `sub` that merely *contains* or extends a declared
         // one — the comparison is byte-for-byte, not a prefix test.
@@ -1380,10 +1398,10 @@ allowed = ["cosmon:molecule:read", "cosmon:molecule:write"]
         assert_eq!(resolved.audience, "cosmon-rpp-tenant-demo");
         assert_eq!(
             resolved.allowed_scopes,
-            vec![
+            Some(vec![
                 "cosmon:molecule:read".to_owned(),
                 "cosmon:molecule:write".to_owned()
-            ]
+            ])
         );
     }
 

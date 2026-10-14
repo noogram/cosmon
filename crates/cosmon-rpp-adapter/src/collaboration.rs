@@ -129,7 +129,7 @@ pub fn admit_collaborator(
         .nucleon_map
         .allowed_scopes_for_audience(&jwt.iss, &jwt.sub, &jwt.aud);
     let carries = |scope: CollaborationScope| {
-        jwt.has_scope(scope.as_str()) || granted.iter().any(|s| s == scope.as_str())
+        crate::auth::scopes::scope_decision(&jwt.scopes, granted, &[scope.as_str()]).is_some()
     };
     if !CollaborationScope::ALL
         .into_iter()
