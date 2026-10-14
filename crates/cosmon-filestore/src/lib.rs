@@ -750,18 +750,79 @@ pub fn resolve_tmux_socket_name(config_path: &Path) -> String {
     }
 }
 
-/// Write `data` to `path` atomically via a `.tmp` sibling + rename.
+/// Process-wide counter that keeps tmp names unique between threads of one
+/// process; the process id keeps them unique between processes.
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A tmp path in the same directory as `path`, unique per call.
+///
+/// A fixed name (`<stem>.json.tmp`) is shared by every writer of the same
+/// file: two unlocked writers truncate and fill one tmp file together, and
+/// whichever renames second can move a torn file into place or fail with
+/// `NotFound` after the first rename consumed it. The tmp stays in the target
+/// directory so the final `rename` is a same-filesystem, atomic replace.
+fn unique_tmp_path(path: &Path) -> std::path::PathBuf {
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .map_or_else(|| "state".into(), |n| n.to_string_lossy().into_owned());
+    path.with_file_name(format!(".{name}.{}.{seq}.tmp", std::process::id()))
+}
+
+/// Write `data` to `path` atomically via a unique `.tmp` sibling + rename.
 ///
 /// Creates parent directories on demand. Visible to sibling modules in
 /// this crate (e.g. [`PresenceStore`]) so every on-disk primitive
-/// shares the same "no torn files" guarantee.
+/// shares the same "no torn files" guarantee. Concurrent writers of the same
+/// path each use their own tmp file, so the destination always holds one
+/// writer's complete content (last rename wins). Not fsynced: see
+/// [`atomic_write_durable`] for the variant that survives a crash.
 pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<(), CosmonError> {
+    write_via_tmp(path, data, false)
+}
+
+/// Like [`atomic_write`], but fsyncs the tmp file before the rename and the
+/// parent directory after it.
+///
+/// Why it exists: a conditional collapse must not acknowledge a transition
+/// that a power loss can undo. The file sync makes the content durable before
+/// it becomes visible under `path`; the directory sync makes the rename
+/// itself durable.
+///
+/// # Errors
+///
+/// Returns an error if the parent directory cannot be created, or if writing,
+/// syncing or renaming fails. The tmp file is removed on failure.
+pub fn atomic_write_durable(path: &Path, data: &[u8]) -> Result<(), CosmonError> {
+    write_via_tmp(path, data, true)
+}
+
+fn write_via_tmp(path: &Path, data: &[u8], durable: bool) -> Result<(), CosmonError> {
+    use std::io::Write as _;
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, data)?;
-    fs::rename(&tmp, path)?;
+    let tmp = unique_tmp_path(path);
+    let result = (|| -> std::io::Result<()> {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(data)?;
+        if durable {
+            file.sync_all()?;
+        }
+        drop(file);
+        fs::rename(&tmp, path)?;
+        if durable {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                fs::File::open(parent)?.sync_all()?;
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result?;
     Ok(())
 }
 
@@ -1393,15 +1454,14 @@ mod tests {
         let tmp_path = mol_dir.join("state.json.tmp");
         fs::write(&tmp_path, b"corrupted partial write").unwrap();
 
-        // A new save should overwrite the stale .tmp and produce a valid file
+        // A new save must produce a valid file whatever a crashed writer left
+        // behind; writers use their own unique tmp names, so the stale
+        // legacy-named file is simply never read.
         let mol = sample_molecule("crsh", MoleculeStatus::Running, None);
         store.save_molecule(&mol_id, &mol).unwrap();
 
         let loaded = store.load_molecule(&mol_id).unwrap();
         assert_eq!(loaded.id, mol_id);
-
-        // The .tmp file should have been cleaned up by the rename
-        assert!(!tmp_path.exists());
     }
 
     #[test]
@@ -2048,5 +2108,78 @@ mod tests {
             store.lock_path(),
             "trunk.lock and fleet.lock must be distinct files"
         );
+    }
+
+    /// Run `writers` threads that each write `rounds` distinct, large, valid
+    /// JSON documents to one path with no lock, and return every write error.
+    fn hammer(write: fn(&Path, &[u8]) -> Result<(), CosmonError>) -> (TempDir, Vec<String>) {
+        const WRITERS: usize = 8;
+        const ROUNDS: usize = 60;
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("mol").join("state.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handles: Vec<_> = (0..WRITERS)
+            .map(|w| {
+                let (path, barrier, errors) = (path.clone(), barrier.clone(), errors.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for r in 0..ROUNDS {
+                        // Distinct lengths: a torn mix of two writers cannot parse.
+                        let doc = serde_json::json!({
+                            "writer": w,
+                            "round": r,
+                            "pad": "x".repeat(20_000 + w * 997 + r),
+                        });
+                        let bytes = serde_json::to_vec(&doc).unwrap();
+                        if let Err(e) = write(&path, &bytes) {
+                            errors.lock().unwrap().push(e.to_string());
+                        }
+                        if let Ok(read) = std::fs::read(&path) {
+                            if serde_json::from_slice::<serde_json::Value>(&read).is_err() {
+                                errors.lock().unwrap().push("torn read".to_owned());
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let errs = errors.lock().unwrap().clone();
+        (dir, errs)
+    }
+
+    #[test]
+    fn atomic_write_concurrent_unlocked_writers_never_tear_or_fail() {
+        let (dir, errs) = hammer(atomic_write);
+        assert!(errs.is_empty(), "writes failed or tore: {errs:?}");
+        let bytes = std::fs::read(dir.path().join("mol").join("state.json")).unwrap();
+        serde_json::from_slice::<serde_json::Value>(&bytes).expect("final file parses");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path().join("mol"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "state.json")
+            .collect();
+        assert!(leftovers.is_empty(), "tmp files left behind: {leftovers:?}");
+    }
+
+    #[test]
+    fn atomic_write_durable_concurrent_unlocked_writers_never_tear_or_fail() {
+        let (dir, errs) = hammer(atomic_write_durable);
+        assert!(errs.is_empty(), "writes failed or tore: {errs:?}");
+        let bytes = std::fs::read(dir.path().join("mol").join("state.json")).unwrap();
+        serde_json::from_slice::<serde_json::Value>(&bytes).expect("final file parses");
+    }
+
+    #[test]
+    fn atomic_write_durable_creates_parents_and_replaces() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("a").join("b").join("f.json");
+        atomic_write_durable(&path, b"{\"v\":1}").unwrap();
+        atomic_write_durable(&path, b"{\"v\":2}").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"v\":2}");
     }
 }
