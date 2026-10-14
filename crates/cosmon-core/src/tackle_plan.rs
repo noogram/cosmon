@@ -1162,6 +1162,30 @@ pub fn build_prompt(
         out.push('\n');
     }
 
+    // A germinated coding-agent node receives both paths as first-class
+    // variables (ADR-161). Their bare values do not explain that they are homes
+    // for run-scoped gate records, not substitutes for project deliverables
+    // that the topic or formula requires in git (noogram/cosmon#205). Local
+    // workers have no git/worktree authority and receive their separate output
+    // contract below.
+    if !crate::egress::adapter_is_local(adapter_name)
+        && mol
+            .variables
+            .contains_key(crate::spore::output::OUTPUT_DIR_VAR)
+    {
+        out.push_str(
+            "## Spore run output directories\n\n\
+             `output_dir` is this node's gitignored home for run-scoped gate records. \
+             Use it when the topic or formula explicitly directs a run record there.\n\n\
+             `run_dir` is the shared root for those records across every node in this \
+             germination, so downstream nodes can read upstream gate evidence.\n\n\
+             These directories do not replace a topic- or formula-named worktree \
+             deliverable. If the topic or formula says to create or commit a project \
+             file, write that file in the git worktree and commit it; a record in \
+             `output_dir` is not a substitute.\n\n",
+        );
+    }
+
     if !crate::egress::adapter_is_local(adapter_name) {
         if let Some(text) =
             briefing.filter(|text| !text.is_empty() && !text.lines().any(|line| line == "## Task"))
@@ -1845,6 +1869,59 @@ mod tests {
             prompt.contains("Never create an\nempty or marker commit")
                 || prompt.contains("Never create an empty or marker commit"),
             "the brief must forbid a ritual empty/marker commit"
+        );
+    }
+
+    /// noogram/cosmon#205: ADR-161's injected paths are for run-scoped gate
+    /// records. Their presence must not let the generic conditional-commit
+    /// protocol turn a topic/formula-named project deliverable into an
+    /// output-dir-only artifact that never reaches the merged branch.
+    #[test]
+    fn a_spore_node_prompt_distinguishes_gate_records_from_worktree_deliverables() {
+        let id = MoleculeId::new("task-20261014-205a").unwrap();
+        let formula_id = FormulaId::new("task-work").unwrap();
+        let variables = HashMap::from([
+            (
+                "topic".to_owned(),
+                "Create and commit review/review.md".to_owned(),
+            ),
+            (
+                crate::spore::output::OUTPUT_DIR_VAR.to_owned(),
+                "/galaxy/.cosmon/state/spore-runs/germ-205/review".to_owned(),
+            ),
+            (
+                crate::spore::output::RUN_DIR_VAR.to_owned(),
+                "/galaxy/.cosmon/state/spore-runs/germ-205".to_owned(),
+            ),
+        ]);
+        let config = ProjectConfig::default();
+        let molecule = brief(&id, &formula_id, &variables);
+
+        let prompt = build_prompt(
+            &molecule,
+            None,
+            Some("## Task\n\n### topic\n\nCreate and commit review/review.md\n"),
+            &config,
+            Path::new("/galaxy/.cosmon/state/molecules/task-20261014-205a"),
+            "codex",
+            Some(Path::new("/galaxy/.worktrees/task-20261014-205a")),
+        );
+
+        assert!(
+            prompt.contains(
+                "`output_dir` is this node's gitignored home for run-scoped gate records"
+            ),
+            "the rendered prompt must state output_dir's purpose"
+        );
+        assert!(
+            prompt.contains("`run_dir` is the shared root for those records"),
+            "the rendered prompt must state run_dir's purpose"
+        );
+        assert!(
+            prompt.contains("If the topic or formula says to create or commit a project file")
+                && prompt.contains("write that file in the git worktree and commit it")
+                && prompt.contains("`output_dir` is not a substitute"),
+            "the output paths must not license skipping a named worktree deliverable"
         );
     }
 
