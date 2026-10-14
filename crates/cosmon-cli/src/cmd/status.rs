@@ -1799,7 +1799,7 @@ fn dead_workers(
                     cosmon_transport::registry::SupervisionMode::TmuxPane,
                     cosmon_transport::registry::supervision_mode_for,
                 );
-            let transport = super::ensemble::probe_transport(backends, &w.id);
+            let transport = super::ensemble::probe_transport(backends, &w.id, mol.tackled_at);
             let ghost =
                 super::ensemble::molecule_ghost(mol.status, mol.merged_at, supervision, transport);
             super::ensemble::is_dead_ghost(ghost).then(|| DeadWorker {
