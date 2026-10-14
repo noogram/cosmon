@@ -154,6 +154,21 @@ fn grant(w: &World, holder: &str, by: &str, sig: &Path) -> Output {
     ])
 }
 
+fn grant_for(w: &World, mission: &str, holder: &str, by: &str, sig: &Path) -> Output {
+    w.cs(&[
+        "takeover",
+        "grant",
+        "--mission",
+        mission,
+        "--to",
+        holder,
+        "--by",
+        by,
+        "--attestation",
+        &sig.display().to_string(),
+    ])
+}
+
 // ── The control: the mechanism is not "refuse everything" ──────────────────
 
 #[test]
@@ -405,6 +420,159 @@ fn printing_a_challenge_confers_nothing() {
     assert!(first.starts_with("cosmon-takeover-grant-v1\n"));
     assert!(!w.seats(BENEFICIARY, "1"));
     assert!(!w.grants_path().exists());
+}
+
+#[test]
+fn challenge_json_is_a_versioned_exact_bytes_contract() {
+    let w = world();
+    let out = w.cs(&[
+        "--json",
+        "takeover",
+        "challenge",
+        "--mission",
+        MISSION,
+        "--to",
+        BENEFICIARY,
+        "--by",
+        "emmanuel",
+    ]);
+    assert!(
+        out.status.success(),
+        "challenge failed: {}",
+        text(&out.stderr)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&out.stdout).expect("challenge JSON");
+    assert_eq!(document["schema_version"], 1);
+    assert_eq!(document["challenge"]["mission_id"], MISSION);
+    assert_eq!(document["challenge"]["holder_session_id"], BENEFICIARY);
+    assert_eq!(document["challenge"]["epoch"], 1);
+    assert_eq!(document["challenge"]["granted_by"], "emmanuel");
+    assert!(document["challenge"]["ttl_seconds"].is_null());
+    assert_eq!(document["bytes"], w.challenge(BENEFICIARY, "emmanuel"));
+}
+
+/// Issue #200's batch path, using stock minisign rather than the deterministic
+/// in-process signer used by the adversarial unit fixtures above.
+///
+/// The secret key lives only in this test's tempdir. The test makes exactly
+/// one signing invocation for all challenge files, matching the operator
+/// gesture a batching client relies on.
+#[test]
+fn one_minisign_invocation_authorises_a_batch_and_nothing_else() {
+    let Some(minisign) = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("minisign"))
+            .find(|candidate| candidate.is_file())
+    }) else {
+        eprintln!("SKIP: minisign is absent; batch takeover end-to-end test did not run");
+        return;
+    };
+
+    let w = world();
+    let secret = w.repo.join("batch-test.key");
+    let public = w.repo.join("batch-test.pub");
+    let generated = Command::new(&minisign)
+        .args(["-G", "-W", "-p"])
+        .arg(&public)
+        .arg("-s")
+        .arg(&secret)
+        .output()
+        .expect("generate throwaway minisign key");
+    assert!(
+        generated.status.success(),
+        "minisign key generation failed: {}",
+        text(&generated.stderr)
+    );
+    std::fs::copy(&public, &w.pubkey).expect("pin throwaway public key");
+
+    let transfers = [
+        ("task-20261014-b001", "session-a"),
+        ("task-20261014-b002", "session-b"),
+        ("task-20261014-b003", "session-c"),
+    ];
+    let challenge_paths: Vec<PathBuf> = transfers
+        .iter()
+        .enumerate()
+        .map(|(index, (mission, holder))| {
+            let out = w.cs(&[
+                "takeover",
+                "challenge",
+                "--mission",
+                mission,
+                "--to",
+                holder,
+                "--by",
+                "operator",
+            ]);
+            assert!(
+                out.status.success(),
+                "challenge failed: {}",
+                text(&out.stderr)
+            );
+            let path = w.repo.join(format!("challenge-{index}.txt"));
+            std::fs::write(&path, out.stdout).expect("write challenge file");
+            path
+        })
+        .collect();
+
+    let mut sign = Command::new(&minisign);
+    sign.args(["-S", "-W", "-s"])
+        .arg(&secret)
+        .arg("-m")
+        .args(&challenge_paths);
+    let signed = sign.output().expect("sign challenge batch");
+    assert!(
+        signed.status.success(),
+        "one minisign batch invocation failed: {}",
+        text(&signed.stderr)
+    );
+
+    let signatures: Vec<PathBuf> = challenge_paths
+        .iter()
+        .map(|path| PathBuf::from(format!("{}.minisig", path.display())))
+        .collect();
+
+    for (mission, holder, sig) in [
+        (transfers[1].0, transfers[1].1, &signatures[0]),
+        (transfers[0].0, "another-session", &signatures[0]),
+    ] {
+        let refused = grant_for(&w, mission, holder, "operator", sig);
+        assert!(
+            !refused.status.success(),
+            "a signature was reused outside its transfer"
+        );
+        let reason = format!("{}{}", text(&refused.stdout), text(&refused.stderr));
+        assert!(
+            reason.contains("signature does not cover this transfer"),
+            "the typed DoesNotCoverTransfer reason must reach the CLI: {reason}"
+        );
+    }
+
+    for ((mission, holder), sig) in transfers.iter().zip(&signatures) {
+        let granted = grant_for(&w, mission, holder, "operator", sig);
+        assert!(
+            granted.status.success(),
+            "batch-signed grant failed for {mission}: {}",
+            text(&granted.stderr)
+        );
+    }
+
+    let stale = grant_for(
+        &w,
+        transfers[0].0,
+        transfers[0].1,
+        "operator",
+        &signatures[0],
+    );
+    assert!(
+        !stale.status.success(),
+        "an epoch-1 signature must not grant epoch 2"
+    );
+    let reason = format!("{}{}", text(&stale.stdout), text(&stale.stderr));
+    assert!(
+        reason.contains("signature does not cover this transfer"),
+        "a stale signature must carry the typed DoesNotCoverTransfer reason: {reason}"
+    );
 }
 
 // ── `--sign-with`: one command, and still not a stamp ──────────────────────

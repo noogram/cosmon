@@ -150,6 +150,24 @@ epoch has `standing: "superseded"` and does not count toward `contested`; a
 claim at or above the lease epoch, or without an epoch, is a `claimant` and does. A Codex claim without `native_id` cannot be a holder.
 `--all-galaxies` uses the same perimeter enumeration as `cs tail`.
 
+**`cs sessions takeover challenge --json`.** Emits one `schema_version: 1`
+document describing exactly one proposed transfer. Within version 1, changes
+are additive under the rule above. The stable fields are:
+
+- `schema_version`: the integer `1`.
+- `challenge`: the structured transfer. Its fields are `mission_id` (the
+  mission whose controls would move), `holder_session_id` (the exact session
+  that would become primary), `epoch` (the next positive lease generation),
+  `granted_by` (the operator label covered by the signature), and `ttl_seconds`
+  (a non-negative integer, or `null` for no time limit).
+- `bytes`: the exact UTF-8 text to write to the batch file and sign. It ends in
+  a newline. A client must not reconstruct it from `challenge`, normalise it,
+  or sign the JSON serialization. The grant verifier checks these exact bytes.
+
+The command is read-only. Producing the document does not reserve its epoch;
+if another grant advances that mission before this challenge is submitted,
+the signature is stale and the grant is refused.
+
 **`cs tail --all-galaxies --json`.** Each emitted JSON object retains the
 event-log fields and adds `source_galaxy`, the name of the project whose ledger
 supplied that row. The field is reader metadata rather than a mutation of the
