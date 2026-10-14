@@ -1288,7 +1288,20 @@ fn seats_for_mission(
             .len()
             > 1;
     let holder = (!conflict).then(|| holders.first().copied()).flatten();
-    let primary_claims = claims.iter().filter(|p| p.role.is_primary()).count();
+    // A primary claim below the verified lease epoch was valid when it was
+    // made and has since been overtaken by a later grant: the ledger already
+    // says it no longer holds the seat, so it is reported as `superseded`
+    // and is not a competing claim. Only a claim the lease cannot back
+    // (same or higher epoch, no epoch, another session) can contest.
+    let superseded = |p: &Presence| {
+        holder.is_some_and(|lease| {
+            p.role.is_primary() && p.lease_epoch.is_some_and(|epoch| epoch < lease.epoch)
+        })
+    };
+    let primary_claims = claims
+        .iter()
+        .filter(|p| p.role.is_primary() && !superseded(p))
+        .count();
     let holder_seated = holder.is_some_and(|lease| {
         claims.iter().any(|p| {
             p.role.is_primary()
@@ -1320,6 +1333,8 @@ fn seats_for_mission(
             });
             let standing = if matching {
                 "holder"
+            } else if superseded(presence) {
+                "superseded"
             } else if presence.role.is_primary() {
                 "claimant"
             } else {
@@ -2582,27 +2597,22 @@ mod tests {
         store.grant(&fixture_lease("current", 2)).unwrap();
         let old = primary("old", 1, Utc::now());
         let current = primary("current", 2, Utc::now() - chrono::Duration::minutes(1));
-        let contested =
+        // Transfer window: the incoming holder is seated at epoch 2 while the
+        // outgoing presence still claims primary at epoch 1. Only one claim is
+        // backed by the lease, so this is not a contest.
+        let transfer =
             seats_for_mission(&store, &fixture_mission(), &[old, current], Utc::now()).unwrap();
-        assert_eq!(contested.verdict, "contested");
-        assert_eq!(
-            contested
+        assert_eq!(transfer.verdict, "one");
+        let standing = |finding: &MissionSeats, session: &str| {
+            finding
                 .seats
                 .iter()
-                .find(|seat| seat.session == "current")
+                .find(|seat| seat.session == session)
                 .unwrap()
-                .standing,
-            "holder"
-        );
-        assert_eq!(
-            contested
-                .seats
-                .iter()
-                .find(|seat| seat.session == "old")
-                .unwrap()
-                .standing,
-            "claimant"
-        );
+                .standing
+        };
+        assert_eq!(standing(&transfer, "current"), "holder");
+        assert_eq!(standing(&transfer, "old"), "superseded");
         let one = seats_for_mission(
             &store,
             &fixture_mission(),
@@ -2622,6 +2632,62 @@ mod tests {
         assert_eq!(empty.unwrap().verdict, "none");
         let unseated = seats_for_mission(&store, &fixture_mission(), &[], Utc::now()).unwrap();
         assert_eq!(unseated.verdict, "granted-unseated");
+    }
+
+    #[test]
+    fn transfer_sequence_never_reads_contested() {
+        let dir = tempdir().unwrap();
+        let store = fixture_store(dir.path());
+        let now = Utc::now();
+        let verdict = |presences: &[Presence]| {
+            seats_for_mission(&store, &fixture_mission(), presences, now)
+                .unwrap()
+                .verdict
+        };
+        store.grant(&fixture_lease("outgoing", 1)).unwrap();
+        assert_eq!(verdict(&[primary("outgoing", 1, now)]), "one");
+        // Incoming granted epoch 2, not yet seated.
+        store.grant(&fixture_lease("incoming", 2)).unwrap();
+        assert_eq!(verdict(&[primary("outgoing", 1, now)]), "granted-unseated");
+        // Incoming seated; outgoing has not yet beaten again.
+        assert_eq!(
+            verdict(&[primary("outgoing", 1, now), primary("incoming", 2, now)]),
+            "one"
+        );
+        // Outgoing demoted itself to copilot.
+        let mut demoted = primary("outgoing", 1, now);
+        demoted.role = cosmon_core::presence::PilotRole::Copilot;
+        assert_eq!(verdict(&[demoted, primary("incoming", 2, now)]), "one");
+    }
+
+    #[test]
+    fn real_conflicts_stay_contested() {
+        let dir = tempdir().unwrap();
+        let store = fixture_store(dir.path());
+        let now = Utc::now();
+        store.grant(&fixture_lease("current", 2)).unwrap();
+        let verdict = |presences: &[Presence]| {
+            seats_for_mission(&store, &fixture_mission(), presences, now)
+                .unwrap()
+                .verdict
+        };
+        // Another session claims primary at the lease epoch.
+        assert_eq!(
+            verdict(&[primary("current", 2, now), primary("rival", 2, now)]),
+            "contested"
+        );
+        // A claim above any verified epoch cannot be backed by the lease.
+        assert_eq!(
+            verdict(&[primary("current", 2, now), primary("rival", 3, now)]),
+            "contested"
+        );
+        // A primary claim carrying no epoch at all is unverifiable.
+        let mut unverifiable = primary("rival", 2, now);
+        unverifiable.lease_epoch = None;
+        assert_eq!(
+            verdict(&[primary("current", 2, now), unverifiable]),
+            "contested"
+        );
     }
 
     #[test]

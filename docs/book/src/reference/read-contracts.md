@@ -145,7 +145,9 @@ state (`ok`, `unreadable`, `no mission`, `ambiguous mission`, or `no trust
 root`); each mission carries a verdict (`one`, `none`, `granted-unseated`,
 `contested`, or `epoch conflict`). `seats` retain every presence claim with
 its liveness and heartbeat, but only a current verified lease holder has
-`standing: "holder"`. A Codex claim without `native_id` cannot be a holder.
+`standing: "holder"`. A primary claim at an epoch below the verified lease
+epoch has `standing: "superseded"` and does not count toward `contested`; a
+claim at or above the lease epoch, or without an epoch, is a `claimant` and does. A Codex claim without `native_id` cannot be a holder.
 `--all-galaxies` uses the same perimeter enumeration as `cs tail`.
 
 **`cs tail --all-galaxies --json`.** Each emitted JSON object retains the
