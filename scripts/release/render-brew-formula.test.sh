@@ -38,10 +38,18 @@ out="$(render_placeholders)"
 for triple in \
   aarch64-apple-darwin x86_64-apple-darwin \
   aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
-  printf '%s\n' "$out" | grep -q "cosmon-0.1.0-${triple}.tar.gz" \
+  grep -qF -- "cosmon-0.1.0-${triple}.tar.gz" <<<"$out" \
     || { echo "FAIL: formula does not serve ${triple}" >&2; exit 1; }
 done
 echo "PASS: all four release triples served"
+
+# 1b. A literal match remains successful when it occurs before a large suffix.
+# A pipe into grep -q can make its producer report SIGPIPE under pipefail after
+# grep has already matched; the here-string above has no producer to fail.
+printf -v sigpipe_fixture 'cosmon-0.1.0-sigpipe-regression.tar.gz%1048576s' ''
+grep -qF -- 'cosmon-0.1.0-sigpipe-regression.tar.gz' <<<"$sigpipe_fixture" \
+  || { echo "FAIL: literal match failed for large early-match fixture" >&2; exit 1; }
+echo "PASS: literal match survives a large early-match fixture"
 
 # 2. Both macOS and Linux carry an on_arm AND an on_intel stanza (the Linux ARM
 #    stanza is the regression this whole change closes).

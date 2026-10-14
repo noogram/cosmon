@@ -56,7 +56,7 @@ out="$("$render_from_artifacts" \
 for triple in \
   aarch64-apple-darwin x86_64-apple-darwin \
   aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
-  printf '%s\n' "$out" | grep -q "cosmon-${VERSION}-${triple}.tar.gz" \
+  grep -qF -- "cosmon-${VERSION}-${triple}.tar.gz" <<<"$out" \
     || { echo "FAIL: rendered formula does not serve ${triple}" >&2; exit 1; }
 done
 echo "PASS: all four release triples served with real version"
