@@ -1,0 +1,6 @@
+{
+  "kind": "tokenizer-catalog",
+  "version": 1,
+  "fetchedAt": 1767348000000,
+  "tokenizers": [{"id": "synthetic-tokenizer"}]
+}

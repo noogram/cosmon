@@ -12,8 +12,9 @@ Example: python3 scripts/model-ladder-drift.py --codex-cache caches/codex.json
 Repeat --claude-config-dir for separate accounts and --consumer for more files.
 Only the proposal is written. Overflow and disabled listings are reported as
 plan-gated at their fetch time; unknown consumer ids count as drift. Conflicting
-account evidence is retained and any older match takes precedence. A staleAt
-expiry also makes a catalog unmeasured. No network or model probe is performed.
+account evidence is retained and any older match takes precedence. staleAt is
+reported as a vendor refresh hint; only fetchedAt bounds measurement age. No
+network or model probe is performed.
 """
 
 import argparse
@@ -30,7 +31,11 @@ FRONTIER = re.compile(r"\b(?:frontier|most capable)\b|(?:^|-)opus-|(?:^|-)fable-
 
 
 def timestamp(value):
-    """Require timezone-aware ISO timestamps so age has an unambiguous meaning."""
+    """Parse an aware ISO timestamp or a Unix epoch timestamp in milliseconds."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    if not isinstance(value, str):
+        raise ValueError("timestamp must be epoch milliseconds or an ISO string")
     result = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if result.tzinfo is None:
         raise ValueError("timestamp has no timezone")
@@ -47,8 +52,6 @@ def read_cache(path, provider, now, max_age):
     if age < 0 or age > max_age:
         raise ValueError("fetch time is future-dated or exceeds max age")
     stale = data.get("staleAt") if provider == "claude" else None
-    if stale and now >= timestamp(stale):
-        raise ValueError("catalog staleAt has elapsed")
     rows = data["models"] if provider == "codex" else data["catalog"]["config"]["models"]
     if not isinstance(rows, list) or not rows:
         raise ValueError("model list is empty or invalid")
@@ -70,7 +73,7 @@ def read_cache(path, provider, now, max_age):
             "priority": row.get("priority"), "visibility": row.get("visibility"),
             "classification": "older" if OLDER.search(description) or section == "overflow" else "current",
             "plan_gated": disabled or section == "overflow",
-            "source": str(path), "fetched_at": fetched,
+            "source": str(path), "fetched_at": fetched, "stale_at": stale,
         })
     return models
 

@@ -29,6 +29,8 @@ class DriftTests(unittest.TestCase):
         # A clean account fixture; tests explicitly introduce plan gating.
         data["catalog"]["config"]["models"] = data["catalog"]["config"]["models"][:1]
         self.catalog.write_text(json.dumps(data))
+        shutil.copyfile(FIXTURES / "tok-synthetic-ccd.json",
+                        self.catalog.parent / "tok-synthetic-ccd.json")
         self.consumer = self.root / "consumer.txt"
         shutil.copyfile(FIXTURES / "current.txt", self.consumer)
         self.proposal = self.root / "ladder.proposed.json"
@@ -69,7 +71,7 @@ class DriftTests(unittest.TestCase):
         report = self.run_audit(1)
         finding = report["findings"][0]
         self.assertEqual(finding["finding"], "plan-gated per catalog")
-        self.assertEqual(finding["fetched_at"], "2026-01-02T10:00:00Z")
+        self.assertEqual(finding["fetched_at"], 1767348000000)
         self.assertEqual(finding["source"], str(self.catalog))
         self.assertEqual(finding["section"], "overflow")
         self.assertTrue(finding["disabled"])
@@ -130,15 +132,32 @@ class DriftTests(unittest.TestCase):
         alias.hardlink_to(self.consumer)
         self.run_audit(2, proposal=alias)
 
-    def test_stale_at_and_future_fetch_are_unmeasured(self):
+    def test_stale_at_is_hint_and_future_fetch_is_unmeasured(self):
         data = json.loads(self.catalog.read_text())
-        data["staleAt"] = "2026-01-02T11:00:00Z"
+        data["staleAt"] = 1767351600000
+        self.catalog.write_text(json.dumps(data))
+        report = self.run_audit(0)
+        self.assertEqual(report["providers"]["claude"][0]["stale_at"], 1767351600000)
+        data["fetchedAt"] = 1767366000000
         self.catalog.write_text(json.dumps(data))
         self.run_audit(2)
-        data["staleAt"] = "2026-01-04T10:00:00Z"
-        data["fetchedAt"] = "2026-01-02T13:00:00Z"
+
+    def test_integer_timestamps_and_missing_disabled_are_supported(self):
+        report = self.run_audit(0)
+        model = report["providers"]["claude"][0]
+        self.assertEqual(model["fetched_at"], 1767348000000)
+        self.assertFalse(model["disabled"])
+
+    def test_malformed_timestamp_is_unmeasured_not_clean(self):
+        data = json.loads(self.catalog.read_text())
+        data["fetchedAt"] = "not a timestamp"
         self.catalog.write_text(json.dumps(data))
-        self.run_audit(2)
+        report = self.run_audit(2)
+        self.assertEqual(report["measurement"], "unmeasured")
+        self.assertTrue(report["unmeasured"])
+
+    def test_tok_ccd_sibling_is_not_a_model_catalog(self):
+        self.assertEqual(self.run_audit(0)["measurement"], "clean")
 
 
 if __name__ == "__main__":
