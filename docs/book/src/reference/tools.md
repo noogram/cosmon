@@ -369,12 +369,13 @@ because every line is checked when it is *read*. Pin the public key at
 `.cosmon/takeover.pub` and commit it, so a swapped trust root is a diff.
 
 WITHOUT TYPING ANYTHING (the hook, mission M6):
+  cs sessions hook install --provider claude --user # ~/.claude/settings.json
   cs sessions hook install --provider claude   # .claude/settings.local.json
   cs sessions hook install --provider codex    # ~/.codex/config.toml notify
   cs sessions hook status                      # wired? and what has it cost
   cs sessions checkpoint stage --mission task-20260731-0d49 \
       --next 'gate:affirm=run just gates before done'
-  cs sessions hook uninstall --provider claude # leaves no residue
+  cs sessions hook uninstall --provider claude --user # leaves foreign hooks untouched
   COSMON_COPILOT_HOOK_OFF=1                    # quiet now, still wired
 
 The hook pings presence, drains the mailbox where the pilot can read it
@@ -887,7 +888,8 @@ Wire this pilot's provider to run the co-pilotage hook. A Codex `notify` held by
 ###### **Options:**
 
 * `--provider <NAME>` — The pilot whose configuration to wire: `claude` or `codex`
-* `--settings <PATH>` — The settings file to edit. Defaults to the provider's own — for Claude `.claude/settings.local.json` beside the current directory, for Codex `$CODEX_HOME/config.toml` or `~/.codex/config.toml`
+* `--settings <PATH>` — The settings file to edit. Defaults to the provider's own — for Claude `.claude/settings.local.json` beside the current directory (or `$HOME/.claude/settings.json` with `--user`), for Codex `$CODEX_HOME/config.toml` or `$HOME/.codex/config.toml`
+* `--user` — Edit the provider's user settings instead of the project-local settings. For Claude this is `$HOME/.claude/settings.json`; Codex is user-level already, so this selects its normal default
 * `--cs-bin <PATH>` — The `cs` binary the hook should invoke. Defaults to this executable
 * `--dry-run` — Print what would be written without writing it
 
@@ -902,7 +904,8 @@ Remove the co-pilotage hook, leaving the rest of the file untouched
 ###### **Options:**
 
 * `--provider <NAME>` — The pilot whose configuration to wire: `claude` or `codex`
-* `--settings <PATH>` — The settings file to edit. Defaults to the provider's own — for Claude `.claude/settings.local.json` beside the current directory, for Codex `$CODEX_HOME/config.toml` or `~/.codex/config.toml`
+* `--settings <PATH>` — The settings file to edit. Defaults to the provider's own — for Claude `.claude/settings.local.json` beside the current directory (or `$HOME/.claude/settings.json` with `--user`), for Codex `$CODEX_HOME/config.toml` or `$HOME/.codex/config.toml`
+* `--user` — Edit the provider's user settings instead of the project-local settings. For Claude this is `$HOME/.claude/settings.json`; Codex is user-level already, so this selects its normal default
 * `--cs-bin <PATH>` — The `cs` binary the hook should invoke. Defaults to this executable
 * `--dry-run` — Print what would be written without writing it
 
@@ -918,6 +921,7 @@ Report whether the hook is wired, and what it has cost
 
 * `--provider <NAME>` — Restrict the report to one provider
 * `--settings <PATH>` — The settings file to inspect, when it is not the provider's default
+* `--user` — Inspect the provider's user settings instead of the project-local settings. Requires `--provider` because it names one provider file
 * `--session <SID>` — The session whose cost ledger to summarise. Defaults to `$COSMON_SESSION_ID`
 
 

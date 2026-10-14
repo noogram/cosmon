@@ -12,5 +12,6 @@ Options:
       --settings <PATH>  The settings file to inspect, when it is not the provider's default
   -v, --verbose          Enable verbose output
       --json             Output in JSON format
+      --user             Inspect the provider's user settings instead of the project-local settings. Requires `--provider` because it names one provider file
       --session <SID>    The session whose cost ledger to summarise. Defaults to `$COSMON_SESSION_ID`
   -h, --help             Print help

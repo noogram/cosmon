@@ -515,6 +515,87 @@ fn deactivation_leaves_the_settings_file_as_it_was() {
     assert_eq!(after, before, "clean deactivation leaves no residue");
 }
 
+/// Issue #202: one user-level install covers every galaxy while the existing
+/// project-local default remains available. The fixture HOME is disposable;
+/// this test must never inspect or edit the developer's real settings.
+#[test]
+fn claude_user_install_is_idempotent_and_uninstall_preserves_foreign_hooks() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = tmp.path().join("state");
+    let home = tmp.path().join("home");
+    let settings = home.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().expect("settings parent")).expect("settings dir");
+    let theirs = r#"{
+  "hooks": {
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "notify-send done"}]}
+    ]
+  }
+}
+"#;
+    std::fs::write(&settings, theirs).expect("seed settings");
+
+    let invoke = |verb: &str| {
+        cs().arg("--config")
+            .arg(&state)
+            .args(["sessions", "hook", verb, "--provider", "claude", "--user"])
+            .env("HOME", &home)
+            .env_remove("CODEX_HOME")
+            .output()
+            .expect("cs runs")
+    };
+
+    let first = invoke("install");
+    assert!(first.status.success(), "first install: {first:?}");
+    let installed = std::fs::read_to_string(&settings).expect("installed settings");
+    assert!(installed.contains(HOOK_MARKER), "cosmon hook installed");
+    assert!(
+        installed.contains("notify-send done"),
+        "foreign hook preserved"
+    );
+
+    let second = invoke("install");
+    assert!(second.status.success(), "second install: {second:?}");
+    assert!(
+        String::from_utf8_lossy(&second.stdout).contains("nothing written"),
+        "second install is reported as a no-op: {}",
+        String::from_utf8_lossy(&second.stdout)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).expect("settings after second install"),
+        installed,
+        "idempotent install leaves the document unchanged"
+    );
+
+    let removed = invoke("uninstall");
+    assert!(removed.status.success(), "uninstall: {removed:?}");
+    let after: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&settings).expect("settings after uninstall"),
+    )
+    .expect("valid settings JSON");
+    let before: serde_json::Value = serde_json::from_str(theirs).expect("valid fixture JSON");
+    assert_eq!(after, before, "uninstall removes only cosmon's entries");
+
+    let local = tmp.path().join("local-galaxy");
+    std::fs::create_dir(&local).expect("local fixture");
+    let local_install = cs()
+        .arg("--config")
+        .arg(&state)
+        .args(["sessions", "hook", "install", "--provider", "claude"])
+        .current_dir(&local)
+        .env("HOME", &home)
+        .output()
+        .expect("local install runs");
+    assert!(
+        local_install.status.success(),
+        "local install: {local_install:?}"
+    );
+    assert!(
+        local.join(".claude/settings.local.json").is_file(),
+        "omitting --user keeps the project-local mode"
+    );
+}
+
 /// The other speed of deactivation: quiet *now*, without editing a file the
 /// running provider has already read.
 #[test]

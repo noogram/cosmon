@@ -101,10 +101,16 @@ pub struct InstallArgs {
     #[arg(long, value_name = "NAME")]
     pub provider: String,
     /// The settings file to edit. Defaults to the provider's own — for Claude
-    /// `.claude/settings.local.json` beside the current directory, for Codex
-    /// `$CODEX_HOME/config.toml` or `~/.codex/config.toml`.
+    /// `.claude/settings.local.json` beside the current directory (or
+    /// `$HOME/.claude/settings.json` with `--user`), for Codex
+    /// `$CODEX_HOME/config.toml` or `$HOME/.codex/config.toml`.
     #[arg(long, value_name = "PATH")]
     pub settings: Option<PathBuf>,
+    /// Edit the provider's user settings instead of the project-local settings.
+    /// For Claude this is `$HOME/.claude/settings.json`; Codex is user-level
+    /// already, so this selects its normal default.
+    #[arg(long, conflicts_with = "settings")]
+    pub user: bool,
     /// The `cs` binary the hook should invoke. Defaults to this executable.
     #[arg(long = "cs-bin", value_name = "PATH")]
     pub cs_bin: Option<PathBuf>,
@@ -122,6 +128,10 @@ pub struct StatusArgs {
     /// The settings file to inspect, when it is not the provider's default.
     #[arg(long, value_name = "PATH")]
     pub settings: Option<PathBuf>,
+    /// Inspect the provider's user settings instead of the project-local
+    /// settings. Requires `--provider` because it names one provider file.
+    #[arg(long, conflicts_with = "settings", requires = "provider")]
+    pub user: bool,
     /// The session whose cost ledger to summarise. Defaults to
     /// `$COSMON_SESSION_ID`.
     #[arg(long, value_name = "SID")]
@@ -192,17 +202,25 @@ impl Direction {
 
 /// Where a provider keeps the file this hook is written into.
 ///
-/// Claude's default is the *project-local, user-private* overlay rather than
-/// `~/.claude/settings.json`: a co-pilot seat belongs to the repository whose
-/// mission is being flown, and `settings.local.json` is the file Claude Code
-/// already treats as this developer's own.
-fn default_settings(provider: HookProvider) -> anyhow::Result<PathBuf> {
+/// Claude keeps both a project-local, user-private overlay and a user settings
+/// file. The local overlay remains the default; `--user` chooses the latter.
+/// Codex has only a user-level hook setting, so both modes resolve alike.
+fn default_settings(provider: HookProvider, user: bool) -> anyhow::Result<PathBuf> {
     match provider {
-        HookProvider::Claude => Ok(PathBuf::from(".claude").join("settings.local.json")),
+        HookProvider::Claude if !user => {
+            Ok(PathBuf::from(".claude").join("settings.local.json"))
+        }
+        HookProvider::Claude => user_home_dir()
+            .map(|home| home.join(".claude").join("settings.json"))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot resolve a home directory — pass --settings with the Claude settings path"
+                )
+            }),
         HookProvider::Codex => {
             let home = std::env::var_os("CODEX_HOME")
                 .map(PathBuf::from)
-                .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
+                .or_else(|| user_home_dir().map(|h| h.join(".codex")))
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "cannot resolve a Codex home — pass --settings with the path to config.toml"
@@ -211,6 +229,13 @@ fn default_settings(provider: HookProvider) -> anyhow::Result<PathBuf> {
             Ok(home.join("config.toml"))
         }
     }
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
 }
 
 fn resolve_cs_bin(args: &InstallArgs) -> String {
@@ -226,7 +251,7 @@ fn run_install(ctx: &Context, args: &InstallArgs, direction: Direction) -> anyho
     let provider = HookProvider::parse(&args.provider).map_err(|e| anyhow::anyhow!(e))?;
     let path = match &args.settings {
         Some(p) => p.clone(),
-        None => default_settings(provider)?,
+        None => default_settings(provider, args.user)?,
     };
     let shown = path.display().to_string();
     // A missing file is not an error: it is the ordinary case on a machine
@@ -303,9 +328,9 @@ fn run_status(ctx: &Context, args: &StatusArgs) -> anyhow::Result<()> {
         Some(raw) => vec![HookProvider::parse(raw).map_err(|e| anyhow::anyhow!(e))?],
         None => vec![HookProvider::Claude, HookProvider::Codex],
     };
-    if args.settings.is_some() && providers.len() != 1 {
+    if (args.settings.is_some() || args.user) && providers.len() != 1 {
         return Err(anyhow::anyhow!(
-            "--settings names one file, so it needs --provider to say whose it is"
+            "--settings or --user names one provider file, so it needs --provider"
         ));
     }
 
@@ -317,7 +342,7 @@ fn run_status(ctx: &Context, args: &StatusArgs) -> anyhow::Result<()> {
     for provider in providers {
         let path = match &args.settings {
             Some(p) => p.clone(),
-            None => default_settings(provider)?,
+            None => default_settings(provider, args.user)?,
         };
         let shown = path.display().to_string();
         let existing = std::fs::read_to_string(&path).ok();
