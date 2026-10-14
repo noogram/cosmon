@@ -2345,6 +2345,7 @@ fn run_takeover_challenge(ctx: &Context, args: &TakeoverChallengeArgs) -> anyhow
         println!(
             "{}",
             serde_json::json!({
+                "schema_version": 1,
                 "challenge": challenge,
                 "bytes": challenge.to_string(),
             })
