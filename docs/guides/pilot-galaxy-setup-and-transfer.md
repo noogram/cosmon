@@ -38,16 +38,18 @@ tag is the only thing that marks it (see the drain behaviour below).
 **3. Install the provider hooks once, at user level.**
 
 ```sh
-cs sessions hook install --provider claude --settings ~/.claude/settings.json
+cs sessions hook install --provider claude --user
 cs sessions hook install --provider codex
 ```
 
-Codex needs no `--settings`: the default is its user configuration,
-`$CODEX_HOME/config.toml` or `~/.codex/config.toml`. Claude's default is the
-project-local `.claude/settings.local.json`, so the explicit `--settings` above
-is what makes the install user-level. Add `--dry-run` to print what would be
-written. An existing Codex `notify` held by another program is chained behind,
-not replaced.
+Codex needs no `--user`: its default is already the user configuration,
+`$CODEX_HOME/config.toml` or `~/.codex/config.toml`. For Claude, `--user`
+selects `~/.claude/settings.json`; without it the existing project-local mode
+still writes `.claude/settings.local.json`. Add `--dry-run` to print what would
+be written. Remove the corresponding user hook with `cs sessions hook
+uninstall --provider claude --user`. Existing foreign hooks are left untouched,
+and an existing Codex `notify` held by another program is chained behind rather
+than replaced.
 
 The hooks are not part of `cs sessions launch`, which only mints the session
 identity. They must already be installed when the new session starts. Outside a

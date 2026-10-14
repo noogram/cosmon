@@ -89,12 +89,13 @@ because every line is checked when it is *read*. Pin the public key at
 `.cosmon/takeover.pub` and commit it, so a swapped trust root is a diff.
 
 WITHOUT TYPING ANYTHING (the hook, mission M6):
+  cs sessions hook install --provider claude --user # ~/.claude/settings.json
   cs sessions hook install --provider claude   # .claude/settings.local.json
   cs sessions hook install --provider codex    # ~/.codex/config.toml notify
   cs sessions hook status                      # wired? and what has it cost
   cs sessions checkpoint stage --mission task-20260731-0d49 \
       --next 'gate:affirm=run just gates before done'
-  cs sessions hook uninstall --provider claude # leaves no residue
+  cs sessions hook uninstall --provider claude --user # leaves foreign hooks untouched
   COSMON_COPILOT_HOOK_OFF=1                    # quiet now, still wired
 
 The hook pings presence, drains the mailbox where the pilot can read it
