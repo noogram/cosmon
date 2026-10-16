@@ -648,6 +648,12 @@ fn converge_binding(
         nucleon_id: binding.nucleon_id.clone(),
         phase: binding.phase.clone(),
         scopes: binding.scopes.clone().unwrap_or_else(|| {
+            tracing::warn!(
+                event = "boot.trust_bootstrap.default_binding_scopes",
+                binding = %effective_nucleon_id(binding),
+                granted_scopes = ?DEFAULT_BINDING_SCOPES,
+                "handoff binding omits scopes; default scopes apply when creating the binding",
+            );
             DEFAULT_BINDING_SCOPES
                 .iter()
                 .map(|s| (*s).to_owned())
@@ -1010,6 +1016,101 @@ mod tests {
 
     fn read_allowlist(state: &Path) -> String {
         std::fs::read_to_string(state.join("security/trusted-issuers.toml")).unwrap()
+    }
+
+    #[test]
+    fn omitted_binding_scopes_warn_but_explicit_scopes_do_not() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+        use tracing_subscriber::Layer;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+        #[derive(Default)]
+        struct Fields(String);
+        impl tracing::field::Visit for Fields {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!("{}={value:?};", field.name()));
+            }
+        }
+        impl<S: tracing::Subscriber> Layer<S> for Capture {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let mut fields = Fields::default();
+                event.record(&mut fields);
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((*event.metadata().level(), fields.0));
+            }
+        }
+
+        for scopes in [None, Some(vec![]), Some(vec!["cosmon:molecule:read"])] {
+            let td = TempDir::new().unwrap();
+            let capture = Capture::default();
+            let subscriber = tracing_subscriber::registry().with(capture.clone());
+            let explicit = scopes
+                .as_ref()
+                .map(|v| format!("scopes = {v:?}\n"))
+                .unwrap_or_default();
+            let doc: HandoffDoc = toml::from_str(&format!(
+                r#"schema = "cosmon-issuer-handoff/v1"
+[issuer]
+iss = "http://idp/"
+audiences = ["aud"]
+[binding]
+noyau = "tenant"
+sub = "subject"
+nucleon_id = "binding-under-test"
+{explicit}"#
+            ))
+            .unwrap();
+            tracing::subscriber::with_default(subscriber, || {
+                let mut report = ConvergeReport::default();
+                converge_doc_bindings(td.path(), Path::new("handoff.toml"), &doc, &mut report)
+                    .unwrap();
+                report.log();
+            });
+            let events = capture.0.lock().unwrap();
+            let warnings: Vec<_> = events
+                .iter()
+                .filter(|(level, fields)| {
+                    *level == tracing::Level::WARN && fields.contains("default_binding_scopes")
+                })
+                .collect();
+            if scopes.is_none() {
+                assert_eq!(warnings.len(), 1, "omitted scopes must warn");
+                assert!(warnings[0].1.contains("binding-under-test"));
+                for scope in DEFAULT_BINDING_SCOPES {
+                    assert!(
+                        warnings[0].1.contains(scope),
+                        "warning must name granted scope {scope}"
+                    );
+                }
+            } else {
+                assert!(warnings.is_empty(), "explicit scopes must not warn");
+            }
+            let binding = std::fs::read_to_string(
+                td.path()
+                    .join("nucleons/binding-under-test/oidc-identity.toml"),
+            )
+            .unwrap();
+            let binding: toml::Value = toml::from_str(&binding).unwrap();
+            let expected = scopes.unwrap_or_else(|| DEFAULT_BINDING_SCOPES.to_vec());
+            if expected.is_empty() {
+                assert!(
+                    binding.get("scopes").is_none(),
+                    "renderer preserves legacy empty-scope behavior"
+                );
+                continue;
+            }
+            assert_eq!(
+                binding["scopes"]["allowed"].as_array().unwrap(),
+                &expected
+                    .iter()
+                    .map(|s| toml::Value::String((*s).to_owned()))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

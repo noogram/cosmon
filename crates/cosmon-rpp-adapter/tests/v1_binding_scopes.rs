@@ -668,3 +668,103 @@ async fn effect_recheck_applies_issuer_scoped_policy() {
     .unwrap();
     assert!(validator.validate(&admission).is_ok());
 }
+
+#[tokio::test]
+async fn harvest_effect_refuses_removed_issuer_and_preserves_other_issuer() {
+    use cosmon_core::config::{HarvestAuthorityConfig, RemoteHarvestPolicy};
+    use cosmon_core::harvest_authorization::HarvestAuthorizationCause;
+    use cosmon_core::harvest_door::HarvestOptions;
+    use cosmon_core::id::MoleculeId;
+    use cosmon_core::remote_harvest::{
+        resolve_remote_policy, RemoteAdmissionValidator, RemoteAuthoritySource,
+        RemoteHarvestAdmission,
+    };
+    use cosmon_rpp_adapter::harvest_effect::AdapterRemoteValidator;
+    use cosmon_rpp_adapter::jwt::JwtVerifier;
+
+    let mut tenants = TenantWorkspaces::new();
+    tenants.add("a");
+    let first = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let other = OidcMock::start_with(OidcMockConfig {
+        issuer: "http://other-idp.test".to_owned(),
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&first, &tenants, vec![], dir.path());
+    let first_keys = first.write_jwks_file(dir.path()).unwrap();
+    other.write_jwks_file(dir.path()).unwrap();
+    state.jwks.store(JwksStore::load(dir.path()).unwrap());
+    let mut bindings = HabilitationMap::builder();
+    for oidc in [&first, &other] {
+        bindings = bindings.insert_with_scopes(
+            oidc.issuer(),
+            "admin-a",
+            HabilitationId::new("nuc-a"),
+            Noyau::new("a"),
+            "cosmon-rpp-a",
+            vec!["cosmon:molecule:harvest".to_owned()],
+        );
+    }
+    state.nucleon_map = cosmon_rpp_adapter::SharedHabilitationMap::new(bindings.build());
+    let validator = AdapterRemoteValidator {
+        state: Arc::new(state),
+    };
+    let admissions: Vec<_> = [&first, &other]
+        .into_iter()
+        .map(|oidc| {
+            let token = oidc.issue(&IssueJwt {
+                subject: "admin-a",
+                audience: Some("cosmon-rpp-a"),
+                scopes: &["cosmon:molecule:harvest"],
+                lifetime_secs: Some(60),
+                jti: Some("effect-trust"),
+            });
+            let jwt =
+                JwtVerifier::validate(&validator.state.jwks.load(), &token, Posture::Prepared)
+                    .unwrap();
+            RemoteHarvestAdmission {
+                issuer: jwt.iss,
+                subject: jwt.sub,
+                audience: jwt.aud,
+                token_id: jwt.jti,
+                tenant: "a".to_owned(),
+                molecule: MoleculeId::new("task-20261016-c001").unwrap(),
+                options: HarvestOptions::new("close"),
+                expires_at: jwt.exp,
+                authority_source: RemoteAuthoritySource::BindingHarvest,
+                policy: resolve_remote_policy(&HarvestAuthorityConfig {
+                    remote: Some(RemoteHarvestPolicy::Scoped),
+                    ..HarvestAuthorityConfig::default()
+                })
+                .unwrap(),
+            }
+        })
+        .collect();
+    for admission in &admissions {
+        assert_eq!(
+            validator.validate(admission),
+            Ok(()),
+            "trusted before removal"
+        );
+    }
+    std::fs::remove_file(first_keys).unwrap();
+    validator
+        .state
+        .jwks
+        .store(JwksStore::load(dir.path()).unwrap());
+    assert_eq!(
+        validator.validate(&admissions[0]),
+        Err(HarvestAuthorizationCause::BindingChanged)
+    );
+    assert_eq!(
+        validator.validate(&admissions[1]),
+        Ok(()),
+        "other issuer stays trusted with identical subject/audience/binding scopes"
+    );
+}

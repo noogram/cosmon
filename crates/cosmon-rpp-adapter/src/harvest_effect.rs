@@ -536,6 +536,17 @@ impl RemoteAdmissionValidator for AdapterRemoteValidator {
         if now >= admission.expires_at {
             return Err(Cause::CredentialExpired);
         }
+        // Admission's issuer/audience pins live in the atomically reloaded
+        // JWKS projection. A retained binding cannot outlive issuer trust.
+        if !self
+            .state
+            .jwks
+            .load()
+            .audiences_for(&admission.issuer)
+            .is_some_and(|audiences| audiences.contains(&admission.audience))
+        {
+            return Err(Cause::BindingChanged);
+        }
         let map = self.state.nucleon_map.load();
         let resolved = map
             .resolve_for_audience(&admission.issuer, &admission.subject, &admission.audience)

@@ -555,3 +555,36 @@ async fn an_absent_ledger_is_an_empty_stream_not_an_error() {
     append(&rig.ledger(), &[line(0)]);
     assert_eq!(molecule_ids(&s.lines(1).await), ["m-0"]);
 }
+
+#[tokio::test]
+async fn open_ledger_stream_closes_after_issuer_removal() {
+    let rig = Rig::new().await;
+    let state = make_state(
+        &rig.oidc,
+        &rig.tenants,
+        vec![(&rig.sub, "nuc-a", "a", AUD)],
+        rig.security.path(),
+    );
+    let jwks = state.jwks.clone();
+    let app = router(state);
+    let response = rig.open(&app, None, BOTH, "ledger-issuer-removal").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let first = tokio::time::timeout(Duration::from_secs(3), body.frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(first.data_ref().unwrap()).contains("event: ledger.epoch"));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), body.frame())
+            .await
+            .is_err(),
+        "stream must be open before removal"
+    );
+    jwks.store(JwksStore::default());
+    tokio::time::timeout(Duration::from_secs(3), axum::body::to_bytes(body, 65536))
+        .await
+        .expect("ledger stream stayed open after issuer removal")
+        .unwrap();
+}
