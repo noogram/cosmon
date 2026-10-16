@@ -372,6 +372,13 @@ authority model is unchanged; what changed is that the command an operator
 consults during a hand-over stopped answering a different question from the one
 it was asked.
 
+**Where the collapse guard lives now** ([ADR-187](187-a-collapse-is-conditional-idempotent-and-receipted.md),
+issue #207). The guard on `cs collapse` moved into the shared collapse
+operation as a `CollapseAuthority` port, so MCP `cosmon_collapse` — which had
+its own transition and no guard — now gets the same refusal. The caller is
+passed in explicitly; a network caller has no mapped session in v1 and is
+refused on a leased mission, per the fourth bullet above.
+
 ## Falsifiers
 
 This ADR is wrong if any of the following turns out to be true. Each is checkable.

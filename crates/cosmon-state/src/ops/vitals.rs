@@ -347,6 +347,7 @@ mod tests {
             non_integration: None,
             prompt_seal: None,
             briefing_seals: vec![],
+            collapse_receipt: None,
             bootstrap_seals: vec![],
             archived: false,
             last_progress_at: None,

@@ -145,6 +145,30 @@ pub fn refuse_unleased_pilot_gesture<F>(
 where
     F: Fn(&str) -> Option<String>,
 {
+    refuse_unleased_pilot_gesture_for_session(
+        state_root,
+        mission,
+        gesture,
+        resolve_pilot_session(env_lookup).as_ref(),
+    )
+}
+
+/// [`refuse_unleased_pilot_gesture`] for a caller whose session the surface
+/// has already resolved.
+///
+/// The collapse operation receives its caller context explicitly (issue
+/// #207) rather than reading the environment of whatever process runs it, so
+/// it needs the guard without the environment lookup.
+///
+/// # Errors
+///
+/// As [`refuse_unleased_pilot_gesture`].
+pub fn refuse_unleased_pilot_gesture_for_session(
+    state_root: &std::path::Path,
+    mission: &MoleculeId,
+    gesture: &'static str,
+    session: Option<&cosmon_core::id::SessionId>,
+) -> anyhow::Result<()> {
     use cosmon_core::pilot_lease::{authorize, epoch_presented_for, RefusalReason};
     use cosmon_filestore::PresenceStore;
 
@@ -169,7 +193,7 @@ where
         .into())
     };
 
-    let Some(session) = resolve_pilot_session(env_lookup) else {
+    let Some(session) = session else {
         return refuse(format!(
             "this session names no identity, and an unnamed caller holds \
              nothing — the lease is held by {holder}. Export COSMON_SESSION_ID \
@@ -178,14 +202,14 @@ where
         ));
     };
 
-    let seat = PresenceStore::new(state_root).load(&session)?;
+    let seat = PresenceStore::new(state_root).load(session)?;
     let presented = epoch_presented_for(
         mission,
         seat.as_ref()
             .and_then(cosmon_core::presence::Presence::claimed_authority),
     );
 
-    match authorize(Some(&lease), chrono::Utc::now(), &session, presented).refusal() {
+    match authorize(Some(&lease), chrono::Utc::now(), session, presented).refusal() {
         None => Ok(()),
         Some(reason) => refuse(RefusalReason::explain(reason)),
     }
@@ -206,13 +230,85 @@ fn refuse_unverifiable_grant_ledger(
     .into())
 }
 
+/// The lease guard as the shared collapse operation reaches it (issue #207).
+///
+/// Reads the lease ledger under `state_root`, which the caller sets to the
+/// state directory the collapse mutates. A local caller is checked exactly as
+/// `cs collapse` always was. A network caller has no mapped pilot session in
+/// v1, so on a leased mission it is refused; on an unleased one it is not the
+/// guard's business, as for everyone else.
+#[derive(Debug, Clone)]
+pub struct LeaseCollapseAuthority {
+    state_root: std::path::PathBuf,
+    gesture: &'static str,
+}
+
+impl LeaseCollapseAuthority {
+    /// An authority over the ledger at `state_root`, naming the refused
+    /// gesture `gesture` (`"cs collapse"`, `"cosmon_collapse"`).
+    #[must_use]
+    pub fn new(state_root: impl Into<std::path::PathBuf>, gesture: &'static str) -> Self {
+        Self {
+            state_root: state_root.into(),
+            gesture,
+        }
+    }
+}
+
+/// Why a network caller is refused on a leased mission.
+pub const REMOTE_CALLER_ON_LEASED_MISSION: &str =
+    "a network caller has no pilot session, and in v1 a mission under co-pilotage \
+     cannot be collapsed remotely; collapse it from the session that holds the lease";
+
+impl cosmon_state::ops::CollapseAuthority for LeaseCollapseAuthority {
+    fn check(
+        &self,
+        id: &MoleculeId,
+        caller: &cosmon_core::collapse_contract::CallerContext,
+    ) -> Result<Option<cosmon_state::ops::LeaseRefusal>, cosmon_core::error::CosmonError> {
+        use cosmon_core::collapse_contract::CallerContext;
+        use cosmon_state::ops::LeaseRefusal;
+
+        let store_error = |e: anyhow::Error| cosmon_core::error::CosmonError::StateStore {
+            reason: format!("pilot lease ledger: {e:#}"),
+        };
+        match caller {
+            CallerContext::Local { session } => match refuse_unleased_pilot_gesture_for_session(
+                &self.state_root,
+                id,
+                self.gesture,
+                session.as_ref(),
+            ) {
+                Ok(()) => Ok(None),
+                Err(e) => match e.downcast::<UnleasedPilotGesture>() {
+                    Ok(refusal) => Ok(Some(LeaseRefusal { why: refusal.why })),
+                    Err(other) => Err(store_error(other)),
+                },
+            },
+            CallerContext::Remote { .. } => {
+                let leases = leases_at(&self.state_root).map_err(store_error)?;
+                let leased = leases
+                    .has_unverifiable_grant_ledger(id)
+                    .map_err(|e| store_error(e.into()))?
+                    || leases
+                        .current(id)
+                        .map_err(|e| store_error(e.into()))?
+                        .is_some();
+                Ok(leased.then(|| LeaseRefusal {
+                    why: REMOTE_CALLER_ON_LEASED_MISSION.to_owned(),
+                }))
+            }
+        }
+    }
+}
+
 /// Resolve the session id this `cs` invocation speaks for, or `None`.
 ///
 /// Uses the same typed native/launch/dispatch contract as `cs presence`, so a
 /// pilot is the same pilot to the guard as it is to the cockpit. A conflicting or
 /// malformed value is `None` and not an error: the guard's caller turns that
 /// into a refusal, which is stricter than an error would be.
-fn resolve_pilot_session<F>(env_lookup: &F) -> Option<cosmon_core::id::SessionId>
+pub fn resolve_pilot_session<F>(env_lookup: &F) -> Option<cosmon_core::id::SessionId>
 where
     F: Fn(&str) -> Option<String>,
 {

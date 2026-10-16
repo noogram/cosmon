@@ -66,6 +66,10 @@ pub struct Args {
     /// Path to the state store root (overrides walk-up discovery).
     #[arg(long)]
     ops_dir: Option<std::path::PathBuf>,
+
+    /// Conditional, idempotent collapse (issue #207).
+    #[command(flatten)]
+    condition: ConditionArgs,
 }
 
 /// Parse the `--cause` / `--account` / `--kind` triple into a
@@ -185,14 +189,20 @@ fn run_with_seats(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 }
 
 /// Execute the `collapse` command for one molecule.
-#[allow(clippy::too_many_lines)]
+///
+/// Every collapse goes through [`cosmon_state::ops::collapse::execute`], the
+/// operation MCP calls too. This function keeps only the CLI's projections:
+/// the legacy event mirror, the archive, and the rendering.
 fn collapse_molecule(
     ctx: &Context,
     args: &Args,
     mol_id: &MoleculeId,
     reason: &str,
 ) -> anyhow::Result<()> {
+    use cosmon_state::ops::collapse::{execute, CollapseOutcome, CollapseRequest, ExecuteError};
+
     let mol_id = mol_id.clone();
+    // Validated here for its message; the operation validates it again.
     let cause = parse_cause(args)?;
     let reason_kind = args
         .reason_kind
@@ -200,100 +210,327 @@ fn collapse_molecule(
         .map(|s| CollapseReason::from(s.to_owned()));
     let ops_dir = cosmon_filestore::resolve_state_dir(args.ops_dir.as_deref());
     let store = ctx.store_at(&ops_dir);
+    let condition = args.condition.parse()?;
 
-    // ADR-168 §D6 — authority guard. Terminating a co-piloted mission is the
-    // most irreversible piloting gesture there is; a co-pilot without the
-    // lease is refused before the terminal transition, not compensated after.
-    //
-    // The lease is read from `ops_dir`, the directory this call mutates: with
+    // ADR-168 §D6 — authority guard, now inside the shared operation. The
+    // lease is read from `ops_dir`, the directory this call mutates: with
     // `--ops-dir` pointing elsewhere than the ambient state dir, checking the
-    // ambient ledger would clear a gesture against a mission it does not hold.
-    super::guard::refuse_unleased_pilot_gesture(
-        &ops_dir,
-        &mol_id,
-        "cs collapse",
-        &super::guard::process_env,
-    )?;
-
-    let mol_data = store.load_molecule(&mol_id)?;
-    let prev_status = mol_data.status;
-    // Stuck-flavored Frozen: when the prior transition to Frozen was
-    // via `cs stuck`, the wire-level `previous_status` renders as
-    // `"stuck"` rather than `"frozen"` so the audit trail preserves the
-    // operator's gesture (`task-20260509-177e`).
-    let previous_was_stuck = prev_status == MoleculeStatus::Frozen && mol_data.stuck_at.is_some();
-    let prev_status_label = if previous_was_stuck {
-        "stuck".to_owned()
-    } else {
-        prev_status.to_string()
+    // ambient ledger would clear a gesture against a mission it does not
+    // hold. The caller is this process's environment, resolved here and
+    // passed explicitly.
+    let authority =
+        cosmon_harvest::pilot_gesture::LeaseCollapseAuthority::new(&ops_dir, "cs collapse");
+    let caller = cosmon_core::collapse_contract::CallerContext::Local {
+        session: cosmon_harvest::pilot_gesture::resolve_pilot_session(&super::guard::process_env),
+    };
+    let request = CollapseRequest {
+        reason: reason.to_owned(),
+        cause: args.cause.clone(),
+        account: args.account.clone(),
+        kind: args.kind.clone(),
+        reason_kind: reason_kind.clone(),
     };
 
-    if prev_status == MoleculeStatus::Collapsed {
-        let fleet = store.load_fleet().unwrap_or_default();
-        let location = super::work_location::WorkLocation::from_state(
-            &mol_data,
-            &fleet,
-            &super::work_location::repo_root(ctx),
-        );
-        if ctx.json {
-            let out = serde_json::json!({
-                "molecule": mol_id.as_str(),
-                "status": "collapsed",
-                "already_collapsed": true,
-                "branch": location.branch,
-                "worktree": location.worktree,
-                "harvest_command": location.harvest_command,
-                "branch_deletion_requires_audit": true,
-            });
-            println!("{}", serde_json::to_string(&out)?);
-        } else {
-            println!(
-                "{} {} already collapsed (no-op)",
-                MoleculeStatus::Collapsed.emoji(),
-                mol_id
+    let store: &dyn cosmon_state::StateStore = &*store;
+    let outcome = execute(
+        store,
+        &ops_dir,
+        &authority,
+        &caller,
+        &mol_id,
+        request,
+        condition,
+        Utc::now(),
+    )
+    .map_err(|e| match e {
+        ExecuteError::UnleasedPilotGesture(refusal) => super::guard::rehome_unleased_pilot_gesture(
+            cosmon_harvest::pilot_gesture::UnleasedPilotGesture {
+                gesture: "cs collapse",
+                mol_id: mol_id.as_str().to_owned(),
+                why: refusal.why,
+            }
+            .into(),
+        ),
+        ExecuteError::Collapse(other) => anyhow::Error::new(other),
+    })?;
+
+    let keyed = match outcome {
+        CollapseOutcome::Keyed(keyed) => keyed,
+        CollapseOutcome::Unconditional { view, molecule } => {
+            let Some(updated) = molecule else {
+                return render_already_collapsed(ctx, store, &mol_id);
+            };
+            let prev_status_label = if view.previous_was_stuck {
+                "stuck".to_owned()
+            } else {
+                view.previous_status.to_string()
+            };
+            let updated = project_transition(ctx, store, &ops_dir, updated, view.previous_status);
+            return render_transition(
+                ctx,
+                store,
+                &updated,
+                &prev_status_label,
+                reason,
+                cause.as_ref(),
+                reason_kind.as_ref(),
             );
-            println!("  {}", location.render());
-            println!("  collapse records abandonment only; audit the branch before deletion.");
+        }
+    };
+
+    if keyed.announced {
+        if let (Some(updated), Some(receipt)) = (keyed.molecule.clone(), keyed.receipt.as_ref()) {
+            project_transition(ctx, store, &ops_dir, updated, receipt.previous_status);
+        } else if let Some(receipt) = keyed.receipt.as_ref() {
+            // A replay that finished an interrupted commit: the state is
+            // already collapsed; only the legacy mirror is owed.
+            emit_legacy_events(&ops_dir, &mol_id, receipt.previous_status, reason);
+        }
+    }
+    render_keyed(ctx, &mol_id, &keyed)
+}
+
+/// Exit codes of keyed collapse refusals. The `--json` `outcome` field is the
+/// contract; these let a shell script branch without parsing it.
+pub(crate) mod exit_code {
+    /// `idempotency_key_reused`.
+    pub const IDEMPOTENCY_KEY_REUSED: i32 = 20;
+    /// `already_completed`.
+    pub const ALREADY_COMPLETED: i32 = 21;
+    /// `already_collapsed`.
+    pub const ALREADY_COLLAPSED: i32 = 22;
+    /// `approval_expired`.
+    pub const APPROVAL_EXPIRED: i32 = 23;
+    /// `unexpected_status`.
+    pub const UNEXPECTED_STATUS: i32 = 24;
+    /// `stale_revision`.
+    pub const STALE_REVISION: i32 = 25;
+    /// `cs collapse-receipt`: the key record and the state disagree.
+    pub const RECEIPT_INCONSISTENT: i32 = 26;
+}
+
+/// A keyed collapse that was refused, carried to `main` for its exit code.
+#[derive(Debug, thiserror::Error)]
+#[error("cs collapse {molecule}: refused — {outcome}{detail}")]
+pub struct CollapseRefused {
+    /// Molecule targeted.
+    pub molecule: String,
+    /// Decision-table label.
+    pub outcome: &'static str,
+    /// Human-readable detail, prefixed with ": " when present.
+    pub detail: String,
+    /// Process exit code.
+    pub code: i32,
+}
+
+/// Exit code of a [`CollapseRefused`] anywhere in the error chain.
+#[must_use]
+pub fn refusal_exit_code(err: &anyhow::Error) -> Option<i32> {
+    err.downcast_ref::<CollapseRefused>().map(|r| r.code)
+}
+
+/// The keyed flags of `cs collapse`. All-or-nothing: `--key` requires an
+/// expected status and revision, and every other flag requires `--key`.
+#[derive(clap::Args, Debug, Default, Clone)]
+pub struct ConditionArgs {
+    /// Make the collapse conditional and idempotent under this caller key
+    /// (`[A-Za-z0-9_-]{16,128}`, generated once by the caller and resent
+    /// unchanged on every retry). Requires --expect-status and
+    /// --expect-revision. Without --key, `cs collapse` is unconditional, as
+    /// it always was.
+    #[arg(
+        long,
+        value_name = "KEY",
+        requires_all = ["expect_status", "expect_revision"],
+        conflicts_with = "with_seats"
+    )]
+    pub key: Option<String>,
+
+    /// Status the caller confirmed (pending, queued, running, frozen,
+    /// starved). A different status is refused `unexpected_status`.
+    #[arg(long, value_name = "STATUS", requires = "key")]
+    pub expect_status: Option<String>,
+
+    /// Revision the caller confirmed, as `cs observe <ID> --json` prints it
+    /// (`b3:…`). A different revision is refused `stale_revision`.
+    #[arg(long, value_name = "REVISION", requires = "key")]
+    pub expect_revision: Option<String>,
+
+    /// Opaque digest of the operator approval; recorded in the request
+    /// digest so a different approval is a different request.
+    #[arg(long, value_name = "DIGEST", requires = "key")]
+    pub approval_digest: Option<String>,
+
+    /// RFC 3339 deadline of the approval. After it the collapse is refused
+    /// `approval_expired` (a replay of a committed key still succeeds).
+    #[arg(long, value_name = "RFC3339", requires = "key")]
+    pub not_after: Option<String>,
+}
+
+impl ConditionArgs {
+    /// The validated condition, `None` without `--key`.
+    fn parse(&self) -> anyhow::Result<Option<cosmon_core::collapse_contract::CollapseCondition>> {
+        use cosmon_core::collapse_contract::{
+            CollapseCondition, CollapsibleStatus, IdempotencyKey, MoleculeRevision,
+        };
+        let Some(key) = self.key.as_deref() else {
+            return Ok(None);
+        };
+        let (Some(status), Some(revision)) = (
+            self.expect_status.as_deref(),
+            self.expect_revision.as_deref(),
+        ) else {
+            anyhow::bail!("--key requires --expect-status and --expect-revision");
+        };
+        let not_after = self
+            .not_after
+            .as_deref()
+            .map(|raw| {
+                chrono::DateTime::parse_from_rfc3339(raw)
+                    .map(|t| t.with_timezone(&Utc))
+                    .map_err(|e| anyhow::anyhow!("--not-after `{raw}` is not RFC 3339: {e}"))
+            })
+            .transpose()?;
+        if let Some(digest) = self.approval_digest.as_deref() {
+            anyhow::ensure!(
+                !digest.is_empty() && digest.len() <= 256,
+                "--approval-digest must be 1 to 256 bytes"
+            );
+        }
+        Ok(Some(CollapseCondition {
+            key: IdempotencyKey::parse(key)?,
+            expect_status: CollapsibleStatus::from_str(status)?,
+            expect_revision: MoleculeRevision::parse(revision)?,
+            approval_digest: self.approval_digest.clone(),
+            not_after,
+        }))
+    }
+}
+
+/// Render a keyed outcome; a refusal becomes a [`CollapseRefused`] error.
+fn render_keyed(
+    ctx: &Context,
+    mol_id: &MoleculeId,
+    keyed: &cosmon_state::ops::KeyedCollapse,
+) -> anyhow::Result<()> {
+    use cosmon_core::collapse_contract::{CollapseOutcomeKind as K, CollapseRefusal as R};
+
+    let json = cosmon_state::ops::KeyedCollapseJson::from_outcome(mol_id, keyed);
+    if ctx.json {
+        println!("{}", serde_json::to_string(&json)?);
+    }
+    let Some(refusal) = keyed.refusal.as_ref() else {
+        if !ctx.json {
+            let receipt_digest = keyed.receipt.as_ref().map_or("", |r| r.digest.as_str());
+            println!(
+                "{} {} collapsed ({}) — digest {}",
+                MoleculeStatus::Collapsed.emoji(),
+                mol_id,
+                keyed.outcome.as_str(),
+                receipt_digest
+            );
+            println!("  read it back: cs collapse-receipt {mol_id} <KEY>");
         }
         return Ok(());
-    }
-
-    if prev_status == MoleculeStatus::Completed {
-        anyhow::bail!("molecule {mol_id} is completed — cannot collapse a completed molecule");
-    }
-
-    let mut updated = mol_data;
-    updated.status = MoleculeStatus::Collapsed;
-    updated.collapse_reason = Some(reason.to_owned());
-    updated.collapse_cause.clone_from(&cause);
-    updated.collapse_reason_kind.clone_from(&reason_kind);
-    updated.collapsed_step = Some(updated.current_step);
-    // Terminal transition: clear the inline live-process record so a
-    // collapsed molecule never carries a phantom worker pointer
-    // (delib-20260426-1bcd #1 fold-in).
-    if updated.process.is_some() {
-        updated.release_process();
-    }
-    updated.updated_at = Utc::now();
-    store.save_molecule(&updated.id.clone(), &updated)?;
-
-    // Append to log.md.
-    let mol_dir = store.molecule_dir(&mol_id);
-    let log_path = mol_dir.join("log.md");
-    let timestamp = Utc::now().format("%Y-%m-%d %H:%M UTC");
-    let log_entry = format!(
-        "\n## {timestamp} — Collapsed\n\n{}\n\nCollapsed at step {}/{}.\n",
-        reason, updated.current_step, updated.total_steps
-    );
-    let existing_log = fs::read_to_string(&log_path).unwrap_or_default();
-    let new_log = if existing_log.is_empty() {
-        format!("# Evolution Log\n{log_entry}")
-    } else {
-        format!("{existing_log}{log_entry}")
     };
-    let _ = fs::write(&log_path, new_log);
+    if let R::UnleasedPilotGesture { why } = refusal {
+        return Err(super::guard::rehome_unleased_pilot_gesture(
+            cosmon_harvest::pilot_gesture::UnleasedPilotGesture {
+                gesture: "cs collapse",
+                mol_id: mol_id.as_str().to_owned(),
+                why: why.clone(),
+            }
+            .into(),
+        ));
+    }
+    let (code, detail) = match refusal {
+        R::IdempotencyKeyReused { .. } => (
+            exit_code::IDEMPOTENCY_KEY_REUSED,
+            "the key is bound to a different request; generate a new key".to_owned(),
+        ),
+        R::AlreadyCompleted => (exit_code::ALREADY_COMPLETED, String::new()),
+        R::AlreadyCollapsed { by_key } => (
+            exit_code::ALREADY_COLLAPSED,
+            by_key.as_ref().map_or_else(
+                || "collapsed without a key".to_owned(),
+                |k| format!("collapsed under another key ({k})"),
+            ),
+        ),
+        R::ApprovalExpired { not_after } => (
+            exit_code::APPROVAL_EXPIRED,
+            format!("--not-after {not_after} has passed"),
+        ),
+        R::UnexpectedStatus { actual } => {
+            (exit_code::UNEXPECTED_STATUS, format!("status is {actual}"))
+        }
+        R::StaleRevision { actual } => (
+            exit_code::STALE_REVISION,
+            format!("revision is now {actual}; re-read it and confirm again"),
+        ),
+        R::UnleasedPilotGesture { .. } => unreachable!("handled above"),
+    };
+    debug_assert!(!matches!(keyed.outcome, K::Replayed | K::Transitioned));
+    Err(CollapseRefused {
+        molecule: mol_id.as_str().to_owned(),
+        outcome: keyed.outcome.as_str(),
+        detail: if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {detail}")
+        },
+        code,
+    }
+    .into())
+}
 
-    // Emit legacy events.
+/// The CLI's post-commit projections of a transition: the legacy event
+/// mirror and the ADR-030 archive. Returns the record as last saved.
+fn project_transition(
+    ctx: &Context,
+    store: &dyn cosmon_state::StateStore,
+    ops_dir: &std::path::Path,
+    mut updated: cosmon_state::MoleculeData,
+    prev_status: MoleculeStatus,
+) -> cosmon_state::MoleculeData {
+    let reason = updated.collapse_reason.clone().unwrap_or_default();
+    emit_legacy_events(ops_dir, &updated.id, prev_status, &reason);
+
+    // ADR-030 M3 — archive the collapsed molecule when the subsystem is
+    // enabled. Non-fatal: any failure is logged and the collapse still
+    // succeeds (the caller owns the terminal transition). The
+    // `updated.archived` idempotence gate makes re-running `cs collapse`
+    // a no-op on the archive — a prior successful write is never
+    // clobbered, and collapsing an already-archived molecule never
+    // double-counts.
+    let config_path = super::resolve_config_from_context(ctx);
+    let project_config = cosmon_filestore::load_project_config(&config_path).unwrap_or_default();
+    if project_config.archive.enabled && !updated.archived {
+        let mol_dir = store.molecule_dir(&updated.id);
+        let archive_mol_dir = cosmon_state::archive::resolve_molecule_dir(ops_dir, &updated.id)
+            .unwrap_or_else(|| mol_dir.clone());
+        if cosmon_state::archive::write_non_fatal(
+            ops_dir,
+            &archive_mol_dir,
+            &updated,
+            cosmon_state::archive::Trigger::Collapse,
+            Utc::now(),
+        )
+        .is_some()
+        {
+            updated.archived = true;
+            let _ = store.save_molecule(&updated.id.clone(), &updated);
+        }
+    }
+    updated
+}
+
+/// The legacy `events.jsonl` mirror of a collapse (pre-`EventV2` readers).
+fn emit_legacy_events(
+    ops_dir: &std::path::Path,
+    mol_id: &MoleculeId,
+    prev_status: MoleculeStatus,
+    reason: &str,
+) {
     let events_path = ops_dir.join("events.jsonl");
     let _ = cosmon_filestore::event::append(
         &events_path,
@@ -310,68 +547,69 @@ fn collapse_molecule(
             reason: reason.to_owned(),
         }),
     );
+}
 
-    // Emit EventV2 records.
-    let status_seq = event_log::emit_one(
-        &events_path,
-        EventV2::MoleculeStatusChanged {
-            molecule_id: mol_id.clone(),
-            from: prev_status_label.clone(),
-            to: "collapsed".to_owned(),
-        },
-        None,
-    )
-    .ok();
-    let _ = event_log::emit_one(
-        &events_path,
-        EventV2::MoleculeCollapsed {
-            molecule_id: mol_id.clone(),
-            reason: reason.to_owned(),
-            kind: reason_kind.clone(),
-        },
-        status_seq,
+/// Render the unconditional no-op on an already-collapsed molecule.
+fn render_already_collapsed(
+    ctx: &Context,
+    store: &dyn cosmon_state::StateStore,
+    mol_id: &MoleculeId,
+) -> anyhow::Result<()> {
+    let mol_data = store.load_molecule(mol_id)?;
+    let fleet = store.load_fleet().unwrap_or_default();
+    let location = super::work_location::WorkLocation::from_state(
+        &mol_data,
+        &fleet,
+        &super::work_location::repo_root(ctx),
     );
-
-    // ADR-030 M3 — archive the collapsed molecule when the subsystem is
-    // enabled. Non-fatal: any failure is logged and the collapse still
-    // succeeds (the caller owns the terminal transition). The
-    // `updated.archived` idempotence gate makes re-running `cs collapse`
-    // a no-op on the archive — a prior successful write is never
-    // clobbered, and collapsing an already-archived molecule never
-    // double-counts.
-    let config_path = super::resolve_config_from_context(ctx);
-    let project_config = cosmon_filestore::load_project_config(&config_path).unwrap_or_default();
-    if project_config.archive.enabled && !updated.archived {
-        let archive_mol_dir = cosmon_state::archive::resolve_molecule_dir(&ops_dir, &mol_id)
-            .unwrap_or_else(|| mol_dir.clone());
-        if cosmon_state::archive::write_non_fatal(
-            &ops_dir,
-            &archive_mol_dir,
-            &updated,
-            cosmon_state::archive::Trigger::Collapse,
-            Utc::now(),
-        )
-        .is_some()
-        {
-            updated.archived = true;
-            let _ = store.save_molecule(&updated.id.clone(), &updated);
-        }
-    }
-
     if ctx.json {
-        let fleet = store.load_fleet().unwrap_or_default();
-        let location = super::work_location::WorkLocation::from_state(
-            &updated,
-            &fleet,
-            &super::work_location::repo_root(ctx),
+        let out = serde_json::json!({
+            "molecule": mol_id.as_str(),
+            "status": "collapsed",
+            "already_collapsed": true,
+            "branch": location.branch,
+            "worktree": location.worktree,
+            "harvest_command": location.harvest_command,
+            "branch_deletion_requires_audit": true,
+        });
+        println!("{}", serde_json::to_string(&out)?);
+    } else {
+        println!(
+            "{} {} already collapsed (no-op)",
+            MoleculeStatus::Collapsed.emoji(),
+            mol_id
         );
+        println!("  {}", location.render());
+        println!("  collapse records abandonment only; audit the branch before deletion.");
+    }
+    Ok(())
+}
+
+/// Render a fresh unconditional transition.
+fn render_transition(
+    ctx: &Context,
+    store: &dyn cosmon_state::StateStore,
+    updated: &cosmon_state::MoleculeData,
+    prev_status_label: &str,
+    reason: &str,
+    cause: Option<&CollapseCause>,
+    reason_kind: Option<&CollapseReason>,
+) -> anyhow::Result<()> {
+    let mol_id = &updated.id;
+    let fleet = store.load_fleet().unwrap_or_default();
+    let location = super::work_location::WorkLocation::from_state(
+        updated,
+        &fleet,
+        &super::work_location::repo_root(ctx),
+    );
+    if ctx.json {
         let out = serde_json::json!({
             "molecule": mol_id.as_str(),
             "previous_status": prev_status_label,
             "status": "collapsed",
             "reason": reason,
-            "cause": cause.as_ref(),
-            "reason_kind": reason_kind.as_ref().map(CollapseReason::as_str),
+            "cause": cause,
+            "reason_kind": reason_kind.map(CollapseReason::as_str),
             "archived": updated.archived,
             "nudge_count": updated.nudge_count,
             "branch": location.branch,
@@ -380,46 +618,34 @@ fn collapse_molecule(
             "branch_deletion_requires_audit": true,
         });
         println!("{}", serde_json::to_string(&out)?);
-    } else {
-        let cause_label = cause
-            .as_ref()
-            .map(|c| format!(" [{c}]"))
-            .unwrap_or_default();
+        return Ok(());
+    }
+    let cause_label = cause.map(|c| format!(" [{c}]")).unwrap_or_default();
+    println!(
+        "{} {} collapsed (was {}){}: {}",
+        MoleculeStatus::Collapsed.emoji(),
+        mol_id,
+        prev_status_label,
+        cause_label,
+        reason
+    );
+    println!("  {}", location.render());
+    println!("  collapse records abandonment only; audit the branch before deletion.");
+    // Post-mortem nudge accounting (delib-20260420-1b02 P2):
+    // surface how many times `cs patrol --nudge` had to poke this
+    // molecule before it collapsed. > 2 nudges suggests an
+    // ambiguous briefing rather than a runtime stall — a data
+    // point a future audit formula will read.
+    if updated.nudge_count > 0 {
+        let suffix = if updated.nudge_count == 1 { "" } else { "s" };
         println!(
-            "{} {} collapsed (was {}){}: {}",
-            MoleculeStatus::Collapsed.emoji(),
-            mol_id,
-            prev_status_label,
-            cause_label,
-            reason
+            "  • nudge_count: {} patrol nudge{suffix}",
+            updated.nudge_count
         );
-        let fleet = store.load_fleet().unwrap_or_default();
-        let location = super::work_location::WorkLocation::from_state(
-            &updated,
-            &fleet,
-            &super::work_location::repo_root(ctx),
-        );
-        println!("  {}", location.render());
-        println!("  collapse records abandonment only; audit the branch before deletion.");
-        // Post-mortem nudge accounting (delib-20260420-1b02 P2):
-        // surface how many times `cs patrol --nudge` had to poke this
-        // molecule before it collapsed. > 2 nudges suggests an
-        // ambiguous briefing rather than a runtime stall — a data
-        // point a future audit formula will read.
-        if updated.nudge_count > 0 {
-            let suffix = if updated.nudge_count == 1 { "" } else { "s" };
-            println!(
-                "  • nudge_count: {} patrol nudge{suffix}",
-                updated.nudge_count
-            );
-            if updated.nudge_count > 2 {
-                println!(
-                    "  ⚠ nudge_count > 2 — likely a briefing-clarity issue, not a runtime bug"
-                );
-            }
+        if updated.nudge_count > 2 {
+            println!("  ⚠ nudge_count > 2 — likely a briefing-clarity issue, not a runtime bug");
         }
     }
-
     Ok(())
 }
 
@@ -557,7 +783,7 @@ mod tests {
     use cosmon_state::{MoleculeData, StateStore};
 
     use super::Context;
-    use super::{run, Args};
+    use super::{run, Args, ConditionArgs};
 
     /// Write a project `config.toml` with `[archive] enabled = true`
     /// at the parent of the state dir — i.e. in the `.cosmon/` layout
@@ -610,6 +836,7 @@ mod tests {
             non_integration: None,
             prompt_seal: None,
             briefing_seals: Vec::new(),
+            collapse_receipt: None,
             bootstrap_seals: Vec::new(),
             archived: false,
             last_progress_at: None,
@@ -697,6 +924,7 @@ mod tests {
             kind: None,
             reason_kind: None,
             ops_dir: Some(state_dir.clone()),
+            condition: ConditionArgs::default(),
         };
         run(&ctx, &args).unwrap();
 
@@ -755,6 +983,7 @@ mod tests {
             kind: None,
             reason_kind: None,
             ops_dir: Some(state_dir.clone()),
+            condition: ConditionArgs::default(),
         };
         run(&ctx, &args).unwrap();
 
@@ -797,6 +1026,7 @@ mod tests {
             kind: None,
             reason_kind: None,
             ops_dir: Some(state_dir.clone()),
+            condition: ConditionArgs::default(),
         };
         run(&ctx, &args).unwrap();
 
@@ -845,6 +1075,7 @@ mod tests {
             kind: Some("max_rolling_5h".to_owned()),
             reason_kind: None,
             ops_dir: Some(state_dir.clone()),
+            condition: ConditionArgs::default(),
         };
         run(&ctx, &args).unwrap();
 
@@ -900,6 +1131,7 @@ mod tests {
             kind: None,
             reason_kind: None,
             ops_dir: Some(state_dir.clone()),
+            condition: ConditionArgs::default(),
         };
         run(&ctx, &args).unwrap();
 
@@ -943,6 +1175,7 @@ mod tests {
             kind: None,
             reason_kind: None,
             ops_dir: Some(state_dir.clone()),
+            condition: ConditionArgs::default(),
         };
         let err = run(&ctx, &args).unwrap_err();
         assert!(

@@ -186,6 +186,14 @@ fn run_detail(
             &store.molecule_dir(&mol.id).to_string_lossy(),
             realization.as_ref(),
         );
+        // The revision a keyed `cs collapse --expect-revision` compares
+        // (issue #207): computed from the state file on this read, never
+        // stored.
+        let mut detail = serde_json::to_value(&detail)?;
+        if let Some(fields) = detail.as_object_mut() {
+            let revision = cosmon_state::ops::collapse::current_revision(store, &mol.id)?;
+            fields.insert("revision".to_owned(), revision.as_str().into());
+        }
         let json = serde_json::to_string_pretty(&detail)?;
         println!("{json}");
         return Ok(());
@@ -598,6 +606,7 @@ mod tests {
             non_integration: None,
             prompt_seal: None,
             briefing_seals: Vec::new(),
+            collapse_receipt: None,
             bootstrap_seals: Vec::new(),
             archived: false,
             last_progress_at: None,

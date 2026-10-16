@@ -1,20 +1,34 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `collapse` — terminal Active|Pending|Starved → Collapsed transition.
+//! `collapse` — the one terminal `→ Collapsed` transition every surface calls.
 //!
-//! Mutation verb extracted under `cosmon_state::ops`. Mirrors the
-//! cs-cli `cs collapse` handler at the
-//! V1 RPP API: a structured, idempotent transition to the Collapsed
-//! terminal state with a free-form reason.
+//! [`execute`] is the shared operation (issue #207): `cs collapse`, both MCP
+//! `cosmon_collapse` hosts and the V1 RPP route all reach it, so the lease
+//! guard, the cause validation, the transition and its log/event tail exist
+//! once. Surfaces keep only their own projections (the CLI's archive and
+//! legacy event mirror, the wire renderers).
 //!
-//! Idempotent: collapsing an already-collapsed molecule is a no-op (no
-//! error). Calling collapse on a `Completed` molecule is a hard error
-//! — completing and collapsing are mutually exclusive terminal states.
+//! It has two modes.
 //!
-//! The lib path covers the body shape `{ reason: String, cause?,
-//! account?, kind? }` that the V1 RPP exposes; the rich `--ops-dir`
-//! discovery, `--cause rate_limit` triple validation, and log.md
-//! appender stay in cs-cli for now.
+//! * **Unconditional** (`condition = None`), today's behaviour: collapsing an
+//!   already-collapsed molecule is a no-op, a `Completed` molecule is a hard
+//!   error, and the lease guard runs first.
+//! * **Keyed** (`condition = Some`): the caller sends an idempotency key, the
+//!   status and revision it confirmed, and optionally an approval digest and
+//!   deadline. The critical section runs under the molecule's dispatch lock
+//!   ([`StateStore::lock_molecule`]): re-read the key record, the state and
+//!   its revision; ask the [`CollapseAuthority`]; run the pure
+//!   [`cosmon_core::collapse_contract::decide`]; on admission reserve
+//!   the key (create-only), write the collapsed state with its embedded
+//!   receipt in one synced rename (the commit point), then mark the key
+//!   committed. Log and events follow after the lock, best-effort. Refusals
+//!   write nothing.
+//!
+//! The unconditional mode does not take the dispatch lock: an in-process
+//! agent loop runs while `cs tackle` holds that lock, and a tool call of that
+//! loop issuing `cs collapse` on its own molecule would wait on its parent
+//! forever. A keyed collapse comes from a broker, never from the worker it
+//! terminates, and waits out a concurrent dispatch by design.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -22,8 +36,14 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::Instant;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use cosmon_core::auth::Subject;
+use cosmon_core::collapse_contract::{
+    classify_lookup, decide, render_not_after, CallerContext, CollapseCondition, CollapseDecision,
+    CollapseIntentV1, CollapseKeyRecord, CollapseOutcomeKind, CollapseReceipt, CollapseRefusal,
+    ContractError, DecisionInput, IdempotencyKey, MoleculeRevision, ReceiptLookup, RequestDigest,
+    RECEIPT_SCHEMA,
+};
 use cosmon_core::error::CosmonError;
 use cosmon_core::event_v2::{CollapseReason, EventV2};
 use cosmon_core::id::MoleculeId;
@@ -33,9 +53,9 @@ use serde::Serialize;
 use crate::event_log;
 use crate::instrumentation::{emit_authz_decision, AuthzDecision};
 use crate::ops::error::OpsError;
-use crate::StateStore;
+use crate::{MoleculeData, StateStore};
 
-/// Errors returned by [`collapse`].
+/// Errors returned by [`collapse`] and [`execute`].
 #[derive(Debug, thiserror::Error)]
 pub enum CollapseError {
     /// No molecule exists with the given ID.
@@ -87,7 +107,75 @@ impl OpsError for CollapseError {
     }
 }
 
-/// Inputs for [`collapse`].
+/// Errors returned by [`execute`].
+///
+/// A separate type from [`CollapseError`] so that the V1 route, which
+/// matches that enum exhaustively and runs without a lease check, keeps
+/// compiling unchanged; its replacement route will surface the refusal.
+#[derive(Debug, thiserror::Error)]
+pub enum ExecuteError {
+    /// Every failure [`collapse`] can report.
+    #[error(transparent)]
+    Collapse(#[from] CollapseError),
+    /// The lease guard refused an unconditional collapse (ADR-168 §D6). A
+    /// keyed collapse reports the same refusal as an outcome instead.
+    #[error("{0}")]
+    UnleasedPilotGesture(LeaseRefusal),
+}
+
+/// The lease guard's refusal, in its own words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseRefusal {
+    /// Why the gesture was refused (one of the guard's distinct reasons).
+    pub why: String,
+}
+
+impl std::fmt::Display for LeaseRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.why)
+    }
+}
+
+/// Who may collapse a molecule, checked inside the operation (ADR-168 §D6).
+///
+/// A port so that the state crate needs no knowledge of the lease ledger,
+/// and so that every surface reaches the same check: the guard used to run
+/// in `cs collapse` only, which left MCP and the API as second doors.
+/// Implementations read the lease ledger from the same state directory the
+/// operation mutates.
+pub trait CollapseAuthority {
+    /// `Ok(None)` allows the collapse, `Ok(Some(_))` refuses it.
+    ///
+    /// # Errors
+    /// A store error reading the ledger. It is reported as an error, never
+    /// as a refusal: an I/O stumble must not read as "you are a co-pilot".
+    fn check(
+        &self,
+        id: &MoleculeId,
+        caller: &CallerContext,
+    ) -> Result<Option<LeaseRefusal>, CosmonError>;
+}
+
+/// The V1 RPP `POST /v1/molecules/:id/collapse` route's pre-#207 behaviour:
+/// no lease check.
+///
+/// Named so the gap is visible at its one call site ([`collapse`]); the
+/// keyed API route of the next increment replaces it with the lease
+/// authority, and no other surface uses it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoLeaseCheck;
+
+impl CollapseAuthority for NoLeaseCheck {
+    fn check(
+        &self,
+        _id: &MoleculeId,
+        _caller: &CallerContext,
+    ) -> Result<Option<LeaseRefusal>, CosmonError> {
+        Ok(None)
+    }
+}
+
+/// Inputs for [`collapse`] and [`execute`].
 #[derive(Debug, Clone)]
 pub struct CollapseRequest {
     /// Free-form reason for the collapse.
@@ -117,9 +205,31 @@ impl CollapseRequest {
             reason_kind: None,
         }
     }
+
+    /// The intent a keyed collapse commits to, ready to digest.
+    fn intent<'a>(
+        &'a self,
+        target: &'a MoleculeId,
+        condition: &'a CollapseCondition,
+        actor: Option<&'a str>,
+    ) -> CollapseIntentV1<'a> {
+        CollapseIntentV1 {
+            target: target.as_str(),
+            reason: &self.reason,
+            cause: self.cause.as_deref(),
+            account: self.account.as_deref(),
+            kind: self.kind.as_deref(),
+            reason_kind: self.reason_kind.as_ref().map(CollapseReason::as_str),
+            expected_status: condition.expect_status.as_str(),
+            expected_revision: condition.expect_revision.as_str(),
+            actor,
+            approval_digest: condition.approval_digest.as_deref(),
+            not_after: condition.not_after.as_ref().map(render_not_after),
+        }
+    }
 }
 
-/// Result of a successful [`collapse`] call.
+/// Result of a successful unconditional collapse.
 #[derive(Debug, Clone)]
 pub struct CollapseView {
     /// Molecule that was collapsed (or already was).
@@ -143,11 +253,63 @@ pub struct CollapseView {
     pub previous_was_stuck: bool,
 }
 
-/// Move a molecule to the `Collapsed` terminal state.
+/// Result of a keyed collapse, refused or not.
+#[derive(Debug, Clone)]
+pub struct KeyedCollapse {
+    /// Which row of the decision table matched.
+    pub outcome: CollapseOutcomeKind,
+    /// Digest of the caller's intent, computed here and returned.
+    pub digest: RequestDigest,
+    /// The receipt, for `transitioned` and `replayed`.
+    pub receipt: Option<CollapseReceipt>,
+    /// The refusal, for every other outcome.
+    pub refusal: Option<CollapseRefusal>,
+    /// `true` when this call announced the transition (log and events): a
+    /// fresh transition, or a replay that finished a commit interrupted
+    /// after the state write. Exactly one call per key does.
+    pub announced: bool,
+    /// The collapsed record this call wrote, when it wrote one.
+    pub molecule: Option<MoleculeData>,
+    /// See [`CollapseView::previous_was_stuck`].
+    pub previous_was_stuck: bool,
+}
+
+/// What [`execute`] returns.
+#[derive(Debug, Clone)]
+pub enum CollapseOutcome {
+    /// Unconditional mode.
+    Unconditional {
+        /// The view surfaces render.
+        view: CollapseView,
+        /// The record written, `None` for an already-collapsed no-op.
+        molecule: Option<MoleculeData>,
+    },
+    /// Keyed mode.
+    Keyed(KeyedCollapse),
+}
+
+/// A point in the keyed critical section, for fault injection.
 ///
-/// Idempotent in the `Collapsed → Collapsed` direction (returns
-/// `already_collapsed = true`). Rejects `Completed` molecules with a
-/// 409 — completing and collapsing are mutually exclusive.
+/// A crash test passes a hook to [`execute_with_hook`] that fails at one of
+/// these stages; the operation then stops exactly as a killed process would,
+/// leaving whatever was already durable, and the test restarts from there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollapseStage {
+    /// The decision admitted the request; nothing is written yet.
+    Decided,
+    /// The key record is reserved; the state is not written.
+    Reserved,
+    /// The collapsed state with its receipt is durable; the key record is
+    /// still reserved.
+    StateSaved,
+}
+
+/// Move a molecule to `Collapsed` — the V1 RPP route's entry point.
+///
+/// Unconditional and unguarded, as before issue #207; it now runs through
+/// [`execute`] with [`NoLeaseCheck`]. Idempotent in the
+/// `Collapsed → Collapsed` direction (returns `already_collapsed = true`).
+/// Rejects `Completed` molecules with a 409.
 ///
 /// # Errors
 ///
@@ -161,7 +323,6 @@ pub struct CollapseView {
     path = "/v1/molecules/:id/collapse",
     principal = "tenant"
 )]
-#[allow(clippy::too_many_lines)]
 pub fn collapse(
     store: &dyn StateStore,
     state_dir: &Path,
@@ -176,9 +337,137 @@ pub fn collapse(
     } else {
         AuthzDecision::Absent
     };
+    let caller = CallerContext::Remote {
+        subject: subject.id().as_str().to_owned(),
+    };
+    let result = execute(
+        store,
+        state_dir,
+        &NoLeaseCheck,
+        &caller,
+        id,
+        request,
+        None,
+        Utc::now(),
+    )
+    .map_err(|e| match e {
+        ExecuteError::Collapse(e) => e,
+        ExecuteError::UnleasedPilotGesture(refusal) => {
+            CollapseError::StoreUnavailable(format!("unexpected lease refusal: {refusal}"))
+        }
+    });
+    if result.is_ok() {
+        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        emit_authz_decision(
+            state_dir,
+            "collapse",
+            &subject_kind,
+            None,
+            decision,
+            latency_ms,
+        );
+    }
+    match result? {
+        CollapseOutcome::Unconditional { view, .. } => Ok(view),
+        CollapseOutcome::Keyed(_) => Err(CollapseError::StoreUnavailable(
+            "unconditional collapse returned a keyed outcome".to_owned(),
+        )),
+    }
+}
 
-    // Parse cause + account/kind triple before touching the store.
+/// The shared collapse operation. See the module documentation.
+///
+/// `state_dir` is where `events.jsonl` lives; the molecule's own files are
+/// located through the store. `now` is the decision time (approval expiry
+/// and the receipt's timestamp).
+///
+/// # Errors
+///
+/// [`ExecuteError`]: malformed input, a missing molecule, a store failure,
+/// and in unconditional mode the lease refusal and the completed-molecule
+/// refusal. Keyed refusals are outcomes, not errors.
+#[allow(clippy::too_many_arguments)]
+pub fn execute(
+    store: &dyn StateStore,
+    state_dir: &Path,
+    authority: &dyn CollapseAuthority,
+    caller: &CallerContext,
+    id: &MoleculeId,
+    request: CollapseRequest,
+    condition: Option<CollapseCondition>,
+    now: DateTime<Utc>,
+) -> Result<CollapseOutcome, ExecuteError> {
+    execute_with_hook(
+        store,
+        state_dir,
+        authority,
+        caller,
+        id,
+        request,
+        condition,
+        now,
+        &|_| Ok(()),
+    )
+}
+
+/// [`execute`] with a fault-injection hook called at each [`CollapseStage`]
+/// of the keyed critical section. A hook error aborts the operation at that
+/// point without undoing anything, which is what a crash does.
+///
+/// # Errors
+///
+/// As [`execute`], plus the hook's error.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_with_hook(
+    store: &dyn StateStore,
+    state_dir: &Path,
+    authority: &dyn CollapseAuthority,
+    caller: &CallerContext,
+    id: &MoleculeId,
+    request: CollapseRequest,
+    condition: Option<CollapseCondition>,
+    now: DateTime<Utc>,
+    hook: &dyn Fn(CollapseStage) -> Result<(), CosmonError>,
+) -> Result<CollapseOutcome, ExecuteError> {
     let cause = parse_cause(&request)?;
+    match condition {
+        None => unconditional(store, state_dir, authority, caller, id, request, cause, now),
+        Some(condition) => keyed(
+            store,
+            state_dir,
+            authority,
+            caller,
+            id,
+            &request,
+            cause.as_ref(),
+            &condition,
+            now,
+            hook,
+        )
+        .map(CollapseOutcome::Keyed)
+        .map_err(ExecuteError::from),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn unconditional(
+    store: &dyn StateStore,
+    state_dir: &Path,
+    authority: &dyn CollapseAuthority,
+    caller: &CallerContext,
+    id: &MoleculeId,
+    request: CollapseRequest,
+    cause: Option<CollapseCause>,
+    now: DateTime<Utc>,
+) -> Result<CollapseOutcome, ExecuteError> {
+    // The guard comes first: terminating a co-piloted mission is refused
+    // before anything is read for the transition, not compensated after.
+    if let Some(refusal) = authority
+        .check(id, caller)
+        .map_err(|e| CollapseError::StoreUnavailable(e.to_string()))?
+    {
+        return Err(ExecuteError::UnleasedPilotGesture(refusal));
+    }
 
     let mol = store
         .load_molecule(id)
@@ -191,60 +480,295 @@ pub fn collapse(
     // (`task-20260509-177e`).
     let previous_was_stuck = prev_status == MoleculeStatus::Frozen && mol.stuck_at.is_some();
 
-    // Idempotent re-entry.
     if prev_status == MoleculeStatus::Collapsed {
-        let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        emit_authz_decision(
-            state_dir,
-            "collapse",
-            &subject_kind,
-            None,
-            decision,
-            latency_ms,
-        );
-        return Ok(CollapseView {
+        return Ok(CollapseOutcome::Unconditional {
+            view: CollapseView {
+                id: id.clone(),
+                previous_status: prev_status,
+                reason: request.reason,
+                cause,
+                already_collapsed: true,
+                previous_was_stuck,
+            },
+            molecule: None,
+        });
+    }
+    if prev_status == MoleculeStatus::Completed {
+        return Err(CollapseError::AlreadyCompleted(id.clone()).into());
+    }
+
+    let updated = collapsed_record(mol, &request, cause.as_ref(), None, now);
+    store
+        .save_molecule(&updated.id.clone(), &updated)
+        .map_err(|e| CollapseError::from_cosmon(id, e))?;
+    announce(
+        store,
+        state_dir,
+        &updated,
+        prev_status,
+        previous_was_stuck,
+        &request,
+    );
+
+    Ok(CollapseOutcome::Unconditional {
+        view: CollapseView {
             id: id.clone(),
             previous_status: prev_status,
             reason: request.reason,
             cause,
-            already_collapsed: true,
+            already_collapsed: false,
             previous_was_stuck,
+        },
+        molecule: Some(updated),
+    })
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn keyed(
+    store: &dyn StateStore,
+    state_dir: &Path,
+    authority: &dyn CollapseAuthority,
+    caller: &CallerContext,
+    id: &MoleculeId,
+    request: &CollapseRequest,
+    cause: Option<&CollapseCause>,
+    condition: &CollapseCondition,
+    now: DateTime<Utc>,
+    hook: &dyn Fn(CollapseStage) -> Result<(), CosmonError>,
+) -> Result<KeyedCollapse, CollapseError> {
+    let store_err = |e: CosmonError| CollapseError::from_cosmon(id, e);
+    let actor = caller.actor();
+    let digest = request
+        .intent(id, condition, actor.as_deref())
+        .digest()
+        .map_err(|e: ContractError| CollapseError::StoreUnavailable(e.to_string()))?;
+    let key = &condition.key;
+
+    let refused = |refusal: CollapseRefusal, previous_was_stuck| KeyedCollapse {
+        outcome: refusal.kind(),
+        digest: digest.clone(),
+        receipt: None,
+        refusal: Some(refusal),
+        announced: false,
+        molecule: None,
+        previous_was_stuck,
+    };
+
+    // ---- critical section -------------------------------------------------
+    let guard = store.lock_molecule(id).map_err(store_err)?;
+    let mut key_record = store.read_collapse_key(key).map_err(store_err)?;
+    let (mol, revision) = store.load_molecule_revisioned(id).map_err(store_err)?;
+    let lease = authority
+        .check(id, caller)
+        .map_err(|e| CollapseError::StoreUnavailable(e.to_string()))?;
+    let prev_status = mol.status;
+    let previous_was_stuck = prev_status == MoleculeStatus::Frozen && mol.stuck_at.is_some();
+
+    // At most two rounds: the second runs only when another process created
+    // the key record between our read and our create-only reservation.
+    for _round in 0..2 {
+        let decision = decide(&DecisionInput {
+            target: id,
+            condition,
+            digest: &digest,
+            key_record: key_record.as_ref(),
+            status: prev_status,
+            revision: &revision,
+            state_receipt: mol.collapse_receipt.as_ref(),
+            lease_refusal: lease.as_ref().map(|l| l.why.as_str()),
+            now,
         });
-    }
+        match decision {
+            CollapseDecision::Refuse(refusal) => return Ok(refused(refusal, previous_was_stuck)),
+            CollapseDecision::Replay { receipt, finalize } => {
+                if finalize {
+                    // The state carries the receipt but the key record does
+                    // not say so: a crash interrupted the commit after its
+                    // commit point. Finish it, and announce the transition,
+                    // which nobody did (announcing happens after the key
+                    // commit).
+                    let record = key_record.clone().unwrap_or_else(|| {
+                        CollapseKeyRecord::reserved(key.clone(), id.clone(), digest.clone())
+                    });
+                    store
+                        .commit_collapse_key(&record.committed(receipt.clone()))
+                        .map_err(store_err)?;
+                    drop(guard);
+                    let previous = receipt.previous_status;
+                    let was_stuck = previous == MoleculeStatus::Frozen && mol.stuck_at.is_some();
+                    announce(store, state_dir, &mol, previous, was_stuck, request);
+                    return Ok(KeyedCollapse {
+                        outcome: CollapseOutcomeKind::Replayed,
+                        digest,
+                        receipt: Some(receipt),
+                        refusal: None,
+                        announced: true,
+                        molecule: None,
+                        previous_was_stuck: was_stuck,
+                    });
+                }
+                return Ok(KeyedCollapse {
+                    outcome: CollapseOutcomeKind::Replayed,
+                    digest,
+                    receipt: Some(receipt),
+                    refusal: None,
+                    announced: false,
+                    molecule: None,
+                    previous_was_stuck: false,
+                });
+            }
+            CollapseDecision::Admit { reserve } => {
+                hook(CollapseStage::Decided).map_err(store_err)?;
+                let reservation =
+                    CollapseKeyRecord::reserved(key.clone(), id.clone(), digest.clone());
+                if reserve
+                    && !store
+                        .reserve_collapse_key(&reservation)
+                        .map_err(store_err)?
+                {
+                    key_record = store.read_collapse_key(key).map_err(store_err)?;
+                    continue;
+                }
+                hook(CollapseStage::Reserved).map_err(store_err)?;
 
-    if prev_status == MoleculeStatus::Completed {
-        return Err(CollapseError::AlreadyCompleted(id.clone()));
-    }
+                let receipt = CollapseReceipt {
+                    schema: RECEIPT_SCHEMA.to_owned(),
+                    key: key.clone(),
+                    digest: digest.clone(),
+                    molecule: id.clone(),
+                    previous_status: prev_status,
+                    previous_revision: revision.clone(),
+                    committed_at: now,
+                };
+                let updated =
+                    collapsed_record(mol.clone(), request, cause, Some(receipt.clone()), now);
+                // The commit point.
+                store
+                    .save_molecule_durable(&updated.id.clone(), &updated)
+                    .map_err(store_err)?;
+                hook(CollapseStage::StateSaved).map_err(store_err)?;
+                store
+                    .commit_collapse_key(&reservation.committed(receipt.clone()))
+                    .map_err(store_err)?;
+                drop(guard);
+                // ---- end of critical section ------------------------------
 
-    let mut updated = mol;
-    updated.status = MoleculeStatus::Collapsed;
-    updated.collapse_reason = Some(request.reason.clone());
-    updated.collapse_cause.clone_from(&cause);
-    updated
-        .collapse_reason_kind
-        .clone_from(&request.reason_kind);
-    updated.collapsed_step = Some(updated.current_step);
-    if updated.process.is_some() {
-        updated.release_process();
+                announce(
+                    store,
+                    state_dir,
+                    &updated,
+                    prev_status,
+                    previous_was_stuck,
+                    request,
+                );
+                return Ok(KeyedCollapse {
+                    outcome: CollapseOutcomeKind::Transitioned,
+                    digest,
+                    receipt: Some(receipt),
+                    refusal: None,
+                    announced: true,
+                    molecule: Some(updated),
+                    previous_was_stuck,
+                });
+            }
+        }
     }
-    updated.updated_at = Utc::now();
-    store
-        .save_molecule(&updated.id.clone(), &updated)
+    Err(CollapseError::StoreUnavailable(format!(
+        "collapse key record for {id} changed twice during one decision"
+    )))
+}
+
+/// Lock-free lookup of what happened under `key` on molecule `id`.
+///
+/// # Errors
+/// [`CollapseError::MoleculeNotFound`] or a store failure.
+pub fn lookup_receipt(
+    store: &dyn StateStore,
+    id: &MoleculeId,
+    key: &IdempotencyKey,
+) -> Result<ReceiptLookup, CollapseError> {
+    // Record first, state second: a commit racing this read can only make
+    // the answer older (reserved_not_applied), never inconsistent.
+    let record = store
+        .read_collapse_key(key)
         .map_err(|e| CollapseError::from_cosmon(id, e))?;
+    let mol = store
+        .load_molecule(id)
+        .map_err(|e| CollapseError::from_cosmon(id, e))?;
+    Ok(classify_lookup(
+        id,
+        key,
+        record.as_ref(),
+        mol.status,
+        mol.collapse_receipt.as_ref(),
+    ))
+}
 
-    // Append to log.md best-effort.
-    let mol_dir = state_dir
-        .join("fleets")
-        .join(updated.fleet_id.as_str())
-        .join("molecules")
-        .join(updated.id.as_str());
+/// The revision of a molecule's current state, as a keyed collapse will
+/// compare it.
+///
+/// # Errors
+/// [`CollapseError::MoleculeNotFound`] or a store failure.
+pub fn current_revision(
+    store: &dyn StateStore,
+    id: &MoleculeId,
+) -> Result<MoleculeRevision, CollapseError> {
+    store
+        .load_molecule_revisioned(id)
+        .map(|(_, revision)| revision)
+        .map_err(|e| CollapseError::from_cosmon(id, e))
+}
+
+/// The collapsed form of `mol`.
+fn collapsed_record(
+    mut mol: MoleculeData,
+    request: &CollapseRequest,
+    cause: Option<&CollapseCause>,
+    receipt: Option<CollapseReceipt>,
+    now: DateTime<Utc>,
+) -> MoleculeData {
+    mol.status = MoleculeStatus::Collapsed;
+    mol.collapse_reason = Some(request.reason.clone());
+    mol.collapse_cause = cause.cloned();
+    mol.collapse_reason_kind.clone_from(&request.reason_kind);
+    mol.collapsed_step = Some(mol.current_step);
+    // Terminal transition: clear the inline live-process record so a
+    // collapsed molecule never carries a phantom worker pointer
+    // (delib-20260426-1bcd #1 fold-in).
+    if mol.process.is_some() {
+        mol.release_process();
+    }
+    mol.updated_at = now;
+    mol.collapse_receipt = receipt;
+    mol
+}
+
+/// Append the `log.md` entry and emit the `EventV2` records of a transition
+/// that has already been persisted. Best-effort: the collapse happened
+/// whatever this does.
+fn announce(
+    store: &dyn StateStore,
+    state_dir: &Path,
+    mol: &MoleculeData,
+    prev_status: MoleculeStatus,
+    previous_was_stuck: bool,
+    request: &CollapseRequest,
+) {
+    let mut mol_dir = store.molecule_dir(&mol.id);
+    if mol_dir.as_os_str().is_empty() {
+        mol_dir = state_dir
+            .join("fleets")
+            .join(mol.fleet_id.as_str())
+            .join("molecules")
+            .join(mol.id.as_str());
+    }
     let log_path = mol_dir.join("log.md");
     let timestamp = Utc::now().format("%Y-%m-%d %H:%M UTC");
     let mut log_entry = String::new();
     let _ = write!(
         log_entry,
         "\n## {timestamp} — Collapsed\n\n{}\n\nCollapsed at step {}/{}.\n",
-        request.reason, updated.current_step, updated.total_steps
+        request.reason, mol.current_step, mol.total_steps
     );
     if let Ok(existing) = fs::read_to_string(&log_path) {
         let new_log = if existing.is_empty() {
@@ -258,9 +782,8 @@ pub fn collapse(
         let _ = fs::write(&log_path, format!("# Evolution Log\n{log_entry}"));
     }
 
-    // Emit EventV2 records. Legacy `cosmon_filestore::event::append`
-    // calls remain in cs-cli; the lib path keeps the canonical V2
-    // stream and lets cs-cli own the legacy mirror.
+    // Legacy `cosmon_filestore::event::append` mirrors stay in cs-cli; the
+    // lib path keeps the canonical V2 stream.
     let events_path = state_dir.join("events.jsonl");
     // When the prior transition was a stuck-flavored Frozen, emit
     // `from: "stuck"` so the audit trail records the operator's gesture
@@ -273,7 +796,7 @@ pub fn collapse(
     let status_seq = event_log::emit_one(
         &events_path,
         EventV2::MoleculeStatusChanged {
-            molecule_id: id.clone(),
+            molecule_id: mol.id.clone(),
             from: from_label,
             to: "collapsed".to_owned(),
         },
@@ -283,31 +806,12 @@ pub fn collapse(
     let _ = event_log::emit_one(
         &events_path,
         EventV2::MoleculeCollapsed {
-            molecule_id: id.clone(),
+            molecule_id: mol.id.clone(),
             reason: request.reason.clone(),
             kind: request.reason_kind.clone(),
         },
         status_seq,
     );
-
-    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    emit_authz_decision(
-        state_dir,
-        "collapse",
-        &subject_kind,
-        None,
-        decision,
-        latency_ms,
-    );
-
-    Ok(CollapseView {
-        id: id.clone(),
-        previous_status: prev_status,
-        reason: request.reason,
-        cause,
-        already_collapsed: false,
-        previous_was_stuck,
-    })
 }
 
 fn parse_cause(request: &CollapseRequest) -> Result<Option<CollapseCause>, CollapseError> {
@@ -341,7 +845,7 @@ fn derive_subject_kind(subject: &Subject) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Wire-format renderer
+// Wire-format renderers
 // ---------------------------------------------------------------------------
 
 /// JSON body emitted by `cs --json collapse` and
@@ -390,6 +894,62 @@ impl CollapseJson {
             reason: view.reason.clone(),
             cause: view.cause.clone(),
             already_collapsed: view.already_collapsed,
+        }
+    }
+}
+
+/// JSON body of a keyed collapse, on every surface.
+///
+/// `outcome` is the contract; exit codes and HTTP statuses are derived from
+/// it. `receipt` is embedded as a JSON value whose canonical bytes are the
+/// receipt's [`CollapseReceipt::canonical_bytes`].
+#[derive(Debug, Clone, Serialize)]
+pub struct KeyedCollapseJson {
+    /// Molecule targeted.
+    pub molecule: String,
+    /// Decision-table row label.
+    pub outcome: &'static str,
+    /// Digest of the intent, computed by cosmon.
+    pub digest: String,
+    /// The receipt, for `transitioned` / `replayed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<CollapseReceipt>,
+    /// Refusal detail, for every other outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
+}
+
+impl KeyedCollapseJson {
+    /// Render a [`KeyedCollapse`].
+    #[must_use]
+    pub fn from_outcome(id: &MoleculeId, outcome: &KeyedCollapse) -> Self {
+        let detail = outcome.refusal.as_ref().map(|refusal| match refusal {
+            CollapseRefusal::IdempotencyKeyReused { bound_molecule } => {
+                // Another molecule's id is not disclosed; only that the key
+                // is taken.
+                serde_json::json!({ "bound_to_this_molecule": bound_molecule == id })
+            }
+            CollapseRefusal::UnleasedPilotGesture { why } => serde_json::json!({ "why": why }),
+            CollapseRefusal::AlreadyCompleted => serde_json::json!({}),
+            CollapseRefusal::AlreadyCollapsed { by_key } => {
+                serde_json::json!({ "by_key": by_key.as_ref().map(IdempotencyKey::as_str) })
+            }
+            CollapseRefusal::ApprovalExpired { not_after } => {
+                serde_json::json!({ "not_after": render_not_after(not_after) })
+            }
+            CollapseRefusal::UnexpectedStatus { actual } => {
+                serde_json::json!({ "actual_status": actual.to_string() })
+            }
+            CollapseRefusal::StaleRevision { actual } => {
+                serde_json::json!({ "actual_revision": actual.as_str() })
+            }
+        });
+        Self {
+            molecule: id.to_string(),
+            outcome: outcome.outcome.as_str(),
+            digest: outcome.digest.as_str().to_owned(),
+            receipt: outcome.receipt.clone(),
+            detail,
         }
     }
 }
@@ -481,6 +1041,7 @@ mod tests {
             non_integration: None,
             prompt_seal: None,
             briefing_seals: Vec::new(),
+            collapse_receipt: None,
             bootstrap_seals: Vec::new(),
             archived: false,
             last_progress_at: None,

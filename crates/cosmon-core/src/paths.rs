@@ -126,6 +126,10 @@ pub enum CosmonPathKind {
     PilotLeaseGrants,
     /// `cas/<prefix>/<hash>` — content-addressed blob (response hashes, etc.).
     Cas,
+    /// `collapse-receipts/<key-hash>.json` — tenant-wide record of one
+    /// collapse idempotency key: reserved, then committed with its receipt
+    /// (issue #207). The file name is a hash of the key, never the key.
+    CollapseReceipt,
     /// `archive/<YYYY>/<MM>/<mol>/` — durable terminal-transition snapshot
     /// directory (ADR-030). Survives worktree teardown.
     ArchiveMolecule,
@@ -180,6 +184,7 @@ impl CosmonPathKind {
             Self::PilotLeaseRequests => "pilot-lease/<mission>.requests.jsonl",
             Self::PilotLeaseGrants => "pilot-lease/<mission>.grants.jsonl",
             Self::Cas => "cas/<prefix>/<hash>",
+            Self::CollapseReceipt => "collapse-receipts/<key-hash>.json",
             Self::ArchiveMolecule => "archive/<YYYY>/<MM>/<mol>/",
             Self::ArchiveFleetEvents => "archive/events/events-<YYYY-MM>.jsonl",
             Self::ArchiveSchemaVersion => "archive/SCHEMA_VERSION",
@@ -200,7 +205,8 @@ impl CosmonPathKind {
             | Self::FleetLock
             | Self::TrunkLock
             | Self::MoleculeState
-            | Self::LegacyMoleculeState => "cosmon-filestore::FileStore",
+            | Self::LegacyMoleculeState
+            | Self::CollapseReceipt => "cosmon-filestore::FileStore",
             // Not yet funnelled: the fleet-level stream is appended from many
             // `cosmon-cli` sites via `resolve_state_dir(None).join(...)`.
             Self::FleetEvents => "cosmon-cli (scattered, migration tail)",
@@ -239,6 +245,7 @@ impl CosmonPathKind {
             Self::PilotLeaseRequests => "takeover requests on a mission (no authority)",
             Self::PilotLeaseGrants => "operator-granted PRIMARY lease ledger for a mission",
             Self::Cas => "content-addressed blob (response hashes, attachments)",
+            Self::CollapseReceipt => "collapse idempotency-key record and receipt (issue #207)",
             Self::ArchiveMolecule => "durable terminal-transition snapshot (ADR-030)",
             Self::ArchiveFleetEvents => "fleet-level archived transition stream (ADR-030)",
             Self::ArchiveSchemaVersion => "archive schema-version marker (ADR-030)",
@@ -346,6 +353,11 @@ pub enum CosmonPath<'a> {
         /// Content hash of the blob.
         hash: &'a ContentHash,
     },
+    /// See [`CosmonPathKind::CollapseReceipt`].
+    CollapseReceipt {
+        /// `IdempotencyKey::file_stem` of the key.
+        key_hash: &'a str,
+    },
     /// See [`CosmonPathKind::ArchiveMolecule`].
     ArchiveMolecule {
         /// Calendar year of the transition.
@@ -391,6 +403,7 @@ impl CosmonPath<'_> {
             Self::PilotLeaseRequests { .. } => CosmonPathKind::PilotLeaseRequests,
             Self::PilotLeaseGrants { .. } => CosmonPathKind::PilotLeaseGrants,
             Self::Cas { .. } => CosmonPathKind::Cas,
+            Self::CollapseReceipt { .. } => CosmonPathKind::CollapseReceipt,
             Self::ArchiveMolecule { .. } => CosmonPathKind::ArchiveMolecule,
             Self::ArchiveFleetEvents { .. } => CosmonPathKind::ArchiveFleetEvents,
             Self::ArchiveSchemaVersion => CosmonPathKind::ArchiveSchemaVersion,
@@ -446,6 +459,9 @@ impl CosmonPath<'_> {
                 PathBuf::from("pilot-lease").join(format!("{}.grants.jsonl", mission.as_str()))
             }
             Self::Cas { hash } => PathBuf::from("cas").join(hash.prefix()).join(hash.as_str()),
+            Self::CollapseReceipt { key_hash } => {
+                PathBuf::from("collapse-receipts").join(format!("{key_hash}.json"))
+            }
             Self::ArchiveMolecule { year, month, id } => PathBuf::from("archive")
                 .join(format!("{year:04}"))
                 .join(format!("{month:02}"))
@@ -504,6 +520,7 @@ mod tests {
             CosmonPathKind::PilotLeaseRequests => CosmonPath::PilotLeaseRequests { mission: mol() },
             CosmonPathKind::PilotLeaseGrants => CosmonPath::PilotLeaseGrants { mission: mol() },
             CosmonPathKind::Cas => CosmonPath::Cas { hash: hash() },
+            CosmonPathKind::CollapseReceipt => CosmonPath::CollapseReceipt { key_hash: "k0" },
             CosmonPathKind::ArchiveMolecule => CosmonPath::ArchiveMolecule {
                 year: 2026,
                 month: 6,
@@ -594,6 +611,7 @@ mod tests {
             "pilot-lease/<mission>.requests.jsonl",
             "pilot-lease/<mission>.grants.jsonl",
             "cas/<prefix>/<hash>",
+            "collapse-receipts/<key-hash>.json",
             "archive/<YYYY>/<MM>/<mol>/",
             "archive/events/events-<YYYY-MM>.jsonl",
             "archive/SCHEMA_VERSION",

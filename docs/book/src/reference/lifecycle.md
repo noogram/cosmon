@@ -413,6 +413,16 @@ Pass --cause to attribute the failure with a structured tag (ADR-062):
   process_death    — worker process died (OOM, signal).
   unknown          — could not be classified.
 
+Conditional, idempotent collapse (a broker executing an approved collapse):
+  rev=$(cs --json observe <mol> | jq -r .revision)
+  cs --json collapse <mol> --reason "<approved reason>" --key <KEY> \
+      --expect-status running --expect-revision "$rev"
+  cs --json collapse-receipt <mol> <KEY>    # after a lost response
+The same key and request replays the stored receipt. Outcomes and exit codes:
+transitioned / replayed 0, unleased_pilot_gesture 16,
+idempotency_key_reused 20, already_completed 21, already_collapsed 22,
+approval_expired 23, unexpected_status 24, stale_revision 25.
+
 ###### **Arguments:**
 
 * `<MOLECULE>` — Molecule ID to collapse
@@ -425,6 +435,28 @@ Pass --cause to attribute the failure with a structured tag (ADR-062):
 * `--account <ALIAS>` — Account alias for `--cause rate_limit` (e.g. `default`)
 * `--kind <KIND>` — Quota currency name for `--cause rate_limit` (e.g. `max_rolling_5h`, `max_weekly`, `api_key_org_monthly`, `financial_usd`, `custody_scoped`). Free-form to remain extensible across providers
 * `--reason-kind <REASON_KIND>` — Operator-facing collapse classification for `cs errors` aggregation: one of `worker_crashed`, `gate_failed`, `blocker_stuck`, `manual_abort`, `resource_exhausted`. Any other value lands in [`CollapseReason::Other`] verbatim; by convention `verification_blocked` marks work done whose gates were blocked by infrastructure — the worker's claim, never merge-safety evidence
+* `--ops-dir <OPS_DIR>` — Path to the state store root (overrides walk-up discovery)
+* `--key <KEY>` — Make the collapse conditional and idempotent under this caller key (`[A-Za-z0-9_-]{16,128}`, generated once by the caller and resent unchanged on every retry). Requires --expect-status and --expect-revision. Without --key, `cs collapse` is unconditional, as it always was
+* `--expect-status <STATUS>` — Status the caller confirmed (pending, queued, running, frozen, starved). A different status is refused `unexpected_status`
+* `--expect-revision <REVISION>` — Revision the caller confirmed, as `cs observe <ID> --json` prints it (`b3:…`). A different revision is refused `stale_revision`
+* `--approval-digest <DIGEST>` — Opaque digest of the operator approval; recorded in the request digest so a different approval is a different request
+* `--not-after <RFC3339>` — RFC 3339 deadline of the approval. After it the collapse is refused `approval_expired` (a replay of a committed key still succeeds)
+
+
+
+## `cs collapse-receipt`
+
+Read back what happened to a `cs collapse --key` request — committed, reserved, inconsistent or unknown
+
+**Usage:** `cs collapse-receipt [OPTIONS] <MOLECULE> <KEY>`
+
+###### **Arguments:**
+
+* `<MOLECULE>` — Molecule the key was sent for
+* `<KEY>` — The idempotency key sent with `cs collapse --key`
+
+###### **Options:**
+
 * `--ops-dir <OPS_DIR>` — Path to the state store root (overrides walk-up discovery)
 
 

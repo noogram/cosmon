@@ -37,6 +37,7 @@ Molecule lifecycle:
   evolve               Evolve a molecule to its next lifecycle state
   complete             Complete a molecule — idempotent Active→Completed transition (worker-callable)
   collapse             Collapse a molecule — terminate with final state recording
+  collapse-receipt     Read back what happened to a `cs collapse --key` request — committed, reserved, inconsistent or unknown
   stuck                Stuck — freeze a molecule and record the blocker
   await-operator       Await-operator — the only sanctioned way to block on an operator decision at an irreversibility boundary (ADR-123). Routes on the molecule's `op-block:*` capability: block-and-emit, or surface-and-continue
   freeze               Freeze a worker — suspend with state preservation (preemption)

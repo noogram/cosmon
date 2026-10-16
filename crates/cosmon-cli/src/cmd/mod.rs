@@ -17,6 +17,7 @@ pub mod claim;
 pub mod cluster;
 pub mod collaboration;
 pub mod collapse;
+pub mod collapse_receipt;
 pub mod complete;
 pub mod config;
 pub mod cross_galaxy;

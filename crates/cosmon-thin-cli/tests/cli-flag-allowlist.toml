@@ -147,6 +147,12 @@ class = "out_of_scope"
 reason = "EventV2 inspection — local-only debug surface."
 
 [[verb_absent_from_thin]]
+verb = "collapse-receipt"
+class = "out_of_scope"
+adr_ref = "ADR-187"
+reason = "local lookup of a collapse key record (issue #207, lot B1). Its remote counterpart, GET /v1/molecules/{id}/collapse-receipts/{key}, lands with the keyed API routes in the next increment."
+
+[[verb_absent_from_thin]]
 verb = "claim"
 class = "out_of_scope"
 reason = "pilot hold on a pending molecule — arbitrates the local Pending→Active race between a human `cs tackle` and a resident `cs run` walker on THIS node. The hold means nothing to a remote tenant with no walker to defer to."
@@ -787,6 +793,36 @@ reason = "typed CollapseReasonKind discriminant — local cataloguing concern; r
 verb = "collapse"
 flag = "--with-seats"
 reason = "fans out over the local work roster (work-ref.json files in the molecule directories, issue #162); a remote tenant has no roster surface and the RPP collapse route acts on one molecule."
+
+[[flag_only_in_cs]]
+verb = "collapse"
+flag = "--key"
+adr_ref = "ADR-187"
+reason = "the caller idempotency key of a conditional collapse (issue #207). The remote counterpart is a new keyed route (PUT /v1/molecules/{id}/collapse-receipts/{key}), not a field on the POST that cs-thin models: an older server ignores unknown POST fields and would collapse unconditionally."
+
+[[flag_only_in_cs]]
+verb = "collapse"
+flag = "--expect-status"
+adr_ref = "ADR-187"
+reason = "the expected status of a conditional collapse (issue #207). The remote counterpart is a new keyed route (PUT /v1/molecules/{id}/collapse-receipts/{key}), not a field on the POST that cs-thin models: an older server ignores unknown POST fields and would collapse unconditionally."
+
+[[flag_only_in_cs]]
+verb = "collapse"
+flag = "--expect-revision"
+adr_ref = "ADR-187"
+reason = "the expected revision of a conditional collapse (issue #207). The remote counterpart is a new keyed route (PUT /v1/molecules/{id}/collapse-receipts/{key}), not a field on the POST that cs-thin models: an older server ignores unknown POST fields and would collapse unconditionally."
+
+[[flag_only_in_cs]]
+verb = "collapse"
+flag = "--approval-digest"
+adr_ref = "ADR-187"
+reason = "the approval digest of a conditional collapse (issue #207). The remote counterpart is a new keyed route (PUT /v1/molecules/{id}/collapse-receipts/{key}), not a field on the POST that cs-thin models: an older server ignores unknown POST fields and would collapse unconditionally."
+
+[[flag_only_in_cs]]
+verb = "collapse"
+flag = "--not-after"
+adr_ref = "ADR-187"
+reason = "the approval deadline of a conditional collapse (issue #207). The remote counterpart is a new keyed route (PUT /v1/molecules/{id}/collapse-receipts/{key}), not a field on the POST that cs-thin models: an older server ignores unknown POST fields and would collapse unconditionally."
 
 # ─────────────────────────────────────────────────────────────────────
 # tackle — cs has rich local plumbing (worktree, tmux, adapter, fleet,

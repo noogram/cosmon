@@ -754,6 +754,14 @@ pub struct MoleculeData {
     /// `--adapter`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter: Option<String>,
+
+    /// Receipt of the keyed collapse that collapsed this molecule (issue
+    /// #207). Written in the same rename that sets `Collapsed`, which makes
+    /// that rename the commit point of a keyed collapse: a receipt here
+    /// means the transition happened. `None` for unkeyed collapses and every
+    /// molecule that is not collapsed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collapse_receipt: Option<cosmon_core::collapse_contract::CollapseReceipt>,
 }
 
 /// Serde skip predicate — keeps zero-valued `u32` counters out of the
@@ -1249,6 +1257,23 @@ impl FleetGuard for () {}
 /// The no-op trunk guard — see [`FleetGuard`] `for ()`.
 impl TrunkGuard for () {}
 
+/// RAII guard over one molecule's dispatch lock.
+///
+/// Returned by [`StateStore::lock_molecule`]. The lock is the one `cs tackle`
+/// holds from claim through spawn, so a keyed collapse waits out a concurrent
+/// dispatch of the same molecule and then sees what the dispatch wrote. There
+/// is deliberately no no-op implementation: an adapter that cannot lock a
+/// molecule refuses a keyed collapse instead of pretending to serialize it.
+pub trait MoleculeGuard {}
+
+fn unsupported(what: &str) -> CosmonError {
+    CosmonError::StateStore {
+        reason: format!(
+            "this state store does not support {what}, which a keyed collapse needs (issue #207)"
+        ),
+    }
+}
+
 /// Hexagonal port for persisting and retrieving Cosmon state.
 ///
 /// Implementations (adapters) provide the actual storage backend
@@ -1381,6 +1406,109 @@ pub trait StateStore {
     /// Returns [`CosmonError`] if the trunk lock cannot be acquired.
     fn lock_trunk(&self, _cmd_hint: &str) -> Result<Box<dyn TrunkGuard + '_>, CosmonError> {
         Ok(Box::new(()))
+    }
+
+    /// Acquire one molecule's dispatch lock (see [`MoleculeGuard`]).
+    ///
+    /// Take it before the fleet lock, never inside it. The default refuses:
+    /// a keyed collapse must not run under a lock that holds nothing.
+    ///
+    /// # Errors
+    /// [`CosmonError::MoleculeNotFound`] when the molecule does not exist,
+    /// [`CosmonError::StateStore`] when the lock cannot be taken or the
+    /// adapter has none.
+    fn lock_molecule(&self, _id: &MoleculeId) -> Result<Box<dyn MoleculeGuard + '_>, CosmonError> {
+        Err(unsupported("a per-molecule lock"))
+    }
+
+    /// Load a molecule together with the revision of the state it was read
+    /// from.
+    ///
+    /// The revision is computed on read and never stored (issue #207). The
+    /// default hashes the canonical form of the decoded record; an adapter
+    /// that reads a file overrides it to hash exactly the bytes it parsed,
+    /// unknown keys included.
+    ///
+    /// # Errors
+    /// As [`load_molecule`](Self::load_molecule).
+    fn load_molecule_revisioned(
+        &self,
+        id: &MoleculeId,
+    ) -> Result<
+        (
+            MoleculeData,
+            cosmon_core::collapse_contract::MoleculeRevision,
+        ),
+        CosmonError,
+    > {
+        let data = self.load_molecule(id)?;
+        let revision =
+            cosmon_core::collapse_contract::MoleculeRevision::of_value(&data).map_err(|e| {
+                CosmonError::StateStore {
+                    reason: e.to_string(),
+                }
+            })?;
+        Ok((data, revision))
+    }
+
+    /// Persist a molecule so that the write survives a crash once this
+    /// returns: the data and the rename are both synced.
+    ///
+    /// A keyed collapse acknowledges only what this has made durable. The
+    /// default delegates to [`save_molecule`](Self::save_molecule), which is
+    /// right for an adapter with no volatile buffer.
+    ///
+    /// # Errors
+    /// As [`save_molecule`](Self::save_molecule).
+    fn save_molecule_durable(
+        &self,
+        id: &MoleculeId,
+        data: &MoleculeData,
+    ) -> Result<(), CosmonError> {
+        self.save_molecule(id, data)
+    }
+
+    /// Read the tenant-wide record of a collapse idempotency key.
+    ///
+    /// Lock-free. `Ok(None)` means no record exists.
+    ///
+    /// # Errors
+    /// [`CosmonError::StateStore`] on I/O failure, an unreadable record, or an
+    /// adapter without receipt storage.
+    fn read_collapse_key(
+        &self,
+        _key: &cosmon_core::collapse_contract::IdempotencyKey,
+    ) -> Result<Option<cosmon_core::collapse_contract::CollapseKeyRecord>, CosmonError> {
+        Err(unsupported("collapse receipts"))
+    }
+
+    /// Create a key record if none exists (create-only, durable).
+    ///
+    /// Returns `true` when this call created it, `false` when a record for
+    /// the key already existed (it is left untouched). Create-only is what
+    /// binds a key to one molecule across processes that hold different
+    /// molecule locks.
+    ///
+    /// # Errors
+    /// [`CosmonError::StateStore`] on I/O failure or an adapter without
+    /// receipt storage.
+    fn reserve_collapse_key(
+        &self,
+        _record: &cosmon_core::collapse_contract::CollapseKeyRecord,
+    ) -> Result<bool, CosmonError> {
+        Err(unsupported("collapse receipts"))
+    }
+
+    /// Replace a key record with its committed form (durable).
+    ///
+    /// # Errors
+    /// [`CosmonError::StateStore`] on I/O failure or an adapter without
+    /// receipt storage.
+    fn commit_collapse_key(
+        &self,
+        _record: &cosmon_core::collapse_contract::CollapseKeyRecord,
+    ) -> Result<(), CosmonError> {
+        Err(unsupported("collapse receipts"))
     }
 }
 
@@ -1584,6 +1712,7 @@ mod tests {
             harvest_reason: None,
             prompt_seal: None,
             briefing_seals: Vec::new(),
+            collapse_receipt: None,
             bootstrap_seals: Vec::new(),
             archived: false,
             last_progress_at: None,
@@ -2428,6 +2557,7 @@ mod tests {
                         prompt_seal: None,
                         briefing_seals,
                         bootstrap_seals: Vec::new(),
+                        collapse_receipt: None,
                         archived: false,
                         last_progress_at: None,
                         last_output_at: None,

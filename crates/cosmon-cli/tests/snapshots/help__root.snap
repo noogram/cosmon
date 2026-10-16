@@ -287,6 +287,7 @@ Commands:
   errors             Errors — aggregate molecule-collapse events into one failure overview: what is breaking the fleet, and which molecules are hit
   evolve             Evolve a molecule to its next lifecycle state
   collapse           Collapse a molecule — terminate with final state recording
+  collapse-receipt   Read back what happened to a `cs collapse --key` request — committed, reserved, inconsistent or unknown
   complete           Complete a molecule — idempotent Active→Completed transition (worker-callable)
   decay              Decay a molecule into child molecules (1 → N)
   merge              Merge molecules into a synthesis (N → 1)

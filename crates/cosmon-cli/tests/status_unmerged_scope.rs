@@ -135,6 +135,7 @@ fn molecule(id: &str, status: MoleculeStatus, reason: Option<&str>) -> MoleculeD
         non_integration: None,
         prompt_seal: None,
         briefing_seals: Vec::new(),
+        collapse_receipt: None,
         bootstrap_seals: Vec::new(),
         archived: status == MoleculeStatus::Collapsed,
         last_progress_at: None,

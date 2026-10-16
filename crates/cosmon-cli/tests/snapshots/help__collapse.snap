@@ -10,17 +10,22 @@ Arguments:
   <MOLECULE>  Molecule ID to collapse
 
 Options:
-      --config <PATH>              Path to the state directory (default: the galaxy's .cosmon/state/)
-      --reason <REASON>            Reason for the collapse. With `--with-seats` it may be omitted when the named molecule is already collapsed: its recorded reason is then inherited, suffixed with the seat and work
-  -v, --verbose                    Enable verbose output
-      --with-seats                 Also collapse every other live member of the declared work the molecule belongs to (owner or seat), with the same reason. Never merges; a completed seat is skipped and `cs done <seat>` is printed
-      --cause <CAUSE>              Structured cause attribution (ADR-062): `rate_limit`, `inference_stall`, `manual`, `process_death`, `unknown`. With `rate_limit`, pair `--account` and `--kind` for the K3 fixture shape
-      --json                       Output in JSON format
-      --account <ALIAS>            Account alias for `--cause rate_limit` (e.g. `default`)
-      --kind <KIND>                Quota currency name for `--cause rate_limit` (e.g. `max_rolling_5h`, `max_weekly`, `api_key_org_monthly`, `financial_usd`, `custody_scoped`). Free-form to remain extensible across providers
-      --reason-kind <REASON_KIND>  Operator-facing collapse classification for `cs errors` aggregation: one of `worker_crashed`, `gate_failed`, `blocker_stuck`, `manual_abort`, `resource_exhausted`. Any other value lands in [`CollapseReason::Other`] verbatim; by convention `verification_blocked` marks work done whose gates were blocked by infrastructure — the worker's claim, never merge-safety evidence
-      --ops-dir <OPS_DIR>          Path to the state store root (overrides walk-up discovery)
-  -h, --help                       Print help
+      --config <PATH>               Path to the state directory (default: the galaxy's .cosmon/state/)
+      --reason <REASON>             Reason for the collapse. With `--with-seats` it may be omitted when the named molecule is already collapsed: its recorded reason is then inherited, suffixed with the seat and work
+  -v, --verbose                     Enable verbose output
+      --with-seats                  Also collapse every other live member of the declared work the molecule belongs to (owner or seat), with the same reason. Never merges; a completed seat is skipped and `cs done <seat>` is printed
+      --cause <CAUSE>               Structured cause attribution (ADR-062): `rate_limit`, `inference_stall`, `manual`, `process_death`, `unknown`. With `rate_limit`, pair `--account` and `--kind` for the K3 fixture shape
+      --json                        Output in JSON format
+      --account <ALIAS>             Account alias for `--cause rate_limit` (e.g. `default`)
+      --kind <KIND>                 Quota currency name for `--cause rate_limit` (e.g. `max_rolling_5h`, `max_weekly`, `api_key_org_monthly`, `financial_usd`, `custody_scoped`). Free-form to remain extensible across providers
+      --reason-kind <REASON_KIND>   Operator-facing collapse classification for `cs errors` aggregation: one of `worker_crashed`, `gate_failed`, `blocker_stuck`, `manual_abort`, `resource_exhausted`. Any other value lands in [`CollapseReason::Other`] verbatim; by convention `verification_blocked` marks work done whose gates were blocked by infrastructure — the worker's claim, never merge-safety evidence
+      --ops-dir <OPS_DIR>           Path to the state store root (overrides walk-up discovery)
+      --key <KEY>                   Make the collapse conditional and idempotent under this caller key (`[A-Za-z0-9_-]{16,128}`, generated once by the caller and resent unchanged on every retry). Requires --expect-status and --expect-revision. Without --key, `cs collapse` is unconditional, as it always was
+      --expect-status <STATUS>      Status the caller confirmed (pending, queued, running, frozen, starved). A different status is refused `unexpected_status`
+      --expect-revision <REVISION>  Revision the caller confirmed, as `cs observe <ID> --json` prints it (`b3:…`). A different revision is refused `stale_revision`
+      --approval-digest <DIGEST>    Opaque digest of the operator approval; recorded in the request digest so a different approval is a different request
+      --not-after <RFC3339>         RFC 3339 deadline of the approval. After it the collapse is refused `approval_expired` (a replay of a committed key still succeeds)
+  -h, --help                        Print help
 
 EXAMPLES:
   cs collapse <mol> --reason "superseded by <other>"
@@ -45,3 +50,13 @@ Pass --cause to attribute the failure with a structured tag (ADR-062):
   manual           — operator decision (default if --reason alone).
   process_death    — worker process died (OOM, signal).
   unknown          — could not be classified.
+
+Conditional, idempotent collapse (a broker executing an approved collapse):
+  rev=$(cs --json observe <mol> | jq -r .revision)
+  cs --json collapse <mol> --reason "<approved reason>" --key <KEY> \
+      --expect-status running --expect-revision "$rev"
+  cs --json collapse-receipt <mol> <KEY>    # after a lost response
+The same key and request replays the stored receipt. Outcomes and exit codes:
+transitioned / replayed 0, unleased_pilot_gesture 16,
+idempotency_key_reused 20, already_completed 21, already_collapsed 22,
+approval_expired 23, unexpected_status 24, stale_revision 25.

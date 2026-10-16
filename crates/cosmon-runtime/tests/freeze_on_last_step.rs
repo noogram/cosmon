@@ -96,6 +96,7 @@ fn seed_molecule(store: &dyn StateStore, id: &MoleculeId, freeze: bool) {
         non_integration: None,
         prompt_seal: None,
         briefing_seals: Vec::new(),
+        collapse_receipt: None,
         bootstrap_seals: Vec::new(),
         archived: false,
         last_progress_at: None,
