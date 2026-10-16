@@ -19,6 +19,12 @@ this stage.
 
 ## [Unreleased]
 
+### Added
+
+- `cs done` warns when a spore molecule has files in its `output_dir` but no
+  commits beyond its base, so the deliverable's location is visible during
+  harvest. The warning does not prevent teardown. (#205)
+
 ### Breaking changes and operator actions on upgrade
 
 - RPP adapter: a binding that declares `[scopes]` is the scope ceiling; token

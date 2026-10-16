@@ -915,6 +915,39 @@ fn branch_is_empty_relative_to(repo_root: &Path, branch: &str, base: &str) -> bo
     }
 }
 
+/// Describe a spore deliverable that may have been written outside the worker worktree.
+///
+/// The decision is pure so the harvest can warn without changing its outcome.
+fn spore_output_warning(
+    branch_has_no_commits: bool,
+    output_dir: &str,
+    file_count: usize,
+) -> Option<String> {
+    (branch_has_no_commits && file_count > 0).then(|| {
+        format!(
+            "molecule branch has no commits beyond its base, but output_dir {output_dir} contains {file_count} file(s); the deliverable may have been written there instead of the worktree"
+        )
+    })
+}
+
+/// Count regular files under a spore output directory, including nested files.
+fn count_output_files(path: &Path) -> std::io::Result<usize> {
+    if !path.is_dir() {
+        return Ok(0);
+    }
+    let mut count = 0;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        if entry.file_type()?.is_dir() {
+            count += count_output_files(&entry_path)?;
+        } else if entry.file_type()?.is_file() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 /// `true` iff `branch`'s tip is on `base` but **not** on `base`'s first-parent
 /// chain — it arrived through the side parent of a merge commit.
 ///
@@ -2409,6 +2442,18 @@ fn run_with_remote_before_lock(
     );
     let base_source = resolved_base.source;
     let base_branch = resolved_base.branch;
+
+    if let Some(output_dir) = mol.variables.get("output_dir") {
+        let branch_has_no_commits = branch_exists(&repo_root, &branch_name)
+            && branch_is_empty_relative_to(&repo_root, &branch_name, &base_branch);
+        if let Ok(file_count) = count_output_files(Path::new(output_dir)) {
+            if let Some(warning) =
+                spore_output_warning(branch_has_no_commits, output_dir, file_count)
+            {
+                eprintln!("⚠ {warning}");
+            }
+        }
+    }
 
     // 1b'. Range non-emptiness precondition (delib-20260717-194b, F5 / adversary
     //      A6). Every range-scoped gate below scans `<base>..<branch>`. If base
@@ -8099,6 +8144,31 @@ fn find_repo_root(ctx: &Context) -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warns_only_for_nonempty_output_on_an_empty_branch() {
+        let warning = spore_output_warning(true, "/spore/output", 2);
+        assert!(warning.as_deref().is_some_and(|message| {
+            message.contains("/spore/output")
+                && message.contains("2 file(s)")
+                && message.contains("deliverable may have been written there")
+        }));
+        assert_eq!(spore_output_warning(true, "/spore/output", 0), None);
+        assert_eq!(spore_output_warning(false, "/spore/output", 2), None);
+    }
+
+    #[test]
+    fn counts_files_in_spore_output_directory() {
+        let output = TempDir::new().expect("output directory");
+        assert_eq!(count_output_files(output.path()).expect("empty output"), 0);
+        std::fs::create_dir(output.path().join("nested")).expect("nested directory");
+        std::fs::write(output.path().join("one.txt"), "one").expect("first file");
+        std::fs::write(output.path().join("nested/two.txt"), "two").expect("nested file");
+        assert_eq!(
+            count_output_files(output.path()).expect("populated output"),
+            2
+        );
+    }
     use cosmon_core::harvest_door::HarvestOptions;
     use cosmon_core::id::{FleetId, FormulaId};
     use cosmon_core::molecule::MoleculeStatus;
