@@ -101,7 +101,17 @@ Pass --cause to attribute the failure with a structured tag (ADR-062):
   inference_stall  — worker alive but stopped emitting tokens.
   manual           — operator decision (default if --reason alone).
   process_death    — worker process died (OOM, signal).
-  unknown          — could not be classified.";
+  unknown          — could not be classified.
+
+Conditional, idempotent collapse (a broker executing an approved collapse):
+  rev=$(cs --json observe <mol> | jq -r .revision)
+  cs --json collapse <mol> --reason \"<approved reason>\" --key <KEY> \\
+      --expect-status running --expect-revision \"$rev\"
+  cs --json collapse-receipt <mol> <KEY>    # after a lost response
+The same key and request replays the stored receipt. Outcomes and exit codes:
+transitioned / replayed 0, unleased_pilot_gesture 16,
+idempotency_key_reused 20, already_completed 21, already_collapsed 22,
+approval_expired 23, unexpected_status 24, stale_revision 25.";
 
 pub const COMPLETE: &str = "EXAMPLES:
   cs complete <mol> --reason \"all steps done\"

@@ -94,6 +94,10 @@ enum Command {
     #[command(after_help = cmd::examples::COLLAPSE)]
     Collapse(cmd::collapse::Args),
 
+    /// Read back what happened to a `cs collapse --key` request — committed, reserved, inconsistent or unknown
+    #[command(name = "collapse-receipt")]
+    CollapseReceipt(cmd::collapse_receipt::Args),
+
     /// Complete a molecule — idempotent Active→Completed transition (worker-callable)
     #[command(after_help = cmd::examples::COMPLETE)]
     Complete(cmd::complete::Args),
@@ -773,6 +777,7 @@ fn main() {
         Command::Errors(args) => cmd::errors::run(&ctx, &args),
         Command::Evolve(args) => cmd::evolve::run(&ctx, &args),
         Command::Collapse(args) => cmd::collapse::run(&ctx, &args),
+        Command::CollapseReceipt(args) => cmd::collapse_receipt::run(&ctx, &args),
         Command::Complete(args) => cmd::complete::run(&ctx, &args),
         Command::Decay(args) => cmd::interaction::run_decay(&ctx, &args),
         Command::Merge(args) => cmd::interaction::run_merge(&ctx, &args),
@@ -915,6 +920,10 @@ fn main() {
         // back to pick its label (ADR-176 D7). Placed before the generic
         // exit-1 path so a named refusal never reaches a script as "failed".
         if let Some(code) = cmd::done::refusal_exit_code(&e) {
+            std::process::exit(code);
+        }
+        // A refused keyed collapse names its decision-table row (issue #207).
+        if let Some(code) = cmd::collapse::refusal_exit_code(&e) {
             std::process::exit(code);
         }
         if e.downcast_ref::<cmd::work::WorkRefusal>().is_some() {

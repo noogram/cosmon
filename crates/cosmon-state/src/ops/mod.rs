@@ -45,7 +45,10 @@ pub use await_operator::{
     await_operator, AwaitOperatorError, AwaitOperatorJson, AwaitOperatorOutcome,
     AwaitOperatorRequest, AwaitOperatorView,
 };
-pub use collapse::{collapse, CollapseError, CollapseJson, CollapseRequest, CollapseView};
+pub use collapse::{
+    collapse, CollapseAuthority, CollapseError, CollapseJson, CollapseOutcome, CollapseRequest,
+    CollapseView, ExecuteError, KeyedCollapse, KeyedCollapseJson, LeaseRefusal, NoLeaseCheck,
+};
 pub use ensemble::{
     ensemble, EnsembleEntryJson, EnsembleError, EnsembleJson, EnsembleRequest, EnsembleView,
 };

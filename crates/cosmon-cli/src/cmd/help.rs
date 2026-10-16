@@ -115,6 +115,7 @@ pub(crate) fn command_group_layout() -> Vec<CommandGroup> {
                 Derived("evolve"),
                 Derived("complete"),
                 Derived("collapse"),
+                Derived("collapse-receipt"),
                 Derived("stuck"),
                 Derived("await-operator"),
                 Derived("freeze"),

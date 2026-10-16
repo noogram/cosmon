@@ -199,7 +199,10 @@ async fn require_valid_bearer(
         .galaxies_root
         .join(spark.noyau.as_str())
         .join(".cosmon");
-    let pin = HttpStatePin::new(tenant_cosmon.join("state"), tenant_cosmon.join("formulas"));
+    // The verified subject rides with the pin so a lifecycle tool can name
+    // the network caller without reading this server's environment.
+    let pin = HttpStatePin::new(tenant_cosmon.join("state"), tenant_cosmon.join("formulas"))
+        .with_subject(jwt.sub.clone());
     let mut req = Request::from_parts(parts, Body::from(body_bytes));
     req.extensions_mut().insert(pin);
 

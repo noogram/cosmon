@@ -2,6 +2,21 @@
 
 # CLI and UI parity audit
 
+## Conditional, idempotent collapse — local surfaces (issue #207, ADR-187)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Read the revision a conditional collapse compares | `cs --json observe <ID>` carries `revision` (`b3:<hex>`, BLAKE3 of the canonical state JSON, computed on read, never stored) | No revision display audited | Not yet: `GET /v1/molecules/{id}` gains the field and a strong ETag in the next increment |
+| Collapse only the state the caller confirmed, once, under a caller key | `cs collapse <ID> --reason R --key K --expect-status S --expect-revision REV [--approval-digest D] [--not-after T]`; `--json` prints `outcome`, `digest`, `receipt`; refusals exit 16, 20–25 by outcome | No equivalent control audited | Not yet: `PUT /v1/molecules/{id}/collapse-receipts/{key}` and `cosmon-remote` flags are the next increment; the existing POST is unchanged and unconditional |
+| Read back a lost response | `cs collapse-receipt <ID> <KEY>` answers `committed` (with the receipt), `reserved_not_applied`, `inconsistent` (exit 26) or `unknown`; a key bound to another molecule answers `idempotency_key_reused` (exit 20) without disclosing it | No equivalent view audited | Not yet: `GET /v1/molecules/{id}/collapse-receipts/{key}` in the next increment |
+| One collapse operation and one lease guard | `cs collapse` and MCP `cosmon_collapse` (stdio and the RPP `/mcp` connector) call `cosmon_state::ops::collapse::execute`; the lease is read from the state dir being mutated | — | MCP over `/mcp` is a network caller: refused on a leased mission in v1. The V1 POST route still runs without the guard until its keyed replacement lands |
+
+`cosmon_collapse` changed behaviour with the shared operation: collapsing an
+already-collapsed molecule is now an idempotent no-op (`already_collapsed:
+true`) as with `cs collapse`, instead of an error, and the collapse now writes
+`log.md` and the `EventV2` records, releases the process record, and is
+refused on a leased mission.
+
 ## Codex live lifecycle observations (issue #193)
 
 | Capability | CLI | Native UI | Remote service |

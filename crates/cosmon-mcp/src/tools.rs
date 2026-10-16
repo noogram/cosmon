@@ -454,6 +454,8 @@ pub struct HttpStatePin {
     state_dir: PathBuf,
     /// Tenant `.cosmon/formulas` directory.
     formulas_dir: PathBuf,
+    /// Verified bearer subject, recorded as the actor of a network caller.
+    subject: Option<String>,
 }
 
 impl HttpStatePin {
@@ -465,7 +467,17 @@ impl HttpStatePin {
         Self {
             state_dir,
             formulas_dir,
+            subject: None,
         }
+    }
+
+    /// Attach the verified bearer subject. The host sets it from the JWT it
+    /// validated, never from a client-supplied value; a lifecycle tool uses
+    /// it as the network caller's identity (issue #207).
+    #[must_use]
+    pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
     }
 
     /// The tenant config path (`<tenant>/.cosmon/config.toml`), derived from
@@ -751,6 +763,7 @@ impl CosmonService {
             non_integration: None,
             prompt_seal: None,
             briefing_seals: Vec::new(),
+            collapse_receipt: None,
             bootstrap_seals: Vec::new(),
             archived: false,
             last_progress_at: None,
@@ -1396,40 +1409,81 @@ impl CosmonService {
         &self,
         Parameters(params): Parameters<CollapseParams>,
     ) -> Result<CallToolResult, McpError> {
+        use cosmon_core::collapse_contract::CallerContext;
+        use cosmon_state::ops::collapse::{
+            execute, CollapseError, CollapseOutcome, CollapseRequest, ExecuteError,
+        };
+
         let mol_id = cosmon_core::id::MoleculeId::new(&params.molecule)
             .map_err(|e| McpError::invalid_params(format!("invalid molecule id: {e}"), None))?;
 
-        let store = self.store_for(params.cwd.as_deref());
-        let mut mol_data = store
-            .load_molecule(&mol_id)
-            .map_err(|e| McpError::invalid_params(format!("molecule not found: {e}"), None))?;
-
-        if mol_data.status == MoleculeStatus::Completed
-            || mol_data.status == MoleculeStatus::Collapsed
-        {
-            return Err(McpError::invalid_params(
-                format!(
-                    "cannot collapse molecule in {} state (already terminal)",
-                    mol_data.status
+        // The shared operation `cs collapse` runs (issue #207), lease guard
+        // included. The ledger is read from the state dir this call mutates.
+        // A network caller (tenant pin installed) has no mapped pilot
+        // session, so it is checked as remote and never through this
+        // server's environment; a local caller is checked from its own.
+        let state_dir = self.state_dir_for(params.cwd.as_deref());
+        let store = FileStore::new(&state_dir);
+        let caller = match Self::active_pin() {
+            Some(pin) => CallerContext::Remote {
+                subject: pin.subject.unwrap_or_default(),
+            },
+            None => CallerContext::Local {
+                session: cosmon_harvest::pilot_gesture::resolve_pilot_session(
+                    &cosmon_harvest::pilot_gesture::process_env,
                 ),
+            },
+        };
+        let authority = cosmon_harvest::pilot_gesture::LeaseCollapseAuthority::new(
+            &state_dir,
+            "cosmon_collapse",
+        );
+        let outcome = execute(
+            &store,
+            &state_dir,
+            &authority,
+            &caller,
+            &mol_id,
+            CollapseRequest::for_reason(params.reason.clone()),
+            None,
+            Utc::now(),
+        )
+        .map_err(|e| match e {
+            ExecuteError::UnleasedPilotGesture(refusal) => McpError::invalid_request(
+                cosmon_harvest::pilot_gesture::UnleasedPilotGesture {
+                    gesture: "cosmon_collapse",
+                    mol_id: mol_id.as_str().to_owned(),
+                    why: refusal.why,
+                }
+                .to_string(),
+                Some(serde_json::json!({ "outcome": "unleased_pilot_gesture" })),
+            ),
+            ExecuteError::Collapse(CollapseError::StoreUnavailable(reason)) => {
+                McpError::internal_error(format!("failed to persist: {reason}"), None)
+            }
+            ExecuteError::Collapse(other) => McpError::invalid_params(other.to_string(), None),
+        })?;
+        let CollapseOutcome::Unconditional { view, molecule } = outcome else {
+            return Err(McpError::internal_error(
+                "unconditional collapse returned a keyed outcome",
                 None,
             ));
-        }
-
-        mol_data.collapse_reason = Some(params.reason.clone());
-        mol_data.collapsed_step = Some(mol_data.current_step);
-        mol_data.status = MoleculeStatus::Collapsed;
-        mol_data.updated_at = Utc::now();
-
-        store
-            .save_molecule(&mol_id, &mol_data)
-            .map_err(|e| McpError::internal_error(format!("failed to persist: {e}"), None))?;
+        };
+        let collapsed_at_step = match molecule {
+            Some(m) => m.collapsed_step,
+            None => store
+                .load_molecule(&mol_id)
+                .ok()
+                .and_then(|m| m.collapsed_step),
+        };
 
         let output = serde_json::json!({
             "molecule": mol_id.as_str(),
             "status": "collapsed",
             "reason": params.reason,
-            "collapsed_at_step": mol_data.collapsed_step,
+            "previous_status": cosmon_state::ops::CollapseJson::from_view(&view).previous_status,
+            "already_collapsed": view.already_collapsed,
+            "collapsed_at_step": collapsed_at_step,
         });
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -1734,6 +1788,7 @@ impl CosmonService {
                 non_integration: None,
                 prompt_seal: None,
                 briefing_seals: Vec::new(),
+                collapse_receipt: None,
                 bootstrap_seals: Vec::new(),
                 archived: false,
                 last_progress_at: None,
@@ -1891,6 +1946,7 @@ impl CosmonService {
             non_integration: None,
             prompt_seal: None,
             briefing_seals: Vec::new(),
+            collapse_receipt: None,
             bootstrap_seals: Vec::new(),
             archived: false,
             last_progress_at: None,
@@ -3401,6 +3457,7 @@ mod tests {
             non_integration: None,
             prompt_seal: None,
             briefing_seals: Vec::new(),
+            collapse_receipt: None,
             bootstrap_seals: Vec::new(),
             archived: false,
             last_progress_at: None,
@@ -3994,6 +4051,177 @@ mod tests {
 
         let reloaded = store.load_molecule(&target.id).unwrap();
         assert_eq!(reloaded.typed_links.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // cosmon_collapse goes through the shared operation and its lease guard
+    // (issue #207, ADR-168 §D6)
+    // -----------------------------------------------------------------------
+
+    /// A galaxy whose one running molecule is leased to `holder`, with the
+    /// grant signed by a pinned operator key — an unsigned grant would read
+    /// back as unleased and make every refusal below vacuous.
+    fn leased_galaxy(root: &Path, holder: &str) -> (PathBuf, MoleculeId) {
+        use cosmon_core::id::SessionId;
+        use cosmon_core::operator_attestation::GrantChallenge;
+        use cosmon_core::pilot_lease::{LeaseEpoch, PilotLease};
+        use cosmon_minisign_testkit::Operator;
+
+        let cosmon = root.join(".cosmon");
+        let state = cosmon.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        // Makes `root` a galaxy, so the stdio path's `cwd` walk-up stops here.
+        std::fs::write(cosmon.join("config.toml"), "").unwrap();
+        let mut mol = sample_mol("task-20261016-1ea5");
+        mol.status = MoleculeStatus::Running;
+        FileStore::new(&state).save_molecule(&mol.id, &mol).unwrap();
+
+        let operator = Operator::from_seed(31);
+        std::fs::write(cosmon.join("takeover.pub"), operator.public_key_file()).unwrap();
+        let holder = SessionId::new(holder.to_owned()).unwrap();
+        let challenge = GrantChallenge::new(
+            mol.id.clone(),
+            holder.clone(),
+            LeaseEpoch::first(),
+            "operator",
+            None,
+        )
+        .unwrap();
+        let signed = cosmon_notary::minisign::MinisignSignature::parse(
+            &operator.sign(&challenge.canonical_bytes()),
+        )
+        .unwrap();
+        let attestation = cosmon_core::operator_attestation::OperatorAttestation {
+            key_id: cosmon_core::operator_attestation::OperatorKeyId::from_bytes(signed.key_id),
+            signature: signed.signature_line(),
+            global_signature: signed.global_signature_line(),
+            trusted_comment: signed.trusted_comment.clone(),
+            untrusted_comment: signed.untrusted_comment.clone(),
+        };
+        cosmon_harvest::pilot_gesture::leases_at(&state)
+            .unwrap()
+            .grant(
+                &PilotLease::new(
+                    mol.id.clone(),
+                    holder,
+                    LeaseEpoch::first(),
+                    "operator",
+                    chrono::Utc::now(),
+                    None,
+                )
+                .attested_by(attestation),
+            )
+            .unwrap();
+        (state, mol.id)
+    }
+
+    fn collapse_params(id: &MoleculeId, cwd: &Path) -> Parameters<CollapseParams> {
+        Parameters(CollapseParams {
+            molecule: id.as_str().to_owned(),
+            reason: "seizing the controls".to_owned(),
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+        })
+    }
+
+    /// A local MCP caller that does not hold the lease gets the refusal
+    /// `cs collapse` gives the same caller — the same guard, the same words —
+    /// and the mission does not move. Before issue #207 this tool had no
+    /// guard at all.
+    #[test]
+    fn local_mcp_collapse_gets_the_cli_lease_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, mission) = leased_galaxy(tmp.path(), "someone-else-holds-it");
+
+        // What the guard says to this process's caller, whatever its
+        // environment names — the exact `why` `cs collapse` prints.
+        let expected = cosmon_harvest::pilot_gesture::refuse_unleased_pilot_gesture(
+            &state,
+            &mission,
+            "cs collapse",
+            &cosmon_harvest::pilot_gesture::process_env,
+        )
+        .expect_err("the lease is held by another session")
+        .downcast::<cosmon_harvest::pilot_gesture::UnleasedPilotGesture>()
+        .expect("a typed refusal")
+        .why;
+
+        let err = CosmonService::new()
+            .cosmon_collapse(collapse_params(&mission, tmp.path()))
+            .expect_err("an unleased caller must be refused");
+        assert!(
+            err.message.contains(&expected),
+            "MCP refusal must carry the guard's words.\nexpected: {expected}\ngot: {}",
+            err.message
+        );
+        assert!(err.message.contains("under co-pilotage"));
+        assert_eq!(
+            FileStore::new(&state)
+                .load_molecule(&mission)
+                .unwrap()
+                .status,
+            MoleculeStatus::Running,
+            "a refused gesture must not move the mission"
+        );
+    }
+
+    /// Over the HTTP connector the caller is a network subject with no pilot
+    /// session; in v1 it cannot collapse a leased mission, whatever this
+    /// server's own environment says.
+    #[tokio::test]
+    async fn remote_mcp_collapse_of_a_leased_mission_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, mission) = leased_galaxy(tmp.path(), "someone-else-holds-it");
+        let pin = HttpStatePin::new(state.clone(), tmp.path().join(".cosmon/formulas"))
+            .with_subject("tenant-subject");
+        let cwd = tmp.path().to_path_buf();
+        let result = HTTP_STATE_PIN
+            .scope(Some(pin), async move {
+                CosmonService::new_remote().cosmon_collapse(collapse_params(&mission, &cwd))
+            })
+            .await;
+        let err = result.expect_err("a network caller holds no lease");
+        assert!(
+            err.message
+                .contains(cosmon_harvest::pilot_gesture::REMOTE_CALLER_ON_LEASED_MISSION),
+            "got: {}",
+            err.message
+        );
+        let mission = MoleculeId::new("task-20261016-1ea5").unwrap();
+        assert_eq!(
+            FileStore::new(&state)
+                .load_molecule(&mission)
+                .unwrap()
+                .status,
+            MoleculeStatus::Running
+        );
+    }
+
+    /// The counter-test: on a mission nobody leased, the MCP collapse goes
+    /// through the shared operation and lands, with its log and events.
+    #[test]
+    fn mcp_collapse_of_an_unleased_mission_lands_through_the_shared_operation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join(".cosmon/state");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(tmp.path().join(".cosmon/config.toml"), "").unwrap();
+        let mut mol = sample_mol("task-20261016-0c0d");
+        mol.status = MoleculeStatus::Running;
+        FileStore::new(&state).save_molecule(&mol.id, &mol).unwrap();
+
+        CosmonService::new()
+            .cosmon_collapse(collapse_params(&mol.id, tmp.path()))
+            .expect("unleased collapse succeeds");
+        let reloaded = FileStore::new(&state).load_molecule(&mol.id).unwrap();
+        assert_eq!(reloaded.status, MoleculeStatus::Collapsed);
+        let events = std::fs::read_to_string(state.join("events.jsonl")).unwrap();
+        assert!(events.contains("molecule_collapsed"), "events: {events}");
+
+        // Idempotent like `cs collapse`, no longer an error.
+        let again = CosmonService::new()
+            .cosmon_collapse(collapse_params(&mol.id, tmp.path()))
+            .expect("collapsing a collapsed molecule is a no-op");
+        let text = format!("{:?}", again.content);
+        assert!(text.contains("already_collapsed"), "{text}");
     }
 
     // -----------------------------------------------------------------------

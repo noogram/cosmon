@@ -66,11 +66,14 @@ pub use resolve::{
     walk_up_find_cosmon_dir_from, StateDirOrigin,
 };
 
+use cosmon_core::collapse_contract::{CollapseKeyRecord, IdempotencyKey, MoleculeRevision};
 use cosmon_core::config::ProjectConfig;
 use cosmon_core::error::CosmonError;
 use cosmon_core::id::{MoleculeId, ProjectId, WorkerId};
 use cosmon_core::paths::CosmonPath;
-use cosmon_state::{Fleet, FleetGuard, MoleculeData, MoleculeFilter, StateStore, TrunkGuard};
+use cosmon_state::{
+    Fleet, FleetGuard, MoleculeData, MoleculeFilter, MoleculeGuard, StateStore, TrunkGuard,
+};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
@@ -509,6 +512,8 @@ impl Drop for FleetLockGuard {
 }
 
 impl FleetGuard for FleetLockGuard {}
+
+impl MoleculeGuard for DispatchLockGuard {}
 
 impl TrunkGuard for TrunkLockGuard {}
 
@@ -1077,30 +1082,7 @@ impl StateStore for FileStore {
     }
 
     fn save_molecule(&self, id: &MoleculeId, data: &MoleculeData) -> Result<(), CosmonError> {
-        /// `MoleculeData` plus the read-contract version, flattened so the
-        /// file keeps every existing key.
-        #[derive(serde::Serialize)]
-        struct VersionedState<'a> {
-            schema_version: u32,
-            #[serde(flatten)]
-            data: &'a MoleculeData,
-        }
-        let json = serde_json::to_string_pretty(&VersionedState {
-            schema_version: cosmon_state::STATE_SCHEMA_VERSION,
-            data,
-        })?;
-        // Write to the fleet-scoped state path, decoded from the write-path
-        // taxonomy (B7 collapse, delib-20260607-aec8) so the writer emits the
-        // path rather than re-stating the `fleets/<fleet>/molecules/<id>/state.json`
-        // layout beside the taxonomy.
-        let path = self.root.join(
-            CosmonPath::MoleculeState {
-                fleet: &data.fleet_id,
-                id,
-            }
-            .rel(),
-        );
-        atomic_write(&path, json.as_bytes())
+        self.write_molecule(id, data, false)
     }
 
     fn list_molecules(&self, filter: &MoleculeFilter) -> Result<Vec<MoleculeData>, CosmonError> {
@@ -1171,6 +1153,160 @@ impl StateStore for FileStore {
         // returns it boxed behind `dyn TrunkGuard`.
         Ok(Box::new(self.acquire_trunk_lock(cmd_hint)?))
     }
+
+    fn lock_molecule(&self, id: &MoleculeId) -> Result<Box<dyn MoleculeGuard + '_>, CosmonError> {
+        // The dispatch lock lives in the molecule directory; opening it for a
+        // molecule that does not exist would create that directory.
+        if !self.molecule_path(id).exists() {
+            return Err(CosmonError::MoleculeNotFound(id.clone()));
+        }
+        Ok(Box::new(self.acquire_dispatch_lock(id)?))
+    }
+
+    fn load_molecule_revisioned(
+        &self,
+        id: &MoleculeId,
+    ) -> Result<(MoleculeData, MoleculeRevision), CosmonError> {
+        let path = self.molecule_path(id);
+        if !path.exists() {
+            return Err(CosmonError::MoleculeNotFound(id.clone()));
+        }
+        // One read, two readers: the record and its revision come from the
+        // same bytes, so the revision names exactly the state decided on.
+        let bytes = fs::read(&path)?;
+        let mol: MoleculeData = serde_json::from_slice(&bytes)?;
+        let revision =
+            MoleculeRevision::of_state_bytes(&bytes).map_err(|e| CosmonError::StateStore {
+                reason: format!("revision of {}: {e}", path.display()),
+            })?;
+        Ok((mol, revision))
+    }
+
+    fn save_molecule_durable(
+        &self,
+        id: &MoleculeId,
+        data: &MoleculeData,
+    ) -> Result<(), CosmonError> {
+        self.write_molecule(id, data, true)
+    }
+
+    fn read_collapse_key(
+        &self,
+        key: &IdempotencyKey,
+    ) -> Result<Option<CollapseKeyRecord>, CosmonError> {
+        let path = self.collapse_key_path(key);
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let record: CollapseKeyRecord =
+                    serde_json::from_slice(&bytes).map_err(|e| CosmonError::StateStore {
+                        reason: format!("unreadable collapse key record {}: {e}", path.display()),
+                    })?;
+                if record.key != *key {
+                    return Err(CosmonError::StateStore {
+                        reason: format!("collapse key record {} names another key", path.display()),
+                    });
+                }
+                Ok(Some(record))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn reserve_collapse_key(&self, record: &CollapseKeyRecord) -> Result<bool, CosmonError> {
+        let bytes = serde_json::to_vec_pretty(record)?;
+        Ok(write_create_only(
+            &self.collapse_key_path(&record.key),
+            &bytes,
+        )?)
+    }
+
+    fn commit_collapse_key(&self, record: &CollapseKeyRecord) -> Result<(), CosmonError> {
+        let bytes = serde_json::to_vec_pretty(record)?;
+        atomic_write_durable(&self.collapse_key_path(&record.key), &bytes)
+    }
+}
+
+impl FileStore {
+    /// Serialize and write one molecule's `state.json`, synced when
+    /// `durable`.
+    fn write_molecule(
+        &self,
+        id: &MoleculeId,
+        data: &MoleculeData,
+        durable: bool,
+    ) -> Result<(), CosmonError> {
+        /// `MoleculeData` plus the read-contract version, flattened so the
+        /// file keeps every existing key.
+        #[derive(serde::Serialize)]
+        struct VersionedState<'a> {
+            schema_version: u32,
+            #[serde(flatten)]
+            data: &'a MoleculeData,
+        }
+        let json = serde_json::to_string_pretty(&VersionedState {
+            schema_version: cosmon_state::STATE_SCHEMA_VERSION,
+            data,
+        })?;
+        // Write to the fleet-scoped state path, decoded from the write-path
+        // taxonomy (B7 collapse, delib-20260607-aec8) so the writer emits the
+        // path rather than re-stating the `fleets/<fleet>/molecules/<id>/state.json`
+        // layout beside the taxonomy.
+        let path = self.root.join(
+            CosmonPath::MoleculeState {
+                fleet: &data.fleet_id,
+                id,
+            }
+            .rel(),
+        );
+        if durable {
+            atomic_write_durable(&path, json.as_bytes())
+        } else {
+            atomic_write(&path, json.as_bytes())
+        }
+    }
+
+    /// Path of a collapse key's record, tenant-wide under the state root.
+    fn collapse_key_path(&self, key: &IdempotencyKey) -> PathBuf {
+        self.root.join(
+            CosmonPath::CollapseReceipt {
+                key_hash: &key.file_stem(),
+            }
+            .rel(),
+        )
+    }
+}
+
+/// Create `path` with `bytes` only if it does not exist, durably.
+///
+/// The content is written and synced under a unique sibling name, then
+/// published with `link(2)`, which fails with `EEXIST` instead of replacing:
+/// of two processes reserving the same key, exactly one creates the file and
+/// the other reads the winner's complete record. Returns whether this call
+/// created it.
+fn write_create_only(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let pending = unique_tmp_path(path);
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pending)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        let created = match fs::hard_link(&pending, path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(e) => return Err(e),
+        };
+        File::open(parent)?.sync_all()?;
+        Ok(created)
+    })();
+    let _ = fs::remove_file(&pending);
+    result
 }
 
 impl FileStore {
@@ -1352,6 +1488,7 @@ mod tests {
             non_integration: None,
             prompt_seal: None,
             briefing_seals: Vec::new(),
+            collapse_receipt: None,
             bootstrap_seals: Vec::new(),
             archived: false,
             last_progress_at: None,

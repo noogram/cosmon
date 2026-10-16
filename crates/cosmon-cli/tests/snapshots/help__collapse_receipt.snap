@@ -1,0 +1,18 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Read back what happened to a `cs collapse --key` request — committed, reserved, inconsistent or unknown
+
+Usage: cs collapse-receipt [OPTIONS] <MOLECULE> <KEY>
+
+Arguments:
+  <MOLECULE>  Molecule the key was sent for
+  <KEY>       The idempotency key sent with `cs collapse --key`
+
+Options:
+      --config <PATH>      Path to the state directory (default: the galaxy's .cosmon/state/)
+      --ops-dir <OPS_DIR>  Path to the state store root (overrides walk-up discovery)
+  -v, --verbose            Enable verbose output
+      --json               Output in JSON format
+  -h, --help               Print help

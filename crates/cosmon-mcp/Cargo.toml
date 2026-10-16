@@ -16,6 +16,8 @@ chrono.workspace = true
 cosmon-core.workspace = true
 http = "1"
 cosmon-filestore.workspace = true
+# The lease authority the shared collapse operation checks (ADR-168 §D6).
+cosmon-harvest.workspace = true
 cosmon-realized.workspace = true
 cosmon-state.workspace = true
 cosmon-transport.workspace = true
@@ -30,6 +32,8 @@ schemars = "0.8"
 tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
+cosmon-minisign-testkit.workspace = true
+cosmon-notary.workspace = true
 tempfile.workspace = true
 
 [lints]

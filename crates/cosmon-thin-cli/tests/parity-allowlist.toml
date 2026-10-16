@@ -70,6 +70,15 @@ guaranteed to differ by the wall-clock delta between the two calls.
 
 [[allowed]]
 verb = "observe"
+path = "revision"
+reason = """
+Issue #207 lot B1 (ADR-187) adds the content revision to `cs observe
+--json` only. `GET /v1/molecules/{id}` gains the same field, with a
+strong ETag, in the next increment of the issue; remove this entry then.
+"""
+
+[[allowed]]
+verb = "observe"
 path = "updated_at"
 reason = """
 `observe` re-reads the molecule from disk. Between the cs and cs-thin

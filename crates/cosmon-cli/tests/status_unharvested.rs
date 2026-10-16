@@ -63,6 +63,7 @@ fn completed(id: &str, archived: bool) -> MoleculeData {
         non_integration: None,
         prompt_seal: None,
         briefing_seals: Vec::new(),
+        collapse_receipt: None,
         bootstrap_seals: Vec::new(),
         archived,
         last_progress_at: None,
