@@ -319,6 +319,7 @@ quick:
 # rustc pass that `cargo test` performs.
 gates: quick
     ./scripts/no-pilot-env.sh ./scripts/verify-wsl2-host.test.sh # ~17 s: separate phase processes
+    ./scripts/no-pilot-env.sh python3 tests/harness/bot_reader_handover_test.py # ~30 s: two-host reader loops against a fake endpoint
     ./scripts/no-pilot-env.sh env CARGO_INCREMENTAL=0 RUSTFLAGS=-Dwarnings cargo test --workspace --locked --no-fail-fast
     ./scripts/no-pilot-env.sh ./scripts/release/crossing.test.sh
 
