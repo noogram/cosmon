@@ -105,26 +105,16 @@ fn issue_logs_jwt(oidc: &OidcMock, sub: &str, audience: &str, jti: &str) -> Stri
     })
 }
 
-#[tokio::test]
-async fn open_logs_stream_closes_when_credential_expires() {
-    // The route's source is a real pane. Where tmux is unavailable,
-    // the existing route tests still exercise admission and wire shape.
-    if std::process::Command::new("tmux")
-        .arg("-V")
-        .output()
-        .is_err()
-    {
-        return;
+struct Session(String);
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("tmux")
+            .args(["-L", "cosmon", "kill-session", "-t", &self.0])
+            .output();
     }
-    struct Session(String);
-    impl Drop for Session {
-        fn drop(&mut self) {
-            let _ = std::process::Command::new("tmux")
-                .args(["-L", "cosmon", "kill-session", "-t", &self.0])
-                .output();
-        }
-    }
+}
 
+fn start_logs_session() -> (String, Session) {
     let molecule = format!(
         "task-stream-{}-{}",
         std::process::id(),
@@ -142,12 +132,27 @@ async fn open_logs_stream_closes_when_credential_expires() {
             "-d",
             "-s",
             &session.0,
-            "sleep",
-            "30",
+            "printf 'issuer-removal-source\\n'; exec sleep 60",
         ])
         .output()
         .unwrap();
     assert!(started.status.success(), "pane session did not start");
+
+    (molecule, session)
+}
+
+#[tokio::test]
+async fn open_logs_stream_closes_when_credential_expires() {
+    // The route's source is a real pane. Where tmux is unavailable,
+    // the existing route tests still exercise admission and wire shape.
+    if std::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let (molecule, session) = start_logs_session();
 
     let mut tenants = TenantWorkspaces::new();
     let _ = tenants.add("a");
@@ -356,4 +361,73 @@ async fn logs_rejects_path_traversal_segment_with_400() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn open_logs_stream_closes_after_issuer_removal() {
+    use http_body_util::BodyExt;
+
+    let (molecule, session) = start_logs_session();
+    let mut tenants = TenantWorkspaces::new();
+    tenants.add("a");
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let security = tempfile::tempdir().unwrap();
+    let state = make_state(
+        &oidc,
+        &tenants,
+        vec![("sub-a", "nuc-a", "a", "cosmon-rpp-a")],
+        security.path(),
+    );
+    let jwks = state.jwks.clone();
+    let jwt = issue_logs_jwt(&oidc, "sub-a", "cosmon-rpp-a", "logs-issuer-removal");
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/molecules/{molecule}/logs"))
+                .header("Authorization", format!("Bearer {jwt}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    // A real log frame proves the source is running before trust is removed.
+    let first = tokio::time::timeout(Duration::from_secs(3), body.frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(first.data_ref().unwrap()).contains("event: log.line"));
+    // The initial pane snapshot can span several SSE frames, including
+    // blank pane lines. Drain it and require a live, idle source.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match tokio::time::timeout(Duration::from_millis(100), body.frame()).await {
+                Err(_) => break,
+                Ok(Some(Ok(_))) => {}
+                _ => panic!("logs source ended before issuer removal"),
+            }
+        }
+    })
+    .await
+    .expect("logs source did not become idle before removal");
+    jwks.store(JwksStore::default());
+    tokio::time::timeout(Duration::from_secs(3), to_bytes(body, 65536))
+        .await
+        .expect("logs stream stayed open after issuer removal")
+        .unwrap();
+    assert!(
+        std::process::Command::new("tmux")
+            .args(["-L", "cosmon", "has-session", "-t", &session.0])
+            .output()
+            .unwrap()
+            .status
+            .success(),
+        "source must still be alive when guard closes"
+    );
 }

@@ -34,6 +34,13 @@ this stage.
   check that every binding with a `[scopes]` section lists each scope its
   holder uses. (task-20261014-ae1c)
 
+### Fixed
+
+- RPP bootstrap warns when a handoff binding omits `scopes`, naming the
+  binding and the default scopes it grants. Harvest effects now refuse an
+  issuer removed from the live trust store. Logs and ledger stream tests
+  verify closure after issuer removal. (#209)
+
 ## [0.7.3] — 2026-10-06
 
 ### Breaking changes and operator actions on upgrade
