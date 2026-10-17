@@ -130,12 +130,18 @@ impl Galaxy {
 /// An implementer (owner, collapsed on its own), a live reviewer, a completed
 /// third seat, and a molecule outside the work.
 fn galaxy() -> Galaxy {
+    galaxy_with_owner(MoleculeStatus::Collapsed)
+}
+
+fn galaxy_with_owner(status: MoleculeStatus) -> Galaxy {
     let galaxy = Galaxy {
         dir: tempfile::tempdir().expect("tempdir"),
     };
     let store = galaxy.store();
-    let mut implementer = molecule(IMPL, MoleculeStatus::Collapsed);
-    implementer.collapse_reason = Some("gate failed outside the diff".to_owned());
+    let mut implementer = molecule(IMPL, status);
+    if status == MoleculeStatus::Collapsed {
+        implementer.collapse_reason = Some("gate failed outside the diff".to_owned());
+    }
     for data in [
         implementer,
         molecule(REVIEW, MoleculeStatus::Running),
@@ -234,14 +240,7 @@ fn rerun_converges_without_changing_anything() {
 
 #[test]
 fn without_a_reason_and_with_a_live_owner_it_refuses_and_changes_nothing() {
-    let galaxy = galaxy();
-    let mut owner = galaxy.status(IMPL);
-    owner.status = MoleculeStatus::Running;
-    owner.collapse_reason = None;
-    galaxy
-        .store()
-        .save_molecule(&owner.id.clone(), &owner)
-        .expect("save owner");
+    let galaxy = galaxy_with_owner(MoleculeStatus::Running);
     let output = galaxy.cs(&["collapse", IMPL, "--with-seats"]);
     assert!(!output.status.success());
     assert_eq!(galaxy.status(REVIEW).status, MoleculeStatus::Running);
