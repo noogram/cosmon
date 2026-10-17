@@ -2,6 +2,21 @@
 
 # CLI and UI parity audit
 
+## Optional Herdr companion
+
+`tools/herdr-companion/cosmon-herdr.py` is an explicit one-shot reader outside
+runtime paths. It lists `cs --json observe` rows and requires exact-id detail
+selection. The observed branch joins Git's existing worktree list; canonical
+conventional deliverables come from the observed `molecule_dir`. Herdr may open
+that worktree in a new shell tab or a deliverable in a read-only GPUI code tab.
+Molecule status, unknown terminal presence and file availability stay separate.
+
+Terminal attachment is unavailable: `observe` exposes no transport backend,
+socket/session address or worker incarnation binding. No name-based fallback,
+worker spawn, lifecycle action, close hook or default transport change is added.
+Native Cosmon UI and remote API surfaces are unchanged; no generated interface
+references change. See the companion README for commands and verification limits.
+
 ## Explicit empty handoff scopes (issue #209)
 
 `cosmon-rpp-adapter trust converge` and server boot use the same bootstrap:
