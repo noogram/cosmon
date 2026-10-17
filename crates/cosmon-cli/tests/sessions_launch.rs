@@ -416,6 +416,58 @@ read -r ready
 }
 
 #[test]
+fn a_new_launch_cannot_heartbeat_the_inherited_previous_holder_row() {
+    for name in ["claude", "codex"] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        galaxy(root);
+        let previous = "previous-holder-fixture";
+        success(
+            cs(root)
+                .args([
+                    "presence",
+                    "ping",
+                    "--session",
+                    previous,
+                    "--provider",
+                    name,
+                ])
+                .output()
+                .expect("seed previous presence"),
+        );
+        let previous_path = root
+            .join(".cosmon/state/presence")
+            .join(format!("session-{previous}.json"));
+        let before = fs::read(&previous_path).expect("previous presence bytes");
+        provider(
+            root,
+            name,
+            r#"
+printf '%s' '{"session_id":"native-claude-fixture","thread-id":"native-codex-fixture"}' | "$TEST_CS" sessions hook run --provider "$TEST_PROVIDER" --event turn-end
+printf '%s' "$COSMON_SESSION_ID"
+"#,
+        );
+        let out = success(
+            launch(root, name)
+                .env("COSMON_SESSION_ID", previous)
+                .env("COSMON_SESSION_LAUNCH_ID", previous)
+                .env("CODEX_THREAD_ID", previous)
+                .env("CODEX_SESSION_ID", previous)
+                .output()
+                .expect("new provider launch"),
+        );
+        let current = String::from_utf8(out.stdout).expect("launch identity");
+        assert_eq!(
+            fs::read(&previous_path).expect("previous presence after new heartbeat"),
+            before,
+            "a new launch must leave the inherited holder's entire row unchanged"
+        );
+        assert_ne!(current, previous);
+        assert_eq!(record(root, &current)["provider"], name);
+    }
+}
+
+#[test]
 fn launcher_clears_both_inherited_codex_native_variables_before_provider_entry() {
     for name in ["claude", "codex"] {
         let tmp = tempfile::tempdir().expect("tempdir");

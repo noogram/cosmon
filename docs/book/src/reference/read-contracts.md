@@ -219,6 +219,32 @@ non-lifecycle presence field and refuses a row that names a provider other than
 It does not inspect conversation content, process age, quota, terminal contents,
 or silence, and it does not make cosmon the owner of the app-server connection.
 
+The anonymous local provider witness in
+`crates/cosmon-core/tests/fixtures/provider-witness-2026-10-18.json` records
+Codex CLI 0.163.0 with one isolated `gpt-6-luna` turn: actual
+`turn/started`, command approval and `turn/completed` events were forwarded to
+the CLI ingress, followed by an explicit transport disconnect. The recorded
+readings are `working`, `waiting_permission`, `idle`, then unavailable with no
+state. The owner of this disposable app-server connection assigned the sequence;
+it was not a resident Cosmon broker. Replaying these observations tests the fold
+and does not constitute another live witness.
+
+The same Codex turn's tool subprocess exported matching `CODEX_THREAD_ID` and
+`CODEX_SESSION_ID`, distinct from the freshly minted launch fallback. A hook
+invocation with a payload constructed from those observed exports and an
+interactive takeover check resolved the same presence row. This qualifies the
+tool environment and shared resolution, not delivery of a configured `notify`
+callback by app-server. The check refused because the disposable mission had no
+lease; no grant or takeover was performed.
+
+Claude Code 2.1.302 was probed with `--init-only`: a real `SessionStart` callback
+exported `CLAUDE_CODE_SESSION_ID` matching its native payload, while
+`CLAUDE_SESSION_ID` was absent. The supported launcher supplied a fresh marked
+identity shared by that callback's presence row and its shell check. No Claude
+model was called. A Claude **tool subprocess** environment remains unverified;
+the callback export alone does not establish a native tool identity contract.
+Keep using `cs sessions launch claude` for the shared launch fallback.
+
 The presence snapshot exposed by `cs sessions list --json` carries the same
 `lifecycle_source`, optional `state`, and the last accepted
 `lifecycle_sequence`. A snapshot from before these fields existed reads as
