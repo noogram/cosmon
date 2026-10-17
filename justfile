@@ -219,6 +219,7 @@ install-mac-pilot:
 # edit-and-rerun `cargo check`/`cargo test` loop outside `just` keeps its
 # incremental cache.
 quick:
+    ./scripts/no-pilot-env.sh python3 tools/herdr-companion/test_companion.py
     ./scripts/no-pilot-env.sh cargo fmt --all -- --check
     ./scripts/no-pilot-env.sh env CARGO_INCREMENTAL=0 cargo clippy --workspace --locked -- -D warnings
     ./scripts/no-pilot-env.sh env CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
