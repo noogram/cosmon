@@ -40,8 +40,14 @@ this stage.
   active-first numbered selection, read-only worker output, existing worktree
   shells and canonical Markdown views in fresh workspaces. Disposable socket/PTY
   acceptance passed on cmux 0.65.1; visual UI, remote use and native worker
-  backends are not qualified. No global installation is automatic; Pi is not
-  delivered. See `tools/cmux-companion` for explicit use and removal. (#210)
+  backends are not qualified. No global installation is automatic. See `tools/cmux-companion` for explicit use and removal. (#210)
+
+- Optional native Pi package independently consumes the readonly v1 contract:
+  explicit project/molecule selection, details, sampled output, Markdown artifacts
+  and verified worktree paths. Disposable Pi 1.1.0 TUI/dummy-worker acceptance
+  passed without a model or provider credentials; closing the view preserves the
+  worker. No worker backend or interactive input is added. See
+  `tools/pi-companion` for loading, packaging and removal. (#210)
 
 - Conditional remote collapse: `cosmon-remote molecule collapse --key
   --expect-status --expect-revision` uses the new PUT receipt route, and

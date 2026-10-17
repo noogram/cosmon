@@ -25,8 +25,15 @@ workspaces for worker output, an existing worktree shell and canonical artifact
 text. cmux socket v2 `workspace.create` uses a POSIX-quoted initial command;
 it has no argv PTY API. No existing surface receives worker input. Installation
 is an explicit local directory invocation with no registry or global hooks.
-Pi remains undelivered; no core command, JSON contract or remote classification
-changes for this optional consumer.
+The independent [Pi package](../../tools/pi-companion/README.md) uses native
+slash commands and TUI components for explicit project/molecule selection,
+details, readonly output and conventional artifacts. Worktree navigation displays
+a verified existing path without launching a shell or changing Pi's cwd. An owned
+Python PTY bridge invokes the public opaque-token attachment because Pi 1.1.0 has
+no native PTY/tab API. Input and resize stay local; close/shutdown detach owned
+readers. Real Pi 1.1.0 TUI/dummy-worker acceptance passed without model calls;
+GUI visual review, remote and worker-backend support are not qualified. No core
+command, JSON contract or remote classification changes for this consumer.
 
 ## Explicit empty handoff scopes (issue #209)
 
