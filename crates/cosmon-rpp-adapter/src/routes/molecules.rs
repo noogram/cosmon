@@ -1305,6 +1305,23 @@ pub struct KeyedCollapseBody {
     pub not_after: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+// Both routes embed exactly CollapseReceipt::canonical_bytes(), independent
+// of struct field order or serde_json map insertion-order features.
+fn collapse_receipt_response(
+    status: StatusCode,
+    body: &impl serde::Serialize,
+    request_id: &str,
+) -> Result<Response, ApiError> {
+    let bytes = cosmon_hash::canonical_serialize(body).map_err(|_| {
+        collapse_api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_unavailable",
+            request_id,
+        )
+    })?;
+    Ok((status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response())
+}
+
 fn collapse_api_error(status: StatusCode, label: &'static str, request_id: &str) -> ApiError {
     ApiError {
         status,
@@ -1497,11 +1514,11 @@ pub async fn put_collapse_receipt(
             &spark.request_id,
         )
     })?;
-    Ok((
+    collapse_receipt_response(
         status,
-        Json(KeyedCollapseJson::from_outcome(&molecule_id, &outcome)),
+        &KeyedCollapseJson::from_outcome(&molecule_id, &outcome),
+        &spark.request_id,
     )
-        .into_response())
 }
 
 /// Lock-free durable receipt lookup, isolated by the same admission as observe.
@@ -1509,7 +1526,7 @@ pub async fn get_collapse_receipt(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath((id, key)): AxumPath<(String, String)>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let (_, spark, molecule_id, store) = collapse_receipt_context(&state, &headers, &id, false)?;
     let key = IdempotencyKey::parse(&key).map_err(|_| {
         collapse_api_error(
@@ -1526,10 +1543,12 @@ pub async fn get_collapse_receipt(
         ReceiptLookup::Inconsistent { detail } => (None, None, Some(detail.as_str())),
         ReceiptLookup::Unknown | ReceiptLookup::BoundElsewhere => (None, None, None),
     };
-    Ok(Json(
-        json!({ "molecule": id, "key": key.as_str(), "state": lookup.as_str(),
+    collapse_receipt_response(
+        StatusCode::OK,
+        &json!({ "molecule": id, "key": key.as_str(), "state": lookup.as_str(),
         "receipt": receipt, "digest": digest, "detail": detail }),
-    ))
+        &spark.request_id,
+    )
 }
 
 /// Body schema for `POST /v1/molecules/:id/freeze`.

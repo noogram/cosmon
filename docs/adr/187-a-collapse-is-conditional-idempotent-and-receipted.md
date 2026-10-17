@@ -164,8 +164,10 @@ before the lock makes this regression fail.
   sends only PUT, including optional approval digest/deadline and cause fields.
   `molecule collapse-receipt <id> <key>` reads the durable answer. Old-server
   404/405 never causes a POST fallback. Unkeyed commands retain POST behavior.
-- A receipt's serialized content is durable across restarted adapters; HTTP
-  lookup and replay return that content without a response-id wrapper. B1's
+- A receipt's serialized content is durable across restarted adapters. Both
+  HTTP receipt routes use canonical JSON serialization: the raw receipt object
+  bytes in transition, lookup and replay equal the durable canonical receipt,
+  without a response-id wrapper. B1's
   file-store crash/concurrency witnesses remain authoritative for the engine.
 - `MoleculeData` gains `collapse_receipt` (absent ⇒ none; additive under
   `STATE_SCHEMA_VERSION = 1`).

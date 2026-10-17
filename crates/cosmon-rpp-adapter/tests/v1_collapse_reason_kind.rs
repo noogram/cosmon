@@ -199,13 +199,13 @@ async fn collapse_route_without_reason_kind_records_none() {
 const KEY: &str = "broker-request-0001";
 const ID: &str = "task-20261017-aaaa";
 
-async fn request(
+async fn request_wire(
     app: &axum::Router,
     method: &str,
     uri: &str,
     jwt: Option<&str>,
     body: Value,
-) -> anyhow::Result<(StatusCode, axum::http::HeaderMap, Value)> {
+) -> anyhow::Result<(StatusCode, axum::http::HeaderMap, Vec<u8>)> {
     use http_body_util::BodyExt;
     let mut req = Request::builder()
         .method(method)
@@ -221,7 +221,34 @@ async fn request(
     let status = response.status();
     let headers = response.headers().clone();
     let bytes = response.into_body().collect().await?.to_bytes();
-    Ok((status, headers, serde_json::from_slice(&bytes)?))
+    Ok((status, headers, bytes.to_vec()))
+}
+
+async fn request(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    jwt: Option<&str>,
+    body: Value,
+) -> anyhow::Result<(StatusCode, axum::http::HeaderMap, Value)> {
+    let (status, headers, wire) = request_wire(app, method, uri, jwt, body).await?;
+    Ok((status, headers, serde_json::from_slice(&wire)?))
+}
+
+/// Locate the receipt value without reserializing or normalizing its wire bytes.
+fn wire_receipt(wire: &[u8]) -> anyhow::Result<&[u8]> {
+    let marker = b"\"receipt\":";
+    let start = wire
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .ok_or_else(|| anyhow::anyhow!("receipt field absent"))?
+        + marker.len();
+    let mut stream = serde_json::Deserializer::from_slice(&wire[start..]).into_iter::<Value>();
+    let receipt = stream
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("receipt value absent"))??;
+    anyhow::ensure!(receipt.is_object(), "receipt must be an object");
+    Ok(&wire[start..start + stream.byte_offset()])
 }
 
 fn revision(tenant: &TenantPath, id: &str) -> anyhow::Result<String> {
@@ -337,8 +364,9 @@ async fn lost_response_restart_replay_and_key_reuse_preserve_the_durable_receipt
     }
     let jwt = jwt_with_scopes(&fx.oidc, &["cosmon:molecule:write"], "replay");
     let body = intent(&fx, ID)?;
-    let (status, _, first) =
-        request(&fx.app, "PUT", &uri(ID, KEY), Some(&jwt), body.clone()).await?;
+    let (status, _, first_wire) =
+        request_wire(&fx.app, "PUT", &uri(ID, KEY), Some(&jwt), body.clone()).await?;
+    let first: Value = serde_json::from_slice(&first_wire)?;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(first["outcome"], "transitioned");
     assert_eq!(stored_state(&fx, ID)["collapse_reason_kind"], "gate_failed");
@@ -360,22 +388,31 @@ async fn lost_response_restart_replay_and_key_reuse_preserve_the_durable_receipt
     }
     .digest()?;
     assert_eq!(first["digest"], expected.as_str());
-    let receipt_bytes = serde_json::to_vec(&first["receipt"])?;
+    let receipt_bytes = wire_receipt(&first_wire)?.to_vec();
+    let durable: cosmon_core::collapse_contract::CollapseReceipt =
+        serde_json::from_value(stored_state(&fx, ID)["collapse_receipt"].clone())?;
+    assert_eq!(
+        receipt_bytes,
+        durable.canonical_bytes()?,
+        "PUT receipt must be canonical durable bytes"
+    );
     // Recreate the router and its event bus. Every handler opens a fresh FileStore;
     // no response cache or in-process receipt survives this boundary.
     let mut restarted_state = fx.state.clone();
     restarted_state.events = Arc::new(cosmon_rpp_adapter::EventBus::with_default_capacity());
     let restarted = router(restarted_state);
-    let (status, _, lookup) =
-        request(&restarted, "GET", &uri(ID, KEY), Some(&jwt), Value::Null).await?;
+    let (status, _, lookup_wire) =
+        request_wire(&restarted, "GET", &uri(ID, KEY), Some(&jwt), Value::Null).await?;
+    let lookup: Value = serde_json::from_slice(&lookup_wire)?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(lookup["state"], "committed");
-    assert_eq!(serde_json::to_vec(&lookup["receipt"])?, receipt_bytes);
-    let (status, _, replay) =
-        request(&restarted, "PUT", &uri(ID, KEY), Some(&jwt), body.clone()).await?;
+    assert_eq!(wire_receipt(&lookup_wire)?, receipt_bytes);
+    let (status, _, replay_wire) =
+        request_wire(&restarted, "PUT", &uri(ID, KEY), Some(&jwt), body.clone()).await?;
+    let replay: Value = serde_json::from_slice(&replay_wire)?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(replay["outcome"], "replayed");
-    assert_eq!(serde_json::to_vec(&replay["receipt"])?, receipt_bytes);
+    assert_eq!(wire_receipt(&replay_wire)?, receipt_bytes);
     for target in [ID, other] {
         let mut changed = body.clone();
         if target == ID {

@@ -590,6 +590,7 @@ paths:
         Decisions follow the nine-outcome ADR-187 table, first match wins.
         Replay precedes expiry, status, revision and lease preconditions.
         Refusals do not write molecule or key state. The receipt has no expiry.
+        Transition, replay and lookup embed byte-equal canonical receipt JSON.
         The shared operation samples its injected live clock after acquiring
         dispatch.lock, immediately before the decision. A wait crossing
         not_after returns approval_expired; receipt committed_at uses that
