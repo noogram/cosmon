@@ -24,10 +24,12 @@ THE 7 VERBS — RPP-exposable (ADR-080 §8p):
   avatar_mould_info GET    /v1/avatar/:instance_id/mould-info scope: cosmon:world:observe
   avatar_status GET    /v1/avatar/:instance_id/status   scope: cosmon:world:observe
   collapse   POST   /v1/molecules/:id/collapse       scope: cosmon:molecule:write
+  collapse_receipt GET    /v1/molecules/:id/collapse-receipts/:key scope: cosmon:molecule:read
   converse   POST   /v1/avatar/converse              scope: cosmon:pilote:converse
   done       POST   /v1/molecules/:id/done           scope: cosmon:molecule:write
   ensemble   GET    /v1/molecules                    scope: cosmon:molecule:read
   freeze     POST   /v1/molecules/:id/freeze         scope: cosmon:molecule:write
+  keyed_collapse PUT    /v1/molecules/:id/collapse-receipts/:key scope: cosmon:molecule:write
   nucleate   POST   /v1/molecules                    scope: cosmon:molecule:write
   observe    GET    /v1/molecules/:id                scope: cosmon:molecule:read
   run        POST   /v1/molecules/:id/run            scope: cosmon:molecule:write+cosmon:worker:spawn

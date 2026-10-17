@@ -92,7 +92,8 @@ advance → terminate → infrastructure → introspection.
 | `cs evolve` | NO | — | Worker-internal (CLAUDE.md *Command perimeters*; ADR-080 §5.1). NEVER exposed. |
 | `cs complete` | NO | — | Worker-internal (CLAUDE.md *Command perimeters*; ADR-080 §5.1). NEVER exposed. |
 | `cs collapse` | V1 | `POST /v1/molecules/:id/collapse` | Terminal transition, shipped in the T-CST-EXPAND cut (`task-20260504-af6b`, 2026-05-04). The row named `POST /v1/molecules/:id/transitions` (`transition=collapse`) — a *design* for a generic transition endpoint that was never built; each transition got its own path instead. Corrected 2026-09-22 (`task-20260922-45cd`) when the drift gate started reading the real route set. |
-| `cs collapse-receipt` | NO (next increment) | (planned) `GET /v1/molecules/:id/collapse-receipts/:key` | Lock-free lookup of a `cs collapse --key` record (issue #207 lot B1, ADR-187): `committed`, `reserved_not_applied`, `inconsistent` or `unknown`. The keyed `PUT`/`GET` routes and `cosmon-remote` flags land in the next increment of #207; the existing `POST .../collapse` is deliberately not extended, because an older server ignores unknown body fields and would collapse unconditionally. |
+| `cs collapse --key --expect-status --expect-revision` | V1 | `PUT /v1/molecules/:id/collapse-receipts/:key` | Nine-outcome ADR-187 contract. Strict keyed body; verified JWT actor and tenant lease guard. No old-server fallback. |
+| `cs collapse-receipt` | V1 | `GET /v1/molecules/:id/collapse-receipts/:key` | Tenant-scoped lock-free durable lookup (issue #207 B2, ADR-187); read or write scope required before key lookup. |
 | `cs decay` | NO (V2 TBD) | — | Decomposition (1 → N); re-evaluate when DAG ops needed remotely. |
 | `cs merge` | NO (V2 TBD) | — | Synthesis (N → 1); same as decay. |
 | `cs transform` | NO (V2 TBD) | — | Kind change (idea → task); operator-driven. |

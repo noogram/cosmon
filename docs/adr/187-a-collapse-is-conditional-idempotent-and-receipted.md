@@ -1,7 +1,7 @@
 # ADR-187: A collapse can be conditional, idempotent and receipted
 
-**Status:** Accepted (2026-10-16) for the local surfaces; the API routes and
-`cosmon-remote` follow in the next increment of issue #207.
+**Status:** Accepted (2026-10-16); local surfaces implemented in B1,
+HTTP and `cosmon-remote` implemented in B2 (2026-10-17).
 
 **Decider:** Noogram.
 
@@ -9,7 +9,7 @@
 §D6 (the lease guard on `cs collapse` moves into the shared operation and
 reaches MCP).
 
-**Tracks:** issue #207 (lot B1); design in deliberation `delib-20261009-8005`.
+**Tracks:** issue #207 (lots B1 and B2); design in deliberation `delib-20261009-8005`.
 
 ## Context
 
@@ -27,11 +27,14 @@ and the broker is not the lifecycle authority.
    canonical JSON of its parsed `state.json`, computed on read and never
    stored. Canonicalising the parsed value keeps unknown keys (two binaries
    agree) and ignores key order (a `HashMap` rewrite does not move it). Only
-   equality is compared. `cs observe --json` exposes it.
+   equality is compared. `cs observe --json` and `GET /v1/molecules/{id}`
+   expose it; HTTP also returns a strong ETag containing the quoted revision.
 
-2. **One operation.** `cosmon_state::ops::collapse::execute` is the collapse
+2. **One operation.** `cosmon_state::ops::collapse::execute_with_clock` is the collapse
    every surface calls: `cs collapse`, MCP `cosmon_collapse` on stdio and on
-   the RPP `/mcp` connector, and the V1 `POST` route through its wrapper.
+   the RPP `/mcp` connector, and both V1 HTTP collapse routes. The legacy
+   POST preserves its response projection and reason classification, with
+   the same tenant lease guard as keyed PUT.
    Surfaces keep only their projections (the CLI's archive and legacy event
    mirror, the renderers). Without a key it behaves as before.
 
@@ -61,8 +64,9 @@ and the broker is not the lifecycle authority.
    bound to another molecule), `replayed` (200; before every precondition,
    because the collapse itself moved the revision and the approval may have
    expired since), `unleased_pilot_gesture` (403), `already_completed` (409),
-   `already_collapsed{by_key}` (409), `approval_expired` (412; cosmon enforces
-   `not_after`), `unexpected_status` (409), `stale_revision` (412),
+   `already_collapsed{by_key}` (409), `approval_expired` (412; compares
+   `not_after` with decision time sampled after the dispatch lock is acquired),
+   `unexpected_status` (409), `stale_revision` (412),
    `transitioned` (201). Refusals write nothing. The CLI maps them to exit
    16 and 20–25; `--json`'s `outcome` field is the contract.
 
@@ -106,7 +110,38 @@ committed collapse. The key record survives that write, and the lookup then
 reports `inconsistent` rather than `committed`: the receipt stays
 historically true, but the molecule is not guaranteed to stay collapsed. A
 fence on `Collapsed` alone, which the audit found no legitimate exit from, is
-an operator decision for a later increment.
+approved by the operator on 2026-10-17 for the separate B3 increment.
+It is not implemented by B2; the limitation remains until B3 lands.
+
+## Approval time belongs to the shared critical section
+
+B2 review reproduced a B1 defect: `execute` accepted a `DateTime` sampled
+before waiting for `dispatch.lock`, then used it for both the expiry decision
+and receipt. A deterministic FileStore lock/clock intervention advanced time
+past a deadline while that lock was held and still observed `transitioned`;
+a fresh post-deadline timestamp instead yielded `approval_expired`.
+
+The correction adds `execute_with_clock`, using the existing
+`cosmon_core::harness::Clock` port. Every production surface — CLI, stdio and
+HTTP MCP, legacy HTTP POST and keyed HTTP PUT — injects `RealClock`. The
+shared operation samples it after acquiring the keyed dispatch lock and
+reading state/authority, immediately before each `decide`. The new receipt
+uses that same post-lock decision timestamp. A retry after a key-reservation
+race samples again; an existing receipt still replays before expiry checks.
+The pure core receives a timestamp and performs no clock I/O.
+
+`execute` and `execute_with_hook` remain deterministic explicit-time APIs for
+compatibility and fault-injection tests. They intentionally fix time; no
+production surface uses them as a live clock source. Approval is checked at
+the decision, rather than promising that the subsequent filesystem commit
+finishes before the deadline.
+
+The regression in `cosmon-filestore/tests/keyed_collapse.rs` holds the real
+lock, advances a controlled Clock across `not_after`, then releases it:
+`approval_expired`, no molecule/key/event write. A before-deadline control
+transitions and records the post-lock timestamp; replay after expiry returns
+the same durable receipt with outcome status 200. Moving the clock sample
+before the lock makes this regression fail.
 
 ## Consequences
 
@@ -114,14 +149,26 @@ an operator decision for a later increment.
   molecule is a no-op instead of an error, the collapse writes `log.md` and
   the `EventV2` records and releases the process record, and a leased mission
   is refused.
-- The V1 `POST /v1/molecules/{id}/collapse` route is unchanged in this
-  increment and still runs without the lease guard (`NoLeaseCheck`, named at
-  its one call site). Its keyed replacement, `PUT`/`GET
-  /v1/molecules/{id}/collapse-receipts/{key}` with `deny_unknown_fields`, the
-  revision on `GET /v1/molecules/{id}` with a strong ETag, and the
-  `cosmon-remote` flags are the next increment. They are new routes, not new
-  fields on the POST: `CollapseBody` ignores unknown fields, so an older
-  server would collapse unconditionally.
+- B2 routes both HTTP collapse gestures through `execute_with_clock` and
+  `LeaseCollapseAuthority` over the admitted tenant's state directory, with
+  `CallerContext::Remote` from the verified JWT subject. No server environment
+  identity can authorize a leased mission. The old POST remains unconditional
+  and keeps its legacy response, except that the lease bypass is closed.
+- Keyed `PUT` and lookup `GET /v1/molecules/{id}/collapse-receipts/{key}`
+  are separate routes; the PUT body denies unknown fields. Keyed responses
+  use the table's exact HTTP statuses and the shared outcome renderer. Lookup
+  returns 200 with its classification, including `inconsistent` or a key bound
+  elsewhere without disclosing that molecule. Both routes require tenant
+  admission, the relevant molecule scope and a molecule visible in that store.
+- `cosmon-remote molecule collapse --key --expect-status --expect-revision`
+  sends only PUT, including optional approval digest/deadline and cause fields.
+  `molecule collapse-receipt <id> <key>` reads the durable answer. Old-server
+  404/405 never causes a POST fallback. Unkeyed commands retain POST behavior.
+- A receipt's serialized content is durable across restarted adapters. Both
+  HTTP receipt routes use canonical JSON serialization: the raw receipt object
+  bytes in transition, lookup and replay equal the durable canonical receipt,
+  without a response-id wrapper. B1's
+  file-store crash/concurrency witnesses remain authoritative for the engine.
 - `MoleculeData` gains `collapse_receipt` (absent ⇒ none; additive under
   `STATE_SCHEMA_VERSION = 1`).
 - The write-path taxonomy gains `collapse-receipts/<key-hash>.json`.
@@ -135,4 +182,9 @@ an operator decision for a later increment.
    goes red when `FileStore::lock_molecule` returns a no-op guard).
 2. A crash after the reservation or after the state write leaves a state from
    which the identical retry does not converge on exactly one event.
-3. A refused keyed request changes any byte under the state directory.
+3. A refused keyed request changes molecule or key state (creating the
+   coordination inode `dispatch.lock` is not a state transition).
+4. Either HTTP collapse route bypasses a lease in the tenant store
+   (`v1_collapse_reason_kind::both_http_collapse_routes_refuse_a_leased_mission_in_the_tenant_store`).
+5. A keyed remote command sends POST to an old server
+   (`cosmon-remote` binary unit test `keyed_cli_against_old_server_never_posts`).

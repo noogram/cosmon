@@ -89,6 +89,8 @@ pub enum Verb {
     Vitals,
     /// `POST /v1/molecules/{id}/collapse` (T-CST-EXPAND).
     CollapseMolecule,
+    /// Lock-free collapse receipt lookup.
+    CollapseReceipt,
     /// `POST /v1/molecules/{id}/freeze` (T-CST-EXPAND).
     FreezeMolecule,
     /// `POST /v1/molecules/{id}/thaw` (T-CST-EXPAND).
@@ -202,6 +204,7 @@ impl Verb {
             Self::EnsembleMolecule => "ensemble",
             Self::Vitals => "vitals",
             Self::CollapseMolecule => "collapse",
+            Self::CollapseReceipt => "collapse-receipt",
             Self::FreezeMolecule => "freeze",
             Self::ThawMolecule => "thaw",
             Self::StuckMolecule => "stuck",

@@ -53,6 +53,10 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use cosmon_core::auth::{JwtClaims, Subject};
+use cosmon_core::collapse_contract::{
+    CallerContext, CollapseCondition, CollapsibleStatus, IdempotencyKey, MoleculeRevision,
+    ReceiptLookup,
+};
 use cosmon_core::error::CosmonError;
 use cosmon_core::event_v2::CollapseReason;
 use cosmon_core::harvest_door::HarvestOptions;
@@ -64,6 +68,7 @@ use cosmon_filestore::{harvest_door, FileStore};
 use cosmon_process_witness::process_start_time;
 use cosmon_state::event_log::LedgerReader;
 use cosmon_state::instrumentation::{emit_authz_decision_with_source, AuthzDecision};
+use cosmon_state::ops::collapse::{CollapseOutcome, ExecuteError, KeyedCollapseJson};
 use cosmon_state::ops::{
     self, CollapseError, CollapseJson, CollapseRequest, EnsembleError, EnsembleJson,
     EnsembleRequest, FreezeError, FreezeJson, FreezeRequest, MoleculeView, NucleateError,
@@ -275,7 +280,7 @@ pub async fn get_molecule(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath(molecule_id_str): AxumPath<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     // 1. Authorization header.
     let token = extract_bearer(&headers).map_err(|e| state.reject(e))?;
 
@@ -313,14 +318,28 @@ pub async fn get_molecule(
         retry_after_seconds: None,
     })?;
 
-    let view = run_observe(&state, &spark, &jwt, &molecule_id)?;
+    let tenant_state_dir = state
+        .galaxies_root
+        .join(spark.noyau.as_str())
+        .join(".cosmon/state");
+    let store = FileStore::new(&tenant_state_dir);
+    // One parsed raw snapshot supplies both status and revision, including unknown fields.
+    let (data, revision) = store
+        .load_molecule_revisioned(&molecule_id)
+        .map_err(|e| collapse_store_error(&e, &spark.request_id))?;
+    let view = ops::observe::observe_loaded(data, &tenant_state_dir, &subject_for_jwt(&jwt));
     let body = ObserveJson::from_view(&view, view.data.id.as_str());
-    let body_value = serde_json::to_value(&body).unwrap_or(Value::Null);
+    let mut body_value = serde_json::to_value(&body).unwrap_or(Value::Null);
+    body_value["revision"] = json!(revision.as_str());
 
-    Ok(Json(json!({
-        "request_id": spark.request_id,
-        "molecule": body_value,
-    })))
+    Ok((
+        [(header::ETAG, format!("\"{}\"", revision.as_str()))],
+        Json(json!({
+            "request_id": spark.request_id,
+            "molecule": body_value,
+        })),
+    )
+        .into_response())
 }
 
 /// Extract the JWT bearer from the `Authorization` header.
@@ -1206,7 +1225,6 @@ pub async fn collapse_molecule(
     }
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
     let store = FileStore::new(&tenant_state_dir);
-    let subject = subject_for_jwt(&jwt);
     let location = collapse_work_location(
         &store,
         &tenant_root,
@@ -1221,41 +1239,31 @@ pub async fn collapse_molecule(
         kind: body.kind,
         reason_kind: body.reason_kind.map(CollapseReason::from),
     };
-    let view =
-        ops::collapse(&store, &tenant_state_dir, &subject, &molecule_id, request).map_err(|e| {
-            match &e {
-                CollapseError::MoleculeNotFound(_) => ApiError {
-                    status: StatusCode::NOT_FOUND,
-                    label: "not_found",
-                    request_id: Some(spark.request_id.clone()),
-                    retry_after_seconds: None,
-                },
-                CollapseError::InvalidCause(_) => ApiError {
-                    status: StatusCode::BAD_REQUEST,
-                    label: "invalid_cause",
-                    request_id: Some(spark.request_id.clone()),
-                    retry_after_seconds: None,
-                },
-                CollapseError::MismatchedAccountKind(_) => ApiError {
-                    status: StatusCode::BAD_REQUEST,
-                    label: "mismatched_account_kind",
-                    request_id: Some(spark.request_id.clone()),
-                    retry_after_seconds: None,
-                },
-                CollapseError::AlreadyCompleted(_) => ApiError {
-                    status: StatusCode::CONFLICT,
-                    label: "already_completed",
-                    request_id: Some(spark.request_id.clone()),
-                    retry_after_seconds: None,
-                },
-                CollapseError::StoreUnavailable(_) => ApiError {
-                    status: StatusCode::SERVICE_UNAVAILABLE,
-                    label: "store_unavailable",
-                    request_id: Some(spark.request_id.clone()),
-                    retry_after_seconds: None,
-                },
-            }
-        })?;
+    let authority = cosmon_harvest::pilot_gesture::LeaseCollapseAuthority::new(
+        &tenant_state_dir,
+        "HTTP collapse",
+    );
+    let caller = CallerContext::Remote {
+        subject: jwt.sub.clone(),
+    };
+    let outcome = ops::collapse::execute_with_clock(
+        &store,
+        &tenant_state_dir,
+        &authority,
+        &caller,
+        &molecule_id,
+        request,
+        None,
+        &cosmon_core::harness::RealClock,
+    )
+    .map_err(|e| collapse_execute_error(e, &spark.request_id))?;
+    let CollapseOutcome::Unconditional { view, .. } = outcome else {
+        return Err(collapse_api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_unavailable",
+            &spark.request_id,
+        ));
+    };
 
     let body = CollapseJson::from_view(&view);
     let body_value = collapse_body(&body, location);
@@ -1271,6 +1279,276 @@ pub async fn collapse_molecule(
         "request_id": spark.request_id,
         "collapse": body_value,
     })))
+}
+
+/// Strict keyed intent: the key belongs in the new route, never on the legacy POST.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyedCollapseBody {
+    /// Exact approved reason bytes.
+    pub reason: String,
+    /// Structured cause attribution.
+    pub cause: Option<String>,
+    /// Rate-limit account.
+    pub account: Option<String>,
+    /// Rate-limit currency.
+    pub kind: Option<String>,
+    /// Operator-facing classification.
+    pub reason_kind: Option<String>,
+    /// Nonterminal status the caller confirmed.
+    pub expect_status: String,
+    /// Canonical raw-state revision the caller confirmed.
+    pub expect_revision: String,
+    /// Opaque approval commitment.
+    pub approval_digest: Option<String>,
+    /// Approval deadline checked against time sampled inside the dispatch lock.
+    pub not_after: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+// Both routes embed exactly CollapseReceipt::canonical_bytes(), independent
+// of struct field order or serde_json map insertion-order features.
+fn collapse_receipt_response(
+    status: StatusCode,
+    body: &impl serde::Serialize,
+    request_id: &str,
+) -> Result<Response, ApiError> {
+    let bytes = cosmon_hash::canonical_serialize(body).map_err(|_| {
+        collapse_api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_unavailable",
+            request_id,
+        )
+    })?;
+    Ok((status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response())
+}
+
+fn collapse_api_error(status: StatusCode, label: &'static str, request_id: &str) -> ApiError {
+    ApiError {
+        status,
+        label,
+        request_id: Some(request_id.to_owned()),
+        retry_after_seconds: None,
+    }
+}
+
+fn collapse_store_error(error: &CosmonError, request_id: &str) -> ApiError {
+    match error {
+        CosmonError::MoleculeNotFound(_) => {
+            collapse_api_error(StatusCode::NOT_FOUND, "not_found", request_id)
+        }
+        _ => collapse_api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "store_unavailable",
+            request_id,
+        ),
+    }
+}
+
+fn collapse_execute_error(error: ExecuteError, request_id: &str) -> ApiError {
+    match error {
+        ExecuteError::UnleasedPilotGesture(_) => {
+            collapse_api_error(StatusCode::FORBIDDEN, "unleased_pilot_gesture", request_id)
+        }
+        ExecuteError::Collapse(error) => {
+            let (status, label) = match error {
+                CollapseError::MoleculeNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+                CollapseError::InvalidCause(_) => (StatusCode::BAD_REQUEST, "invalid_cause"),
+                CollapseError::MismatchedAccountKind(_) => {
+                    (StatusCode::BAD_REQUEST, "mismatched_account_kind")
+                }
+                CollapseError::AlreadyCompleted(_) => (StatusCode::CONFLICT, "already_completed"),
+                CollapseError::StoreUnavailable(_) => {
+                    (StatusCode::SERVICE_UNAVAILABLE, "store_unavailable")
+                }
+            };
+            collapse_api_error(status, label, request_id)
+        }
+    }
+}
+
+/// Authenticate and admit before resolving any tenant key or molecule state.
+fn collapse_receipt_context(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    id: &str,
+    write: bool,
+) -> Result<(ValidatedJwt, Spark, MoleculeId, FileStore), ApiError> {
+    let token = extract_bearer(headers).map_err(|e| state.reject(e))?;
+    let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
+        .map_err(|e| state.reject(e))?;
+    let scopes: &[&str] = if write {
+        &[SCOPE_MOLECULE_WRITE]
+    } else {
+        &[SCOPE_MOLECULE_READ, SCOPE_MOLECULE_WRITE]
+    };
+    authorise_scope(
+        state,
+        &jwt,
+        if write {
+            "collapse"
+        } else {
+            "collapse-receipt"
+        },
+        scopes,
+        if write {
+            SCOPE_MOLECULE_WRITE
+        } else {
+            SCOPE_MOLECULE_READ
+        },
+    )?;
+    let spark = build_spark(
+        state,
+        &jwt,
+        if write {
+            Verb::CollapseMolecule
+        } else {
+            Verb::CollapseReceipt
+        },
+        Some(id),
+    )?;
+    let molecule_id = MoleculeId::new(id)
+        .map_err(|_| collapse_api_error(StatusCode::NOT_FOUND, "not_found", &spark.request_id))?;
+    let store = FileStore::new(
+        state
+            .galaxies_root
+            .join(spark.noyau.as_str())
+            .join(".cosmon/state"),
+    );
+    // Visibility is checked before consulting the tenant-wide key registry.
+    store
+        .load_molecule(&molecule_id)
+        .map_err(|e| collapse_store_error(&e, &spark.request_id))?;
+    Ok((jwt, spark, molecule_id, store))
+}
+
+/// Conditional, idempotent collapse (ADR-187); never falls back to POST.
+pub async fn put_collapse_receipt(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath((id, key)): AxumPath<(String, String)>,
+    body: Result<Json<KeyedCollapseBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Response, ApiError> {
+    let (jwt, spark, molecule_id, store) = collapse_receipt_context(&state, &headers, &id, true)?;
+    let invalid = || {
+        collapse_api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_collapse_intent",
+            &spark.request_id,
+        )
+    };
+    let Json(body) = body.map_err(|_| invalid())?;
+    if body.reason.trim().is_empty() {
+        return Err(invalid());
+    }
+    let condition = CollapseCondition {
+        key: IdempotencyKey::parse(&key).map_err(|_| invalid())?,
+        expect_status: body
+            .expect_status
+            .parse::<CollapsibleStatus>()
+            .map_err(|_| invalid())?,
+        expect_revision: MoleculeRevision::parse(&body.expect_revision).map_err(|_| invalid())?,
+        approval_digest: body.approval_digest,
+        not_after: body.not_after,
+    };
+    let request = CollapseRequest {
+        reason: body.reason,
+        cause: body.cause,
+        account: body.account,
+        kind: body.kind,
+        reason_kind: body.reason_kind.map(CollapseReason::from),
+    };
+    let tenant_state_dir = state
+        .galaxies_root
+        .join(spark.noyau.as_str())
+        .join(".cosmon/state");
+    let authority = cosmon_harvest::pilot_gesture::LeaseCollapseAuthority::new(
+        &tenant_state_dir,
+        "HTTP collapse",
+    );
+    let caller = CallerContext::Remote { subject: jwt.sub };
+    // A dispatch can hold this lock while its worker runs. Waiting must not
+    // occupy an async executor thread needed by that worker or other routes.
+    let target = molecule_id.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        ops::collapse::execute_with_clock(
+            &store,
+            &tenant_state_dir,
+            &authority,
+            &caller,
+            &target,
+            request,
+            Some(condition),
+            &cosmon_core::harness::RealClock,
+        )
+    })
+    .await
+    .map_err(|_| {
+        collapse_api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_unavailable",
+            &spark.request_id,
+        )
+    })?
+    .map_err(|e| collapse_execute_error(e, &spark.request_id))?;
+    let CollapseOutcome::Keyed(outcome) = outcome else {
+        return Err(collapse_api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_unavailable",
+            &spark.request_id,
+        ));
+    };
+    if outcome.announced {
+        if let Some(receipt) = &outcome.receipt {
+            state.events.publish(MoleculeEvent::state_changed(
+                spark.noyau.as_str(),
+                &id,
+                receipt.previous_status.to_string(),
+                "collapsed",
+            ));
+        }
+    }
+    let status = StatusCode::from_u16(outcome.outcome.http_status()).map_err(|_| {
+        collapse_api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_unavailable",
+            &spark.request_id,
+        )
+    })?;
+    collapse_receipt_response(
+        status,
+        &KeyedCollapseJson::from_outcome(&molecule_id, &outcome),
+        &spark.request_id,
+    )
+}
+
+/// Lock-free durable receipt lookup, isolated by the same admission as observe.
+pub async fn get_collapse_receipt(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath((id, key)): AxumPath<(String, String)>,
+) -> Result<Response, ApiError> {
+    let (_, spark, molecule_id, store) = collapse_receipt_context(&state, &headers, &id, false)?;
+    let key = IdempotencyKey::parse(&key).map_err(|_| {
+        collapse_api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_collapse_intent",
+            &spark.request_id,
+        )
+    })?;
+    let lookup = ops::collapse::lookup_receipt(&store, &molecule_id, &key)
+        .map_err(|e| collapse_execute_error(e.into(), &spark.request_id))?;
+    let (receipt, digest, detail) = match &lookup {
+        ReceiptLookup::Committed(receipt) => (Some(receipt), Some(receipt.digest.as_str()), None),
+        ReceiptLookup::ReservedNotApplied { digest } => (None, Some(digest.as_str()), None),
+        ReceiptLookup::Inconsistent { detail } => (None, None, Some(detail.as_str())),
+        ReceiptLookup::Unknown | ReceiptLookup::BoundElsewhere => (None, None, None),
+    };
+    collapse_receipt_response(
+        StatusCode::OK,
+        &json!({ "molecule": id, "key": key.as_str(), "state": lookup.as_str(),
+        "receipt": receipt, "digest": digest, "detail": detail }),
+        &spark.request_id,
+    )
 }
 
 /// Body schema for `POST /v1/molecules/:id/freeze`.

@@ -190,7 +190,7 @@ fn run_with_seats(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
 /// Execute the `collapse` command for one molecule.
 ///
-/// Every collapse goes through [`cosmon_state::ops::collapse::execute`], the
+/// Every collapse goes through [`cosmon_state::ops::collapse::execute_with_clock`], the
 /// operation MCP calls too. This function keeps only the CLI's projections:
 /// the legacy event mirror, the archive, and the rendering.
 fn collapse_molecule(
@@ -199,7 +199,9 @@ fn collapse_molecule(
     mol_id: &MoleculeId,
     reason: &str,
 ) -> anyhow::Result<()> {
-    use cosmon_state::ops::collapse::{execute, CollapseOutcome, CollapseRequest, ExecuteError};
+    use cosmon_state::ops::collapse::{
+        execute_with_clock, CollapseOutcome, CollapseRequest, ExecuteError,
+    };
 
     let mol_id = mol_id.clone();
     // Validated here for its message; the operation validates it again.
@@ -232,7 +234,7 @@ fn collapse_molecule(
     };
 
     let store: &dyn cosmon_state::StateStore = &*store;
-    let outcome = execute(
+    let outcome = execute_with_clock(
         store,
         &ops_dir,
         &authority,
@@ -240,7 +242,7 @@ fn collapse_molecule(
         &mol_id,
         request,
         condition,
-        Utc::now(),
+        &cosmon_core::harness::RealClock,
     )
     .map_err(|e| match e {
         ExecuteError::UnleasedPilotGesture(refusal) => super::guard::rehome_unleased_pilot_gesture(

@@ -1411,7 +1411,7 @@ impl CosmonService {
     ) -> Result<CallToolResult, McpError> {
         use cosmon_core::collapse_contract::CallerContext;
         use cosmon_state::ops::collapse::{
-            execute, CollapseError, CollapseOutcome, CollapseRequest, ExecuteError,
+            execute_with_clock, CollapseError, CollapseOutcome, CollapseRequest, ExecuteError,
         };
 
         let mol_id = cosmon_core::id::MoleculeId::new(&params.molecule)
@@ -1438,7 +1438,7 @@ impl CosmonService {
             &state_dir,
             "cosmon_collapse",
         );
-        let outcome = execute(
+        let outcome = execute_with_clock(
             &store,
             &state_dir,
             &authority,
@@ -1446,7 +1446,7 @@ impl CosmonService {
             &mol_id,
             CollapseRequest::for_reason(params.reason.clone()),
             None,
-            Utc::now(),
+            &cosmon_core::harness::RealClock,
         )
         .map_err(|e| match e {
             ExecuteError::UnleasedPilotGesture(refusal) => McpError::invalid_request(

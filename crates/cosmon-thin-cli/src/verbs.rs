@@ -172,3 +172,19 @@ pub fn avatar_mould_info() {}
 /// bounded by the adapter (L3 anti-cycle).
 #[cosmon_thin_macro::verb(method = "POST", path = "/v1/avatar/converse", principal = "tenant")]
 pub fn converse() {}
+
+/// Wire stub for the ADR-187 keyed collapse route.
+#[cosmon_thin_macro::verb(
+    method = "PUT",
+    path = "/v1/molecules/:id/collapse-receipts/:key",
+    principal = "tenant"
+)]
+pub fn keyed_collapse() {}
+
+/// Wire stub for lock-free durable receipt lookup.
+#[cosmon_thin_macro::verb(
+    method = "GET",
+    path = "/v1/molecules/:id/collapse-receipts/:key",
+    principal = "tenant"
+)]
+pub fn collapse_receipt() {}

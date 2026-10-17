@@ -752,3 +752,55 @@ async fn phone_home_header_rides_when_enabled_and_stops_on_opt_out() {
         std::env::remove_var(phone_home::ENV_DIR);
     }
 }
+
+#[tokio::test]
+async fn keyed_collapse_and_receipt_lookup_use_only_the_new_routes() -> anyhow::Result<()> {
+    use cosmon_remote::client::KeyedCollapseRequest;
+    let server = MockServer::start().await;
+    let key = "broker-request-0001";
+    let route = "/v1/molecules/task-20261017-aaaa/collapse-receipts/broker-request-0001";
+    let body = KeyedCollapseRequest {
+        reason: "approved".into(),
+        cause: None,
+        account: None,
+        kind: None,
+        reason_kind: Some("gate_failed".into()),
+        expect_status: "running".into(),
+        expect_revision: format!("b3:{}", "0".repeat(64)),
+        approval_digest: Some("approval".into()),
+        not_after: Some("2030-01-01T00:00:00Z".into()),
+    };
+    Mock::given(method("PUT"))
+        .and(path(route))
+        .and(header("authorization", "Bearer fake"))
+        .and(body_json(serde_json::to_value(&body)?))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_json(json!({"outcome": "transitioned", "receipt": {"key": key}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(route))
+        .and(header("authorization", "Bearer fake"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"state": "committed", "receipt": {"key": key}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = Client::new(&profile_for(&server), Some("fake".into()))?;
+    let collapsed = client
+        .keyed_collapse("task-20261017-aaaa", key, &body)
+        .await?;
+    let lookup = client.collapse_receipt("task-20261017-aaaa", key).await?;
+    assert_eq!(collapsed["receipt"], lookup["receipt"]);
+    assert!(client
+        .collapse_receipt("task-20261017-aaaa", "bad/key?query=1")
+        .await
+        .is_err());
+    server.verify().await;
+    Ok(())
+}

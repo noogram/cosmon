@@ -406,3 +406,15 @@ successfully answered request, not that the model used them.
 After a freeze, finish the blocker, then `cs complete` and `cs done` it. After a collapse, collapse the
 pending dependent and re-nucleate it with a new `--blocked-by` edge. The native
 and other CLI surfaces in this table remain unverified for this capability.
+
+
+## Conditional remote collapse (issue #207 B2)
+
+| Gesture | CLI | HTTP / remote client | Native UI |
+|---|---|---|---|
+| Confirm status and revision | `cs observe --json` | `GET /v1/molecules/{id}` includes raw-state revision and strong ETag | No confirmation control audited |
+| Collapse the confirmed revision | `cs collapse --key --expect-status --expect-revision` | Keyed PUT and matching `cosmon-remote molecule collapse` flags; nine ADR-187 outcomes, no POST fallback | No keyed control audited |
+| Recover a lost response | `cs collapse-receipt <id> <key>` | Tenant-scoped GET and `cosmon-remote molecule collapse-receipt` | No receipt view audited |
+
+Both HTTP collapse routes refuse leased missions through the shared authority.
+The stale-writer limitation in ADR-187 remains until the separate D8/B3 change lands.

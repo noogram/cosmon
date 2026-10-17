@@ -3,21 +3,22 @@ Molecule lifecycle (the §8p frozen surface)
 Usage: cosmon-remote molecule [OPTIONS] <COMMAND>
 
 Commands:
-  nucleate  `POST /v1/molecules` — create a molecule
-  list      `GET /v1/molecules` — ensemble list with optional filters
-  get       `GET /v1/molecules/{id}`
-  result    `GET /v1/molecules/{id}/result` — fetch the canonical deliverable (synthesis.md / result.md / the lone artifact). Prints the body to stdout (text) or a metadata line (binary); `--json` for the full envelope
-  status    `GET /v1/molecules/{id}/status` — status, phase, `updated_at` and whether it is terminal, and nothing else: the cheap read a poller repeats. `wait` is this in a loop. Sends a conditional request when it can, so an unmoved molecule costs a 304 and no body
-  session   `GET /v1/molecules/{id}/session` — read the worker's message thread: who said what, in order, with a `waiting` verdict when it looks stuck on an unanswered prompt. Survives the worker, unlike the live `/logs` tail. Read-only — nothing is written into the session
-  tackle    `POST /v1/molecules/{id}/tackle` [coûteux]
-  run       `POST /v1/molecules/{id}/run` — request the resident drain of the DAG rooted at this molecule. The server decides what to tackle, under the binding's bounds (read them via `quota`); 202 on spawn, lifecycle on the events stream
-  done      `POST /v1/molecules/{id}/done` — the harvest door (ADR-176 as amended by issue #51): close this molecule and integrate it where that second authority arises. Carries the full parameter set of `cs done` — `--strategy`, `--force`, the hook waivers — because the requester merging into their own trunk is the operator. `--reason` is mandatory and is never fabricated. Refused unless an operator-sealed grant covers it; 200 with the outcome, never 202
-  collapse  `POST /v1/molecules/{id}/collapse`
-  freeze    `POST /v1/molecules/{id}/freeze`
-  thaw      `POST /v1/molecules/{id}/freeze` with `state: "active"` — resume a frozen molecule (the legacy `/thaw` route is 410 Gone)
-  stuck     `POST /v1/molecules/{id}/stuck`
-  tag       `POST /v1/molecules/{id}/tags`
-  help      Print this message or the help of the given subcommand(s)
+  nucleate          `POST /v1/molecules` — create a molecule
+  list              `GET /v1/molecules` — ensemble list with optional filters
+  get               `GET /v1/molecules/{id}`
+  result            `GET /v1/molecules/{id}/result` — fetch the canonical deliverable (synthesis.md / result.md / the lone artifact). Prints the body to stdout (text) or a metadata line (binary); `--json` for the full envelope
+  status            `GET /v1/molecules/{id}/status` — status, phase, `updated_at` and whether it is terminal, and nothing else: the cheap read a poller repeats. `wait` is this in a loop. Sends a conditional request when it can, so an unmoved molecule costs a 304 and no body
+  session           `GET /v1/molecules/{id}/session` — read the worker's message thread: who said what, in order, with a `waiting` verdict when it looks stuck on an unanswered prompt. Survives the worker, unlike the live `/logs` tail. Read-only — nothing is written into the session
+  tackle            `POST /v1/molecules/{id}/tackle` [coûteux]
+  run               `POST /v1/molecules/{id}/run` — request the resident drain of the DAG rooted at this molecule. The server decides what to tackle, under the binding's bounds (read them via `quota`); 202 on spawn, lifecycle on the events stream
+  done              `POST /v1/molecules/{id}/done` — the harvest door (ADR-176 as amended by issue #51): close this molecule and integrate it where that second authority arises. Carries the full parameter set of `cs done` — `--strategy`, `--force`, the hook waivers — because the requester merging into their own trunk is the operator. `--reason` is mandatory and is never fabricated. Refused unless an operator-sealed grant covers it; 200 with the outcome, never 202
+  collapse          `POST /v1/molecules/{id}/collapse`; with --key: `PUT /v1/molecules/{id}/collapse-receipts/{key}` (no fallback)
+  collapse-receipt  `GET /v1/molecules/{id}/collapse-receipts/{key}` — look up a durable collapse receipt
+  freeze            `POST /v1/molecules/{id}/freeze`
+  thaw              `POST /v1/molecules/{id}/freeze` with `state: "active"` — resume a frozen molecule (the legacy `/thaw` route is 410 Gone)
+  stuck             `POST /v1/molecules/{id}/stuck`
+  tag               `POST /v1/molecules/{id}/tags`
+  help              Print this message or the help of the given subcommand(s)
 
 Options:
       --profile <PROFILE>  Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)

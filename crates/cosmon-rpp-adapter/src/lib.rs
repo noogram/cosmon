@@ -434,6 +434,11 @@ pub fn router(state: AppState) -> Router {
             post(routes::molecules::tag_molecule),
         )
         .route(
+            "/v1/molecules/{id}/collapse-receipts/{key}",
+            axum::routing::put(routes::molecules::put_collapse_receipt)
+                .get(routes::molecules::get_collapse_receipt),
+        )
+        .route(
             "/v1/molecules/{id}/collapse",
             post(routes::molecules::collapse_molecule),
         )

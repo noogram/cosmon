@@ -542,3 +542,211 @@ fn unconditional_collapse_does_not_wait_for_the_dispatch_lock() {
     assert_eq!(status(&state, MOL), MoleculeStatus::Collapsed);
     assert_eq!(transition_events(&state, MOL), 1);
 }
+
+/// Controlled time for the production clock entrypoint, advanced while the
+/// real dispatch lock is held by another thread.
+struct DecisionClock {
+    origin: chrono::DateTime<Utc>,
+    millis: std::sync::atomic::AtomicI64,
+}
+
+impl cosmon_core::harness::Clock for DecisionClock {
+    fn now(&self) -> chrono::DateTime<Utc> {
+        self.origin
+            + chrono::Duration::milliseconds(self.millis.load(std::sync::atomic::Ordering::SeqCst))
+    }
+}
+
+/// Observe the attempt before delegating to the real FileStore lock. Every
+/// state/key read and write still uses the actual file adapter.
+struct LockAttemptStore {
+    inner: FileStore,
+    attempted: std::sync::mpsc::Sender<()>,
+}
+
+impl StateStore for LockAttemptStore {
+    fn load_fleet(&self) -> Result<cosmon_state::Fleet, CosmonError> {
+        self.inner.load_fleet()
+    }
+    fn save_fleet(&self, fleet: &cosmon_state::Fleet) -> Result<(), CosmonError> {
+        self.inner.save_fleet(fleet)
+    }
+    fn load_molecule(&self, id: &MoleculeId) -> Result<MoleculeData, CosmonError> {
+        self.inner.load_molecule(id)
+    }
+    fn save_molecule(&self, id: &MoleculeId, data: &MoleculeData) -> Result<(), CosmonError> {
+        self.inner.save_molecule(id, data)
+    }
+    fn list_molecules(
+        &self,
+        filter: &cosmon_state::MoleculeFilter,
+    ) -> Result<Vec<MoleculeData>, CosmonError> {
+        self.inner.list_molecules(filter)
+    }
+    fn molecule_dir(&self, id: &MoleculeId) -> PathBuf {
+        self.inner.molecule_dir(id)
+    }
+    fn lock_molecule(
+        &self,
+        id: &MoleculeId,
+    ) -> Result<Box<dyn cosmon_state::MoleculeGuard + '_>, CosmonError> {
+        self.attempted
+            .send(())
+            .map_err(|_| CosmonError::StateStore {
+                reason: "clock witness receiver closed".into(),
+            })?;
+        self.inner.lock_molecule(id)
+    }
+    fn load_molecule_revisioned(
+        &self,
+        id: &MoleculeId,
+    ) -> Result<
+        (
+            MoleculeData,
+            cosmon_core::collapse_contract::MoleculeRevision,
+        ),
+        CosmonError,
+    > {
+        self.inner.load_molecule_revisioned(id)
+    }
+    fn save_molecule_durable(
+        &self,
+        id: &MoleculeId,
+        data: &MoleculeData,
+    ) -> Result<(), CosmonError> {
+        self.inner.save_molecule_durable(id, data)
+    }
+    fn read_collapse_key(
+        &self,
+        key: &IdempotencyKey,
+    ) -> Result<Option<cosmon_core::collapse_contract::CollapseKeyRecord>, CosmonError> {
+        self.inner.read_collapse_key(key)
+    }
+    fn reserve_collapse_key(
+        &self,
+        record: &cosmon_core::collapse_contract::CollapseKeyRecord,
+    ) -> Result<bool, CosmonError> {
+        self.inner.reserve_collapse_key(record)
+    }
+    fn commit_collapse_key(
+        &self,
+        record: &cosmon_core::collapse_contract::CollapseKeyRecord,
+    ) -> Result<(), CosmonError> {
+        self.inner.commit_collapse_key(record)
+    }
+}
+
+type ClockTestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+fn clocked_after_lock_wait(
+    state: &Path,
+    clock: std::sync::Arc<DecisionClock>,
+    condition: CollapseCondition,
+    advance_millis: i64,
+) -> ClockTestResult<KeyedCollapse> {
+    use std::sync::atomic::Ordering;
+    let id = MoleculeId::new(MOL)?;
+    let store = FileStore::new(state);
+    let held = store.acquire_dispatch_lock(&id)?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker_state = state.to_path_buf();
+    let worker_clock = clock.clone();
+    let worker = std::thread::spawn(move || -> ClockTestResult<_> {
+        let store = LockAttemptStore {
+            inner: FileStore::new(&worker_state),
+            attempted: tx,
+        };
+        Ok(cosmon_state::ops::collapse::execute_with_clock(
+            &store,
+            &worker_state,
+            &NoLeaseCheck,
+            &caller(),
+            &id,
+            CollapseRequest::for_reason(REASON),
+            Some(condition),
+            &*worker_clock,
+        )?)
+    });
+    // This signal is inside the StateStore lock port, before the real blocking
+    // flock. A pre-lock clock sample necessarily precedes the clock advance.
+    rx.recv_timeout(Duration::from_secs(5))?;
+    clock.millis.store(advance_millis, Ordering::SeqCst);
+    drop(held);
+    match worker
+        .join()
+        .map_err(|_| "clock regression worker panicked")??
+    {
+        CollapseOutcome::Keyed(outcome) => Ok(outcome),
+        CollapseOutcome::Unconditional { .. } => Err("expected keyed outcome".into()),
+    }
+}
+
+#[test]
+fn approval_clock_is_sampled_after_lock_and_replay_wins_after_expiry() -> ClockTestResult<()> {
+    use std::sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc,
+    };
+    let (_tmp, state) = seeded(&[MOL]);
+    let origin = "2026-10-17T10:00:00Z".parse::<chrono::DateTime<Utc>>()?;
+    let mut condition = condition(&state, MOL);
+    condition.not_after = Some(origin + chrono::Duration::seconds(1));
+    let clock = Arc::new(DecisionClock {
+        origin,
+        millis: AtomicI64::new(0),
+    });
+    let before = snapshot(&state);
+    let expired = clocked_after_lock_wait(&state, clock.clone(), condition.clone(), 2000)?;
+    assert_eq!(expired.outcome, CollapseOutcomeKind::ApprovalExpired);
+    assert!(expired.receipt.is_none());
+    assert_eq!(
+        snapshot(&state),
+        before,
+        "expiry after waiting must write no state/key/event"
+    );
+    assert_eq!(lookup(&state, MOL), ReceiptLookup::Unknown);
+
+    // A separate wait crosses 500 ms but stays inside the approval window.
+    clock.millis.store(0, Ordering::SeqCst);
+    let applied = clocked_after_lock_wait(&state, clock.clone(), condition.clone(), 500)?;
+    assert_eq!(applied.outcome, CollapseOutcomeKind::Transitioned);
+    let receipt = applied.receipt.ok_or("transitioned without receipt")?;
+    assert_eq!(
+        receipt.committed_at,
+        origin + chrono::Duration::milliseconds(500)
+    );
+    let committed = snapshot(&state);
+
+    // Same intent after expiry: the original durable receipt wins, HTTP 200.
+    clock.millis.store(2000, Ordering::SeqCst);
+    let result = cosmon_state::ops::collapse::execute_with_clock(
+        &FileStore::new(&state),
+        &state,
+        &NoLeaseCheck,
+        &caller(),
+        &MoleculeId::new(MOL)?,
+        CollapseRequest::for_reason(REASON),
+        Some(condition),
+        &*clock,
+    )?;
+    let CollapseOutcome::Keyed(replayed) = result else {
+        return Err("expected keyed replay".into());
+    };
+    assert_eq!(replayed.outcome, CollapseOutcomeKind::Replayed);
+    assert_eq!(replayed.outcome.http_status(), 200);
+    assert_eq!(
+        replayed
+            .receipt
+            .as_ref()
+            .ok_or("replay receipt missing")?
+            .canonical_bytes()?,
+        receipt.canonical_bytes()?
+    );
+    assert_eq!(
+        snapshot(&state),
+        committed,
+        "replay after expiry must not rewrite the commit"
+    );
+    assert_eq!(transition_events(&state, MOL), 1);
+    Ok(())
+}

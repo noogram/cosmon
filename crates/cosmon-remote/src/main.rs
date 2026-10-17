@@ -24,8 +24,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use cosmon_remote::canon;
 use cosmon_remote::client::{
-    Client, CollapseRequest, ListFilters, Liveness, NucleateRequest, ReactiveRefresh,
-    ReasonRequest, ResultEnvelope, TagRequest,
+    Client, CollapseRequest, KeyedCollapseRequest, ListFilters, Liveness, NucleateRequest,
+    ReactiveRefresh, ReasonRequest, ResultEnvelope, TagRequest,
 };
 use cosmon_remote::config::{Profile, ProfileStore, ENV_TOKEN};
 use cosmon_remote::error::{Error, Result};
@@ -467,13 +467,47 @@ enum MoleculeCmd {
         #[arg(long)]
         deploy_off_trunk: bool,
     },
-    #[command(about = format!("{}{}", canon::POST_V1_MOLECULES_ID_COLLAPSE.label(), canon::POST_V1_MOLECULES_ID_COLLAPSE.effect_suffix()))]
+    #[command(about = format!("{}; with --key: {} (no fallback){}", canon::POST_V1_MOLECULES_ID_COLLAPSE.label(), canon::PUT_V1_MOLECULES_ID_COLLAPSE_RECEIPTS_KEY.label(), canon::POST_V1_MOLECULES_ID_COLLAPSE.effect_suffix()))]
     Collapse {
+        /// Molecule to collapse.
         id: String,
+        /// Exact approved reason.
         #[arg(long)]
         reason: String,
+        /// Structured collapse cause.
         #[arg(long)]
         cause: Option<String>,
+        /// Caller-generated idempotency key; uses PUT and never falls back to POST.
+        #[arg(long, requires_all = ["expect_status", "expect_revision"])]
+        key: Option<String>,
+        /// Nonterminal status confirmed by the operator.
+        #[arg(long, requires = "key", value_parser = ["pending", "queued", "running", "frozen", "starved"])]
+        expect_status: Option<String>,
+        /// Revision returned by molecule get.
+        #[arg(long, requires = "key")]
+        expect_revision: Option<String>,
+        /// Opaque approval digest (keyed mode only).
+        #[arg(long, requires = "key")]
+        approval_digest: Option<String>,
+        /// RFC3339 approval deadline (keyed mode only).
+        #[arg(long, requires = "key")]
+        not_after: Option<String>,
+        /// Rate-limit account (keyed mode only).
+        #[arg(long, requires = "key")]
+        account: Option<String>,
+        /// Rate-limit currency (keyed mode only).
+        #[arg(long, requires = "key")]
+        kind: Option<String>,
+        /// Operator-facing classification (keyed mode only).
+        #[arg(long, requires = "key")]
+        reason_kind: Option<String>,
+    },
+    #[command(about = format!("{} — look up a durable collapse receipt", canon::GET_V1_MOLECULES_ID_COLLAPSE_RECEIPTS_KEY.label()))]
+    CollapseReceipt {
+        /// Molecule the key was sent for.
+        id: String,
+        /// Caller-generated collapse key.
+        key: String,
     },
     #[command(about = format!("{}{}", canon::POST_V1_MOLECULES_ID_FREEZE.label(), canon::POST_V1_MOLECULES_ID_FREEZE.effect_suffix()))]
     Freeze {
@@ -1809,9 +1843,45 @@ async fn run_molecule(
                 );
             }
         }
-        MoleculeCmd::Collapse { id, reason, cause } => {
-            let body = CollapseRequest { reason, cause };
-            let body = client.collapse(&id, &body).await?;
+        MoleculeCmd::Collapse {
+            id,
+            reason,
+            cause,
+            key,
+            expect_status,
+            expect_revision,
+            approval_digest,
+            not_after,
+            account,
+            kind,
+            reason_kind,
+        } => {
+            let body = if let Some(key) = key {
+                let body = KeyedCollapseRequest {
+                    reason,
+                    cause,
+                    account,
+                    kind,
+                    reason_kind,
+                    approval_digest,
+                    not_after,
+                    expect_status: expect_status.ok_or_else(|| {
+                        Error::Config("--expect-status required with --key".into())
+                    })?,
+                    expect_revision: expect_revision.ok_or_else(|| {
+                        Error::Config("--expect-revision required with --key".into())
+                    })?,
+                };
+                client.keyed_collapse(&id, &key, &body).await?
+            } else {
+                client
+                    .collapse(&id, &CollapseRequest { reason, cause })
+                    .await?
+            };
+            print_json(json, &body);
+        }
+        MoleculeCmd::CollapseReceipt { id, key } => {
+            let body = client.collapse_receipt(&id, &key).await?;
             print_json(json, &body);
         }
         MoleculeCmd::Freeze { id, reason } => {
@@ -2658,6 +2728,86 @@ fn run_logout(profile: &Profile, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Parse the actual clap command and run its dispatch against an older server.
+    // A POST would perform the irreversible effect; this test forbids every POST.
+    #[tokio::test]
+    async fn keyed_cli_against_old_server_never_posts() -> anyhow::Result<()> {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        for status in [404, 405] {
+            let server = MockServer::start().await;
+            Mock::given(method("PUT"))
+                .and(path(
+                    "/v1/molecules/task-20261017-aaaa/collapse-receipts/broker-request-0001",
+                ))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({"error": "old_server"})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"collapse": {"status": "collapsed"}})),
+                )
+                .expect(0)
+                .mount(&server)
+                .await;
+            let profile: Profile = serde_json::from_value(serde_json::json!({
+                "host": server.uri(), "sub": "operator", "aud": "cosmon-rpp-a",
+                "oidc_url": server.uri(), "phone_home": false
+            }))?;
+            let rev = format!("b3:{}", "0".repeat(64));
+            let cli = Cli::try_parse_from([
+                "cosmon-remote",
+                "molecule",
+                "collapse",
+                "task-20261017-aaaa",
+                "--reason",
+                "approved",
+                "--key",
+                "broker-request-0001",
+                "--expect-status",
+                "pending",
+                "--expect-revision",
+                &rev,
+            ])?;
+            let Cmd::Molecule { sub } = cli.cmd else {
+                anyhow::bail!("molecule command");
+            };
+            let result = run_molecule(&profile, sub, Some("fake".into()), true).await;
+            assert!(matches!(result, Err(Error::Api { status: actual, .. }) if actual == status));
+            server.verify().await;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn collapse_preconditions_require_the_key_and_each_other() {
+        let base = [
+            "cosmon-remote",
+            "molecule",
+            "collapse",
+            "task-20261017-aaaa",
+            "--reason",
+            "approved",
+        ];
+        for flags in [
+            vec!["--key", "broker-request-0001"],
+            vec!["--expect-status", "pending"],
+            vec!["--expect-revision", "revision"],
+            vec!["--not-after", "2030-01-01T00:00:00Z"],
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(flags)).is_err());
+        }
+        assert!(
+            Cli::try_parse_from(base).is_ok(),
+            "legacy unconditional mode remains available"
+        );
+    }
 
     #[tokio::test]
     async fn token_refuses_stdout_without_confirmation_before_profile_lookup() {
