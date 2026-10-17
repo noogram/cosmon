@@ -1650,6 +1650,15 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         adapter: &str,
         prompt: &str,
     ) -> Result<(), SpawnAttemptFailure> {
+        let expected_process = store
+            .load_molecule(recorded.molecule())
+            .ok()
+            .filter(|mol| {
+                mol.process
+                    .as_ref()
+                    .is_some_and(|p| &p.worker_id == recorded.worker())
+            })
+            .and_then(|mol| mol.process);
         let handle = self
             .backend
             .spawn(agent, &RuntimeConfig::default())
@@ -1678,6 +1687,18 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             });
         }
 
+        if let Some(identity) = &handle.terminal {
+            if !dispatch_ledger::stamp_terminal_witness(
+                store,
+                recorded.molecule(),
+                expected_process.as_ref(),
+                identity,
+            ) {
+                eprintln!(
+                    "library executor: terminal witness not recorded; attachment unavailable"
+                );
+            }
+        }
         if let Some(pid) = handle.pid {
             let start_time = cosmon_process_witness::process_start_time(pid);
             if !dispatch_ledger::stamp_pid_witness(store, recorded.molecule(), pid, start_time) {

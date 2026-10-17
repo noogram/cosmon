@@ -982,6 +982,16 @@ fn ensure_codex_project_trusted_at(config_path: &Path, work_dir: &Path) -> Resul
 /// Returns [`CodexError::SpawnFailed`] when the tmux session cannot be
 /// created.
 pub fn spawn_codex_session(config: &CodexSessionConfig) -> Result<(), CodexError> {
+    spawn_codex_session_witnessed(config).map(|_| ())
+}
+
+/// Launch with an optional terminal incarnation captured at creation.
+///
+/// # Errors
+/// Returns the same launch errors as [`spawn_codex_session`].
+pub fn spawn_codex_session_witnessed(
+    config: &CodexSessionConfig,
+) -> Result<Option<cosmon_core::terminal::TerminalIdentity>, CodexError> {
     if config.mode == CodexMode::Interactive {
         if let Some(home) = &config.work_hook_home {
             ensure_codex_project_trusted_at(
@@ -1009,7 +1019,7 @@ pub fn spawn_codex_session(config: &CodexSessionConfig) -> Result<(), CodexError
 
     let backend = TmuxBackend::new(&config.socket);
     backend
-        .spawn_worker_with_env(
+        .spawn_worker_with_env_witnessed(
             &config.session_name,
             &config.work_dir,
             &cmd,

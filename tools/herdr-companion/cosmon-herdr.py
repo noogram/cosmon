@@ -9,6 +9,9 @@ Cosmon state file is parsed; no lifecycle command or terminal input is sent.
 import argparse
 import datetime
 import json
+import os
+import shutil
+import socket
 from pathlib import Path
 import re
 import subprocess
@@ -16,10 +19,7 @@ import sys
 
 
 DELIVERABLES = ("synthesis.md", "frame.md", "outcomes.md", "plan.md", "report.md", "result.md")
-TERMINAL_GAP = (
-    "cs observe JSON has worker, but no transport backend, socket/session address "
-    "or worker incarnation binding. Terminal presence is unknown; attachment is unavailable."
-)
+
 
 
 class Unavailable(Exception):
@@ -61,7 +61,7 @@ def observe(args, molecule_id):
     """Refuse Cosmon's convenient prefix resolution at this exact-id boundary."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", molecule_id):
         raise Unavailable("select a complete molecule id, not an option or path")
-    value = read_json([args.cs, "--json", "observe", molecule_id], args.repo)
+    value = read_json(cs_argv(args, "observe", molecule_id), args.repo)
     row(value)
     if value["id"] != molecule_id:
         raise Unavailable("cs resolved a different molecule; complete exact id required")
@@ -116,14 +116,14 @@ def snapshot(args, detail):
     """Keep lifecycle status, terminal presence and filesystem observations separate."""
     return {**row(detail), "updated_at": detail.get("updated_at"),
             "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "terminal": {"presence": "unknown", "availability": "unavailable", "reason": TERMINAL_GAP},
+            "terminal": terminal(args, detail["id"]),
             "worktree": worktree(args, detail), "artifacts": artifacts(detail)}
 
 
 def execute(args):
     """Dispatch only observations and explicit view creation; there is no close hook."""
     if args.command == "list":
-        argv = [args.cs, "--json", "observe"] + (["--all"] if args.all else [])
+        argv = cs_argv(args, "observe") + (["--all"] if args.all else [])
         values = read_json(argv, args.repo)
         if not isinstance(values, list):
             raise Unavailable("cs observe list JSON must be an array")
@@ -132,15 +132,18 @@ def execute(args):
     if args.command == "show":
         return snapshot(args, detail)
     if args.terminal:
-        # No address is fabricated from worker names, pane labels or private files.
-        raise Unavailable(TERMINAL_GAP)
+        value = terminal(args, args.id)
+        if value["availability"] != "available":
+            raise Unavailable("terminal " + value["availability"] + ": " + value.get("reason", "unknown"))
+        argv = cs_argv(args, "terminal", args.id, "--attach", "--expect", value["expected"], json_output=False)
+        return open_argv(args, argv, "Cosmon worker (read-only)")
     if args.worktree:
         target = worktree(args, detail)
         if target["availability"] != "available":
             raise Unavailable(target["reason"])
-        if not args.herdr_session or not args.workspace:
-            raise Unavailable("opening a worktree requires --herdr-session and --workspace")
-        output = read_json([args.herdr, "--session", args.herdr_session, "tab", "create",
+        if not args.workspace:
+            raise Unavailable("opening a worktree requires a workspace")
+        output = read_json(herdr_argv(args, "tab", "create") + [
                             "--workspace", args.workspace, "--cwd", target["path"], "--no-focus"], args.repo)
         return {"id": args.id, "opened": "worktree", "path": target["path"], "herdr": output}
     available = artifacts(detail)
@@ -150,19 +153,170 @@ def execute(args):
     if len(selected) != 1:
         raise Unavailable("artifact absent or outside the conventional deliverable set")
     if not args.window:
-        raise Unavailable("opening an artifact requires an explicit GPUI --window")
+        argv = [sys.executable, str(Path(__file__).resolve()), "--repo", str(args.repo),
+                "--cs", args.cs, "read-artifact", args.id, args.artifact]
+        return open_argv(args, argv, "Cosmon artifact (read-only)")
     output = read_json([args.herdr_ui, "code", "open", selected[0]["path"] + ":1",
                         "--window", args.window, "--json"], args.repo)
     return {"id": args.id, "opened": "artifact", "path": selected[0]["path"], "herdr_ui": output}
 
 
+def safe_text(value):
+    """Keep terminal control bytes in untrusted display content inert."""
+    return "".join(c if c.isprintable() or c in "\n\t" else repr(c)[1:-1] for c in str(value))
+
+
+def cs_argv(args, *command, json_output=True):
+    """Pin the selected galaxy explicitly so inherited state overrides cannot redirect it."""
+    return [args.cs, "--config", str(args.repo / ".cosmon" / "state")] + (["--json"] if json_output else []) + list(command)
+
+
+def herdr_argv(args, *command):
+    """The context socket stays inherited; an explicit session is never guessed."""
+    return [args.herdr] + (["--session", args.herdr_session] if args.herdr_session else []) + list(command)
+
+
+def galaxy(path):
+    """Validate Git's canonical main checkout, including invocation from its worktrees."""
+    candidate = Path(path).resolve(strict=True)
+    if not candidate.is_dir():
+        raise Unavailable("project context is not a directory")
+    records = run(["git", "worktree", "list", "--porcelain", "-z"], candidate).decode().split("\0\0")
+    first = dict(f.split(" ", 1) for f in records[0].split("\0") if " " in f)
+    root = Path(first.get("worktree", "")).resolve(strict=True)
+    if not (root / ".cosmon" / "config.toml").is_file():
+        raise Unavailable("project has no Cosmon galaxy configuration")
+    return root
+
+
+def configure(args):
+    """Use actual Herdr context fields; never select the plugin source cwd as a galaxy."""
+    context = json.loads(os.environ.get("HERDR_PLUGIN_CONTEXT_JSON", "{}"))
+    if not isinstance(context, dict):
+        raise Unavailable("invalid plugin context")
+    explicit = args.repo or os.environ.get("COSMON_CLIENT_REPO")
+    if explicit:
+        args.repo = galaxy(explicit)
+    elif os.environ.get("HERDR_PLUGIN_ID") or context:
+        roots = set()
+        for key in ("workspace_cwd", "focused_pane_cwd"):
+            value = context.get(key)
+            if value:
+                try:
+                    roots.add(galaxy(value))
+                except (Unavailable, OSError):
+                    continue
+        if len(roots) != 1:
+            raise Unavailable("plugin project context missing or ambiguous; supply --repo")
+        args.repo = roots.pop()
+    else:
+        args.repo = galaxy(Path.cwd())
+    args.cs = shutil.which(args.cs) or args.cs
+    env_workspace = os.environ.get("HERDR_WORKSPACE_ID")
+    context_workspace = context.get("workspace_id")
+    if not args.workspace and env_workspace and context_workspace and env_workspace != context_workspace:
+        raise Unavailable("plugin workspace context disagrees")
+    args.workspace = args.workspace or env_workspace or context_workspace
+
+
+def terminal(args, molecule_id):
+    """Consume only the versioned public capability; unknown is never an address."""
+    try:
+        value = read_json(cs_argv(args, "terminal", molecule_id), args.repo)
+    except Unavailable:
+        return {"availability": "unknown", "reason": "public terminal capability unavailable"}
+    if not isinstance(value, dict) or value.get("kind") != "cosmon.terminal" or type(value.get("schema_version")) is not int or value["schema_version"] != 1:
+        raise Unavailable("unsupported terminal contract")
+    if value.get("id") != molecule_id or value.get("project_root") != str(args.repo) or value.get("state_dir") != str((args.repo / ".cosmon" / "state").resolve()):
+        raise Unavailable("terminal observation identifies a different molecule or project")
+    availability = value.get("availability")
+    if availability not in ("available", "unknown", "unavailable"):
+        raise Unavailable("invalid terminal availability")
+    if availability == "available" and (value.get("capability") != "read_only_ignore_size" or not isinstance(value.get("expected"), str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["expected"])):
+        raise Unavailable("unsupported terminal attachment capability")
+    return value
+
+
+def api(args, method, params):
+    """Use Herdr's documented newline JSON socket API, not shell command injection."""
+    status = read_json(herdr_argv(args, "status", "server", "--json"), args.repo)
+    address = status.get("socket")
+    if not status.get("running") or not isinstance(address, str):
+        raise Unavailable("Herdr server/socket unavailable")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(20)
+            client.connect(address)
+            client.sendall(json.dumps({"id": "cosmon-view", "method": method, "params": params}).encode() + b"\n")
+            with client.makefile("rb") as stream:
+                reply = json.loads(stream.readline(4 * 1024 * 1024))
+    except (OSError, ValueError) as error:
+        raise Unavailable("Herdr socket request unavailable") from error
+    if "error" in reply or "result" not in reply:
+        raise Unavailable("Herdr refused " + method)
+    return reply.get("result")
+
+
+def open_argv(args, argv, title):
+    """Create a NEW tab with a real argv PTY process; never replace an existing tab."""
+    if not args.workspace:
+        raise Unavailable("opening a terminal view requires an existing workspace")
+    return api(args, "layout.apply", {"workspace_id": args.workspace, "tab_label": title,
+        "focus": True, "root": {"type": "pane", "cwd": str(args.repo), "command": argv}})
+
+
+def select(args):
+    """Numbered selector: no opaque id copying, polling, web server or lifecycle controls."""
+    while True:
+        args.command, args.all = "list", True
+        values = execute(args)["molecules"]
+        print("\nClient integrations — Cosmon in Herdr\n" + safe_text(args.repo))
+        for index, value in enumerate(values, 1):
+            print(f"{index}. {safe_text(value['id'])}  {safe_text(value['status'])}")
+        choice = input("Molecule number, r refresh, q quit: ").strip()
+        if choice.lower() == "q":
+            return 0
+        if not choice.isdigit() or not 1 <= int(choice) <= len(values):
+            continue
+        args.id = values[int(choice) - 1]["id"]
+        while True:
+            try:
+                # Re-observe the selected id for each rendering and each action.
+                detail = observe(args, args.id)
+                view = snapshot(args, detail)
+                print(safe_text(json.dumps(view, indent=2)))
+                print("t terminal (read-only), w worktree shell, a artifact, b back, q quit")
+                action = input("Action: ").strip().lower()
+                if action == "q":
+                    return 0
+                if action == "b":
+                    break
+                args.command = "open"
+                args.terminal, args.worktree, args.artifact, args.window = action == "t", action == "w", None, None
+                if action == "a":
+                    files = view["artifacts"].get("files", [])
+                    for index, file in enumerate(files, 1):
+                        print(f"{index}. {safe_text(file['name'])}")
+                    selected = input("Artifact number: ").strip()
+                    if not selected.isdigit() or not 1 <= int(selected) <= len(files):
+                        continue
+                    args.artifact = files[int(selected) - 1]["name"]
+                elif action not in ("t", "w"):
+                    continue
+                print(safe_text(json.dumps(execute(args))))
+            except Unavailable as error:
+                print("Unavailable: " + safe_text(error))
+
+
 def main():
     """Print one JSON response, including explicit unavailable results (exit 1)."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", type=Path, default=Path.cwd(), help="existing galaxy checkout")
-    parser.add_argument("--cs", default="cs", help="Cosmon executable")
-    parser.add_argument("--herdr", default="herdr", help="daemon CLI executable")
+    parser.add_argument("--repo", type=Path, help="existing galaxy checkout; otherwise validated plugin context")
+    parser.add_argument("--cs", default=os.environ.get("COSMON_CLIENT_CS", "cs"), help="Cosmon executable")
+    parser.add_argument("--herdr", default=os.environ.get("HERDR_BIN_PATH", "herdr"), help="daemon CLI executable")
     parser.add_argument("--herdr-ui", default="Herdr", help="GPUI executable (distinct from herdr)")
+    parser.add_argument("--herdr-session", help="existing local daemon session (or plugin socket context)")
+    parser.add_argument("--workspace", help="existing workspace (or plugin context)")
     commands = parser.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list", help="one-shot cs observe list; never peek propulsion")
     listing.add_argument("--all", action="store_true")
@@ -173,14 +327,36 @@ def main():
     target = opening.add_mutually_exclusive_group(required=True)
     target.add_argument("--worktree", action="store_true")
     target.add_argument("--artifact", metavar="NAME")
-    target.add_argument("--terminal", action="store_true", help="reports the missing transport capability")
-    opening.add_argument("--herdr-session", help="existing local Herdr daemon session")
-    opening.add_argument("--workspace", help="existing workspace for the new terminal tab")
+    target.add_argument("--terminal", action="store_true", help="open the launch-bound worker terminal read-only")
+    opening.add_argument("--herdr-session", default=argparse.SUPPRESS, help="existing local Herdr daemon session")
+    opening.add_argument("--workspace", default=argparse.SUPPRESS, help="existing workspace for the new terminal tab")
     opening.add_argument("--window", help="explicit GPUI window id for a read-only code tab")
+    commands.add_parser("select", help="interactive numbered molecule and action selector")
+    commands.add_parser("launch", help="plugin action: open selector pane in current workspace")
+    reading = commands.add_parser("read-artifact", help=argparse.SUPPRESS)
+    reading.add_argument("id")
+    reading.add_argument("artifact")
     args = parser.parse_args()
     try:
-        result = execute(args)
-    except Unavailable as error:
+        configure(args)
+        if args.command == "select":
+            return select(args)
+        if args.command == "launch":
+            if not args.workspace:
+                raise Unavailable("plugin action requires a workspace")
+            result = read_json(herdr_argv(args, "plugin", "pane", "open", "--plugin", "cosmon.client", "--entrypoint", "selector", "--placement", "tab", "--workspace", args.workspace, "--env", "COSMON_CLIENT_REPO=" + str(args.repo), "--env", "COSMON_CLIENT_CS=" + args.cs, "--focus"), args.repo)
+        elif args.command == "read-artifact":
+            detail = observe(args, args.id)
+            choices = artifacts(detail).get("files", [])
+            paths = [f["path"] for f in choices if f["name"] == args.artifact]
+            if len(paths) != 1:
+                raise Unavailable("artifact unavailable")
+            print(safe_text(Path(paths[0]).read_text(errors="replace")))
+            input("\nRead-only artifact. Enter to close.")
+            return 0
+        else:
+            result = execute(args)
+    except (Unavailable, OSError, ValueError, EOFError, KeyboardInterrupt) as error:
         print(json.dumps({"availability": "unavailable", "reason": str(error)}))
         return 1
     print(json.dumps(result, indent=2))

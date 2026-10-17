@@ -473,6 +473,36 @@ pub fn stamp_pid_witness(
     store.save_molecule(mol_id, &mol).is_ok()
 }
 
+/// Persist creation-time terminal evidence only while the same dispatch is bound.
+/// A concurrent lifecycle/process write refuses the optional capability.
+#[must_use]
+pub fn stamp_terminal_witness(
+    store: &FileStore,
+    mol_id: &MoleculeId,
+    expected: Option<&cosmon_core::process::MoleculeProcess>,
+    identity: &cosmon_core::terminal::TerminalIdentity,
+) -> bool {
+    let Ok(_guard) = store.lock_fleet() else {
+        return false;
+    };
+    let Ok(revision) = cosmon_state::ops::collapse::current_revision(store, mol_id) else {
+        return false;
+    };
+    let Ok(mut mol) = store.load_molecule(mol_id) else {
+        return false;
+    };
+    if expected.is_none() || mol.process.as_ref() != expected {
+        return false;
+    }
+    let Some(ref mut process) = mol.process else {
+        return false;
+    };
+    process.terminal = Some(identity.clone());
+    store
+        .save_molecule_if_revision(mol_id, &mol, &revision)
+        .is_ok()
+}
+
 /// Undo the ledger entry when the spawn it authorised did not happen.
 ///
 /// Reverses only this worker's binding, claim and status promotion while

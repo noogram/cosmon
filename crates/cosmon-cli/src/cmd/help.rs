@@ -112,6 +112,7 @@ pub(crate) fn command_group_layout() -> Vec<CommandGroup> {
                 Derived("listen"),
                 Derived("nucleate"),
                 Derived("observe"),
+                Derived("terminal"),
                 Derived("evolve"),
                 Derived("complete"),
                 Derived("collapse"),

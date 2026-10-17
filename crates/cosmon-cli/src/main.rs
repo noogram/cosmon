@@ -79,6 +79,9 @@ enum Command {
     #[command(after_help = cmd::examples::OBSERVE)]
     Observe(cmd::observe::Args),
 
+    /// Observe or attach a worker terminal read-only with exact incarnation checks
+    Terminal(cmd::terminal::Args),
+
     /// Inspect and query the `EventV2` event log
     #[command(after_help = cmd::examples::EVENTS, hide = true)]
     Events(cmd::events::Args),
@@ -773,6 +776,7 @@ fn main() {
         Command::Ensemble(args) => cmd::ensemble::run(&ctx, &args),
         Command::Nucleate(args) => cmd::nucleate::run(&ctx, &args),
         Command::Observe(args) => cmd::observe::run(&ctx, &args),
+        Command::Terminal(args) => cmd::terminal::run(&ctx, &args),
         Command::Events(args) => cmd::events::run(&ctx, &args),
         Command::Errors(args) => cmd::errors::run(&ctx, &args),
         Command::Evolve(args) => cmd::evolve::run(&ctx, &args),

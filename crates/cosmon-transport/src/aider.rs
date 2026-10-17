@@ -184,6 +184,16 @@ pub struct AiderSessionConfig {
 /// Returns [`AiderError::SpawnFailed`] if the tmux session cannot be
 /// created.
 pub fn spawn_aider_session(config: &AiderSessionConfig) -> Result<(), AiderError> {
+    spawn_aider_session_witnessed(config).map(|_| ())
+}
+
+/// Launch with an optional terminal incarnation captured at creation.
+///
+/// # Errors
+/// Returns the same launch errors as [`spawn_aider_session`].
+pub fn spawn_aider_session_witnessed(
+    config: &AiderSessionConfig,
+) -> Result<Option<cosmon_core::terminal::TerminalIdentity>, AiderError> {
     let mut cmd = format!("aider --model {}", shell_escape(&config.model));
     for flag in config.permission_flags.as_flags() {
         cmd.push(' ');
@@ -213,7 +223,7 @@ pub fn spawn_aider_session(config: &AiderSessionConfig) -> Result<(), AiderError
 
     let backend = TmuxBackend::new(&config.socket);
     let outcome = backend
-        .spawn_worker(&config.session_name, &config.work_dir, &cmd)
+        .spawn_worker_with_env_witnessed(&config.session_name, &config.work_dir, &cmd, &[])
         .map_err(|e| AiderError::SpawnFailed(e.to_string()));
 
     // ADR-097 / WS-1' (delib-20260519-e6db W3 / adversary F1.3) —

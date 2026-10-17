@@ -118,6 +118,7 @@ pub mod tackle;
 pub mod tag;
 pub mod tail;
 pub mod teardown;
+pub mod terminal;
 pub mod test;
 pub mod thaw;
 pub mod tokens;

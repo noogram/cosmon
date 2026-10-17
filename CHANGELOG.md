@@ -21,6 +21,17 @@ this stage.
 
 ### Added
 
+- Client integrations: `cs --json terminal EXACT_ID` exposes a versioned local
+  terminal capability with explicit unknown/unavailable states. Read-only
+  attachment requires its fresh incarnation token and preserves worker size
+  and session environment. Legacy launches without a creation-time witness
+  remain unknown. (#210)
+- Optional Herdr plugin with a numbered molecule selector, read-only worker
+  terminal, existing worktree shell and canonical artifact viewer. Cosmon
+  remains usable independently; the package has no startup hooks or worker
+  lifecycle controls. See `tools/herdr-companion` for prerequisites and explicit
+  local link/unlink instructions. Other clients are not delivered here. (#211)
+
 - Conditional remote collapse: `cosmon-remote molecule collapse --key
   --expect-status --expect-revision` uses the new PUT receipt route, and
   `molecule collapse-receipt` recovers its durable result. Molecule GET now

@@ -872,6 +872,7 @@ mod tests {
                 session_name: format!("{}{}", config.session_prefix, id.name()),
                 id,
                 pid: None,
+                terminal: None,
             })
         }
         fn terminate(&self, _id: &WorkerId) -> Result<(), TransportError> {

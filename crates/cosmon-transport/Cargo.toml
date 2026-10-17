@@ -32,6 +32,7 @@ cosmon-core = { workspace = true, features = ["test-harness"] }
 # exposes `unistd::Uid`; the workspace pin already enables it.
 nix.workspace = true
 cosmon-state.workspace = true
+cosmon-process-witness.workspace = true
 # `rand` mints the per-dispatch briefing-receipt nonce (`briefing_receipt`).
 # The nonce keys one dispatch to its receipt; it is not a secret, but it must
 # not collide across the dispatches a single worker takes in one session.

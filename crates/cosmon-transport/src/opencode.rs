@@ -126,6 +126,16 @@ pub struct OpencodeSessionConfig {
 /// Returns [`OpencodeError::SpawnFailed`] when the tmux session cannot be
 /// created.
 pub fn spawn_opencode_session(config: &OpencodeSessionConfig) -> Result<(), OpencodeError> {
+    spawn_opencode_session_witnessed(config).map(|_| ())
+}
+
+/// Launch with an optional terminal incarnation captured at creation.
+///
+/// # Errors
+/// Returns the same launch errors as [`spawn_opencode_session`].
+pub fn spawn_opencode_session_witnessed(
+    config: &OpencodeSessionConfig,
+) -> Result<Option<cosmon_core::terminal::TerminalIdentity>, OpencodeError> {
     let cmd = build_opencode_command(config);
 
     if let Some(t) = &config.telemetry {
@@ -143,7 +153,7 @@ pub fn spawn_opencode_session(config: &OpencodeSessionConfig) -> Result<(), Open
 
     let backend = TmuxBackend::new(&config.socket);
     backend
-        .spawn_worker_with_env(
+        .spawn_worker_with_env_witnessed(
             &config.session_name,
             &config.work_dir,
             &cmd,

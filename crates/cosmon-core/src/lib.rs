@@ -306,6 +306,7 @@ pub mod staleness;
 pub mod tackle;
 #[doc(hidden)]
 pub mod tackle_plan;
+pub mod terminal;
 #[doc(hidden)]
 pub mod toposort;
 #[doc(hidden)]

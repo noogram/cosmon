@@ -184,6 +184,7 @@ impl TransportBackend for MockBackend {
             // every platform, so ledger-stamping tests can assert both the
             // pid and its start time without spawning anything.
             pid: Some(std::process::id()),
+            terminal: None,
         })
     }
 

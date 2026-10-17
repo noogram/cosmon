@@ -663,6 +663,22 @@ impl TmuxBackend {
         cmd: &str,
         environment: &[(String, String)],
     ) -> Result<(), TransportError> {
+        self.spawn_worker_with_env_witnessed(session_name, work_dir, cmd, environment)
+            .map(|_| ())
+    }
+
+    /// Spawn as usual and return an optional incarnation captured by `new-session`.
+    /// Missing observation never changes successful worker-launch semantics.
+    ///
+    /// # Errors
+    /// Returns a spawn error only when session creation itself fails.
+    pub fn spawn_worker_with_env_witnessed(
+        &self,
+        session_name: &str,
+        work_dir: &str,
+        cmd: &str,
+        environment: &[(String, String)],
+    ) -> Result<Option<cosmon_core::terminal::TerminalIdentity>, TransportError> {
         let cmd = crate::locale::with_utf8_floor_from_env(cmd);
         let assignments = environment
             .iter()
@@ -671,6 +687,9 @@ impl TmuxBackend {
         let mut args = vec![
             "new-session".to_owned(),
             "-d".to_owned(),
+            "-P".to_owned(),
+            "-F".to_owned(),
+            crate::terminal::LAUNCH_FORMAT.to_owned(),
             "-s".to_owned(),
             session_name.to_owned(),
             "-c".to_owned(),
@@ -681,9 +700,10 @@ impl TmuxBackend {
             args.push(assignment.clone());
         }
         args.push(cmd);
-        self.tmux_cmd(&args.iter().map(String::as_str).collect::<Vec<_>>())
+        let raw = self
+            .tmux_cmd(&args.iter().map(String::as_str).collect::<Vec<_>>())
             .map_err(|e| TransportError::SpawnFailed(format!("tmux new-session failed: {e}")))?;
-        Ok(())
+        Ok(crate::terminal::parse_identity(&raw).ok())
     }
 
     /// Resolve the live tmux session belonging to `worker`.
@@ -1017,7 +1037,15 @@ impl TransportBackend for TmuxBackend {
         // session the *server's* cwd — the dispatching process's, which in
         // the RPP image is `/cosmon` and not the molecule worktree, so the
         // worker's `cs` walk-up would resolve to the wrong project.
-        let mut argv: Vec<&str> = vec!["new-session", "-d", "-s", &session];
+        let mut argv: Vec<&str> = vec![
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            crate::terminal::LAUNCH_FORMAT,
+            "-s",
+            &session,
+        ];
         let cwd_arg;
         if let Some(cwd) = &agent.cwd {
             cwd_arg = cwd.to_str().ok_or_else(|| {
@@ -1030,7 +1058,8 @@ impl TransportBackend for TmuxBackend {
             argv.push(cwd_arg);
         }
         argv.push(&full_cmd);
-        self.tmux_cmd(&argv)
+        let launch = self
+            .tmux_cmd(&argv)
             .map_err(|e| TransportError::SpawnFailed(format!("tmux new-session failed: {e}")))?;
 
         // Witness the pane's root PID for the dispatch ledger
@@ -1047,6 +1076,7 @@ impl TransportBackend for TmuxBackend {
             id: worker_id,
             session_name: session,
             pid,
+            terminal: crate::terminal::parse_identity(&launch).ok(),
         })
     }
 

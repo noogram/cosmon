@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+id = "cosmon.client"
+name = "Cosmon — Client integrations"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "Optional molecule selector and read-only worker views"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "open"
+title = "Open Cosmon selector"
+contexts = ["workspace"]
+command = ["python3", "cosmon-herdr.py", "launch"]
+
+[[panes]]
+id = "selector"
+title = "Cosmon selector"
+placement = "tab"
+command = ["python3", "cosmon-herdr.py", "select"]

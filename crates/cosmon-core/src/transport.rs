@@ -80,6 +80,9 @@ pub struct SpawnHandle {
     /// fail the spawn.
     #[serde(default)]
     pub pid: Option<u32>,
+    /// Launch-bound terminal witness, if the backend supports read-only views.
+    #[serde(default)]
+    pub terminal: Option<crate::terminal::TerminalIdentity>,
 }
 
 /// Information about an active session.

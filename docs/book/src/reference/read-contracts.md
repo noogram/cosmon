@@ -1,7 +1,7 @@
 # Read contracts for external consumers
 
 A program outside cosmon can read cosmon's state without importing any cosmon
-code. Four artefacts make up that surface. Each carries a `schema_version`, and
+code. Five artefacts make up that surface. Each carries a `schema_version`, and
 this page lists the fields a reader may rely on.
 
 | Artefact | Where | `schema_version` |
@@ -9,6 +9,7 @@ this page lists the fields a reader may rely on.
 | Event log | `.cosmon/state/events.jsonl`, one JSON object per line | `1` |
 | Molecule state | `.cosmon/state/fleets/<fleet>/molecules/<id>/state.json` | `1` |
 | Ensemble | `cs ensemble --json` | `1` |
+| Local worker terminal capability | `cs --json terminal EXACT_ID` | `1` |
 | Git conventions | branch and merge subject | not versioned |
 
 ## The rule
@@ -18,12 +19,127 @@ only: a field may be added, and no field is removed, renamed or given a new
 meaning. A change that would break a reader bumps the integer. Readers must
 ignore keys they do not know.
 
-A record or file with no `schema_version` was written before the stamp existed
-and reads as version `1`.
+A historical record or file with no `schema_version` reads as version `1`.
+The new terminal capability requires an explicit version and kind: missing or
+unsupported stamps must be refused by clients.
 
 A field that is going to leave the contract is first listed here as deprecated,
 and stays readable for at least one release after that listing. It leaves only
 with a `schema_version` bump.
+
+## Client integrations: local terminal capability v1
+
+`cs --config STATE_DIRECTORY --json terminal EXACT_ID` observes a bound worker
+terminal without changing lifecycle or sending input. `STATE_DIRECTORY` is the
+selected galaxy's state directory, not its configuration file. Exact molecule
+ids are required; prefixes are refused. Existing `observe` output is unchanged.
+Cosmon has no dependency on the clients consuming this contract. Existing
+`observe` reads used for client details append authorization instrumentation to
+`instrumentation/authz.jsonl`; lifecycle/process state and artifact bytes stay
+unchanged. The new `terminal` command itself writes no persistent state.
+
+Every observation has `schema_version: 1`, `kind: "cosmon.terminal"`, `id`,
+`project_id`, `fleet_id`, canonical absolute `project_root` and `state_dir`, and
+`availability`. Valid observations exit 0, including unknown/unavailable.
+Invalid/missing ids, wrong projects and refused attachment exit nonzero and
+report errors on stderr. Paths and process evidence are local and private;
+clients should not publish their runtime observations.
+
+| Availability | Fields and meaning |
+|---|---|
+| `available` | `capability: "read_only_ignore_size"`, `identity`, opaque `expected` token |
+| `unknown` | `reason: "identity_unknown"` for a legacy/non-terminal launch without a witness, or `"backend_unavailable"` when the backend could not be read |
+| `unavailable` | `reason: "no_process"`, `"identity_changed"` or `"ambiguous_terminal"`; no attachment capability |
+
+Unknown/unavailable omit `identity`, `expected` and `capability`. Absence of a
+successful probe never establishes worker death. Molecule completion, terminal
+availability and deliverable acceptance remain separate observations.
+
+Example (synthetic values, not a live receipt):
+
+```json
+{
+  "schema_version": 1,
+  "kind": "cosmon.terminal",
+  "id": "task-20990101-a001",
+  "project_id": "example-project",
+  "fleet_id": "default",
+  "project_root": "/example/galaxy",
+  "state_dir": "/example/galaxy/.cosmon/state",
+  "availability": "available",
+  "capability": "read_only_ignore_size",
+  "identity": {
+    "backend": "tmux",
+    "socket_path": "/example/tmux/socket",
+    "server_pid": 1200,
+    "server_start": 1000000,
+    "session_id": 4,
+    "session_created": 1800000000,
+    "pane_id": 6,
+    "pane_pid": 1300,
+    "pane_start": 2000000
+  },
+  "expected": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+```
+
+`identity.backend = "tmux"` carries numeric session/pane ids, server/pane PIDs,
+opaque platform launch fingerprints, tmux creation timestamp and exact socket
+path. The spawning adapter captures the newly created target with
+`new-session -P -F`; the optional `process.terminal` field persists it. No
+retroactive witness is inferred from a label. Legacy launches, other backends,
+unsupported platforms and failed optional witness writes remain unknown;
+workers continue to run normally. Current kernel witnesses support macOS and
+Linux; tmux server versions below 3.2 or unknown versions refuse the capability.
+Backend read probes are bounded to three seconds. Terminal availability
+authenticates the pane root process, not provider progress or business success. Only a single live window with a single pane is offered.
+
+Clients must validate version, kind, selected project/state paths, exact id,
+availability and capability. They ignore additive fields, refuse unknown
+versions/capabilities, and re-observe immediately before opening a view. Treat
+`expected` as opaque; do not hash identities or attach directly to their
+addresses. Launch the public command with inherited PTY input/output and the
+validated project cwd, using separate argv entries:
+
+```json
+["cs", "--config", "/example/galaxy/.cosmon/state", "terminal", "task-20990101-a001", "--attach", "--expect", "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+```
+
+Both flags are required together. The token binds the project, state directory,
+fleet, exact molecule and complete process record. Attachment re-reads that
+binding, validates kernel fingerprints and guards server/session/pane numbers
+inside tmux before `attach-session -E -r -f ignore-size`. It uses a separate
+client, clearing inherited `TMUX`/`TMUX_PANE` only for this attachment process.
+`-E` preserves session environment. An output-only renderer uses a read-only
+control client without size announcements, because a sole ordinary ignore-size
+client can still determine tmux's fallback size. No keyboard byte is forwarded;
+outer UI dimensions affect only local presentation. Closing the client detaches its view. Opening/closing
+never spawns, stops or harvests the worker. Local `q`, Escape or Ctrl-C closes the output-only view;
+independent tmux operations and configured hooks remain operator-owned.
+
+This is a same-user consistency check, not a security boundary. Filesystem
+lifecycle reads and kernel probes cannot be atomic with tmux's queue. A
+concurrent lifecycle clear after the last read remains possible. PID start
+tokens are checked immediately before execution but cannot be evaluated by
+native tmux formats: a server restart with colliding numeric identities and
+creation timestamps in that final interval is not excluded. tmux hooks and
+user configuration also remain operator-owned. The view is read-only while
+its client flags stay read-only; it does not revoke the user's independent
+ability to operate tmux.
+
+The optional [Herdr plugin](../../../../tools/herdr-companion/README.md)
+consumes this contract. Other client acceptance requires independent witnesses;
+no cmux or Pi delivery is claimed here. No remote API or native Cosmon UI
+terminal route is added. Existing schemas and historical baselines are preserved.
+
+The generic attachment requires Python 3 on macOS/Linux for its output-only
+control-mode renderer. It launches a read-only/ignore-size tmux control client
+without sending size announcements (`refresh-client -C`), including after an
+ordinary controller resizes and detaches. Native ignore-size alone is not
+sufficient when the viewer is the only client. The renderer samples guarded
+visible-pane frames four times per second; it is not a lossless PTY byte stream
+or scrollback viewer. Local q/Escape/Ctrl-C closes it and no keyboard bytes are
+forwarded. Outer UI dimensions affect presentation only.
 
 ## events.jsonl
 

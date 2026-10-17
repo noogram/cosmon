@@ -2030,6 +2030,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
+    if let Some(identity) = &spawn_outcome.terminal {
+        if !dispatch_ledger::stamp_terminal_witness(&store, &mol.id, mol.process.as_ref(), identity)
+        {
+            eprintln!("cs tackle: terminal identity not recorded; read-only attachment will be unavailable");
+        }
+    }
+
     // 9. Stamp the PID witness on the ledger entry written at step 8b.
     //
     //    Only the detached-local arm yields one, and only after the process
@@ -2040,6 +2047,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //    is already Running and supervised by its session, so a failed
     //    second write costs the PID axis, never the dispatch
     //    (noogram/cosmon#3 Defect 1).
+    let mol = store.load_molecule(&mol_id).unwrap_or(mol);
     let updated = if let Some(witness) = &spawn_outcome.detached_local {
         if dispatch_ledger::stamp_pid_witness(&store, &mol_id, witness.pid, witness.pid_start_time)
         {
@@ -4472,6 +4480,8 @@ pub(super) struct SpawnOutcome {
     /// on the `MoleculeProcess` so the runtime's PID-axis liveness check can
     /// authenticate it. `None` for every other adapter.
     pub detached_local: Option<DetachedLocalWitness>,
+    /// Launch-bound terminal evidence; absent for unsupported or legacy spawns.
+    pub terminal: Option<cosmon_core::terminal::TerminalIdentity>,
     /// The Claude configuration directory this dispatch's worker was actually
     /// launched under (`CLAUDE_CONFIG_DIR`), when the claude arm resolved one.
     ///
@@ -4688,6 +4698,7 @@ pub(super) fn spawn_and_prompt(
     // arm with something to say: the config dir it resolved, which the
     // realized-model watcher needs and cannot recompute (see
     // [`SpawnOutcome::claude_config_dir`]).
+    let mut terminal = None;
     if adapter.as_str() == "claude" {
         let claude_config_dir = spawn_claude_and_prompt(
             backend,
@@ -4702,15 +4713,17 @@ pub(super) fn spawn_and_prompt(
             strong_set,
             &harness_argv(harness_args),
             dispatch_t0,
+            &mut terminal,
         )?;
         return Ok(SpawnOutcome {
+            terminal,
             codex_launch_dialogue: None,
             detached_local: None,
             claude_config_dir,
             inprocess_work: None,
         });
     }
-    match adapter.as_str() {
+    let mut outcome = match adapter.as_str() {
         "aider" => spawn_aider_and_prompt(
             backend,
             wid,
@@ -4720,6 +4733,7 @@ pub(super) fn spawn_and_prompt(
             mol,
             adapter_entry,
             preferred_model,
+            &mut terminal,
         )
         .map(|()| SpawnOutcome::default()),
         // Gap#5 (`task-20260615-df30`) — codex joins claude/aider as the
@@ -4738,6 +4752,7 @@ pub(super) fn spawn_and_prompt(
             adapter_entry,
             preferred_model,
             &harness_argv(harness_args),
+            &mut terminal,
         )
         .map(|dialogue| SpawnOutcome {
             codex_launch_dialogue: dialogue,
@@ -4755,6 +4770,7 @@ pub(super) fn spawn_and_prompt(
             prompt,
             adapter_entry,
             preferred_model,
+            &mut terminal,
         )
         .map(|()| SpawnOutcome::default()),
         "openai" => spawn_openai_session(
@@ -4819,7 +4835,9 @@ pub(super) fn spawn_and_prompt(
              not wired in spawn_and_prompt — this is a build-time bug, not \
              a runtime path. Add a match arm in spawn_and_prompt."
         )),
-    }
+    }?;
+    outcome.terminal = terminal;
+    Ok(outcome)
 }
 
 /// `FeatureNotCompiled` stub for the `llama-cpp` adapter. The in-process
@@ -5384,6 +5402,7 @@ fn spawn_claude_and_prompt(
     // applied), so the caller can hand it to the realized-model watcher —
     // resolving it a second time is not an option, since `cb next` advances a
     // round-robin balancer and would hand the watcher a *different* account.
+    terminal: &mut Option<cosmon_core::terminal::TerminalIdentity>,
 ) -> anyhow::Result<Option<String>> {
     // `LiveProbe` is not imported here: this path calls the Claude probe's
     // inherent `await_live_with_status`, which keeps the pane verdict the
@@ -5771,7 +5790,12 @@ fn spawn_claude_and_prompt(
         },
     );
 
-    backend.spawn_worker(session_name, &worktree_path.to_string_lossy(), &claude_cmd)?;
+    *terminal = backend.spawn_worker_with_env_witnessed(
+        session_name,
+        &worktree_path.to_string_lossy(),
+        &claude_cmd,
+        &[],
+    )?;
     stage("session.spawned");
 
     // First stage: a side-effect-free liveness poll (the substrate-agnostic
@@ -6695,6 +6719,7 @@ fn spawn_aider_and_prompt(
     mol: &MoleculeData,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
+    terminal: &mut Option<cosmon_core::terminal::TerminalIdentity>,
 ) -> anyhow::Result<()> {
     use cosmon_transport::aider;
     use cosmon_transport::readiness::LiveProbe as _;
@@ -6713,7 +6738,7 @@ fn spawn_aider_and_prompt(
         Some(prompt.to_owned()),
     );
 
-    aider::spawn_aider_session(&config)
+    *terminal = aider::spawn_aider_session_witnessed(&config)
         .map_err(|e| anyhow::anyhow!("cs tackle: aider spawn failed: {e}"))?;
 
     // Postcondition: demand evidence aider actually came up, via the same
@@ -6970,6 +6995,7 @@ fn spawn_codex_and_prompt(
     // overrides the interactive flags does not thereby lose the effort their
     // formula step pinned. Empty leaves the command byte-identical.
     harness_args: &[String],
+    terminal: &mut Option<cosmon_core::terminal::TerminalIdentity>,
 ) -> anyhow::Result<Option<cosmon_core::dialogue::DialogueScan>> {
     use cosmon_transport::codex;
     use cosmon_transport::readiness::LiveProbe as _;
@@ -7077,7 +7103,7 @@ fn spawn_codex_and_prompt(
         parent_mol_id: Some(mol.id.as_str().to_owned()),
     };
 
-    codex::spawn_codex_session(&config)
+    *terminal = codex::spawn_codex_session_witnessed(&config)
         .map_err(|e| anyhow::anyhow!("cs tackle: codex spawn failed: {e}"))?;
 
     // Postcondition: demand evidence codex actually came up, via the same
@@ -7138,7 +7164,7 @@ fn spawn_codex_and_prompt(
             &provenance,
             || {
                 backend.terminate(wid)?;
-                codex::spawn_codex_session(&config)?;
+                *terminal = codex::spawn_codex_session_witnessed(&config)?;
                 let probe = cosmon_transport::readiness::CodexProbe;
                 match probe.await_live(
                     backend,
@@ -7480,6 +7506,8 @@ fn opencode_session_config(
 /// live. This is the surface-lie guard applied to opencode: an
 /// `[exited]` carcass pane (binary missing on PATH, crash on launch) is
 /// caught here instead of the prompt firing into a dead pane.
+// The optional launch witness travels beside the existing adapter arguments.
+#[allow(clippy::too_many_arguments)]
 fn spawn_opencode_and_prompt(
     backend: &TmuxBackend,
     wid: &cosmon_core::id::WorkerId,
@@ -7488,6 +7516,7 @@ fn spawn_opencode_and_prompt(
     prompt: &str,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
+    terminal: &mut Option<cosmon_core::terminal::TerminalIdentity>,
 ) -> anyhow::Result<()> {
     use cosmon_transport::opencode;
     use cosmon_transport::readiness::LiveProbe as _;
@@ -7510,7 +7539,7 @@ fn spawn_opencode_and_prompt(
         effective_model.as_deref(),
     );
 
-    opencode::spawn_opencode_session(&config)
+    *terminal = opencode::spawn_opencode_session_witnessed(&config)
         .map_err(|e| anyhow::anyhow!("cs tackle: opencode spawn failed: {e}"))?;
 
     // Postcondition: demand evidence opencode actually came up, via the same
@@ -8605,6 +8634,7 @@ fn spawn_detached_local_worker(
     // Defect 1). Threading the witness up so step 9 binds the record *with*
     // the PID is the durable fix.
     Ok(SpawnOutcome {
+        terminal: None,
         codex_launch_dialogue: None,
         detached_local: Some(DetachedLocalWitness {
             pid: child.id(),

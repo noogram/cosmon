@@ -1656,6 +1656,7 @@ dependencies = [
  "chrono",
  "cosmon-bridge-claude",
  "cosmon-core",
+ "cosmon-process-witness",
  "cosmon-state",
  "fs2",
  "nix 0.31.2",

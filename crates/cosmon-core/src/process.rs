@@ -82,6 +82,10 @@ pub struct MoleculeProcess {
     /// crashed worker can grep journals by PID).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// Terminal incarnation captured by the spawning adapter; absent for legacy
+    /// or non-terminal workers. Readers must refuse attachment when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<crate::terminal::TerminalIdentity>,
     /// Opaque operating-system launch fingerprint captured with [`Self::pid`].
     ///
     /// A PID alone is not an identity: after a crash the kernel can assign its
@@ -143,6 +147,7 @@ impl MoleculeProcess {
             started_at: Utc::now(),
             status: WorkerStatus::Active,
             pid: None,
+            terminal: None,
             pid_start_time: None,
             adapter_name: None,
             model: None,
