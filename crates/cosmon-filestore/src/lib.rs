@@ -1190,6 +1190,15 @@ impl StateStore for FileStore {
         self.write_molecule(id, data, true)
     }
 
+    fn save_molecule_if_revision(
+        &self,
+        id: &MoleculeId,
+        data: &MoleculeData,
+        expected: &MoleculeRevision,
+    ) -> Result<(), CosmonError> {
+        self.write_molecule_checked(id, data, false, Some(expected), || {})
+    }
+
     fn read_collapse_key(
         &self,
         key: &IdempotencyKey,
@@ -1236,6 +1245,21 @@ impl FileStore {
         data: &MoleculeData,
         durable: bool,
     ) -> Result<(), CosmonError> {
+        self.write_molecule_checked(id, data, durable, None, || {})
+    }
+
+    // Lock order: dispatch (when needed) -> fleet (when needed) -> state-write.
+    // This innermost lock is never held across executor work and never acquires
+    // either outer lock. Saves may already be inside dispatch/fleet sections.
+    // `after_check` lets unit tests intervene at the actual check/rename seam.
+    fn write_molecule_checked(
+        &self,
+        id: &MoleculeId,
+        data: &MoleculeData,
+        durable: bool,
+        expected: Option<&MoleculeRevision>,
+        after_check: impl FnOnce(),
+    ) -> Result<(), CosmonError> {
         /// `MoleculeData` plus the read-contract version, flattened so the
         /// file keeps every existing key.
         #[derive(serde::Serialize)]
@@ -1244,14 +1268,6 @@ impl FileStore {
             #[serde(flatten)]
             data: &'a MoleculeData,
         }
-        let json = serde_json::to_string_pretty(&VersionedState {
-            schema_version: cosmon_state::STATE_SCHEMA_VERSION,
-            data,
-        })?;
-        // Write to the fleet-scoped state path, decoded from the write-path
-        // taxonomy (B7 collapse, delib-20260607-aec8) so the writer emits the
-        // path rather than re-stating the `fleets/<fleet>/molecules/<id>/state.json`
-        // layout beside the taxonomy.
         let path = self.root.join(
             CosmonPath::MoleculeState {
                 fleet: &data.fleet_id,
@@ -1259,6 +1275,54 @@ impl FileStore {
             }
             .rel(),
         );
+        // Key by id, independent of fleet/legacy layout: a legacy record's
+        // first save migrates its destination without changing its lock.
+        let lock_path = self.root.join(CosmonPath::MoleculeWriteLock { id }.rel());
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        lock.lock_exclusive()?;
+        let current_path = self.molecule_path(id);
+        match fs::read(&current_path) {
+            Ok(bytes) => {
+                // Fail closed on corrupt or unreadable state. Missing state is
+                // creation; any other read/parse error must not reopen work.
+                let current: MoleculeData = serde_json::from_slice(&bytes)?;
+                if current.status == cosmon_core::molecule::MoleculeStatus::Collapsed
+                    && (data.status != cosmon_core::molecule::MoleculeStatus::Collapsed
+                        || data.collapse_receipt != current.collapse_receipt)
+                {
+                    return Err(CosmonError::StateStore {
+                        reason: format!("molecule {id} is collapsed; cannot leave Collapsed or replace its receipt"),
+                    });
+                }
+                if let Some(expected) = expected {
+                    let revision = MoleculeRevision::of_state_bytes(&bytes).map_err(|e| {
+                        CosmonError::StateStore {
+                            reason: e.to_string(),
+                        }
+                    })?;
+                    if &revision != expected {
+                        return Err(CosmonError::StateStore {
+                            reason: format!("molecule {id} changed before conditional save"),
+                        });
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && expected.is_none() => {}
+            Err(e) => return Err(e.into()),
+        }
+        after_check();
+        let json = serde_json::to_string_pretty(&VersionedState {
+            schema_version: cosmon_state::STATE_SCHEMA_VERSION,
+            data,
+        })?;
         if durable {
             atomic_write_durable(&path, json.as_bytes())
         } else {
@@ -1402,6 +1466,8 @@ pub(crate) fn trunk_lock_env_serial() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(test)]
 mod tests {
+    mod terminal_writes;
+
     use std::collections::HashMap;
 
     use chrono::Utc;

@@ -91,6 +91,9 @@ pub enum CosmonPathKind {
     FleetRuntime,
     /// `fleet.lock` — advisory lock serialising fleet-state JSON writes.
     FleetLock,
+    /// `molecule-write-locks/<mol>.lock` — innermost state check/rename lock,
+    /// keyed independently of fleet and legacy layout.
+    MoleculeWriteLock,
     /// `trunk.lock` — advisory lock serialising **git main trunk** writes
     /// (ADR-110 I1 WRITER-UNIQUE). Distinct from [`Self::FleetLock`].
     TrunkLock,
@@ -171,6 +174,7 @@ impl CosmonPathKind {
             Self::Fleet => "fleet.json",
             Self::FleetRuntime => "fleet.runtime.json",
             Self::FleetLock => "fleet.lock",
+            Self::MoleculeWriteLock => "molecule-write-locks/<mol>.lock",
             Self::TrunkLock => "trunk.lock",
             Self::FleetEvents => "events.jsonl",
             Self::MoleculeState => "fleets/<fleet>/molecules/<mol>/state.json",
@@ -204,6 +208,7 @@ impl CosmonPathKind {
             | Self::FleetRuntime
             | Self::FleetLock
             | Self::TrunkLock
+            | Self::MoleculeWriteLock
             | Self::MoleculeState
             | Self::LegacyMoleculeState
             | Self::CollapseReceipt => "cosmon-filestore::FileStore",
@@ -232,6 +237,9 @@ impl CosmonPathKind {
             Self::Fleet => "durable fleet snapshot (identities, roles, assignments)",
             Self::FleetRuntime => "host-local worker overlay (worktree paths, restart counts)",
             Self::FleetLock => "advisory lock for fleet-state JSON writes",
+            Self::MoleculeWriteLock => {
+                "advisory lock for serialized molecule state check and rename"
+            }
             Self::TrunkLock => "advisory lock for git main-trunk writes (ADR-110 I1)",
             Self::FleetEvents => "fleet-level append-only transition stream",
             Self::MoleculeState => "authoritative molecule state",
@@ -257,7 +265,7 @@ impl CosmonPathKind {
     #[must_use]
     pub fn persistence(self) -> Persistence {
         match self {
-            Self::FleetLock | Self::TrunkLock => Persistence::Lock,
+            Self::FleetLock | Self::TrunkLock | Self::MoleculeWriteLock => Persistence::Lock,
             Self::ArchiveMolecule | Self::ArchiveFleetEvents | Self::ArchiveSchemaVersion => {
                 Persistence::ArchiveTracked
             }
@@ -290,6 +298,11 @@ pub enum CosmonPath<'a> {
     FleetRuntime,
     /// See [`CosmonPathKind::FleetLock`].
     FleetLock,
+    /// See [`CosmonPathKind::MoleculeWriteLock`].
+    MoleculeWriteLock {
+        /// Molecule id, stable across a legacy-layout migration.
+        id: &'a MoleculeId,
+    },
     /// See [`CosmonPathKind::TrunkLock`].
     TrunkLock,
     /// See [`CosmonPathKind::FleetEvents`].
@@ -390,6 +403,7 @@ impl CosmonPath<'_> {
             Self::Fleet => CosmonPathKind::Fleet,
             Self::FleetRuntime => CosmonPathKind::FleetRuntime,
             Self::FleetLock => CosmonPathKind::FleetLock,
+            Self::MoleculeWriteLock { .. } => CosmonPathKind::MoleculeWriteLock,
             Self::TrunkLock => CosmonPathKind::TrunkLock,
             Self::FleetEvents => CosmonPathKind::FleetEvents,
             Self::MoleculeState { .. } => CosmonPathKind::MoleculeState,
@@ -421,6 +435,9 @@ impl CosmonPath<'_> {
             Self::Fleet => PathBuf::from("fleet.json"),
             Self::FleetRuntime => PathBuf::from("fleet.runtime.json"),
             Self::FleetLock => PathBuf::from("fleet.lock"),
+            Self::MoleculeWriteLock { id } => {
+                PathBuf::from("molecule-write-locks").join(format!("{id}.lock"))
+            }
             Self::TrunkLock => PathBuf::from("trunk.lock"),
             Self::FleetEvents => PathBuf::from("events.jsonl"),
             Self::MoleculeState { fleet, id } => PathBuf::from("fleets")
@@ -501,6 +518,7 @@ mod tests {
             CosmonPathKind::Fleet => CosmonPath::Fleet,
             CosmonPathKind::FleetRuntime => CosmonPath::FleetRuntime,
             CosmonPathKind::FleetLock => CosmonPath::FleetLock,
+            CosmonPathKind::MoleculeWriteLock => CosmonPath::MoleculeWriteLock { id: mol() },
             CosmonPathKind::TrunkLock => CosmonPath::TrunkLock,
             CosmonPathKind::FleetEvents => CosmonPath::FleetEvents,
             CosmonPathKind::MoleculeState => CosmonPath::MoleculeState {
@@ -598,6 +616,7 @@ mod tests {
             "fleet.json",
             "fleet.runtime.json",
             "fleet.lock",
+            "molecule-write-locks/<mol>.lock",
             "trunk.lock",
             "events.jsonl",
             "fleets/<fleet>/molecules/<mol>/state.json",

@@ -12,6 +12,21 @@ The operator `nucleon render`, admin provisioning and federation paths retain
 legacy empty-list rendering without `[scopes]`. No native UI control, remote
 route or CLI flag changes; generated help and OpenAPI are unchanged.
 
+## Collapsed persistence and terminal command refusals (issue #207, D8)
+
+| Capability | CLI | Native UI | Shared storage |
+|---|---|---|---|
+| Refuse stuck/evolve on terminal work before energy or event mutation | `cs stuck` uses the shared stuck operation; `cs evolve` refuses Completed/Collapsed even at zero energy | No new control | Regular and durable FileStore saves refuse leaving Collapsed under one serialized check/rename; metadata updates retaining Collapsed and Completed → Frozen remain legal |
+| Refuse stale dispatch/gate/acceptance results | Runtime dispatch claim and rollback, gate completion and worker acceptance compare live lifecycle and revision before saving | No new control | Conditional writes use the same innermost writer lock; dispatch and fleet locks are not reacquired |
+
+The writer lock is `CosmonPath::MoleculeWriteLock` at
+`molecule-write-locks/<mol>.lock` under the state root, owned by FileStore and
+classified as an advisory lock in `cs paths --writes`. It is keyed by molecule
+id across legacy-to-fleet migration. Lock order is dispatch (if held), then
+fleet (if held), then the writer lock; a save never reacquires either outer
+lock. A save retaining Collapsed must retain its embedded receipt as well. The JSON
+state schema and collapse receipt format are unchanged.
+
 ## Conditional, idempotent collapse — local surfaces (issue #207, ADR-187)
 
 | Capability | CLI | Native UI | Remote service |

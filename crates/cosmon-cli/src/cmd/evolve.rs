@@ -603,6 +603,18 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // Load molecule state.
         let mol_data = store.load_molecule(&mol_id)?;
 
+        // Terminal calls must refuse before the energy breaker can park them.
+        if matches!(
+            mol_data.status,
+            cosmon_core::molecule::MoleculeStatus::Completed
+                | cosmon_core::molecule::MoleculeStatus::Collapsed
+        ) {
+            return Err(cosmon_core::evolve::EvolveError::NotRunnable {
+                status: mol_data.status,
+            }
+            .into());
+        }
+
         // Energy circuit breaker (THESIS Part XI). When the per-molecule
         // [`StepBudget`] is exhausted, refuse the step and park the
         // molecule in `Frozen` with reason `"energy-exhausted"` so a

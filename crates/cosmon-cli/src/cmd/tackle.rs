@@ -3226,7 +3226,7 @@ fn handle_gate_failure(
 /// mark completion if this was the last step.
 fn advance_gate_step(
     ctx: &Context,
-    store: &FileStore,
+    store: &dyn StateStore,
     mol_id: &MoleculeId,
     mol: &MoleculeData,
     formula: &Formula,
@@ -3247,7 +3247,16 @@ fn advance_gate_step(
     )?;
 
     // Persist the step advancement.
-    let mut updated = store.load_molecule(mol_id)?;
+    let (mut updated, revision) = store.load_molecule_revisioned(mol_id)?;
+    if matches!(
+        updated.status,
+        MoleculeStatus::Completed | MoleculeStatus::Collapsed
+    ) || updated.status != mol.status
+        || updated.current_step != mol.current_step
+        || updated.completed_steps != mol.completed_steps
+    {
+        anyhow::bail!("gate completion raced with another transition for {mol_id}");
+    }
     let step_id = cosmon_core::id::StepId::new(&outcome.completed_step.id)?;
     updated.completed_steps.push(step_id);
     updated.updated_at = Utc::now();
@@ -3268,10 +3277,10 @@ fn advance_gate_step(
         _ => {}
     }
 
-    store.save_molecule(mol_id, &updated)?;
+    store.save_molecule_if_revision(mol_id, &updated, &revision)?;
 
     // Emit step-completed event.
-    let events_path = cosmon_filestore::resolve_state_dir(None).join("events.jsonl");
+    let events_path = ctx.state_dir().join("events.jsonl");
     let _ = cosmon_state::event_log::emit_one(
         &events_path,
         cosmon_core::event_v2::EventV2::MoleculeStepCompleted {
@@ -4919,7 +4928,7 @@ fn adapter_completes_inline(adapter: &ValidatedAdapterName) -> bool {
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 fn accept_worker_turn(
-    store: &FileStore,
+    store: &dyn StateStore,
     state_dir: &Path,
     mol_id: &MoleculeId,
     formula: &Formula,
@@ -4944,6 +4953,9 @@ fn accept_worker_turn(
         )
     })?;
     let step_id = cosmon_core::id::StepId::new(&step.id)?;
+    if observed.status == MoleculeStatus::Collapsed {
+        anyhow::bail!("worker acceptance refused: {mol_id} is collapsed");
+    }
     if observed.completed_steps.contains(&step_id) {
         return Ok(());
     }
@@ -5043,11 +5055,19 @@ fn accept_worker_turn(
 
     let updated = {
         let _guard = store.lock_fleet()?;
-        let mut current = store.load_molecule(mol_id)?;
+        let (mut current, revision) = store.load_molecule_revisioned(mol_id)?;
+        // A recorded acceptance may be retried; collapsed work cannot be
+        // accepted even when the step appears in its history.
+        if current.status == MoleculeStatus::Collapsed {
+            anyhow::bail!("worker acceptance raced with collapse for {mol_id}");
+        }
         if current.completed_steps.contains(&step_id) {
             return Ok(());
         }
-        if current.current_step != expected_step {
+        if current.status == MoleculeStatus::Completed
+            || current.status != observed.status
+            || current.current_step != expected_step
+        {
             anyhow::bail!(
                 "worker acceptance raced with another transition: expected step {}, found {}",
                 expected_step,
@@ -5073,7 +5093,7 @@ fn accept_worker_turn(
             }
             _ => {}
         }
-        store.save_molecule(mol_id, &current)?;
+        store.save_molecule_if_revision(mol_id, &current, &revision)?;
         current
     };
 
@@ -10788,6 +10808,8 @@ mod issue61_pressure_check {
 
 #[cfg(test)]
 mod tests {
+    mod terminal_writers;
+
     use std::collections::HashMap;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 

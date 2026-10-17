@@ -1779,7 +1779,7 @@ impl Runtime {
         // poll-interval stale, but this read is fresh. Anything that
         // flipped out of `Pending` since the last poll (e.g. a human's
         // `cs tackle` landed first) is skipped below.
-        let mut mol = self.store.load_molecule(id)?;
+        let (mut mol, revision) = self.store.load_molecule_revisioned(id)?;
         if mol.status == MoleculeStatus::Running
             || mol.status == MoleculeStatus::Completed
             || mol.status == MoleculeStatus::Collapsed
@@ -1812,16 +1812,27 @@ impl Runtime {
         // model, so the pin reproduces them instead of re-resolving from
         // ambient env (noogram/cosmon#3 Defect 2).
         let pin = DispatchPin::from_molecule(&mol);
-        self.store.save_molecule(&mol.id.clone(), &mol)?;
+        self.store.save_molecule_if_revision(id, &mol, &revision)?;
         if let Err(e) = self.executor.dispatch_with_pin(id, &pin) {
             // Rollback: the molecule was flipped to Running optimistically
             // before dispatch. If dispatch fails, the molecule is stranded
             // in Running with no worker — the DAG stalls. Reset to Pending
             // so the next tick re-evaluates and retries. The save error is
             // swallowed because the dispatch failure is the primary signal.
-            mol.status = MoleculeStatus::Pending;
-            mol.updated_at = Utc::now();
-            let _ = self.store.save_molecule(&mol.id.clone(), &mol);
+            if let Ok((mut current, revision)) = self.store.load_molecule_revisioned(id) {
+                // Roll back only our unchanged optimistic claim. Never undo
+                // a completion/collapse or another writer's progress.
+                if current.status == MoleculeStatus::Running
+                    && current.updated_at == mol.updated_at
+                    && current.current_step == mol.current_step
+                {
+                    current.status = MoleculeStatus::Pending;
+                    current.updated_at = Utc::now();
+                    let _ = self
+                        .store
+                        .save_molecule_if_revision(id, &current, &revision);
+                }
+            }
             return Err(e);
         }
         Ok(())
@@ -1876,6 +1887,8 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
+    mod terminal_writers;
+
     use super::*;
 
     /// Prove `Policy` is object-safe — the runtime requires a trait object.

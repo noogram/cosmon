@@ -1302,9 +1302,33 @@ pub trait StateStore {
 
     /// Persist a single molecule.
     ///
+    /// `FileStore` serializes all saves through a distinct innermost writer lock
+    /// and refuses leaving `Collapsed`. `Completed` is deliberately not sticky:
+    /// freeze-on-last-step still permits `Completed → Frozen`.
+    ///
     /// # Errors
     /// Returns [`CosmonError::StateStore`] if the write fails.
     fn save_molecule(&self, id: &MoleculeId, data: &MoleculeData) -> Result<(), CosmonError>;
+
+    /// Persist a result only if the state still has the revision it was
+    /// calculated from. This bounds read/compute/write without holding a lock
+    /// during executor work. `FileStore` serializes comparison through rename.
+    ///
+    /// Adapters without conditional writes refuse rather than providing a
+    /// check-then-save race.
+    ///
+    /// # Errors
+    /// Returns an error on a stale revision or an unsupported adapter.
+    fn save_molecule_if_revision(
+        &self,
+        _id: &MoleculeId,
+        _data: &MoleculeData,
+        _expected: &cosmon_core::collapse_contract::MoleculeRevision,
+    ) -> Result<(), CosmonError> {
+        Err(CosmonError::StateStore {
+            reason: "this state store does not support conditional molecule writes".into(),
+        })
+    }
 
     /// List molecules matching the given filter.
     ///
@@ -1665,6 +1689,16 @@ mod tests {
         // Guards drop here without panicking — the no-op release path.
         drop(fleet_guard);
         drop(trunk_guard);
+        // A legacy/alternate adapter must explicitly refuse the new contract;
+        // a default read-then-save would advertise atomicity it cannot supply.
+        let mol = mol_with_links(Vec::new());
+        let revision = cosmon_core::collapse_contract::MoleculeRevision::of_value(&mol).unwrap();
+        let error = store
+            .save_molecule_if_revision(&mol.id, &mol, &revision)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not support conditional molecule writes"));
     }
 
     /// Prove that `EnergyTracker` is object-safe.

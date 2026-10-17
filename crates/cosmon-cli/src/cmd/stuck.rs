@@ -5,9 +5,6 @@
 //! When a worker cannot proceed, it calls `cs stuck` to freeze
 //! the molecule with a reason. The molecule can be thawed later.
 
-use cosmon_core::event_v2::EventV2;
-use cosmon_state::event_log;
-
 use super::Context;
 
 /// Arguments for the `stuck` subcommand.
@@ -26,27 +23,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let store = ctx.store_at(&state_dir);
 
     let mol_id = cosmon_core::id::MoleculeId::new(&args.molecule)?;
-    let mut mol = store.load_molecule(&mol_id)?;
-
-    let now = chrono::Utc::now();
-    mol.status = cosmon_core::molecule::MoleculeStatus::Frozen;
-    mol.updated_at = now;
-    // Mark stuck-flavored Frozen so a downstream `cs collapse` can render
-    // `previous_status: "stuck"` rather than `"frozen"`
-    // (`task-20260509-177e`).
-    mol.stuck_at = Some(now);
-    store.save_molecule(&mol_id, &mol)?;
-
-    // Emit EventV2 records.
-    let events_path = state_dir.join("events.jsonl");
-    let _ = event_log::emit_one(
-        &events_path,
-        EventV2::MoleculeStuck {
-            molecule_id: mol_id.clone(),
-            reason: cosmon_core::event_v2::StuckReason::from(args.reason.clone()),
+    cosmon_state::ops::stuck::stuck(
+        store.as_ref(),
+        &state_dir,
+        &cosmon_core::auth::Subject::operator(),
+        &mol_id,
+        cosmon_state::ops::stuck::StuckRequest {
+            reason: args.reason.clone(),
         },
-        None,
-    );
+    )?;
+    let mut mol = store.load_molecule(&mol_id)?;
 
     // ADR-030 M3 — archive the stuck molecule's state so a reclone or
     // triage review can see the blocker without running `cs`. Non-fatal:
@@ -228,5 +214,37 @@ mod tests {
             !archive_root.exists(),
             "archived flag must short-circuit the write"
         );
+    }
+    #[test]
+    fn stuck_refuses_terminal_without_state_or_events_changes() {
+        for status in [MoleculeStatus::Completed, MoleculeStatus::Collapsed] {
+            let tmp = tempfile::tempdir().unwrap();
+            let state_dir = tmp.path().join("state");
+            let store = FileStore::new(&state_dir);
+            let mut m = mol("task-20261017-stuck");
+            m.status = status;
+            m.energy_budget = Some(cosmon_core::energy::StepBudget {
+                cap: 1,
+                remaining: 0,
+            });
+            store.save_molecule(&m.id, &m).unwrap();
+            let path = store.molecule_dir(&m.id).join("state.json");
+            let before = std::fs::read(&path).unwrap();
+            let ctx = Context {
+                verbose: false,
+                json: true,
+                config: Some(state_dir.clone()),
+            };
+            assert!(run(
+                &ctx,
+                &Args {
+                    molecule: m.id.to_string(),
+                    reason: "blocked".into()
+                }
+            )
+            .is_err());
+            assert_eq!(std::fs::read(path).unwrap(), before);
+            assert!(!state_dir.join("events.jsonl").exists());
+        }
     }
 }
