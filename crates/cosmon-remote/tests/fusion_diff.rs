@@ -255,7 +255,7 @@ const TACKLE_PRE: &str = "  tackle    `POST /v1/molecules/{id}/tackle`";
 const TACKLE_POST: &str = "  tackle    `POST /v1/molecules/{id}/tackle` [co\u{fb}teux]";
 
 #[test]
-fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_done_session_and_status_lines() {
+fn molecule_diff_is_the_blessed_lifecycle_and_conditional_collapse_help() {
     // In-place substitutions: the thaw about correction (A2, blessed
     // in CHANGELOG 0.2.0) and the scope-derived [coûteux] marker on
     // tackle (A3, task-20260610-10d2). Four blessed additions: the
@@ -269,15 +269,35 @@ fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_done_session_an
     // join a surface pinned this tightly: the line each adds is the
     // whole change.
     let pre = lines_of("molecule.pre-fusion.help.txt");
-    let post = lines_of("molecule.help.txt");
+    // B2 (#207) adds collapse-receipt and the conditional PUT description.
+    // The 16-character verb widens clap's command column from 8 to 16.
+    // Check that exact layout, then undo only that padding for comparison
+    // against the preserved pre-fusion reference. All other bytes stay pinned.
+    let mut post = lines_of("molecule.help.txt");
+    for line in commands_section(&post) {
+        let command = line.split_whitespace().next().expect("command name");
+        let prefix = format!("  {command:16}  ");
+        let description = line
+            .strip_prefix(&prefix)
+            .expect("16-column command padding");
+        let normalized = format!("  {command:8}  {description}");
+        let index = post
+            .iter()
+            .position(|candidate| candidate == &line)
+            .expect("command row");
+        post[index] = normalized;
+    }
+    let collapse_pre = "  collapse  `POST /v1/molecules/{id}/collapse`";
+    let collapse_post = "  collapse  `POST /v1/molecules/{id}/collapse`; with --key: `PUT /v1/molecules/{id}/collapse-receipts/{key}` (no fallback)";
+    let receipt_post = "  collapse-receipt  `GET /v1/molecules/{id}/collapse-receipts/{key}` — look up a durable collapse receipt";
     let added: Vec<&String> = post.iter().filter(|l| !pre.contains(l)).collect();
     let removed: Vec<&String> = pre.iter().filter(|l| !post.contains(l)).collect();
     assert_eq!(
         removed.len(),
-        3,
-        "blessed removals: the pre-fusion thaw + tackle lines + the reworded --token row, got {removed:?}"
+        4,
+        "blessed removals: the pre-fusion thaw + tackle + collapse lines + the reworded --token row, got {removed:?}"
     );
-    for old_line in [THAW_PRE, TACKLE_PRE, TOKEN_PRE] {
+    for old_line in [THAW_PRE, TACKLE_PRE, TOKEN_PRE, collapse_pre] {
         assert!(
             removed.iter().any(|l| l.as_str() == old_line),
             "expected the pre-fusion line to be substituted: {old_line:?}, removed = {removed:?}"
@@ -285,10 +305,16 @@ fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_done_session_an
     }
     assert_eq!(
         added.len(),
-        7,
+        9,
         "blessed: thaw correction + tackle marker + run line + done line + session line \
-         + status line + --token reword, got {added:?}"
+         + status line + --token reword + conditional collapse + receipt lookup, got {added:?}"
     );
+    for line in [collapse_post, receipt_post] {
+        assert!(
+            added.iter().any(|candidate| candidate.as_str() == line),
+            "missing the blessed conditional collapse help: {line:?}, added = {added:?}"
+        );
+    }
     assert!(
         added.iter().any(|l| l.as_str() == THAW_POST),
         "missing the blessed thaw correction, got {added:?}"
