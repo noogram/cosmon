@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-10-17T22:43:40.391084+00:00",
+  "tested_revision": "ccf255df569a2fc975bd9b6355449b58d7d1c4e6",
+  "scope": "Local disposable provider processes; no real pilot or lease; anonymous metadata only. Replaying this receipt is a fixture test, not a new live witness.",
+  "codex": {
+    "lifecycle": {
+      "codex_version": "codex-cli 0.163.0",
+      "model": "gpt-6-luna",
+      "cs_version": "cs 0.7.3 (ccf255df, tree 7572bd8c, built 2026-10-17)",
+      "completion": "completed",
+      "approval_observed": true,
+      "events": [
+        {
+          "sequence": 1,
+          "method": "turn/started",
+          "reading": {
+            "changed": true,
+            "disposition": "applied",
+            "source": "live_lifecycle",
+            "state": "working"
+          }
+        },
+        {
+          "sequence": 2,
+          "method": "item/commandExecution/requestApproval",
+          "reading": {
+            "changed": true,
+            "disposition": "applied",
+            "source": "live_lifecycle",
+            "state": "waiting_permission"
+          }
+        },
+        {
+          "sequence": 3,
+          "method": "turn/completed",
+          "reading": {
+            "changed": true,
+            "disposition": "applied",
+            "source": "live_lifecycle",
+            "state": "idle"
+          }
+        },
+        {
+          "sequence": 4,
+          "method": "transport/disconnected",
+          "reading": {
+            "changed": true,
+            "disposition": "applied",
+            "source": "unavailable",
+            "state": null
+          }
+        }
+      ],
+      "real_model_turn": true,
+      "conversation_content_retained": false,
+      "identity_receipt_exists": true
+    },
+    "identity": {
+      "variables_present": {
+        "COSMON_SESSION_ID": true,
+        "COSMON_SESSION_LAUNCH_ID": true,
+        "CODEX_THREAD_ID": true,
+        "CODEX_SESSION_ID": true,
+        "CLAUDE_SESSION_ID": false,
+        "COSMON_PARENT_MOL_ID": false
+      },
+      "native_aliases_agree": true,
+      "launch_marker_matches": true,
+      "native_precedes_launch": true,
+      "hook_exit": 0,
+      "presence_matches_shell_identity": true,
+      "check_names_shell_identity": true,
+      "check_exit": 1,
+      "presence_rows": 1,
+      "callback_payload": "constructed_from_observed_tool_environment"
+    }
+  },
+  "claude": {
+    "cli_exit": 0,
+    "receipt_exists": true,
+    "provider_version": "Claude Code 2.1.302",
+    "probe_mode": "init-only SessionStart callback subprocess; no model call",
+    "variables_present": {
+      "CLAUDE_SESSION_ID": false,
+      "CLAUDE_CODE_SESSION_ID": true,
+      "COSMON_SESSION_ID": true,
+      "COSMON_SESSION_LAUNCH_ID": true,
+      "CODEX_THREAD_ID": false,
+      "CODEX_SESSION_ID": false,
+      "COSMON_PARENT_MOL_ID": false
+    },
+    "launch_marker_matches": true,
+    "launch_is_fresh": true,
+    "native_payload_present": true,
+    "presence_matches_launch": true,
+    "check_names_launch": true,
+    "check_exit": 1,
+    "hook_exit": 0,
+    "presence_rows": 1,
+    "tool_subprocess_witness": "pending: no model call authorized",
+    "conversation_content_retained": false,
+    "native_hook_export_matches_payload": true
+  }
+}
