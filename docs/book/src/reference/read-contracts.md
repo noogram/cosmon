@@ -129,9 +129,12 @@ its client flags stay read-only; it does not revoke the user's independent
 ability to operate tmux.
 
 The optional [Herdr plugin](../../../../tools/herdr-companion/README.md) and
-independent [cmux tooling](../../../../tools/cmux-companion/README.md) consume
-this contract. Each client's acceptance requires its own witnesses;
-Pi is not delivered here. No remote API or native Cosmon UI
+independent [cmux tooling](../../../../tools/cmux-companion/README.md), and
+[native Pi package](../../../../tools/pi-companion/README.md) consume this
+contract. Each client's acceptance requires its own witnesses. Pi uses an owned
+local PTY bridge and native component for output; it exposes no worker input or
+backend. Its disposable Pi 1.1.0 TUI acceptance is distinct from GUI visual
+review, remote use and worker-backend qualification. No remote API or native Cosmon UI
 terminal route is added. Existing schemas and historical baselines are preserved.
 
 The generic attachment requires Python 3 on macOS/Linux for its output-only

@@ -1,0 +1,12 @@
+{
+  "name": "@noogram/cosmon-pi",
+  "version": "0.1.0",
+  "description": "Optional readonly Pi client for the Cosmon public v1 contract",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "author": "Noogram (noogram.org)",
+  "keywords": ["pi-package"],
+  "files": ["index.ts", "client.mjs", "extension.mjs", "pty_bridge.py", "README.md", "examples"],
+  "pi": {"extensions": ["./index.ts"]},
+  "peerDependencies": {"@earendil-works/pi-coding-agent": "*", "@earendil-works/pi-tui": "*"}
+}

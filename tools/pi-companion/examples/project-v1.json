@@ -1,0 +1,6 @@
+{
+  "root": "/absolute/path/to/galaxy",
+  "projectId": "example-project",
+  "fleet": "default",
+  "cs": "cs"
+}

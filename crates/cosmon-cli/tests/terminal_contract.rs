@@ -194,6 +194,25 @@ fn owned_cmux_client_acceptance() {
     owned_client_acceptance("cmux-companion");
 }
 
+#[test]
+#[ignore = "explicit real Pi/TUI acceptance; requires a pinned Pi test installation"]
+fn owned_pi_client_acceptance() {
+    owned_client_acceptance("pi-companion");
+}
+
+#[test]
+fn optional_pi_client_contract() {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/pi-companion/test_client.mjs");
+    match Command::new("node").arg("--test").arg(script).status() {
+        Ok(status) => assert!(status.success(), "Pi public client contract tests failed"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("SKIP optional Pi tooling tests: Node.js is unavailable");
+        }
+        Err(error) => panic!("could not run Pi client contract tests: {error}"),
+    }
+}
+
 fn owned_client_acceptance(companion: &str) {
     let mut f = Fixture::new();
     f.launch();
