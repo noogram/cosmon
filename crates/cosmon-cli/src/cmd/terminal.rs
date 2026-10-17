@@ -133,10 +133,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 && current.process == mol.process,
             "terminal process binding changed"
         );
-        match args.mode {
-            Mode::ReadOnly => backend.attach_read_only(identity)?,
-            Mode::Interactive => backend.attach_interactive(identity)?,
-        }
+        attach(&backend, args.mode, identity)?;
     } else {
         let view = Observation {
             schema_version: 1,
@@ -191,4 +188,68 @@ fn capability(
         identity: identity.clone(),
         expected,
     })
+}
+
+// The injected ports keep mode selection testable without a terminal or UI.
+fn attach<T: TerminalBackend + TerminalInteractionBackend>(
+    backend: &T,
+    mode: Mode,
+    identity: &TerminalIdentity,
+) -> Result<(), TerminalUnavailable> {
+    match mode {
+        Mode::ReadOnly => backend.attach_read_only(identity),
+        Mode::Interactive => backend.attach_interactive(identity),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct RecordingTerminal(RefCell<Vec<(&'static str, TerminalIdentity)>>);
+
+    impl TerminalBackend for RecordingTerminal {
+        fn validate_terminal(&self, _: &TerminalIdentity) -> Result<(), TerminalUnavailable> {
+            Ok(())
+        }
+
+        fn attach_read_only(&self, identity: &TerminalIdentity) -> Result<(), TerminalUnavailable> {
+            self.0.borrow_mut().push(("read", identity.clone()));
+            Ok(())
+        }
+    }
+
+    impl TerminalInteractionBackend for RecordingTerminal {
+        fn attach_interactive(
+            &self,
+            identity: &TerminalIdentity,
+        ) -> Result<(), TerminalUnavailable> {
+            self.0.borrow_mut().push(("input", identity.clone()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_never_requests_input_and_explicit_mode_preserves_the_target() {
+        let backend = RecordingTerminal::default();
+        let identity = TerminalIdentity::Tmux {
+            socket_path: "/example/terminal.sock".into(),
+            server_pid: 1,
+            server_start: 2,
+            session_id: 3,
+            session_created: 4,
+            pane_id: 5,
+            pane_pid: 6,
+            pane_start: 7,
+        };
+        assert!(attach(&backend, Mode::default(), &identity).is_ok());
+        assert_eq!(&*backend.0.borrow(), &[("read", identity.clone())]);
+        assert!(attach(&backend, Mode::Interactive, &identity).is_ok());
+        assert_eq!(
+            &*backend.0.borrow(),
+            &[("read", identity.clone()), ("input", identity)]
+        );
+    }
 }
