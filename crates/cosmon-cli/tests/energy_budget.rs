@@ -315,3 +315,47 @@ acceptance = "Done"
         "--energy-budget 0 must NOT stamp a budget on the molecule, got {state}"
     );
 }
+
+/// Terminal calls at both zero and nonzero energy must be completely inert.
+#[test]
+fn terminal_evolve_preserves_state_budget_and_events() {
+    use cosmon_filestore::FileStore;
+    use cosmon_state::{MoleculeData, StateStore};
+    for status in ["completed", "collapsed"] {
+        for remaining in [0, 1] {
+            let tmp = tempfile::tempdir().unwrap();
+            let state_dir = tmp.path().join("state");
+            let store = FileStore::new(&state_dir);
+            let now = chrono::Utc::now();
+            let m: MoleculeData = serde_json::from_value(serde_json::json!({
+                "id": "task-20261017-energy", "fleet_id": "default", "formula_id": "terminal-energy",
+                "status": status, "variables": {}, "created_at": now, "updated_at": now,
+                "total_steps": 1, "current_step": 0, "completed_steps": [], "links": [],
+                "energy_budget": {"cap": 1, "remaining": remaining}
+            })).unwrap();
+            store.save_molecule(&m.id, &m).unwrap();
+            let path = store.molecule_dir(&m.id).join("state.json");
+            let before = fs::read(&path).unwrap();
+            let formula = tmp.path().join("formula.toml");
+            fs::write(&formula, "formula = \"terminal-energy\"\nversion = 1\n[[steps]]\nid = \"step\"\ntitle = \"Step\"\ndescription = \"Step\"\n").unwrap();
+            let output = cosmon_bin_in(tmp.path())
+                .args([
+                    "--json",
+                    "evolve",
+                    m.id.as_str(),
+                    "--evidence",
+                    "done",
+                    "--ops-dir",
+                    state_dir.to_str().unwrap(),
+                    "--formula",
+                    formula.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("must be running"));
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert!(!state_dir.join("events.jsonl").exists());
+        }
+    }
+}

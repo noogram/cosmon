@@ -9,7 +9,7 @@ HTTP and `cosmon-remote` implemented in B2 (2026-10-17).
 §D6 (the lease guard on `cs collapse` moves into the shared operation and
 reaches MCP).
 
-**Tracks:** issue #207 (lots B1 and B2); design in deliberation `delib-20261009-8005`.
+**Tracks:** issue #207 (lots B1, B2 and B3); design in deliberation `delib-20261009-8005`.
 
 ## Context
 
@@ -90,14 +90,14 @@ and the broker is not the lifecycle authority.
    environment is never consulted for a network caller. The lease ledger is
    read from the state directory the collapse mutates.
 
-## Terminal states are not made sticky in this increment
+## Terminal-state audit and D8: only Collapsed is sticky
 
 Issue #207's first decision made terminal states sticky in `save_molecule`,
 gated by an audit of every write out of a terminal status: *"a legitimate
 exit found there stops this item."* The audit found one.
 `cosmon-runtime/src/lib.rs` `apply_freeze` moves `Completed → Frozen` by
 design for formulas with `freeze_on_last_step` (called at
-`lib.rs:1545` and `lib.rs:1754`). The item therefore stopped. Two other
+`lib.rs:1545` and `lib.rs:1754`). The item therefore stopped in B1. Two other
 writes out of a terminal status were found and are bugs, not exits:
 `cs stuck` (`cmd/stuck.rs:28-37`, no terminal check, unlike `ops::stuck`) and
 the energy-exhausted branch of `cs evolve` (`cmd/evolve.rs:608-618`). Three
@@ -105,13 +105,18 @@ read-then-write races could write a stale non-terminal copy
 (`cosmon-runtime/src/lib.rs:1822`, `cmd/tackle.rs:5064`,
 `cmd/tackle.rs:3263`).
 
-Consequence: an unlocked writer holding a stale copy can still overwrite a
-committed collapse. The key record survives that write, and the lookup then
-reports `inconsistent` rather than `committed`: the receipt stays
-historically true, but the molecule is not guaranteed to stay collapsed. A
-fence on `Collapsed` alone, which the audit found no legitimate exit from, is
-approved by the operator on 2026-10-17 for the separate B3 increment.
-It is not implemented by B2; the limitation remains until B3 lands.
+D8 (2026-10-17, B3) makes only `Collapsed` sticky. Regular, durable and
+conditional FileStore molecule saves serialize current-state validation through
+rename under `molecule-write-locks/<mol>.lock`, a separate innermost writer lock
+taken after any dispatch/fleet lock. A stale save cannot leave `Collapsed` or
+replace its embedded receipt. Metadata updates that retain `Collapsed` and its
+receipt remain legal; `Completed → Frozen` remains explicitly supported for
+`freeze_on_last_step`. The audited dispatch, gate-completion and
+worker-acceptance writers also validate their live lifecycle and compare
+revisions on save, so a concurrent `Completed` transition is not overwritten.
+State schema and receipt formats do not change. The lock path is declared as
+`CosmonPath::MoleculeWriteLock` in the write-path taxonomy and remains stable
+across legacy-to-fleet migration; saves never reacquire dispatch or fleet locks.
 
 ## Approval time belongs to the shared critical section
 
@@ -171,7 +176,8 @@ before the lock makes this regression fail.
   file-store crash/concurrency witnesses remain authoritative for the engine.
 - `MoleculeData` gains `collapse_receipt` (absent ⇒ none; additive under
   `STATE_SCHEMA_VERSION = 1`).
-- The write-path taxonomy gains `collapse-receipts/<key-hash>.json`.
+- The write-path taxonomy gains `collapse-receipts/<key-hash>.json` (B1) and
+  `molecule-write-locks/<mol>.lock` (B3).
 
 ## Falsifiers
 
