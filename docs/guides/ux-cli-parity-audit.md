@@ -8,13 +8,14 @@
 |---|---|---|---|
 | Observe exact worker terminal incarnation | `cs --json terminal EXACT_ID`, versioned available/unknown/unavailable contract | Consumes public capability; never reads private state JSON or infers a target from labels | No new route or control |
 | Attach a read-only, size-neutral worker view | `cs terminal EXACT_ID --attach --expect TOKEN`, re-read and tmux in-server identity guard, output-only control reader with `-E -r -f ignore-size` | New argv PTY tab invoking the same public command; close detaches the view | No new route or control |
+| Explicit exact-worker human input/output | `cs terminal EXACT_ID --mode interactive --attach --expect TOKEN`; separate port/kind; guarded hex input and participating dimensions, `-E` | Optional Herdr Interagir action; native Cosmon view reports unknown, restores token-pinned read-only | No new route or control |
 | Select molecule, worktree and deliverable | Existing `observe` plus exact Git branch join and canonical molecule_dir | Optional manifest action/pane and numbered selector; worktree shell tab and read-only artifact pager, retained CLI/GPUI code-open mode | No change |
 
 The kernel has no Herdr or other client dependency. Optional launch evidence on
 `process.terminal` is captured at spawn; missing legacy witnesses remain unknown.
 Molecule status and deliverable acceptance do not establish terminal presence.
-No input action, lifecycle authority, worker backend or default transport change
-is added. Read [the contract](../book/src/reference/read-contracts.md) and the
+Input is available only through the explicit interactive action. No lifecycle
+authority, worker backend or default transport change is added. Read [the contract](../book/src/reference/read-contracts.md) and the
 [plugin instructions](../../tools/herdr-companion/README.md) for compatibility,
 installation, local consistency limits and actual verification coverage. Herdr
 socket/PTY acceptance is distinct from rendered GPUI acceptance and from other

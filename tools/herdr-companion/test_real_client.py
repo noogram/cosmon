@@ -205,6 +205,55 @@ def main():
             receipt["state_hashes"] = before
             receipt["worker_size_before"] = before_size
             receipt["worker_size_after"] = after_size
+            # Explicit Interagir, native Agents and release: only this dummy worker.
+            def open_view(interactive=False):
+                previous = {p["pane_id"] for p in panes()}
+                run([sys.executable, str(plugin / "cosmon-herdr.py"), "--repo", str(args.repo),
+                     "--cs", args.cs, "open", "task-20990101-a001",
+                     "--interact" if interactive else "--terminal", "--workspace", wid], env)
+                return wait_for("Cosmon native view pane", lambda: next((p for p in panes() if p["pane_id"] not in previous), None))
+            def agents():
+                return decode(run(["herdr", "agent", "list"], env))
+            interactive = open_view(True)
+            iid = interactive["pane_id"]
+            native = wait_for("native Cosmon unknown report", lambda: (v if "Cosmon" in json.dumps(v) and "unknown" in json.dumps(v) else None) if (v := agents()) else None)
+            receipt["native_agents"] = native
+            details = api("pane.get", {"pane_id": iid})
+            receipt["interactive_pane"] = details
+            check("native registration is Cosmon with honest unknown", "Cosmon" in json.dumps(details) and "unknown" in json.dumps(details))
+            wait_for("interactive client contributes dimensions", lambda: dimensions() != ordinary_size)
+            interactive_size = dimensions()
+            api("pane.send_text", {"pane_id": iid, "text": "EXPLICIT-INTERACTIVE-INPUT"})
+            api("pane.send_keys", {"pane_id": iid, "keys": ["Enter"]})
+            check("explicit input reached dummy process", bool(wait_for("input witness", lambda: (args.repo / "worker-input").exists() and b"EXPLICIT-INTERACTIVE-INPUT" in (args.repo / "worker-input").read_bytes())))
+            check("interactive session environment unchanged", before_environment == run(["tmux", "-L", args.tmux_socket, "show-environment", "-t", "=fixture"]))
+            # Ctrl-] detaches and the wrapper releases its native reporting authority.
+            api("pane.send_text", {"pane_id": iid, "text": "\x1d"})
+            wait_for("interactive client detached", lambda: not clients().strip())
+            check("interactive close preserves exact worker", json.loads(run(cs + ["--json", "terminal", "task-20990101-a001"], env))["expected"] == view["expected"])
+            check("interactive detach released native agent", bool(wait_for("native release", lambda: "Cosmon" not in json.dumps(agents()))))
+            receipt["interactive_dimensions"] = interactive_size
+            # Cold restore exercises Herdr's stored argv. It must reconnect readonly.
+            restored_view = open_view(True)
+            rid = restored_view["pane_id"]
+            wait_for("restore view attached after registration", lambda: clients().strip())
+            run(["herdr", "server", "stop"], env)
+            server.wait(timeout=10)
+            server = subprocess.Popen(["herdr", "server"], env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+            status = wait_for("cold restarted owned server", ready)
+            check("restore uses same isolated socket", status["socket"] == address)
+            restored_clients = wait_for("restored read-only control client", lambda: clients().strip())
+            check("restore never restores input authority", all("read-only" in line and "ignore-size" in line for line in restored_clients.splitlines()))
+            check("restore reconnects same worker", json.loads(run(cs + ["--json", "terminal", "task-20990101-a001"], env))["expected"] == view["expected"])
+            after_restore_input = (args.repo / "worker-input").read_bytes()
+            api("pane.send_text", {"pane_id": rid, "text": "RESTORE-MUST-NOT-FORWARD"})
+            api("pane.send_keys", {"pane_id": rid, "keys": ["Enter"]})
+            time.sleep(0.3)
+            check("restored readonly keys never reach worker", (args.repo / "worker-input").read_bytes() == after_restore_input)
+            receipt["restored_agents"] = agents()
+            receipt["restored_pane"] = api("pane.get", {"pane_id": rid})
+            api("pane.close", {"pane_id": rid})
+            wait_for("restored view detaches", lambda: not clients().strip())
             # Force a pane respawn AFTER kernel validation but BEFORE tmux's
             # if-shell queue executes. This targets the actual execution guard,
             # with a real PTY so a missing guard would successfully attach.
@@ -232,7 +281,7 @@ def main():
             pid, descriptor = pty.fork()
             if pid == 0:
                 os.chdir(args.repo)
-                os.execvpe(args.cs, cs + ["terminal", "task-20990101-a001", "--attach", "--expect", view["expected"]], race_env)
+                os.execvpe(args.cs, cs + ["terminal", "task-20990101-a001", "--mode", "interactive", "--attach", "--expect", view["expected"]], race_env)
             transcript = bytearray()
             deadline = time.monotonic() + 4
             exit_status = None

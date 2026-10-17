@@ -239,6 +239,25 @@ fn owned_herdr_client_acceptance() {
 }
 
 #[test]
+fn explicit_interactive_io_resize_and_stale_refusal() {
+    let mut f = Fixture::new();
+    f.launch();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/herdr-companion/test_interactive.py");
+    assert!(Command::new("python3")
+        .arg(script)
+        .args([
+            "--cs",
+            env!("CARGO_BIN_EXE_cs"),
+            "--repo",
+            f.root.path().to_str().unwrap()
+        ])
+        .status()
+        .unwrap()
+        .success());
+}
+
+#[test]
 fn terminal_witness_stamp_cannot_rebind_a_replaced_dispatch() {
     let mut f = Fixture::new();
     f.launch();

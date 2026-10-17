@@ -331,7 +331,7 @@ SEE ALSO: cs wait (block until terminal), cs peek (fractal TUI).
 
 ## `cs terminal`
 
-Observe or attach a worker terminal read-only with exact incarnation checks
+Observe or attach an exact worker terminal (read-only by default)
 
 **Usage:** `cs terminal [OPTIONS] <MOLECULE_ID>`
 
@@ -341,7 +341,17 @@ Observe or attach a worker terminal read-only with exact incarnation checks
 
 ###### **Options:**
 
-* `--attach` — Attach this terminal read-only, excluding its size from worker sizing
+* `--attach` — Attach using the selected mode (default: output only, no worker resize)
+* `--mode <MODE>` — Explicit input capability; interactive dimensions may resize the worker
+
+  Default value: `read-only`
+
+  Possible values:
+  - `read-only`:
+    Output only, with no worker size or environment influence
+  - `interactive`:
+    Literal human input and output; contributes terminal dimensions
+
 * `--expect <TOKEN>` — Incarnation token returned by a fresh terminal observation
 
 

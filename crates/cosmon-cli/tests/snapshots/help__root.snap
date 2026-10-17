@@ -284,7 +284,7 @@ Commands:
   ensemble           Display ensemble status — observe the fleet at a glance
   nucleate           Nucleate a new molecule from a formula template
   observe            Observe a molecule's current state and history
-  terminal           Observe or attach a worker terminal read-only with exact incarnation checks
+  terminal           Observe or attach an exact worker terminal (read-only by default)
   errors             Errors — aggregate molecule-collapse events into one failure overview: what is breaking the fleet, and which molecules are hit
   evolve             Evolve a molecule to its next lifecycle state
   collapse           Collapse a molecule — terminate with final state recording

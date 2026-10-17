@@ -73,3 +73,14 @@ pub trait TerminalBackend {
     /// at execution as well as before constructing the launch command.
     fn attach_read_only(&self, identity: &TerminalIdentity) -> Result<(), TerminalUnavailable>;
 }
+
+/// Explicit input-capable attachment, separate from the output-only reader port.
+/// No UI provider or lifecycle authority belongs to this capability.
+pub trait TerminalInteractionBackend {
+    /// Attach literal input/output to the exact launch; dimensions may resize it.
+    /// Session environment updates must remain disabled.
+    ///
+    /// # Errors
+    /// Refuses unavailable, ambiguous or changed launch witnesses.
+    fn attach_interactive(&self, identity: &TerminalIdentity) -> Result<(), TerminalUnavailable>;
+}
