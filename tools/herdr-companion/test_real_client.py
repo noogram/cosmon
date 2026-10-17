@@ -214,18 +214,25 @@ def main():
                 return wait_for("Cosmon native view pane", lambda: next((p for p in panes() if p["pane_id"] not in previous), None))
             def agents():
                 return decode(run(["herdr", "agent", "list"], env))
-            interactive = open_view(True)
+            before_interaction = {p["pane_id"] for p in panes()}
+            enter("i")  # Actual selector Interagir action, after its readonly default.
+            interactive = wait_for("Interagir opened a new view", lambda: next((p for p in panes() if p["pane_id"] not in before_interaction), None))
             iid = interactive["pane_id"]
-            native = wait_for("native Cosmon unknown report", lambda: (v if "Cosmon" in json.dumps(v) and "unknown" in json.dumps(v) else None) if (v := agents()) else None)
+            def native_cosmon():
+                value = agents()
+                return value if any(a.get("pane_id") == iid and a.get("agent") == "Cosmon"
+                                    and a.get("agent_status") == "unknown"
+                                    for a in value["agents"]) else None
+            native = wait_for("native Cosmon unknown report", native_cosmon)
             receipt["native_agents"] = native
             details = api("pane.get", {"pane_id": iid})
             receipt["interactive_pane"] = details
-            check("native registration is Cosmon with honest unknown", "Cosmon" in json.dumps(details) and "unknown" in json.dumps(details))
+            check("native registration is Cosmon with honest unknown", details["pane"].get("agent") == "Cosmon" and details["pane"].get("agent_status") == "unknown")
             wait_for("interactive client contributes dimensions", lambda: dimensions() != ordinary_size)
             interactive_size = dimensions()
             api("pane.send_text", {"pane_id": iid, "text": "EXPLICIT-INTERACTIVE-INPUT"})
             api("pane.send_keys", {"pane_id": iid, "keys": ["Enter"]})
-            check("explicit input reached dummy process", bool(wait_for("input witness", lambda: (args.repo / "worker-input").exists() and b"EXPLICIT-INTERACTIVE-INPUT" in (args.repo / "worker-input").read_bytes())))
+            check("explicit input reached dummy process", bool(wait_for("input witness", lambda: (args.repo / "worker-input").exists() and (args.repo / "worker-input").read_bytes() == b"EXPLICIT-INTERACTIVE-INPUT\n")))
             check("interactive session environment unchanged", before_environment == run(["tmux", "-L", args.tmux_socket, "show-environment", "-t", "=fixture"]))
             # Ctrl-] detaches and the wrapper releases its native reporting authority.
             api("pane.send_text", {"pane_id": iid, "text": "\x1d"})
