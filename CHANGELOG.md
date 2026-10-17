@@ -35,7 +35,13 @@ this stage.
   terminal, existing worktree shell and canonical artifact viewer. Cosmon
   remains usable independently; the package has no startup hooks or worker
   lifecycle controls. See `tools/herdr-companion` for prerequisites and explicit
-  local link/unlink instructions. Other clients are not delivered here. (#211)
+  local link/unlink instructions. (#211)
+- Optional independent cmux tooling consumes the same public v1 contract:
+  active-first numbered selection, read-only worker output, existing worktree
+  shells and canonical Markdown views in fresh workspaces. Disposable socket/PTY
+  acceptance passed on cmux 0.65.1; visual UI, remote use and native worker
+  backends are not qualified. No global installation is automatic; Pi is not
+  delivered. See `tools/cmux-companion` for explicit use and removal. (#210)
 
 - Conditional remote collapse: `cosmon-remote molecule collapse --key
   --expect-status --expect-revision` uses the new PUT receipt route, and

@@ -185,8 +185,20 @@ fn real_tmux_launch_rejects_stale_token_reused_name_and_kernel_fingerprint() {
 #[test]
 #[ignore = "explicit real Herdr/PTY acceptance; creates only owned disposable resources"]
 fn owned_herdr_client_acceptance() {
+    owned_client_acceptance("herdr-companion");
+}
+
+#[test]
+#[ignore = "explicit real cmux/PTY acceptance; creates only owned disposable workspaces"]
+fn owned_cmux_client_acceptance() {
+    owned_client_acceptance("cmux-companion");
+}
+
+fn owned_client_acceptance(companion: &str) {
     let mut f = Fixture::new();
     f.launch();
+    // The ensemble contract scopes listings to this configured project.
+    f.molecule.project_id = Some(cosmon_core::id::ProjectId::new("example-project").unwrap());
     // Existing branch mapping for worktree navigation; no Herdr worktree creation.
     for argv in [
         vec!["init", "-q"],
@@ -222,7 +234,7 @@ fn owned_herdr_client_acceptance() {
     )
     .unwrap();
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tools/herdr-companion/test_real_client.py");
+        .join(format!("../../tools/{companion}/test_real_client.py"));
     assert!(Command::new("python3")
         .arg(script)
         .args([

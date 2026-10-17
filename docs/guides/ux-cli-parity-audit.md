@@ -19,7 +19,14 @@ authority, worker backend or default transport change is added. Read [the contra
 [plugin instructions](../../tools/herdr-companion/README.md) for compatibility,
 installation, local consistency limits and actual verification coverage. Herdr
 socket/PTY acceptance is distinct from rendered GPUI acceptance and from other
-clients; cmux and Pi are not delivered by this change.
+clients. The independent [cmux tooling](../../tools/cmux-companion/README.md)
+now consumes the same v1 contract: active-first numbered selection and fresh
+workspaces for worker output, an existing worktree shell and canonical artifact
+text. cmux socket v2 `workspace.create` uses a POSIX-quoted initial command;
+it has no argv PTY API. No existing surface receives worker input. Installation
+is an explicit local directory invocation with no registry or global hooks.
+Pi remains undelivered; no core command, JSON contract or remote classification
+changes for this optional consumer.
 
 ## Explicit empty handoff scopes (issue #209)
 
