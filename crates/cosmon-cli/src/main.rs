@@ -79,7 +79,7 @@ enum Command {
     #[command(after_help = cmd::examples::OBSERVE)]
     Observe(cmd::observe::Args),
 
-    /// Observe or attach a worker terminal read-only with exact incarnation checks
+    /// Observe or attach an exact worker terminal (read-only by default)
     Terminal(cmd::terminal::Args),
 
     /// Inspect and query the `EventV2` event log

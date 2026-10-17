@@ -43,7 +43,8 @@ herdr plugin action invoke cosmon.client.open
 ```
 
 The action opens a new **terminal tab** with a numbered selector. Choose a
-molecule number, then `t` for its read-only terminal, `w` for an existing
+molecule number, then `t` for its read-only terminal, `i` (**Interagir**) for
+explicit human input/output, `w` for an existing
 worktree shell, or `a` and an artifact number for a read-only text viewer.
 `b` returns to the molecule list, `r` refreshes it and `q` exits. There is no
 automatic refresh loop. No internal id needs to be copied during this flow.
@@ -59,11 +60,15 @@ herdr plugin pane open --plugin cosmon.client --entrypoint selector \
 Plugin v1 exposes actions and terminal panes. The installed GPUI command
 inventory does not expose a plugin action command; a native palette entry or
 keybinding has not been qualified. Run the commands above in its terminal.
-Do not expect a native dashboard or a new sidebar. Daemon socket/PTY acceptance
+Worker views report to Herdr's native Agents list as **Cosmon**, with
+semantic state **unknown**; the supported reader has no actual harness state
+witness. Tab labels and report messages distinguish a view from a worker.
+Molecule Running is never interpreted as Working. Daemon socket/PTY acceptance
 is separate from a visual check of the GPUI rendering.
 
-Close a worker view using the normal tab close affordance or tmux detach
-(local `q`, Escape or Ctrl-C). This detaches the view's client; it does not terminate,
+Close a read-only view using the normal tab close affordance or local
+`q`, Escape or Ctrl-C. Interactive views detach with Ctrl-]; other keys,
+including Ctrl-C, are forwarded to the exact worker. This detaches the view's client; it does not terminate,
 freeze, complete or harvest the worker. The artifact viewer closes on Enter;
 closing a worktree shell affects that shell only. Do not start a worker in
 that shell and infer lifecycle integration.
@@ -138,7 +143,7 @@ The helper re-observes before opening and launches `cs terminal --attach
 Cosmon then re-reads the exact process binding, checks platform PID start tokens
 and executes a numeric server/session/pane guard inside tmux before attaching
 with `-E -r -f ignore-size`. Session environment, worker size and ordinary
-worker input are preserved. No input or lifecycle actions are exposed. This is
+worker input are preserved. The read-only route exposes no input; lifecycle actions remain absent. This is
 local same-user consistency, not an authorization boundary; the final
 filesystem/kernel/tmux interval is not atomic, and user-controlled tmux hooks remain in force. See the contract for precise race
 and platform limits. Native backends, remote SSH and other clients are outside
@@ -181,3 +186,54 @@ sufficient when the viewer is the only client. The renderer samples guarded
 visible-pane frames four times per second; it is not a lossless PTY byte stream
 or scrollback viewer. Local q/Escape/Ctrl-C closes it and no keyboard bytes are
 forwarded. Outer UI dimensions affect presentation only.
+
+## Native Agents, explicit input and restore
+
+Plugin 0.2 requires the corresponding Cosmon build for explicit interaction:
+
+```sh
+python3 tools/herdr-companion/cosmon-herdr.py --repo /path/to/galaxy \
+  open task-20990101-a001 --interact --workspace WORKSPACE_ID
+```
+
+Opening a terminal runs a lightweight `view` wrapper, not an agent harness.
+It sends bounded `pane report-agent --state unknown`, `report-agent-session`
+and `release-agent` reports under its own source with label Cosmon. Reporting
+failure does not interrupt the worker or view. This package cannot truthfully
+report working/idle/blocked from its public observations, and deliberately
+reports unknown. Reports do not supply authorization for input.
+
+This is native Agents presence and explicit human IO only. It supplies no
+working/idle/blocked transitions and no turn-completion signal. Do not use
+`herdr agent wait` or `herdr agent prompt --wait` as turn tracking for these
+views: with unknown state they can remain waiting. Native state automation is
+not qualified by this integration.
+
+Interagir requests the separate `cosmon.terminal.interactive` capability and
+revalidates project, molecule and incarnation. Literal bytes are hex encoded
+before the guarded tmux queue; there is no shell interpolation. Dimensions
+participate in tmux sizing and may resize the worker, including when clients
+close. `-E` suppresses session environment updates. Both renderers sample the
+visible pane four times per second; neither is a lossless PTY stream.
+
+Herdr cold restore, when enabled, reconnects a **read-only** view to the
+original token. It does not call agent start/resume and never launches another
+harness. Interagir must be selected again explicitly. Missing/changed worker,
+project or executable paths refuse restore. A linked plugin must remain at a
+stable path; Herdr's plain-command, argument count/length and quoting limits
+may prevent registration, which prints restore unavailable. Restore depends
+on Herdr session persistence, the original local tmux server and launch
+witnesses. Reported identity is a local consistency token, not a credential or
+provider conversation identifier.
+
+The real acceptance test also exercises native registration/release, explicit
+input to a dummy process, environment and dimensions, cold restart with no
+input authority, and stale refusal. Runtime socket/PTY evidence and rendered
+GPUI inspection must be reported separately. See the primary Herdr contracts:
+[adding support](https://herdr.dev/docs/add-herdr-support/) and
+[Agents](https://herdr.dev/docs/agents/).
+
+Herdr 0.9.5 exposes `agent_session` references only for its known official
+agent sources. Cosmon keeps its own name/source: the worker consistency token
+is carried in reconnect argv, not presented as a provider-native session.
+Native registration and actual cold restore are separate acceptance checks.

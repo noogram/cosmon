@@ -9,6 +9,7 @@ this page lists the fields a reader may rely on.
 | Event log | `.cosmon/state/events.jsonl`, one JSON object per line | `1` |
 | Molecule state | `.cosmon/state/fleets/<fleet>/molecules/<id>/state.json` | `1` |
 | Ensemble | `cs ensemble --json` | `1` |
+| Local interactive terminal capability | `cs --json terminal EXACT_ID --mode interactive` | `1`, distinct kind |
 | Local worker terminal capability | `cs --json terminal EXACT_ID` | `1` |
 | Git conventions | branch and merge subject | not versioned |
 
@@ -141,6 +142,48 @@ sufficient when the viewer is the only client. The renderer samples guarded
 visible-pane frames four times per second; it is not a lossless PTY byte stream
 or scrollback viewer. Local q/Escape/Ctrl-C closes it and no keyboard bytes are
 forwarded. Outer UI dimensions affect presentation only.
+
+## Explicit local interaction
+
+The omitted mode (or `--mode read-only`) retains the exact v1 kind and
+output-only behavior above. `--mode interactive` is a separate typed port and
+contract, `schema_version: 1`, `kind: "cosmon.terminal.interactive"`, with
+`capability: "interactive_resize"` when available. Identity, availability,
+project/fleet binding and expected-token semantics are the same. Observing this
+capability sends no input. To request human input/output explicitly:
+
+```sh
+cs terminal EXACT_ID --mode interactive --attach --expect TOKEN
+```
+
+The input renderer attaches a separate tmux control client with `-E`, encodes
+keyboard bytes as hex, and guards numeric server/session/pane identity on every
+input, frame and resize in the server queue. Ctrl-] detaches locally; other
+bytes, including Ctrl-C, go to the worker. Closing the outer pane detaches only
+this client. No worker start/resume or lifecycle command is involved.
+
+Interactive clients announce their dimensions with `refresh-client -C` and
+participate in normal tmux sizing; opening, resizing and detaching may change
+worker dimensions according to tmux window-size policy and other clients.
+Session environment updates remain disabled by `-E`; this does not replace
+the worker process environment or inject Herdr variables into it. The display
+samples visible-pane frames at four Hz; it is not a lossless terminal byte
+stream, scrollback browser, or guarantee of every full-screen application.
+The same final-interval, tmux hook and same-user consistency limitations above
+apply. Input authority is explicit local intent, never inferred from lifecycle
+status, semantic status, or terminal availability.
+
+The optional Herdr wrapper reports native label **Cosmon** with state
+**unknown**: this reader has no supported actual harness semantic witness.
+Molecule `running` never becomes `working`. Its tab/message describes a view,
+not another harness. The `Interagir` selector action opens an explicit
+interactive view. Read-only remains the default. Restore registers only the
+wrapper's read-only reconnect argv pinned to project, exact molecule and
+original token; it never launches a second harness or restores input authority.
+The original plugin/script and Cosmon executable paths must still exist.
+Herdr restore must be enabled and accept its bounded argv (plain PATH command,
+no apostrophes/control bytes). Rejected paths are reported as restore
+unavailable. Duplicate views may be opened, but never duplicate workers.
 
 ## events.jsonl
 

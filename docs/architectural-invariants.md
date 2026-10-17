@@ -361,6 +361,7 @@ stop and ask whether Y already has its own command.
 |---------|-------------------|--------|------|-------|
 | `cs nucleate` | Ø → Inert | Human / MCP | Create molecule record | Pure state creation. Nothing runs. |
 | `cs observe` | — (read) | Human / MCP | Inspect molecule state | Pure read. Never mutates. |
+| `cs terminal` | — (read/view) | Human / local client | Inspect or attach exact existing worker | Output-only v1 default; explicit `--mode interactive` grants local human IO and participating dimensions. No lifecycle/worker launch; close detaches. Token is consistency, not authorization. |
 | `cs ensemble` | — (read) | Human | Show fleet overview | Pure read. |
 | `cs tackle` | Inert → Propelled | Human | Create worktree + tmux + fleet worker + inject prompt | The sole entry point into Propelled for L1. |
 | `cs patrol` | diagnosis (read) | Human / external scheduler | Scan fleet, detect drift | `--respawn` for dead workers, `--propel` for stale molecules. |

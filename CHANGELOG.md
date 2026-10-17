@@ -21,6 +21,11 @@ this stage.
 
 ### Added
 
+- Local `cs terminal --mode interactive` adds explicit guarded human input/output
+  with participating dimensions, preserving read-only v1 defaults. The optional
+  Herdr plugin registers native Cosmon views with honest unknown semantic state,
+  an Interagir action, and read-only reconnects to the exact existing worker.
+
 - Client integrations: `cs --json terminal EXACT_ID` exposes a versioned local
   terminal capability with explicit unknown/unavailable states. Read-only
   attachment requires its fresh incarnation token and preserves worker size

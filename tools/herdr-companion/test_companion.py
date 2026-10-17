@@ -177,14 +177,69 @@ else:
         self.detail["_terminal"] = self.public_terminal()
         self.fixture.write_text(json.dumps(self.detail))
         args = SimpleNamespace(cs=str(self.cs), repo=self.repo, command="open", id=self.detail["id"],
-                               terminal=True, workspace="wTEST")
+                               terminal=True, workspace="wTEST", herdr=str(self.herdr))
         with patch.dict(os.environ, self.env), patch.object(companion, "open_argv", return_value={"created": True}) as opening:
             self.assertEqual(companion.execute(args), {"created": True})
         argv = opening.call_args.args[1]
-        self.assertEqual(argv, [str(self.cs), "--config", str(self.repo / ".cosmon" / "state"),
-                         "terminal", self.detail["id"], "--attach", "--expect", "sha256:" + "a" * 64])
+        self.assertEqual(argv, [sys.executable, str(COMPANION), "--repo", str(self.repo),
+                         "--cs", str(self.cs), "--herdr", str(self.herdr),
+                         "view", self.detail["id"], "--expect", "sha256:" + "a" * 64])
+        self.assertNotIn("--interact", argv)
         self.assertEqual(self.calls(), [["cs", ["--json", "observe", self.detail["id"]]],
                                        ["cs", ["--json", "terminal", self.detail["id"]]]])
+
+    def test_restore_drops_input_and_never_launches_a_harness(self):
+        args = SimpleNamespace(repo=self.repo, cs=str(self.cs), herdr=str(self.herdr),
+                               id=self.detail["id"], herdr_session=None)
+        explicit = companion.view_argv(args, "sha256:" + "a" * 64, True)
+        restore = companion.view_argv(args, "sha256:" + "a" * 64)
+        self.assertIn("--interact", explicit)
+        self.assertNotIn("--interact", restore)
+        self.assertEqual(restore, explicit[:-1])
+        self.assertNotIn("start", restore)
+        self.assertNotIn("resume", restore)
+        restore[0] = "python3"
+        self.assertTrue(companion.valid_resume(restore))
+        for bad in (["/bin/python3"], ["python3", "bad'path"], ["python3", "bad\npath"],
+                    ["python3"] + ["a"] * 64, ["python3", "x" * 8193], ["-python3"], ["python3", "bad\x85path"]):
+            self.assertFalse(companion.valid_resume(bad))
+
+    def test_native_reports_are_unknown_and_release_and_restore_is_readonly(self):
+        args = SimpleNamespace(repo=self.repo, cs=str(self.cs), herdr=str(self.herdr),
+                               id=self.detail["id"], herdr_session=None, interact=True,
+                               expect="sha256:" + "a" * 64)
+        value = {"availability": "available", "expected": args.expect}
+        with patch.object(companion, "observe"), patch.object(companion, "terminal", return_value=value), \
+                patch.dict(os.environ, {"HERDR_ENV": "1", "HERDR_PANE_ID": "wTEST:p1",
+                                       "HERDR_SOCKET_PATH": "fixture", "HERDR_BIN_PATH": str(self.herdr)}), \
+                patch.object(companion.subprocess, "run") as reports, \
+                patch.object(companion.subprocess, "Popen") as launching:
+            reports.return_value.returncode = 0
+            launching.return_value.wait.return_value = 0
+            launching.return_value.poll.return_value = 0
+            self.assertEqual(companion.worker_view(args), 0)
+        calls = [call.args[0] for call in reports.call_args_list]
+        self.assertEqual([call[2] for call in calls],
+                         ["report-agent", "report-agent-session", "release-agent"])
+        self.assertIn("unknown", calls[0])
+        self.assertNotIn("working", calls[0])
+        self.assertTrue(all("Cosmon" in call for call in calls))
+        sequences = [int(call[call.index("--seq") + 1]) for call in calls]
+        self.assertEqual(sequences, sorted(set(sequences)))
+        resume = calls[1][calls[1].index("--") + 1:]
+        self.assertEqual(resume[0], "python3")
+        self.assertIn(args.expect, resume)
+        self.assertNotIn("--interact", resume)
+        self.assertEqual(launching.call_args.args[0][-2:], ["--mode", "interactive"])
+
+    def test_stale_view_never_registers_or_launches(self):
+        args = SimpleNamespace(id=self.detail["id"], interact=True, expect="sha256:" + "a" * 64)
+        with patch.object(companion, "observe"), patch.object(companion, "terminal", return_value={
+                "availability": "available", "expected": "sha256:" + "b" * 64}), \
+                patch.object(companion.subprocess, "Popen") as opening:
+            with self.assertRaises(companion.Unavailable):
+                companion.worker_view(args)
+            opening.assert_not_called()
 
     def test_terminal_version_capability_identity_project_and_token_negatives(self):
         for key, value in [("schema_version", 2), ("schema_version", True), ("kind", "other"), ("capability", "write"),

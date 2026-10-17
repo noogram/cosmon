@@ -5,7 +5,9 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use cosmon_core::terminal::{TerminalBackend, TerminalIdentity, TerminalUnavailable};
+use cosmon_core::terminal::{
+    TerminalBackend, TerminalIdentity, TerminalInteractionBackend, TerminalUnavailable,
+};
 use cosmon_process_witness::process_start_time;
 
 use crate::TmuxBackend;
@@ -120,6 +122,48 @@ impl TerminalBackend for TmuxBackend {
                 &attach,
                 "terminal-incarnation-refused",
             ])
+            .status()
+            .map_err(|_| TerminalUnavailable::BackendUnavailable)?;
+        if !status.success() {
+            return Err(TerminalUnavailable::BackendUnavailable);
+        }
+        Ok(())
+    }
+}
+
+impl TerminalInteractionBackend for TmuxBackend {
+    fn attach_interactive(&self, identity: &TerminalIdentity) -> Result<(), TerminalUnavailable> {
+        self.validate_terminal(identity)?;
+        let TerminalIdentity::Tmux {
+            socket_path,
+            session_id,
+            pane_id,
+            ..
+        } = identity;
+        let guard = identity_guard(identity);
+        // Numeric targets and a fixed predicate only; keyboard bytes travel as hex.
+        let attach = format!("attach-session -E -t ${session_id}");
+        let status = Command::new("python3")
+            .args([
+                "-c",
+                include_str!("terminal_interactive.py"),
+                &session_id.to_string(),
+                &pane_id.to_string(),
+                &guard,
+                "tmux",
+                "-C",
+                "-S",
+                socket_path,
+                "if-shell",
+                "-F",
+                "-t",
+                &format!("${session_id}"),
+                &guard,
+                &attach,
+                "terminal-incarnation-refused",
+            ])
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
             .status()
             .map_err(|_| TerminalUnavailable::BackendUnavailable)?;
         if !status.success() {

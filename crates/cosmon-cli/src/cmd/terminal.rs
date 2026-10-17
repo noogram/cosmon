@@ -1,34 +1,61 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Exact molecule terminal observation and optional read-only attachment.
+//! Exact molecule terminal observation, output-only by default, explicit human IO.
 
 use cosmon_core::id::MoleculeId;
 use cosmon_core::terminal::{
-    TerminalBackend, TerminalCapability, TerminalIdentity, TerminalUnavailable,
+    TerminalBackend, TerminalCapability, TerminalIdentity, TerminalInteractionBackend,
+    TerminalUnavailable,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::Context;
 
+/// Explicit attachment behavior; omission preserves the v1 output-only contract.
+#[derive(Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Mode {
+    /// Output only, with no worker size or environment influence.
+    #[default]
+    ReadOnly,
+    /// Literal human input and output; contributes terminal dimensions.
+    Interactive,
+}
+
 /// Arguments for the additive local terminal-view capability.
 #[derive(clap::Args)]
 pub struct Args {
     /// Complete molecule ID; prefixes are refused.
     pub molecule_id: String,
-    /// Attach this terminal read-only, excluding its size from worker sizing.
+    /// Attach using the selected mode (default: output only, no worker resize).
     #[arg(long, requires = "expect")]
     pub attach: bool,
+    /// Explicit input capability; interactive dimensions may resize the worker.
+    #[arg(long, value_enum, default_value = "read-only")]
+    pub mode: Mode,
     /// Incarnation token returned by a fresh terminal observation.
     #[arg(long, requires = "attach", value_name = "TOKEN")]
     pub expect: Option<String>,
 }
 
 #[derive(Serialize)]
+#[serde(untagged)]
+enum AttachmentCapability {
+    ReadOnly(TerminalCapability),
+    Interactive(InteractiveCapability),
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InteractiveCapability {
+    InteractiveResize,
+}
+
+#[derive(Serialize)]
 #[serde(tag = "availability", rename_all = "snake_case")]
 enum Capability {
     Available {
-        capability: TerminalCapability,
+        capability: AttachmentCapability,
         identity: TerminalIdentity,
         expected: String,
     },
@@ -53,7 +80,7 @@ struct Observation {
     capability: Capability,
 }
 
-/// Execute a local read or attach without lifecycle, input or persistent writes.
+/// Execute a local observation or explicit attachment without lifecycle writes.
 ///
 /// # Errors
 /// Refuses incomplete identities, wrong projects, stale tokens and unsupported terminals.
@@ -75,7 +102,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         "terminal molecule project mismatch"
     );
     let backend = cosmon_transport::TmuxBackend::new(super::tmux_socket_name(ctx));
-    let capability = capability(&mol, &backend, &project_id, &state_dir)?;
+    let mut capability = capability(&mol, &backend, &project_id, &state_dir)?;
+    if args.mode == Mode::Interactive {
+        if let Capability::Available { capability, .. } = &mut capability {
+            *capability =
+                AttachmentCapability::Interactive(InteractiveCapability::InteractiveResize);
+        }
+    }
     if args.attach {
         let Capability::Available {
             identity, expected, ..
@@ -94,14 +127,21 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // then validates kernel witnesses and guards exact targets in tmux's queue.
         let current = store.load_molecule(&id)?;
         anyhow::ensure!(
-            current.id == id && current.process == mol.process,
+            current.id == id
+                && current.project_id == mol.project_id
+                && current.fleet_id == mol.fleet_id
+                && current.process == mol.process,
             "terminal process binding changed"
         );
-        backend.attach_read_only(identity)?;
+        attach(&backend, args.mode, identity)?;
     } else {
         let view = Observation {
             schema_version: 1,
-            kind: "cosmon.terminal",
+            kind: if args.mode == Mode::Interactive {
+                "cosmon.terminal.interactive"
+            } else {
+                "cosmon.terminal"
+            },
             id,
             project_id,
             fleet_id: mol.fleet_id.clone(),
@@ -144,8 +184,72 @@ fn capability(
     let material = serde_json::to_vec(&(project, state_dir, &mol.fleet_id, &mol.id, process))?;
     let expected = format!("sha256:{:x}", Sha256::digest(material));
     Ok(Capability::Available {
-        capability: TerminalCapability::ReadOnlyIgnoreSize,
+        capability: AttachmentCapability::ReadOnly(TerminalCapability::ReadOnlyIgnoreSize),
         identity: identity.clone(),
         expected,
     })
+}
+
+// The injected ports keep mode selection testable without a terminal or UI.
+fn attach<T: TerminalBackend + TerminalInteractionBackend>(
+    backend: &T,
+    mode: Mode,
+    identity: &TerminalIdentity,
+) -> Result<(), TerminalUnavailable> {
+    match mode {
+        Mode::ReadOnly => backend.attach_read_only(identity),
+        Mode::Interactive => backend.attach_interactive(identity),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct RecordingTerminal(RefCell<Vec<(&'static str, TerminalIdentity)>>);
+
+    impl TerminalBackend for RecordingTerminal {
+        fn validate_terminal(&self, _: &TerminalIdentity) -> Result<(), TerminalUnavailable> {
+            Ok(())
+        }
+
+        fn attach_read_only(&self, identity: &TerminalIdentity) -> Result<(), TerminalUnavailable> {
+            self.0.borrow_mut().push(("read", identity.clone()));
+            Ok(())
+        }
+    }
+
+    impl TerminalInteractionBackend for RecordingTerminal {
+        fn attach_interactive(
+            &self,
+            identity: &TerminalIdentity,
+        ) -> Result<(), TerminalUnavailable> {
+            self.0.borrow_mut().push(("input", identity.clone()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_never_requests_input_and_explicit_mode_preserves_the_target() {
+        let backend = RecordingTerminal::default();
+        let identity = TerminalIdentity::Tmux {
+            socket_path: "/example/terminal.sock".into(),
+            server_pid: 1,
+            server_start: 2,
+            session_id: 3,
+            session_created: 4,
+            pane_id: 5,
+            pane_pid: 6,
+            pane_start: 7,
+        };
+        assert!(attach(&backend, Mode::default(), &identity).is_ok());
+        assert_eq!(&*backend.0.borrow(), &[("read", identity.clone())]);
+        assert!(attach(&backend, Mode::Interactive, &identity).is_ok());
+        assert_eq!(
+            &*backend.0.borrow(),
+            &[("read", identity.clone()), ("input", identity)]
+        );
+    }
 }
