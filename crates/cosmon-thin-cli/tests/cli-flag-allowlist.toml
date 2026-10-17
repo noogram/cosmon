@@ -142,6 +142,12 @@ reason = "binary-posture toggle (prepared ↔ active) is operator-only by constr
 # ─────────────────────────────────────────────────────────────────────
 
 [[verb_absent_from_thin]]
+verb = "terminal"
+class = "out_of_scope"
+adr_ref = "ADR-080 §8p"
+reason = "Client integrations v1 authenticates host-local project/fleet/process launch witnesses and opens an output-only local tmux view; no RPP terminal attach route is exposed. Remote logs/session reads are separate capabilities."
+
+[[verb_absent_from_thin]]
 verb = "events"
 class = "out_of_scope"
 reason = "EventV2 inspection — local-only debug surface."
