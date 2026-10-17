@@ -36,6 +36,14 @@ this stage.
 
 ### Fixed
 
+- RPP handoff bootstrap preserves explicit `scopes = []` as `[scopes]`
+  `allowed = []`, so a token cannot supply write authority. Omitted handoff
+  scopes retain the defaults and warning; federated empty bindings retain
+  token-scope admission. Existing bindings remain operator-owned: bootstrap
+  reports drift without rewriting them. Review bindings created from empty
+  handoffs before upgrading and explicitly set `[scopes] allowed = []` where
+  no grants were intended. (#209)
+
 - RPP bootstrap warns when a handoff binding omits `scopes`, naming the
   binding and the default scopes it grants. Harvest effects now refuse an
   issuer removed from the live trust store. Logs and ledger stream tests

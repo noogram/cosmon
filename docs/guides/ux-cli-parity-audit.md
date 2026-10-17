@@ -2,6 +2,16 @@
 
 # CLI and UI parity audit
 
+## Explicit empty handoff scopes (issue #209)
+
+`cosmon-rpp-adapter trust converge` and server boot use the same bootstrap:
+`scopes = []` in `[binding]` or `[[bindings]]` creates `[scopes] allowed = []`
+and refuses token-carried scopes. Omission retains the default grants and
+warning. Existing bindings remain operator-owned and are preserved on drift.
+The operator `nucleon render`, admin provisioning and federation paths retain
+legacy empty-list rendering without `[scopes]`. No native UI control, remote
+route or CLI flag changes; generated help and OpenAPI are unchanged.
+
 ## Conditional, idempotent collapse — local surfaces (issue #207, ADR-187)
 
 | Capability | CLI | Native UI | Remote service |

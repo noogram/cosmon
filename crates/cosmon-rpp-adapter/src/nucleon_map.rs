@@ -777,7 +777,9 @@ pub struct HabilitationBindingSpec {
     /// Cognitive-substrate label (ADR-063). Defaults to `Biological`.
     pub phase: Option<String>,
     /// Binding-granted scopes. Empty → no `[scopes]` section (legacy
-    /// JWT-scopes-only admission).
+    /// JWT-scopes-only admission). Handoff declarations use
+    /// [`render_oidc_identity_toml_with_explicit_scopes`] to retain an
+    /// explicitly empty grant.
     pub scopes: Vec<String>,
     /// ISO-8601 provisioning timestamp. Informational; pass the operator
     /// clock (the renderer is pure and does not read the wall clock).
@@ -868,9 +870,35 @@ pub fn build_binding(spec: &HabilitationBindingSpec) -> Result<OidcIdentity, Ren
 /// Propagates [`build_binding`]'s validation failures, plus a
 /// [`RenderError::Serialize`] if TOML emission fails.
 pub fn render_oidc_identity_toml(spec: &HabilitationBindingSpec) -> Result<String, RenderError> {
-    let binding = build_binding(spec)?;
+    render_binding(&build_binding(spec)?)
+}
+
+/// Render a binding whose scope list is an explicit complete grant.
+///
+/// Unlike [`render_oidc_identity_toml`], an empty `spec.scopes` renders
+/// `[scopes] allowed = []`, denying all scopes. Handoff bootstrap uses
+/// this after resolving omitted scopes to its documented defaults. Legacy
+/// and federated callers keep the existing renderer's empty-list fallback.
+///
+/// # Errors
+///
+/// Propagates the same validation and serialization failures as
+/// [`render_oidc_identity_toml`].
+pub fn render_oidc_identity_toml_with_explicit_scopes(
+    spec: &HabilitationBindingSpec,
+) -> Result<String, RenderError> {
+    let mut binding = build_binding(spec)?;
+    // build_binding retains the legacy empty => None convention. Here the
+    // caller has declared a grant, so even an empty list must survive.
+    binding.scopes = Some(ScopesGrant {
+        allowed: spec.scopes.clone(),
+    });
+    render_binding(&binding)
+}
+
+fn render_binding(binding: &OidcIdentity) -> Result<String, RenderError> {
     let body =
-        toml::to_string_pretty(&binding).map_err(|e| RenderError::Serialize(e.to_string()))?;
+        toml::to_string_pretty(binding).map_err(|e| RenderError::Serialize(e.to_string()))?;
     // A leading provenance comment mirrors the heredoc's header so an
     // operator reading the file on disk knows what rendered it.
     Ok(format!(
