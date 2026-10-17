@@ -21,6 +21,14 @@ this stage.
 
 ### Added
 
+- Conditional remote collapse: `cosmon-remote molecule collapse --key
+  --expect-status --expect-revision` uses the new PUT receipt route, and
+  `molecule collapse-receipt` recovers its durable result. Molecule GET now
+  returns the computed revision and strong ETag. Both HTTP collapse routes
+  enforce the tenant lease guard. (#207, ADR-187)
+- Remote help and man output intentionally gain the keyed flags and receipt
+  command; generated references are refreshed for this additive CLI change.
+
 - `cs done` warns when a spore molecule has files in its `output_dir` but no
   commits beyond its base, so the deliverable's location is visible during
   harvest. The warning does not prevent teardown. (#205)

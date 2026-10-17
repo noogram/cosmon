@@ -411,9 +411,11 @@ paths:
 
         ## Required scope
 
-        `cosmon:molecule:read`. (V0 policy grid: missing scope still
-        yields a successful response with `AuthzDecisionEvaluated`
-        emitted; the 403 below is reserved for V1.)
+        `cosmon:molecule:read` or `cosmon:molecule:write`.
+        `molecule.revision` is BLAKE3 over canonical parsed raw state JSON,
+        including unknown fields, computed on read and never stored.
+        The strong ETag is the quoted revision, usable as `expect_revision`
+        after removing the quotes (ADR-187).
       tags: [molecules]
       parameters:
         - in: path
@@ -430,6 +432,10 @@ paths:
       responses:
         "200":
           description: Molecule found and accessible to the caller.
+          headers:
+            ETag:
+              description: Strong state revision, quoted b3 hex digest.
+              schema: {type: string}
           content:
             application/json:
               schema:
@@ -565,12 +571,104 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
+  /v1/molecules/{id}/collapse-receipts/{key}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: {type: string}
+      - in: path
+        name: key
+        required: true
+        schema: {type: string, pattern: '^[A-Za-z0-9_-]{16,128}$'}
+    put:
+      operationId: keyedCollapseMolecule
+      summary: Conditional idempotent collapse with a durable receipt (ADR-187).
+      description: |
+        Requires cosmon:molecule:write and tenant admission. The verified JWT
+        subject is the actor; a leased mission cannot be collapsed remotely.
+        Decisions follow the nine-outcome ADR-187 table, first match wins.
+        Replay precedes expiry, status, revision and lease preconditions.
+        Refusals do not write molecule or key state. The receipt has no expiry.
+        An old server returns 404/405; clients must never fall back to POST.
+        A stale unlocked writer can still overwrite Collapsed until D8 lands;
+        lookup then reports inconsistent rather than claiming current collapse.
+      tags: [molecules]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/KeyedCollapseBody'}
+      responses:
+        "201":
+          description: transitioned
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KeyedCollapseOutcome'}
+        "200":
+          description: replayed (same durable receipt)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KeyedCollapseOutcome'}
+        "403":
+          description: unleased_pilot_gesture, or admission/scope refusal
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - {$ref: '#/components/schemas/KeyedCollapseOutcome'}
+                  - {$ref: '#/components/schemas/ApiError'}
+        "409":
+          description: already_completed, already_collapsed (detail.by_key), or unexpected_status
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KeyedCollapseOutcome'}
+        "412":
+          description: approval_expired or stale_revision
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KeyedCollapseOutcome'}
+        "422":
+          description: idempotency_key_reused (including a key bound to another molecule)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/KeyedCollapseOutcome'}
+        "400": {description: Malformed intent, unknown body fields, invalid key or empty reason}
+        "401": {description: Missing or invalid bearer}
+        "404": {description: Molecule absent from the admitted tenant}
+        "429": {description: Admission rate limit}
+        "503": {description: State or lease ledger unavailable}
+    get:
+      operationId: getCollapseReceipt
+      summary: Lock-free lookup after a lost collapse response.
+      description: |
+        Requires cosmon:molecule:read or cosmon:molecule:write and tenant
+        admission, including molecule visibility, before key lookup.
+        Every lookup classification returns 200; this is an inspection,
+        not a new collapse. Unknown and reserved_not_applied are settled by
+        resubmitting the identical PUT. A key bound to another molecule
+        returns idempotency_key_reused without its identity or receipt.
+      tags: [molecules]
+      responses:
+        "200":
+          description: Durable lookup classification
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CollapseReceiptLookup'}
+        "400": {description: Invalid key}
+        "401": {description: Missing or invalid bearer}
+        "403": {description: Admission or scope refusal}
+        "404": {description: Molecule absent from the admitted tenant}
+        "429": {description: Admission rate limit}
+        "503": {description: Store unavailable}
+
   /v1/molecules/{id}/collapse:
     post:
       operationId: collapseMolecule
       summary: Collapse (terminate) a molecule with a reason (T-CST-EXPAND).
       description: |
-        Library-direct call to `cosmon_state::ops::collapse`. The
+        Library-direct call to `cosmon_state::ops::collapse::execute`,
+        with the tenant lease guard and verified JWT caller. The
         `reason` field is mandatory. `cause` is an optional structured
         attribution (`"rate_limit"`, `"design_change"`, `"abandoned"`);
         when `cause = "rate_limit"`, `account` and `kind` further
@@ -638,8 +736,8 @@ paths:
                 $ref: "#/components/schemas/ApiError"
         "409":
           description: |
-            Molecule already in a terminal status (cannot collapse a
-            collapsed/completed molecule).
+            Molecule already completed. An already-collapsed molecule
+            remains an idempotent no-op with a 200 legacy response.
           content:
             application/json:
               schema:
@@ -3403,6 +3501,58 @@ components:
             type: string
           description: Tags to remove.
 
+    KeyedCollapseBody:
+      type: object
+      additionalProperties: false
+      required: [reason, expect_status, expect_revision]
+      properties:
+        reason: {type: string, minLength: 1}
+        cause: {type: [string, "null"]}
+        account: {type: [string, "null"]}
+        kind: {type: [string, "null"]}
+        reason_kind: {type: [string, "null"]}
+        expect_status: {type: string, enum: [pending, queued, running, frozen, starved]}
+        expect_revision: {type: string, pattern: '^b3:[0-9a-fA-F]{64}$'}
+        approval_digest: {type: [string, "null"]}
+        not_after: {type: [string, "null"], format: date-time}
+    CollapseReceipt:
+      type: object
+      required: [schema, key, digest, molecule, previous_status, previous_revision, committed_at]
+      properties:
+        schema: {type: string, const: cosmon.collapse-receipt.v1}
+        key: {type: string}
+        digest: {type: string}
+        molecule: {type: string}
+        previous_status: {type: string}
+        previous_revision: {type: string}
+        committed_at: {type: string, format: date-time}
+    KeyedCollapseOutcome:
+      type: object
+      required: [molecule, outcome, digest]
+      properties:
+        molecule: {type: string}
+        outcome:
+          type: string
+          enum: [idempotency_key_reused, replayed, unleased_pilot_gesture, already_completed, already_collapsed, approval_expired, unexpected_status, stale_revision, transitioned]
+        digest: {type: string}
+        receipt: {$ref: '#/components/schemas/CollapseReceipt'}
+        detail:
+          type: object
+          description: Refusal detail; never discloses another molecule's identity or receipt.
+          additionalProperties: true
+    CollapseReceiptLookup:
+      type: object
+      required: [molecule, key, state, receipt, digest, detail]
+      properties:
+        molecule: {type: string}
+        key: {type: string}
+        state: {type: string, enum: [committed, reserved_not_applied, inconsistent, unknown, idempotency_key_reused]}
+        receipt:
+          oneOf:
+            - {$ref: '#/components/schemas/CollapseReceipt'}
+            - {type: "null"}
+        digest: {type: [string, "null"]}
+        detail: {type: [string, "null"]}
     CollapseBody:
       type: object
       required: [reason]
@@ -3791,6 +3941,10 @@ components:
          worker, variables, links, tags, created_at, updated_at,
          collapse_reason, collapsed_step, poll_count, transitions, branch]
       properties:
+        revision:
+          type: string
+          pattern: '^b3:[0-9a-f]{64}$'
+          description: Computed raw-state revision on GET molecule; never persisted.
         id:
           type: string
           description: Molecule identifier.

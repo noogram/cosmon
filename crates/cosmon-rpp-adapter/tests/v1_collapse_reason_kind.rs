@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `POST /v1/molecules/{id}/collapse` passes the request's `reason_kind`
-//! through to the state operation (issue #207, prerequisite 3).
-//!
-//! The route used to build its `CollapseRequest` with `reason_kind: None`, so
-//! an API-driven collapse could never carry the classification `cs errors`
-//! aggregates on, whatever the caller sent.
+//! HTTP collapse contract (issue #207, ADR-187): legacy classification and
+//! response compatibility, conditional outcome matrix, durable receipt recovery,
+//! tenant authorization and the shared lease guard, against real FileStores.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +22,8 @@ use tower::ServiceExt;
 struct Fixture {
     oidc: OidcMock,
     tenant: TenantPath,
+    tenant_b: TenantPath,
+    state: AppState,
     _tenants: TenantWorkspaces,
     _security_dir: tempfile::TempDir,
     _artifact_root: tempfile::TempDir,
@@ -34,9 +33,10 @@ struct Fixture {
 async fn fixture() -> Fixture {
     let mut tenants = TenantWorkspaces::new();
     let tenant = tenants.add("a");
+    let tenant_b = tenants.add("b");
 
     let oidc = OidcMock::start_with(OidcMockConfig {
-        audiences: vec!["cosmon-rpp-a".to_owned()],
+        audiences: vec!["cosmon-rpp-a".to_owned(), "cosmon-rpp-b".to_owned()],
         ..OidcMockConfig::default()
     })
     .await;
@@ -53,6 +53,13 @@ async fn fixture() -> Fixture {
             HabilitationId::new("nuc-a"),
             Noyau::new("a"),
             "cosmon-rpp-a",
+        )
+        .insert(
+            oidc.issuer(),
+            "sub-b",
+            HabilitationId::new("nuc-b"),
+            Noyau::new("b"),
+            "cosmon-rpp-b",
         )
         .build();
     let rate_limiter =
@@ -96,10 +103,12 @@ async fn fixture() -> Fixture {
             cosmon_rpp_adapter::portee::PorteeProvisioner::inert(),
         ),
     };
-    let app = router(state);
+    let app = router(state.clone());
     Fixture {
         oidc,
         tenant,
+        tenant_b,
+        state,
         _tenants: tenants,
         _security_dir: security_dir,
         _artifact_root: artifact_root,
@@ -185,4 +194,435 @@ async fn collapse_route_without_reason_kind_records_none() {
     let status = post_collapse(&fx, id, &jwt, &serde_json::json!({ "reason": "plain" })).await;
     assert_eq!(status, StatusCode::OK);
     assert!(stored_state(&fx, id)["collapse_reason_kind"].is_null());
+}
+
+const KEY: &str = "broker-request-0001";
+const ID: &str = "task-20261017-aaaa";
+
+async fn request(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    jwt: Option<&str>,
+    body: Value,
+) -> anyhow::Result<(StatusCode, axum::http::HeaderMap, Value)> {
+    use http_body_util::BodyExt;
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("Content-Type", "application/json");
+    if let Some(jwt) = jwt {
+        req = req.header("Authorization", format!("Bearer {jwt}"));
+    }
+    let response = app
+        .clone()
+        .oneshot(req.body(Body::from(serde_json::to_vec(&body)?))?)
+        .await?;
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response.into_body().collect().await?.to_bytes();
+    Ok((status, headers, serde_json::from_slice(&bytes)?))
+}
+
+fn revision(tenant: &TenantPath, id: &str) -> anyhow::Result<String> {
+    let bytes = std::fs::read(
+        tenant
+            .state_dir
+            .join("fleets/default/molecules")
+            .join(id)
+            .join("state.json"),
+    )?;
+    Ok(cosmon_core::collapse_contract::MoleculeRevision::of_state_bytes(&bytes)?.to_string())
+}
+
+fn intent(fx: &Fixture, id: &str) -> anyhow::Result<Value> {
+    Ok(
+        serde_json::json!({"reason": "approved", "expect_status": "pending",
+        "expect_revision": revision(&fx.tenant, id)?, "reason_kind": "gate_failed"}),
+    )
+}
+
+fn uri(id: &str, key: &str) -> String {
+    format!("/v1/molecules/{id}/collapse-receipts/{key}")
+}
+
+fn snapshot(
+    root: &std::path::Path,
+) -> anyhow::Result<std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>> {
+    let mut out = std::collections::BTreeMap::new();
+    if root.exists() {
+        for entry in std::fs::read_dir(root)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                out.extend(snapshot(&path)?);
+            } else if !path.ends_with("dispatch.lock") {
+                // Lock inode creation is coordination, not molecule/key state (B1 contract).
+                out.insert(path.clone(), std::fs::read(path)?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[tokio::test]
+async fn get_revision_and_etag_hash_the_raw_snapshot_including_unknown_fields() -> anyhow::Result<()>
+{
+    let fx = fixture().await;
+    fx.tenant.insert_molecule(
+        ID,
+        &serde_json::json!({"status": "pending", "future_field": {"b": 2, "a": 1}}),
+    )?;
+    let jwt = jwt_with_scopes(&fx.oidc, &["cosmon:molecule:read"], "revision");
+    let (code, headers, body) = request(
+        &fx.app,
+        "GET",
+        &format!("/v1/molecules/{ID}"),
+        Some(&jwt),
+        Value::Null,
+    )
+    .await?;
+    assert_eq!(code, StatusCode::OK);
+    let rev = revision(&fx.tenant, ID)?;
+    assert_eq!(body["molecule"]["revision"], rev);
+    assert_eq!(headers["etag"], format!("\"{rev}\""));
+    assert!(stored_state(&fx, ID).get("revision").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn http_outcome_matrix_and_refusals_leave_state_and_keys_unchanged() -> anyhow::Result<()> {
+    let cases = [
+        ("pending", "unexpected_status", 409),
+        ("pending", "stale_revision", 412),
+        ("pending", "approval_expired", 412),
+        ("completed", "already_completed", 409),
+        ("collapsed", "already_collapsed", 409),
+    ];
+    for (status, outcome, code) in cases {
+        let fx = fixture().await;
+        fx.tenant
+            .insert_molecule(ID, &serde_json::json!({"status": status}))?;
+        let jwt = jwt_with_scopes(&fx.oidc, &["cosmon:molecule:write"], "matrix");
+        let mut body = intent(&fx, ID)?;
+        match outcome {
+            "unexpected_status" => body["expect_status"] = serde_json::json!("running"),
+            "stale_revision" => {
+                body["expect_revision"] = serde_json::json!(format!("b3:{}", "0".repeat(64)))
+            }
+            "approval_expired" => body["not_after"] = serde_json::json!("2000-01-01T00:00:00Z"),
+            _ => {}
+        }
+        let before = snapshot(&fx.tenant.state_dir)?;
+        let (actual_code, _, response) =
+            request(&fx.app, "PUT", &uri(ID, KEY), Some(&jwt), body).await?;
+        assert_eq!(actual_code.as_u16(), code, "{response}");
+        assert_eq!(response["outcome"], outcome);
+        assert_eq!(
+            snapshot(&fx.tenant.state_dir)?,
+            before,
+            "refusal {outcome} wrote tenant state"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn lost_response_restart_replay_and_key_reuse_preserve_the_durable_receipt(
+) -> anyhow::Result<()> {
+    let fx = fixture().await;
+    let other = "task-20261017-bbbb";
+    for id in [ID, other] {
+        fx.tenant
+            .insert_molecule(id, &serde_json::json!({"status": "pending"}))?;
+    }
+    let jwt = jwt_with_scopes(&fx.oidc, &["cosmon:molecule:write"], "replay");
+    let body = intent(&fx, ID)?;
+    let (status, _, first) =
+        request(&fx.app, "PUT", &uri(ID, KEY), Some(&jwt), body.clone()).await?;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(first["outcome"], "transitioned");
+    assert_eq!(stored_state(&fx, ID)["collapse_reason_kind"], "gate_failed");
+    // The expected digest includes the verified subject, never an ambient server identity.
+    let expected = cosmon_core::collapse_contract::CollapseIntentV1 {
+        target: ID,
+        reason: "approved",
+        cause: None,
+        account: None,
+        kind: None,
+        reason_kind: Some("gate_failed"),
+        expected_status: "pending",
+        expected_revision: body["expect_revision"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("revision"))?,
+        actor: Some("jwt:sub-a"),
+        approval_digest: None,
+        not_after: None,
+    }
+    .digest()?;
+    assert_eq!(first["digest"], expected.as_str());
+    let receipt_bytes = serde_json::to_vec(&first["receipt"])?;
+    // Recreate the router and its event bus. Every handler opens a fresh FileStore;
+    // no response cache or in-process receipt survives this boundary.
+    let mut restarted_state = fx.state.clone();
+    restarted_state.events = Arc::new(cosmon_rpp_adapter::EventBus::with_default_capacity());
+    let restarted = router(restarted_state);
+    let (status, _, lookup) =
+        request(&restarted, "GET", &uri(ID, KEY), Some(&jwt), Value::Null).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(lookup["state"], "committed");
+    assert_eq!(serde_json::to_vec(&lookup["receipt"])?, receipt_bytes);
+    let (status, _, replay) =
+        request(&restarted, "PUT", &uri(ID, KEY), Some(&jwt), body.clone()).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay["outcome"], "replayed");
+    assert_eq!(serde_json::to_vec(&replay["receipt"])?, receipt_bytes);
+    for target in [ID, other] {
+        let mut changed = body.clone();
+        if target == ID {
+            changed["reason"] = serde_json::json!("approved.");
+        }
+        let before = snapshot(&fx.tenant.state_dir)?;
+        let (status, _, reused) =
+            request(&restarted, "PUT", &uri(target, KEY), Some(&jwt), changed).await?;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(reused["outcome"], "idempotency_key_reused");
+        assert!(reused.get("receipt").is_none());
+        assert_eq!(snapshot(&fx.tenant.state_dir)?, before);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn receipt_authz_visibility_and_tenant_isolation_cover_read_and_write() -> anyhow::Result<()>
+{
+    let fx = fixture().await;
+    fx.tenant
+        .insert_molecule(ID, &serde_json::json!({"status": "pending"}))?;
+    let write = jwt_with_scopes(&fx.oidc, &["cosmon:molecule:write"], "authz-write");
+    let read = jwt_with_scopes(&fx.oidc, &["cosmon:molecule:read"], "authz-read");
+    let none = jwt_with_scopes(&fx.oidc, &[], "authz-none");
+    let b = fx.oidc.issue(&IssueJwt {
+        subject: "sub-b",
+        audience: Some("cosmon-rpp-b"),
+        scopes: &["cosmon:molecule:write"],
+        lifetime_secs: Some(60),
+        jti: Some("tenant-b"),
+    });
+    let body = intent(&fx, ID)?;
+    for method in ["GET", "PUT"] {
+        assert_eq!(
+            request(&fx.app, method, &uri(ID, KEY), None, body.clone())
+                .await?
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(&fx.app, method, &uri(ID, KEY), Some(&none), body.clone())
+                .await?
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            request(&fx.app, method, &uri(ID, KEY), Some(&b), body.clone())
+                .await?
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert_eq!(
+        request(&fx.app, "PUT", &uri(ID, KEY), Some(&read), body.clone())
+            .await?
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let (_, _, unknown) = request(&fx.app, "GET", &uri(ID, KEY), Some(&read), Value::Null).await?;
+    assert_eq!(unknown["state"], "unknown");
+    assert_eq!(
+        request(&fx.app, "PUT", &uri(ID, KEY), Some(&write), body.clone())
+            .await?
+            .0,
+        StatusCode::CREATED
+    );
+    fx.tenant_b
+        .insert_molecule(ID, &serde_json::json!({"status": "pending"}))?;
+    let (_, _, unknown_b) = request(&fx.app, "GET", &uri(ID, KEY), Some(&b), Value::Null).await?;
+    assert_eq!(unknown_b["state"], "unknown");
+    assert!(unknown_b["receipt"].is_null());
+    let mut body_b = body;
+    body_b["expect_revision"] = serde_json::json!(revision(&fx.tenant_b, ID)?);
+    assert_eq!(
+        request(&fx.app, "PUT", &uri(ID, KEY), Some(&b), body_b)
+            .await?
+            .0,
+        StatusCode::CREATED
+    );
+    let other = "task-20261017-cccc";
+    fx.tenant
+        .insert_molecule(other, &serde_json::json!({"status": "pending"}))?;
+    let (_, _, bound) = request(&fx.app, "GET", &uri(other, KEY), Some(&read), Value::Null).await?;
+    assert_eq!(bound["state"], "idempotency_key_reused");
+    assert!(bound["receipt"].is_null());
+    assert!(!serde_json::to_string(&bound)?.contains(ID));
+    Ok(())
+}
+
+#[tokio::test]
+async fn strict_keyed_body_rejects_typos_and_malformed_conditions() -> anyhow::Result<()> {
+    let fx = fixture().await;
+    fx.tenant
+        .insert_molecule(ID, &serde_json::json!({"status": "pending"}))?;
+    let jwt = jwt_with_scopes(&fx.oidc, &["cosmon:molecule:write"], "invalid");
+    for (field, value) in [
+        ("typo", serde_json::json!(true)),
+        ("expect_status", serde_json::json!("completed")),
+        ("expect_revision", serde_json::json!("oops")),
+        ("not_after", serde_json::json!("yesterday")),
+        ("reason", serde_json::json!(" ")),
+    ] {
+        let mut body = intent(&fx, ID)?;
+        body[field] = value;
+        let before = snapshot(&fx.tenant.state_dir)?;
+        assert_eq!(
+            request(&fx.app, "PUT", &uri(ID, KEY), Some(&jwt), body)
+                .await?
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(snapshot(&fx.tenant.state_dir)?, before);
+    }
+    Ok(())
+}
+
+/// Seed an actual signed lease ledger in the tenant store, without lifecycle commands.
+fn lease(tenant: &TenantPath, id: &str) -> anyhow::Result<()> {
+    use cosmon_core::id::{MoleculeId, SessionId};
+    use cosmon_core::operator_attestation::{GrantChallenge, OperatorAttestation, OperatorKeyId};
+    use cosmon_core::pilot_lease::{LeaseEpoch, PilotLease};
+    let operator = cosmon_minisign_testkit::Operator::from_seed(23);
+    std::fs::write(
+        tenant
+            .state_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("cosmon dir"))?
+            .join("takeover.pub"),
+        operator.public_key_file(),
+    )?;
+    let mission = MoleculeId::new(id)?;
+    let holder = SessionId::new("fixture-holder".to_owned())?;
+    let challenge = GrantChallenge::new(
+        mission.clone(),
+        holder.clone(),
+        LeaseEpoch::first(),
+        "operator",
+        None,
+    )?;
+    let signed = cosmon_notary::minisign::MinisignSignature::parse(
+        &operator.sign(&challenge.canonical_bytes()),
+    )?;
+    let attestation = OperatorAttestation {
+        key_id: OperatorKeyId::from_bytes(signed.key_id),
+        signature: signed.signature_line(),
+        global_signature: signed.global_signature_line(),
+        trusted_comment: signed.trusted_comment.clone(),
+        untrusted_comment: signed.untrusted_comment.clone(),
+    };
+    cosmon_harvest::pilot_gesture::leases_at(&tenant.state_dir)?.grant(
+        &PilotLease::new(
+            mission,
+            holder,
+            LeaseEpoch::first(),
+            "operator",
+            chrono::Utc::now(),
+            None,
+        )
+        .attested_by(attestation),
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn both_http_collapse_routes_refuse_a_leased_mission_in_the_tenant_store(
+) -> anyhow::Result<()> {
+    let fx = fixture().await;
+    fx.tenant
+        .insert_molecule(ID, &serde_json::json!({"status": "pending"}))?;
+    lease(&fx.tenant, ID)?;
+    let jwt = jwt_with_scopes(&fx.oidc, &["cosmon:molecule:write"], "lease");
+    let before = snapshot(&fx.tenant.state_dir)?;
+    for (method, uri, body) in [
+        (
+            "POST",
+            format!("/v1/molecules/{ID}/collapse"),
+            serde_json::json!({"reason": "approved"}),
+        ),
+        ("PUT", uri(ID, KEY), intent(&fx, ID)?),
+    ] {
+        let (status, _, response) = request(&fx.app, method, &uri, Some(&jwt), body).await?;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method}: {response}");
+        assert!(serde_json::to_string(&response)?.contains("unleased_pilot_gesture"));
+        assert_eq!(snapshot(&fx.tenant.state_dir)?, before);
+    }
+    // Exercise the same authority locally: no JWT-to-session bridge is invented.
+    use cosmon_core::collapse_contract::CallerContext;
+    use cosmon_state::ops::collapse::CollapseAuthority;
+    let authority =
+        cosmon_harvest::pilot_gesture::LeaseCollapseAuthority::new(&fx.tenant.state_dir, "fixture");
+    let id = cosmon_core::id::MoleculeId::new(ID)?;
+    assert!(authority
+        .check(&id, &CallerContext::Local { session: None })?
+        .is_some());
+    assert!(authority
+        .check(
+            &id,
+            &CallerContext::Remote {
+                subject: "sub-a".into()
+            }
+        )?
+        .is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn receipt_lookup_exposes_reserved_and_inconsistent_without_writing() -> anyhow::Result<()> {
+    use cosmon_core::collapse_contract::{CollapseKeyRecord, IdempotencyKey, RequestDigest};
+    use cosmon_core::id::MoleculeId;
+    use cosmon_state::StateStore;
+    let fx = fixture().await;
+    fx.tenant
+        .insert_molecule(ID, &serde_json::json!({"status": "pending"}))?;
+    let jwt = jwt_with_scopes(&fx.oidc, &["cosmon:molecule:read"], "lookup-states");
+    let key = IdempotencyKey::parse(KEY)?;
+    let id = MoleculeId::new(ID)?;
+    let store = cosmon_filestore::FileStore::new(&fx.tenant.state_dir);
+    let digest = RequestDigest::try_from(format!("b3:{}", "0".repeat(64)))?;
+    let record = CollapseKeyRecord::reserved(key.clone(), id.clone(), digest.clone());
+    assert!(store.reserve_collapse_key(&record)?);
+    let before = snapshot(&fx.tenant.state_dir)?;
+    let (status, _, reserved) =
+        request(&fx.app, "GET", &uri(ID, KEY), Some(&jwt), Value::Null).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reserved["state"], "reserved_not_applied");
+    assert_eq!(reserved["digest"], digest.as_str());
+    assert_eq!(snapshot(&fx.tenant.state_dir)?, before);
+    let receipt = cosmon_core::collapse_contract::CollapseReceipt {
+        schema: cosmon_core::collapse_contract::RECEIPT_SCHEMA.to_owned(),
+        key,
+        digest,
+        molecule: id,
+        previous_status: cosmon_core::molecule::MoleculeStatus::Pending,
+        previous_revision: cosmon_core::collapse_contract::MoleculeRevision::parse(&revision(
+            &fx.tenant, ID,
+        )?)?,
+        committed_at: chrono::Utc::now(),
+    };
+    // An inconsistent on-disk pair, e.g. after the known pre-B3 stale writer.
+    store.commit_collapse_key(&record.committed(receipt))?;
+    let before = snapshot(&fx.tenant.state_dir)?;
+    let (status, _, inconsistent) =
+        request(&fx.app, "GET", &uri(ID, KEY), Some(&jwt), Value::Null).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(inconsistent["state"], "inconsistent");
+    assert!(inconsistent["receipt"].is_null());
+    assert_eq!(snapshot(&fx.tenant.state_dir)?, before);
+    Ok(())
 }

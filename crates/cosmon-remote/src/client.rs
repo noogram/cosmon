@@ -275,6 +275,29 @@ pub struct CollapseRequest {
     pub cause: Option<String>,
 }
 
+/// Complete ADR-187 intent sent only to the keyed PUT route.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeyedCollapseRequest {
+    /// Exact approved reason bytes.
+    pub reason: String,
+    /// Structured cause attribution.
+    pub cause: Option<String>,
+    /// Rate-limit account alias.
+    pub account: Option<String>,
+    /// Rate-limit currency.
+    pub kind: Option<String>,
+    /// Operator-facing classification.
+    pub reason_kind: Option<String>,
+    /// Confirmed nonterminal status.
+    pub expect_status: String,
+    /// Confirmed raw-state revision.
+    pub expect_revision: String,
+    /// Optional approval commitment.
+    pub approval_digest: Option<String>,
+    /// RFC3339 approval deadline.
+    pub not_after: Option<String>,
+}
+
 /// Body for `POST /v1/molecules/{id}/freeze`, `…/thaw`, `…/stuck`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReasonRequest {
@@ -1304,6 +1327,32 @@ impl Client {
         decode_json(resp).await
     }
 
+    /// Conditional collapse; an older server's 404/405 is returned without fallback.
+    pub async fn keyed_collapse(
+        &self,
+        id: &str,
+        key: &str,
+        body: &KeyedCollapseRequest,
+    ) -> Result<serde_json::Value> {
+        validate_collapse_key(key)?;
+        let resp = self
+            .send(
+                self.req_canon(canon::PUT_V1_MOLECULES_ID_COLLAPSE_RECEIPTS_KEY, &[id, key])
+                    .json(body),
+            )
+            .await?;
+        decode_json(resp).await
+    }
+
+    /// Look up the durable receipt after a lost collapse response.
+    pub async fn collapse_receipt(&self, id: &str, key: &str) -> Result<serde_json::Value> {
+        validate_collapse_key(key)?;
+        let resp = self
+            .send(self.req_canon(canon::GET_V1_MOLECULES_ID_COLLAPSE_RECEIPTS_KEY, &[id, key]))
+            .await?;
+        decode_json(resp).await
+    }
+
     /// Freeze (pause) a molecule via the fused freeze route.
     ///
     /// Fusion v1.0.0-rc made `state` mandatory in
@@ -2084,4 +2133,11 @@ mod tests {
             assert_eq!(back.get("kind").and_then(|k| k.as_str()), Some(raw));
         }
     }
+}
+
+// Validate before route substitution: keys cannot introduce path components or queries.
+fn validate_collapse_key(key: &str) -> Result<()> {
+    cosmon_core::collapse_contract::IdempotencyKey::parse(key)
+        .map(|_| ())
+        .map_err(|e| Error::Config(e.to_string()))
 }

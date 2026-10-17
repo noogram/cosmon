@@ -1,7 +1,7 @@
 # ADR-187: A collapse can be conditional, idempotent and receipted
 
-**Status:** Accepted (2026-10-16) for the local surfaces; the API routes and
-`cosmon-remote` follow in the next increment of issue #207.
+**Status:** Accepted (2026-10-16); local surfaces implemented in B1,
+HTTP and `cosmon-remote` implemented in B2 (2026-10-17).
 
 **Decider:** Noogram.
 
@@ -9,7 +9,7 @@
 §D6 (the lease guard on `cs collapse` moves into the shared operation and
 reaches MCP).
 
-**Tracks:** issue #207 (lot B1); design in deliberation `delib-20261009-8005`.
+**Tracks:** issue #207 (lots B1 and B2); design in deliberation `delib-20261009-8005`.
 
 ## Context
 
@@ -27,11 +27,14 @@ and the broker is not the lifecycle authority.
    canonical JSON of its parsed `state.json`, computed on read and never
    stored. Canonicalising the parsed value keeps unknown keys (two binaries
    agree) and ignores key order (a `HashMap` rewrite does not move it). Only
-   equality is compared. `cs observe --json` exposes it.
+   equality is compared. `cs observe --json` and `GET /v1/molecules/{id}`
+   expose it; HTTP also returns a strong ETag containing the quoted revision.
 
 2. **One operation.** `cosmon_state::ops::collapse::execute` is the collapse
    every surface calls: `cs collapse`, MCP `cosmon_collapse` on stdio and on
-   the RPP `/mcp` connector, and the V1 `POST` route through its wrapper.
+   the RPP `/mcp` connector, and both V1 HTTP collapse routes. The legacy
+   POST preserves its response projection and reason classification, with
+   the same tenant lease guard as keyed PUT.
    Surfaces keep only their projections (the CLI's archive and legacy event
    mirror, the renderers). Without a key it behaves as before.
 
@@ -106,7 +109,8 @@ committed collapse. The key record survives that write, and the lookup then
 reports `inconsistent` rather than `committed`: the receipt stays
 historically true, but the molecule is not guaranteed to stay collapsed. A
 fence on `Collapsed` alone, which the audit found no legitimate exit from, is
-an operator decision for a later increment.
+approved by the operator on 2026-10-17 for the separate B3 increment.
+It is not implemented by B2; the limitation remains until B3 lands.
 
 ## Consequences
 
@@ -114,14 +118,24 @@ an operator decision for a later increment.
   molecule is a no-op instead of an error, the collapse writes `log.md` and
   the `EventV2` records and releases the process record, and a leased mission
   is refused.
-- The V1 `POST /v1/molecules/{id}/collapse` route is unchanged in this
-  increment and still runs without the lease guard (`NoLeaseCheck`, named at
-  its one call site). Its keyed replacement, `PUT`/`GET
-  /v1/molecules/{id}/collapse-receipts/{key}` with `deny_unknown_fields`, the
-  revision on `GET /v1/molecules/{id}` with a strong ETag, and the
-  `cosmon-remote` flags are the next increment. They are new routes, not new
-  fields on the POST: `CollapseBody` ignores unknown fields, so an older
-  server would collapse unconditionally.
+- B2 routes both HTTP collapse gestures through `execute` and
+  `LeaseCollapseAuthority` over the admitted tenant's state directory, with
+  `CallerContext::Remote` from the verified JWT subject. No server environment
+  identity can authorize a leased mission. The old POST remains unconditional
+  and keeps its legacy response, except that the lease bypass is closed.
+- Keyed `PUT` and lookup `GET /v1/molecules/{id}/collapse-receipts/{key}`
+  are separate routes; the PUT body denies unknown fields. Keyed responses
+  use the table's exact HTTP statuses and the shared outcome renderer. Lookup
+  returns 200 with its classification, including `inconsistent` or a key bound
+  elsewhere without disclosing that molecule. Both routes require tenant
+  admission, the relevant molecule scope and a molecule visible in that store.
+- `cosmon-remote molecule collapse --key --expect-status --expect-revision`
+  sends only PUT, including optional approval digest/deadline and cause fields.
+  `molecule collapse-receipt <id> <key>` reads the durable answer. Old-server
+  404/405 never causes a POST fallback. Unkeyed commands retain POST behavior.
+- A receipt's serialized content is durable across restarted adapters; HTTP
+  lookup and replay return that content without a response-id wrapper. B1's
+  file-store crash/concurrency witnesses remain authoritative for the engine.
 - `MoleculeData` gains `collapse_receipt` (absent ⇒ none; additive under
   `STATE_SCHEMA_VERSION = 1`).
 - The write-path taxonomy gains `collapse-receipts/<key-hash>.json`.
@@ -135,4 +149,9 @@ an operator decision for a later increment.
    goes red when `FileStore::lock_molecule` returns a no-op guard).
 2. A crash after the reservation or after the state write leaves a state from
    which the identical retry does not converge on exactly one event.
-3. A refused keyed request changes any byte under the state directory.
+3. A refused keyed request changes molecule or key state (creating the
+   coordination inode `dispatch.lock` is not a state transition).
+4. Either HTTP collapse route bypasses a lease in the tenant store
+   (`v1_collapse_reason_kind::both_http_collapse_routes_refuse_a_leased_mission_in_the_tenant_store`).
+5. A keyed remote command sends POST to an old server
+   (`cosmon-remote` binary unit test `keyed_cli_against_old_server_never_posts`).

@@ -1,0 +1,13 @@
+`GET /v1/molecules/{id}/collapse-receipts/{key}` — look up a durable collapse receipt
+
+Usage: cosmon-remote molecule collapse-receipt [OPTIONS] <ID> <KEY>
+
+Arguments:
+  <ID>   Molecule the key was sent for
+  <KEY>  Caller-generated collapse key
+
+Options:
+      --profile <PROFILE>  Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --json               Render machine-readable JSON instead of human text where applicable
+      --token <TOKEN>      Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+  -h, --help               Print help
