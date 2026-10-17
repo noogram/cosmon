@@ -153,6 +153,61 @@ impl Harness {
         }
     }
 
+    /// Provision from the actual handoff file, then reload exactly what
+    /// bootstrap rendered rather than constructing an in-memory grant.
+    async fn from_handoff(scope_declaration: &str, header: &str) -> Self {
+        use cosmon_rpp_adapter::trust_bootstrap::{converge_with, TrustBootstrapSection};
+
+        let h = Self::new(None).await;
+        let handoff_dir = h.security_dir.path().join("handoff");
+        std::fs::create_dir_all(&handoff_dir).unwrap();
+        std::fs::write(
+            handoff_dir.join("issuer.toml"),
+            format!(
+                r#"schema = "cosmon-issuer-handoff/v1"
+[issuer]
+iss = "{}"
+audiences = ["{AUD}"]
+{header}
+noyau = "a"
+sub = "{SUB}"
+nucleon_id = "nuc-a"
+{scope_declaration}
+"#,
+                h.oidc.issuer(),
+            ),
+        )
+        .unwrap();
+        let section = TrustBootstrapSection {
+            handoff_dir: Some(handoff_dir),
+            ..TrustBootstrapSection::default()
+        };
+        let report = converge_with(h.security_dir.path(), &section, None, false).unwrap();
+        assert_eq!(report.bindings_written, ["nuc-a"]);
+        h.reload_bindings();
+        // A reboot must preserve the binding, including an empty grant.
+        let report = converge_with(h.security_dir.path(), &section, None, false).unwrap();
+        assert_eq!(report.bindings_unchanged, 1);
+        h
+    }
+
+    fn reload_bindings(&self) {
+        self.state
+            .nucleon_map
+            .store(HabilitationMap::load(self.security_dir.path()).unwrap());
+    }
+
+    fn binding_text(&self, id: &str) -> String {
+        std::fs::read_to_string(
+            self.security_dir
+                .path()
+                .join("nucleons")
+                .join(id)
+                .join("oidc-identity.toml"),
+        )
+        .unwrap()
+    }
+
     fn app(&self) -> Router {
         router(self.state.clone())
     }
@@ -220,6 +275,152 @@ fn request(method: &str, uri: &str, jwt: &str, body: Option<&str>) -> Request<Bo
 fn assert_refused(audit: &AuthzDecisionEvaluated) {
     assert_eq!(audit.decision, AuthzDecision::Absent, "{audit:?}");
     assert_eq!(audit.grant_source, None, "{audit:?}");
+}
+
+/// Both handoff shapes must carry explicit emptiness through disk and
+/// JWT authentication to the real write route's scope check.
+#[tokio::test]
+async fn handoff_explicit_empty_scopes_refuse_token_write() {
+    for header in ["[binding]", "[[bindings]]"] {
+        let h = Harness::from_handoff("scopes = []", header).await;
+        let jwt = h.token(&[MOLECULE_WRITE], "jti-handoff-empty");
+        assert_eq!(
+            h.send(
+                "POST",
+                "/v1/molecules",
+                &jwt,
+                Some(r#"{"formula":"task-work"}"#)
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+            "explicit empty handoff {header} must refuse token write",
+        );
+        assert_refused(&h.audit_for("nucleate"));
+        let body = h.binding_text("nuc-a");
+        assert!(body.contains("[scopes]"));
+        assert!(body.contains("allowed = []"));
+    }
+}
+
+#[tokio::test]
+async fn handoff_omitted_scopes_keep_default_grants() {
+    let h = Harness::from_handoff("", "[binding]").await;
+    // Defaults remain binding grants even when the token carries only openid.
+    let jwt = h.token(&["openid"], "jti-handoff-default");
+    assert_eq!(
+        h.send(
+            "POST",
+            "/v1/molecules",
+            &jwt,
+            Some(r#"{"formula":"task-work"}"#)
+        )
+        .await,
+        StatusCode::CREATED,
+    );
+    assert_eq!(
+        h.audit_for("nucleate").grant_source.as_deref(),
+        Some(GRANT_SOURCE_BINDING)
+    );
+    let body = h.binding_text("nuc-a");
+    let parsed: toml::Value = toml::from_str(&body).unwrap();
+    assert_eq!(
+        parsed["scopes"]["allowed"].as_array().unwrap(),
+        &[
+            MOLECULE_READ,
+            MOLECULE_WRITE,
+            WORKER_SPAWN,
+            ARTIFACT_READ,
+            EVENTS_SUBSCRIBE
+        ]
+        .map(|s| toml::Value::String(s.to_owned())),
+    );
+}
+
+#[tokio::test]
+async fn handoff_nonempty_scopes_keep_binding_ceiling() {
+    let h = Harness::from_handoff(r#"scopes = ["cosmon:molecule:read"]"#, "[[bindings]]").await;
+    let jwt = h.token(&[MOLECULE_READ, MOLECULE_WRITE], "jti-handoff-read");
+    assert_eq!(
+        h.send("GET", "/v1/molecules", &jwt, None).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        h.send(
+            "POST",
+            "/v1/molecules",
+            &jwt,
+            Some(r#"{"formula":"task-work"}"#)
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+    );
+    assert_refused(&h.audit_for("nucleate"));
+    // #208 uses the binding's complete grant, not a JWT intersection.
+    let openid = h.token(&["openid"], "jti-handoff-openid");
+    assert_eq!(
+        h.send("GET", "/v1/molecules", &openid, None).await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn federated_empty_scopes_keep_legacy_token_admission() {
+    use cosmon_rpp_adapter::image_init::ImageInit;
+    use cosmon_rpp_adapter::portee::{PartnerIdentity, PorteeProvisioner, PorteeSpec};
+    use cosmon_rpp_adapter::provisioner::Provisioner;
+
+    let h = Harness::new(None).await;
+    let state_dir = h.security_dir.path().to_path_buf();
+    let galaxies_root = h.tenants.galaxies_root().to_path_buf();
+    let provisioner = Arc::new(Provisioner::new(
+        state_dir.clone(),
+        galaxies_root.clone(),
+        h.state.nucleon_map.clone(),
+        ImageInit {
+            inbox_root: state_dir.join("inbox"),
+            galaxies_root,
+            claude_home: state_dir.join("home"),
+            formulas_seed_dir: None,
+        },
+    ));
+    let outcome = PorteeProvisioner::new(state_dir, provisioner)
+        .federate(&PorteeSpec {
+            portee_id: Some("peer".to_owned()),
+            partner: PartnerIdentity {
+                issuer: h.oidc.issuer().to_owned(),
+                sub: SUB.to_owned(),
+            },
+            galaxies: vec!["a".to_owned()],
+            scopes: vec![],
+            create_noyau: false,
+            created_at: None,
+        })
+        .await
+        .unwrap();
+    assert!(!h
+        .binding_text(&outcome.members[0].habilitation_id)
+        .contains("[scopes]"));
+    h.reload_bindings();
+    let jwt = h.token(&[MOLECULE_WRITE], "jti-federation-write");
+    assert_eq!(
+        h.send(
+            "POST",
+            "/v1/molecules",
+            &jwt,
+            Some(r#"{"formula":"task-work"}"#)
+        )
+        .await,
+        StatusCode::CREATED,
+    );
+    assert_eq!(
+        h.audit_for("nucleate").grant_source.as_deref(),
+        Some(GRANT_SOURCE_JWT)
+    );
+    let openid = h.token(&["openid"], "jti-federation-openid");
+    assert_eq!(
+        h.send("GET", "/v1/molecules", &openid, None).await,
+        StatusCode::FORBIDDEN
+    );
 }
 
 #[tokio::test]

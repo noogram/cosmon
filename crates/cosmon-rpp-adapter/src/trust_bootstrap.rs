@@ -68,7 +68,9 @@ use serde::Deserialize;
 
 use crate::auth::scopes;
 use crate::jwks_fetch::TrustedIssuers;
-use crate::nucleon_map::{render_oidc_identity_toml, HabilitationBindingSpec, RenderError};
+use crate::nucleon_map::{
+    render_oidc_identity_toml_with_explicit_scopes, HabilitationBindingSpec, RenderError,
+};
 
 /// Handoff schema identifier accepted by this reader (contract C).
 pub const HANDOFF_SCHEMA: &str = "cosmon-issuer-handoff/v1";
@@ -141,7 +143,8 @@ pub struct HandoffBinding {
     /// Directory name under `nucleons/`. Omitted → `<noyau>`.
     #[serde(default)]
     pub nucleon_id: Option<String>,
-    /// Binding-granted scopes. Omitted → [`DEFAULT_BINDING_SCOPES`].
+    /// Binding-granted scopes. Omitted → [`DEFAULT_BINDING_SCOPES`] with a
+    /// warning; explicitly empty → `[scopes] allowed = []` (grants nothing).
     #[serde(default)]
     pub scopes: Option<Vec<String>>,
     /// Cognitive-substrate label (ADR-063). Omitted → `Biological`.
@@ -665,11 +668,12 @@ fn converge_binding(
         .nucleon_id
         .clone()
         .unwrap_or_else(|| spec.noyau.clone());
-    let rendered =
-        render_oidc_identity_toml(&spec).map_err(|source| TrustBootstrapError::Binding {
+    let rendered = render_oidc_identity_toml_with_explicit_scopes(&spec).map_err(|source| {
+        TrustBootstrapError::Binding {
             nucleon_id: nucleon_id.clone(),
             source,
-        })?;
+        }
+    })?;
     let binding_path = state_dir
         .join("nucleons")
         .join(&nucleon_id)
@@ -1096,13 +1100,6 @@ nucleon_id = "binding-under-test"
             .unwrap();
             let binding: toml::Value = toml::from_str(&binding).unwrap();
             let expected = scopes.unwrap_or_else(|| DEFAULT_BINDING_SCOPES.to_vec());
-            if expected.is_empty() {
-                assert!(
-                    binding.get("scopes").is_none(),
-                    "renderer preserves legacy empty-scope behavior"
-                );
-                continue;
-            }
             assert_eq!(
                 binding["scopes"]["allowed"].as_array().unwrap(),
                 &expected
@@ -1336,17 +1333,18 @@ nucleon_id = "binding-under-test"
             .map(|scope| (*scope).to_owned())
             .collect::<Vec<_>>();
         scopes.push(scopes::ARTIFACT_WRITE.to_owned());
-        let operator_binding = render_oidc_identity_toml(&HabilitationBindingSpec {
-            noyau: "tenant-demo-sandbox".into(),
-            sub: "3".into(),
-            issuer: "http://ext/git".into(),
-            audience: "client-id-abc".into(),
-            nucleon_id: Some("cosmon-forgejo".into()),
-            phase: None,
-            scopes,
-            sealed_at: None,
-        })
-        .unwrap();
+        let operator_binding =
+            crate::nucleon_map::render_oidc_identity_toml(&HabilitationBindingSpec {
+                noyau: "tenant-demo-sandbox".into(),
+                sub: "3".into(),
+                issuer: "http://ext/git".into(),
+                audience: "client-id-abc".into(),
+                nucleon_id: Some("cosmon-forgejo".into()),
+                phase: None,
+                scopes,
+                sealed_at: None,
+            })
+            .unwrap();
         std::fs::write(&binding_path, &operator_binding).unwrap();
 
         let report = converge_with(&state, &section, None, false).unwrap();
