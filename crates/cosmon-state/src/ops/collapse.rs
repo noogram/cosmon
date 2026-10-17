@@ -2,8 +2,9 @@
 
 //! `collapse` — the one terminal `→ Collapsed` transition every surface calls.
 //!
-//! [`execute`] is the shared operation (issue #207): `cs collapse`, both MCP
-//! `cosmon_collapse` hosts and the V1 RPP route all reach it, so the lease
+//! [`execute_with_clock`] is the shared production operation (issue #207):
+//! `cs collapse`, both MCP `cosmon_collapse` hosts and both V1 HTTP collapse
+//! routes all reach it, so the lease
 //! guard, the cause validation, the transition and its log/event tail exist
 //! once. Surfaces keep only their own projections (the CLI's archive and
 //! legacy event mirror, the wire renderers).
@@ -46,6 +47,7 @@ use cosmon_core::collapse_contract::{
 };
 use cosmon_core::error::CosmonError;
 use cosmon_core::event_v2::{CollapseReason, EventV2};
+use cosmon_core::harness::{Clock, RealClock};
 use cosmon_core::id::MoleculeId;
 use cosmon_core::molecule::{CollapseCause, MoleculeStatus};
 use serde::Serialize;
@@ -109,9 +111,8 @@ impl OpsError for CollapseError {
 
 /// Errors returned by [`execute`].
 ///
-/// A separate type from [`CollapseError`] so that the V1 route, which
-/// matches that enum exhaustively and runs without a lease check, keeps
-/// compiling unchanged; its replacement route will surface the refusal.
+/// Separates operation errors from keyed decision-table refusals and lets
+/// surfaces map an unconditional lease refusal without losing its meaning.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteError {
     /// Every failure [`collapse`] can report.
@@ -156,12 +157,10 @@ pub trait CollapseAuthority {
     ) -> Result<Option<LeaseRefusal>, CosmonError>;
 }
 
-/// The V1 RPP `POST /v1/molecules/:id/collapse` route's pre-#207 behaviour:
-/// no lease check.
+/// Compatibility/test authority that performs no lease check.
 ///
-/// Named so the gap is visible at its one call site ([`collapse`]); the
-/// keyed API route of the next increment replaces it with the lease
-/// authority, and no other surface uses it.
+/// The legacy [`collapse`] helper retains it for API compatibility. Production
+/// CLI, MCP and HTTP surfaces pass a real authority to [`execute_with_clock`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoLeaseCheck;
 
@@ -340,7 +339,7 @@ pub fn collapse(
     let caller = CallerContext::Remote {
         subject: subject.id().as_str().to_owned(),
     };
-    let result = execute(
+    let result = execute_with_clock(
         store,
         state_dir,
         &NoLeaseCheck,
@@ -348,7 +347,7 @@ pub fn collapse(
         id,
         request,
         None,
-        Utc::now(),
+        &RealClock,
     )
     .map_err(|e| match e {
         ExecuteError::Collapse(e) => e,
@@ -375,11 +374,12 @@ pub fn collapse(
     }
 }
 
-/// The shared collapse operation. See the module documentation.
+/// Collapse with an explicit deterministic timestamp. See the module documentation.
 ///
 /// `state_dir` is where `events.jsonl` lives; the molecule's own files are
-/// located through the store. `now` is the decision time (approval expiry
-/// and the receipt's timestamp).
+/// located through the store. `now` fixes the decision/receipt timestamp for
+/// deterministic callers. Production surfaces use [`execute_with_clock`] so
+/// the operation samples live time inside the keyed critical section.
 ///
 /// # Errors
 ///
@@ -429,9 +429,86 @@ pub fn execute_with_hook(
     now: DateTime<Utc>,
     hook: &dyn Fn(CollapseStage) -> Result<(), CosmonError>,
 ) -> Result<CollapseOutcome, ExecuteError> {
+    execute_using_clock(
+        store,
+        state_dir,
+        authority,
+        caller,
+        id,
+        request,
+        condition,
+        &OperationTimestamp(now),
+        hook,
+    )
+}
+
+/// Collapse using an injected clock owned by the shared operation.
+///
+/// Production surfaces pass [`RealClock`]. In keyed mode the clock is sampled
+/// after acquiring the dispatch lock and reading state/authority, immediately
+/// before each decision. A new receipt uses that same post-lock timestamp;
+/// a replay keeps its original receipt and wins over expired approvals.
+/// The explicit-time [`execute`] and [`execute_with_hook`] remain compatible
+/// deterministic entrypoints, not production clock sources.
+///
+/// # Errors
+/// As [`execute`].
+#[allow(clippy::too_many_arguments)]
+pub fn execute_with_clock(
+    store: &dyn StateStore,
+    state_dir: &Path,
+    authority: &dyn CollapseAuthority,
+    caller: &CallerContext,
+    id: &MoleculeId,
+    request: CollapseRequest,
+    condition: Option<CollapseCondition>,
+    clock: &dyn Clock,
+) -> Result<CollapseOutcome, ExecuteError> {
+    execute_using_clock(
+        store,
+        state_dir,
+        authority,
+        caller,
+        id,
+        request,
+        condition,
+        clock,
+        &|_| Ok(()),
+    )
+}
+
+struct OperationTimestamp(DateTime<Utc>);
+
+impl Clock for OperationTimestamp {
+    fn now(&self) -> DateTime<Utc> {
+        self.0
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_using_clock(
+    store: &dyn StateStore,
+    state_dir: &Path,
+    authority: &dyn CollapseAuthority,
+    caller: &CallerContext,
+    id: &MoleculeId,
+    request: CollapseRequest,
+    condition: Option<CollapseCondition>,
+    clock: &dyn Clock,
+    hook: &dyn Fn(CollapseStage) -> Result<(), CosmonError>,
+) -> Result<CollapseOutcome, ExecuteError> {
     let cause = parse_cause(&request)?;
     match condition {
-        None => unconditional(store, state_dir, authority, caller, id, request, cause, now),
+        None => unconditional(
+            store,
+            state_dir,
+            authority,
+            caller,
+            id,
+            request,
+            cause,
+            clock.now(),
+        ),
         Some(condition) => keyed(
             store,
             state_dir,
@@ -441,7 +518,7 @@ pub fn execute_with_hook(
             &request,
             cause.as_ref(),
             &condition,
-            now,
+            clock,
             hook,
         )
         .map(CollapseOutcome::Keyed)
@@ -533,7 +610,7 @@ fn keyed(
     request: &CollapseRequest,
     cause: Option<&CollapseCause>,
     condition: &CollapseCondition,
-    now: DateTime<Utc>,
+    clock: &dyn Clock,
     hook: &dyn Fn(CollapseStage) -> Result<(), CosmonError>,
 ) -> Result<KeyedCollapse, CollapseError> {
     let store_err = |e: CosmonError| CollapseError::from_cosmon(id, e);
@@ -567,6 +644,9 @@ fn keyed(
     // At most two rounds: the second runs only when another process created
     // the key record between our read and our create-only reservation.
     for _round in 0..2 {
+        // The lock wait, state read and authority check can outlive approval.
+        // Sample here, not at the surface or before acquiring dispatch.lock.
+        let now = clock.now();
         let decision = decide(&DecisionInput {
             target: id,
             condition,

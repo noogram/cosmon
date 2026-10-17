@@ -590,6 +590,10 @@ paths:
         Decisions follow the nine-outcome ADR-187 table, first match wins.
         Replay precedes expiry, status, revision and lease preconditions.
         Refusals do not write molecule or key state. The receipt has no expiry.
+        The shared operation samples its injected live clock after acquiring
+        dispatch.lock, immediately before the decision. A wait crossing
+        not_after returns approval_expired; receipt committed_at uses that
+        post-lock decision time. Existing receipts replay even after expiry.
         An old server returns 404/405; clients must never fall back to POST.
         A stale unlocked writer can still overwrite Collapsed until D8 lands;
         lookup then reports inconsistent rather than claiming current collapse.
@@ -667,7 +671,7 @@ paths:
       operationId: collapseMolecule
       summary: Collapse (terminate) a molecule with a reason (T-CST-EXPAND).
       description: |
-        Library-direct call to `cosmon_state::ops::collapse::execute`,
+        Library-direct call to `cosmon_state::ops::collapse::execute_with_clock`,
         with the tenant lease guard and verified JWT caller. The
         `reason` field is mandatory. `cause` is an optional structured
         attribution (`"rate_limit"`, `"design_change"`, `"abandoned"`);
@@ -3525,7 +3529,10 @@ components:
         molecule: {type: string}
         previous_status: {type: string}
         previous_revision: {type: string}
-        committed_at: {type: string, format: date-time}
+        committed_at:
+          type: string
+          format: date-time
+          description: Decision timestamp sampled after dispatch.lock, before the filesystem commit.
     KeyedCollapseOutcome:
       type: object
       required: [molecule, outcome, digest]

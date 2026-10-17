@@ -626,3 +626,60 @@ async fn receipt_lookup_exposes_reserved_and_inconsistent_without_writing() -> a
     assert_eq!(snapshot(&fx.tenant.state_dir)?, before);
     Ok(())
 }
+
+/// A keyed request waits out dispatch on a blocking thread, leaving HTTP reads live.
+#[tokio::test]
+async fn keyed_http_lock_wait_does_not_block_the_async_executor() -> anyhow::Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let fx = fixture().await;
+    fx.tenant
+        .insert_molecule(ID, &serde_json::json!({"status": "pending"}))?;
+    let jwt = jwt_with_scopes(&fx.oidc, &["cosmon:molecule:write"], "lock-wait");
+    let body = intent(&fx, ID)?;
+    let state_dir = fx.tenant.state_dir.clone();
+    let released = Arc::new(AtomicBool::new(false));
+    let observed_release = released.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || -> anyhow::Result<()> {
+        let store = cosmon_filestore::FileStore::new(state_dir);
+        let id = cosmon_core::id::MoleculeId::new(ID)?;
+        let guard = store.acquire_dispatch_lock(&id)?;
+        ready_tx.send(())?;
+        // A bounded cleanup path makes a broken async boundary fail, not hang.
+        let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        observed_release.store(true, Ordering::SeqCst);
+        drop(guard);
+        Ok(())
+    });
+    ready_rx.recv_timeout(Duration::from_secs(5))?;
+    let app = fx.app.clone();
+    let put_jwt = jwt.clone();
+    let put =
+        tokio::spawn(
+            async move { request(&app, "PUT", &uri(ID, KEY), Some(&put_jwt), body).await },
+        );
+    // This test runs on a single-thread Tokio executor. The spawned handler
+    // must yield while the OS thread holds its dispatch lock.
+    tokio::task::yield_now().await;
+    let (status, _, _) = request(
+        &fx.app,
+        "GET",
+        &format!("/v1/molecules/{ID}"),
+        Some(&jwt),
+        Value::Null,
+    )
+    .await?;
+    let read_before_release = !released.load(Ordering::SeqCst);
+    let _ = release_tx.send(());
+    holder
+        .join()
+        .map_err(|_| anyhow::anyhow!("lock holder panicked"))??;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(put.await??.0, StatusCode::CREATED);
+    assert!(
+        read_before_release,
+        "HTTP executor waited on dispatch.lock before serving the read"
+    );
+    Ok(())
+}

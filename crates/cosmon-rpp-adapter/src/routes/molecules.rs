@@ -1246,7 +1246,7 @@ pub async fn collapse_molecule(
     let caller = CallerContext::Remote {
         subject: jwt.sub.clone(),
     };
-    let outcome = ops::collapse::execute(
+    let outcome = ops::collapse::execute_with_clock(
         &store,
         &tenant_state_dir,
         &authority,
@@ -1254,7 +1254,7 @@ pub async fn collapse_molecule(
         &molecule_id,
         request,
         None,
-        chrono::Utc::now(),
+        &cosmon_core::harness::RealClock,
     )
     .map_err(|e| collapse_execute_error(e, &spark.request_id))?;
     let CollapseOutcome::Unconditional { view, .. } = outcome else {
@@ -1301,7 +1301,7 @@ pub struct KeyedCollapseBody {
     pub expect_revision: String,
     /// Opaque approval commitment.
     pub approval_digest: Option<String>,
-    /// Approval deadline enforced by the shared operation.
+    /// Approval deadline checked against time sampled inside the dispatch lock.
     pub not_after: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -1449,16 +1449,29 @@ pub async fn put_collapse_receipt(
         "HTTP collapse",
     );
     let caller = CallerContext::Remote { subject: jwt.sub };
-    let outcome = ops::collapse::execute(
-        &store,
-        &tenant_state_dir,
-        &authority,
-        &caller,
-        &molecule_id,
-        request,
-        Some(condition),
-        chrono::Utc::now(),
-    )
+    // A dispatch can hold this lock while its worker runs. Waiting must not
+    // occupy an async executor thread needed by that worker or other routes.
+    let target = molecule_id.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        ops::collapse::execute_with_clock(
+            &store,
+            &tenant_state_dir,
+            &authority,
+            &caller,
+            &target,
+            request,
+            Some(condition),
+            &cosmon_core::harness::RealClock,
+        )
+    })
+    .await
+    .map_err(|_| {
+        collapse_api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_unavailable",
+            &spark.request_id,
+        )
+    })?
     .map_err(|e| collapse_execute_error(e, &spark.request_id))?;
     let CollapseOutcome::Keyed(outcome) = outcome else {
         return Err(collapse_api_error(

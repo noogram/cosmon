@@ -30,7 +30,7 @@ and the broker is not the lifecycle authority.
    equality is compared. `cs observe --json` and `GET /v1/molecules/{id}`
    expose it; HTTP also returns a strong ETag containing the quoted revision.
 
-2. **One operation.** `cosmon_state::ops::collapse::execute` is the collapse
+2. **One operation.** `cosmon_state::ops::collapse::execute_with_clock` is the collapse
    every surface calls: `cs collapse`, MCP `cosmon_collapse` on stdio and on
    the RPP `/mcp` connector, and both V1 HTTP collapse routes. The legacy
    POST preserves its response projection and reason classification, with
@@ -64,8 +64,9 @@ and the broker is not the lifecycle authority.
    bound to another molecule), `replayed` (200; before every precondition,
    because the collapse itself moved the revision and the approval may have
    expired since), `unleased_pilot_gesture` (403), `already_completed` (409),
-   `already_collapsed{by_key}` (409), `approval_expired` (412; cosmon enforces
-   `not_after`), `unexpected_status` (409), `stale_revision` (412),
+   `already_collapsed{by_key}` (409), `approval_expired` (412; compares
+   `not_after` with decision time sampled after the dispatch lock is acquired),
+   `unexpected_status` (409), `stale_revision` (412),
    `transitioned` (201). Refusals write nothing. The CLI maps them to exit
    16 and 20–25; `--json`'s `outcome` field is the contract.
 
@@ -112,13 +113,43 @@ fence on `Collapsed` alone, which the audit found no legitimate exit from, is
 approved by the operator on 2026-10-17 for the separate B3 increment.
 It is not implemented by B2; the limitation remains until B3 lands.
 
+## Approval time belongs to the shared critical section
+
+B2 review reproduced a B1 defect: `execute` accepted a `DateTime` sampled
+before waiting for `dispatch.lock`, then used it for both the expiry decision
+and receipt. A deterministic FileStore lock/clock intervention advanced time
+past a deadline while that lock was held and still observed `transitioned`;
+a fresh post-deadline timestamp instead yielded `approval_expired`.
+
+The correction adds `execute_with_clock`, using the existing
+`cosmon_core::harness::Clock` port. Every production surface — CLI, stdio and
+HTTP MCP, legacy HTTP POST and keyed HTTP PUT — injects `RealClock`. The
+shared operation samples it after acquiring the keyed dispatch lock and
+reading state/authority, immediately before each `decide`. The new receipt
+uses that same post-lock decision timestamp. A retry after a key-reservation
+race samples again; an existing receipt still replays before expiry checks.
+The pure core receives a timestamp and performs no clock I/O.
+
+`execute` and `execute_with_hook` remain deterministic explicit-time APIs for
+compatibility and fault-injection tests. They intentionally fix time; no
+production surface uses them as a live clock source. Approval is checked at
+the decision, rather than promising that the subsequent filesystem commit
+finishes before the deadline.
+
+The regression in `cosmon-filestore/tests/keyed_collapse.rs` holds the real
+lock, advances a controlled Clock across `not_after`, then releases it:
+`approval_expired`, no molecule/key/event write. A before-deadline control
+transitions and records the post-lock timestamp; replay after expiry returns
+the same durable receipt with outcome status 200. Moving the clock sample
+before the lock makes this regression fail.
+
 ## Consequences
 
 - `cosmon_collapse` now behaves as `cs collapse`: an already-collapsed
   molecule is a no-op instead of an error, the collapse writes `log.md` and
   the `EventV2` records and releases the process record, and a leased mission
   is refused.
-- B2 routes both HTTP collapse gestures through `execute` and
+- B2 routes both HTTP collapse gestures through `execute_with_clock` and
   `LeaseCollapseAuthority` over the admitted tenant's state directory, with
   `CallerContext::Remote` from the verified JWT subject. No server environment
   identity can authorize a leased mission. The old POST remains unconditional
