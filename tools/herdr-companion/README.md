@@ -203,6 +203,12 @@ failure does not interrupt the worker or view. This package cannot truthfully
 report working/idle/blocked from its public observations, and deliberately
 reports unknown. Reports do not supply authorization for input.
 
+This is native Agents presence and explicit human IO only. It supplies no
+working/idle/blocked transitions and no turn-completion signal. Do not use
+`herdr agent wait` or `herdr agent prompt --wait` as turn tracking for these
+views: with unknown state they can remain waiting. Native state automation is
+not qualified by this integration.
+
 Interagir requests the separate `cosmon.terminal.interactive` capability and
 revalidates project, molecule and incarnation. Literal bytes are hex encoded
 before the guarded tmux queue; there is no shell interpolation. Dimensions
