@@ -127,9 +127,10 @@ user configuration also remain operator-owned. The view is read-only while
 its client flags stay read-only; it does not revoke the user's independent
 ability to operate tmux.
 
-The optional [Herdr plugin](../../../../tools/herdr-companion/README.md)
-consumes this contract. Other client acceptance requires independent witnesses;
-no cmux or Pi delivery is claimed here. No remote API or native Cosmon UI
+The optional [Herdr plugin](../../../../tools/herdr-companion/README.md) and
+independent [cmux tooling](../../../../tools/cmux-companion/README.md) consume
+this contract. Each client's acceptance requires its own witnesses;
+Pi is not delivered here. No remote API or native Cosmon UI
 terminal route is added. Existing schemas and historical baselines are preserved.
 
 The generic attachment requires Python 3 on macOS/Linux for its output-only
