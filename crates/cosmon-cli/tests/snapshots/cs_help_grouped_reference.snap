@@ -34,6 +34,7 @@ Molecule lifecycle:
   listen               Listen — voice → whisper.cpp → `cs nucleate spark` (MVP)
   nucleate             Nucleate a new molecule from a formula template
   observe              Observe a molecule's current state and history
+  terminal             Observe or attach a worker terminal read-only with exact incarnation checks
   evolve               Evolve a molecule to its next lifecycle state
   complete             Complete a molecule — idempotent Active→Completed transition (worker-callable)
   collapse             Collapse a molecule — terminate with final state recording

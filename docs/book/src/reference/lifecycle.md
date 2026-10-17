@@ -329,6 +329,23 @@ SEE ALSO: cs wait (block until terminal), cs peek (fractal TUI).
 
 
 
+## `cs terminal`
+
+Observe or attach a worker terminal read-only with exact incarnation checks
+
+**Usage:** `cs terminal [OPTIONS] <MOLECULE_ID>`
+
+###### **Arguments:**
+
+* `<MOLECULE_ID>` — Complete molecule ID; prefixes are refused
+
+###### **Options:**
+
+* `--attach` — Attach this terminal read-only, excluding its size from worker sizing
+* `--expect <TOKEN>` — Incarnation token returned by a fresh terminal observation
+
+
+
 ## `cs evolve`
 
 Evolve a molecule to its next lifecycle state

@@ -1,96 +1,183 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 
-# Optional Cosmon views in Herdr
+# Client integrations: Cosmon in Herdr
 
-Run this companion explicitly from an existing galaxy checkout. Python 3
-standard library, Git and `cs` suffice for observations; Herdr is optional.
-Nothing is installed or enabled. Removing this directory leaves Cosmon intact.
+An optional Herdr plugin and Python CLI for selecting molecules, viewing a
+worker read-only, opening its existing Git worktree, and reading canonical
+Markdown deliverables. Cosmon remains independent of Herdr. Removing the plugin
+leaves worker processes, state, lifecycle and ordinary `cs` commands intact.
 
-```sh
-python3 tools/herdr-companion/cosmon-herdr.py list
-python3 tools/herdr-companion/cosmon-herdr.py list --all
-python3 tools/herdr-companion/cosmon-herdr.py show task-example-0001
-```
+## Prerequisites
 
-Output is JSON. `list` uses the one-shot `cs --json observe` list, and `show`
-uses its detail form. Selection requires the complete, exact molecule id;
-Cosmon's prefix convenience is refused. The reader never invokes `peek`
-(whose normal loop can propel work), patrol, lifecycle verbs or terminal input.
-It stores no cache and parses no private state files.
+- Python 3.9+, Git, and a Cosmon build providing `cs terminal` v1 on `PATH`.
+- Local tmux 3.2+ with read-only/ignore-size client flags (tested with 3.5a), on
+  macOS or Linux for kernel process fingerprints. A single live window/pane
+  and a creation-time terminal witness are required. Older workers without a
+  witness display **unknown**; this tool never retrofits identity from labels.
+- Herdr daemon CLI 0.9.5+ for the manifest/action/pane and argv PTY APIs. A
+  running local Herdr session with an existing workspace for the chosen galaxy.
+  The tested GPUI app is a separate executable from the daemon CLI.
 
-The view separates molecule status, unknown terminal presence, existing Git
-worktree and canonical deliverables. It timestamps the observation; the facts
-can change after the read. `completed` does not establish a live process,
-artifact acceptance or harvest. A branch supplied by `cs observe` is joined
-by exact ref equality to `git worktree list --porcelain -z`; no path is guessed
-from an id. This identifies the branch checkout, not the worker's current cwd.
-Absent or ambiguous mappings stay unavailable; nothing creates a worktree.
+There is no build step, dependency download, background service, startup hook,
+web server or framework. Runtime state is not stored in the plugin source.
 
-`molecule_dir` from `cs observe` supplies the canonical artifact residence.
-The reader exposes existing regular `synthesis.md`, `frame.md`, `outcomes.md`,
-`plan.md`, `report.md`, `result.md` and `responses/*.md`, and lists missing
-conventional root files separately. Symlinks are excluded. These are file
-observations, not a new artifact manifest or a success verdict. Custom and
-binary outputs are outside this first companion's discovery set.
+## Link, open, remove
 
-## Open an explicit view
-
-Herdr's daemon CLI (`herdr`, tested against 0.9.5) and Herdr GPUI (`Herdr`,
-tested against 20261016.1 protocol 3) are distinct executables. Find the local
-executables and inspect their help; `--herdr` and `--herdr-ui` accept executable
-paths. These flags and `--repo` precede the subcommand. No shell text is built
-from paths, labels or ids; all external calls use argv and a bounded wait.
-
-Use `herdr --session NAME workspace list` to choose an **existing local**
-session and workspace. Opening a worktree creates only a new shell tab there:
+From the Cosmon checkout containing this directory:
 
 ```sh
-python3 tools/herdr-companion/cosmon-herdr.py open task-example-0001 \
-  --worktree --herdr-session NAME --workspace WORKSPACE_ID
+herdr plugin link "$PWD/tools/herdr-companion"
+herdr plugin list --json
+herdr plugin action list --plugin cosmon.client
 ```
 
-The command re-observes the molecule and Git mapping before calling
-`herdr --session NAME tab create --workspace WORKSPACE_ID --cwd PATH --no-focus`.
-It does not use Herdr's worktree creation/removal machinery. Closing this shell
-tab removes the view and its own shell; it cannot harvest or stop a Cosmon
-worker. Do not start a worker inside the view and infer lifecycle integration.
+Linking explicitly registers ordinary local code in Herdr's plugin registry.
+It is an operator action; Cosmon never registers it automatically. The package
+is not installed by a Cosmon upgrade. Keep a locally linked directory available
+for later invocations; use a stable checkout, not a disposable worker worktree.
 
-Use `Herdr window list --json` to choose an explicit GPUI window, then open a
-deliverable read-only in a code tab:
+Inside a Herdr terminal workspace whose cwd belongs to the selected galaxy:
 
 ```sh
-python3 tools/herdr-companion/cosmon-herdr.py open task-example-0001 \
-  --artifact synthesis.md --window WINDOW_ID
+herdr plugin action invoke cosmon.client.open
 ```
 
-This calls `Herdr code open PATH:1 --window WINDOW_ID --json`, never `code edit`
-or `browser open`. A code tab does not serve the canonical directory over HTTP.
-The companion has no close hooks, background refresh, worker backend or mutation
-controls. Herdr unavailability/refusal returns JSON `availability: unavailable`
-and exit 1, without falling back to a different window or spawning a worker.
+The action opens a new **terminal tab** with a numbered selector. Choose a
+molecule number, then `t` for its read-only terminal, `w` for an existing
+worktree shell, or `a` and an artifact number for a read-only text viewer.
+`b` returns to the molecule list, `r` refreshes it and `q` exits. There is no
+automatic refresh loop. No internal id needs to be copied during this flow.
 
-## Terminal capability gap
+The selector can also be opened explicitly:
 
-`open ID --terminal` currently returns unavailable. The supported
-`cs observe` detail has `worker`, `branch` and `molecule_dir`; it has no
-transport backend, socket/session address or worker incarnation binding.
-The `ensemble` worker `live`/`effective` fields also do not supply an attach
-address. A worker label, pane label or derived tmux session name cannot establish
-that association. This increment deliberately leaves terminal presence unknown
-and never calls tmux or a production pane. An explicit public transport
-observation is required before attachment can be implemented safely.
+```sh
+herdr plugin pane open --plugin cosmon.client --entrypoint selector \
+  --placement tab --workspace WORKSPACE_ID \
+  --env COSMON_CLIENT_REPO=/path/to/galaxy
+```
 
-No core CLI, API schema, generated help or default transport changes. The
-authority boundary follows ADR-095 amendment A3–A7, ADR-080 and ADR-168.
+Plugin v1 exposes actions and terminal panes. The installed GPUI command
+inventory does not expose a plugin action command; a native palette entry or
+keybinding has not been qualified. Run the commands above in its terminal.
+Do not expect a native dashboard or a new sidebar. Daemon socket/PTY acceptance
+is separate from a visual check of the GPUI rendering.
+
+Close a worker view using the normal tab close affordance or tmux detach
+(local `q`, Escape or Ctrl-C). This detaches the view's client; it does not terminate,
+freeze, complete or harvest the worker. The artifact viewer closes on Enter;
+closing a worktree shell affects that shell only. Do not start a worker in
+that shell and infer lifecycle integration.
+
+To stop offering the plugin and remove its registration:
+
+```sh
+herdr plugin disable cosmon.client
+herdr plugin unlink cosmon.client
+```
+
+For a GitHub-installed copy, `herdr plugin uninstall cosmon.client` is the
+corresponding removal command. A local link needs only unlinking. Herdr does
+not delete plugin user config/state; this plugin writes neither. No GitHub
+installation/publication is performed or needed for the local path.
+
+## Project and client context
+
+The plugin uses the documented `HERDR_PLUGIN_CONTEXT_JSON.workspace_cwd` and
+`focused_pane_cwd` fields, plus `HERDR_WORKSPACE_ID`. Git's worktree registry
+resolves the canonical main checkout; it must contain `.cosmon/config.toml`.
+Missing or contradictory project/workspace context is refused. The plugin
+source cwd is never the default galaxy. An explicit `--repo` or
+`COSMON_CLIENT_REPO` selects a validated root when context is unavailable.
+`HERDR_BIN_PATH` selects the running Herdr CLI, and its status supplies the
+actual socket address; no socket path is guessed. Commands use argv arrays.
+
+All Cosmon calls pass explicit `--config ROOT/.cosmon/state` so an inherited
+`COSMON_STATE_DIR` cannot redirect the selected project. `--cs` (or
+`COSMON_CLIENT_CS`) can select a specific already-built Cosmon executable.
+No command strips the runtime egress policy or changes shared Git config.
+
+## Retained CLI
+
+Global flags precede the subcommand. Commands return JSON; refusals exit 1.
+
+```sh
+python3 tools/herdr-companion/cosmon-herdr.py --repo /path/to/galaxy list --all
+python3 tools/herdr-companion/cosmon-herdr.py --repo /path/to/galaxy show task-20990101-a001
+python3 tools/herdr-companion/cosmon-herdr.py --repo /path/to/galaxy \
+  open task-20990101-a001 --terminal --herdr-session NAME --workspace WORKSPACE_ID
+python3 tools/herdr-companion/cosmon-herdr.py --repo /path/to/galaxy \
+  open task-20990101-a001 --worktree --herdr-session NAME --workspace WORKSPACE_ID
+python3 tools/herdr-companion/cosmon-herdr.py --repo /path/to/galaxy \
+  open task-20990101-a001 --artifact synthesis.md --herdr-session NAME --workspace WORKSPACE_ID
+```
+
+`--artifact NAME --window WINDOW_ID` retains read-only GPUI code-tab opening;
+set `--herdr-ui` to the actual GPUI executable. Without `--window`, artifacts
+open in a new terminal text viewer with control bytes escaped. GPUI is not
+required for that viewer. No canonical directory is served over HTTP.
+
+`list` uses one-shot `cs observe`, never `peek` propulsion. Every action
+re-observes the exact molecule id. Worktrees are joined by exact branch ref to
+`git worktree list --porcelain -z`; no worktree is created or removed. This
+locates the branch checkout, not the worker's current cwd. Conventional
+`synthesis.md`, `frame.md`, `outcomes.md`, `plan.md`, `report.md`, `result.md`
+and `responses/*.md` files beneath the public `molecule_dir` are offered;
+symlinks are excluded. Binary/custom outputs need another reader. File
+existence and molecule completion are not artifact acceptance.
+
+## Public terminal contract
+
+See [read contracts](../../docs/book/src/reference/read-contracts.md) for the
+versioned JSON and attach argv. `show` includes that observation separately
+from lifecycle/worktree/artifact status. A missing old CLI capability is
+unknown; invalid versions, project/id mismatches and unsupported capabilities
+are refused. Available observations carry an opaque expected-incarnation token.
+The helper re-observes before opening and launches `cs terminal --attach
+--expect` in a new argv PTY tab; it never attaches directly to cached addresses.
+
+Cosmon then re-reads the exact process binding, checks platform PID start tokens
+and executes a numeric server/session/pane guard inside tmux before attaching
+with `-E -r -f ignore-size`. Session environment, worker size and ordinary
+worker input are preserved. No input or lifecycle actions are exposed. This is
+local same-user consistency, not an authorization boundary; the final
+filesystem/kernel/tmux interval is not atomic, and user-controlled tmux hooks remain in force. See the contract for precise race
+and platform limits. Native backends, remote SSH and other clients are outside
+this package's acceptance.
 
 ## Verification
 
 ```sh
-python3 tools/herdr-companion/test_companion.py
+./scripts/no-pilot-env.sh python3 tools/herdr-companion/test_companion.py
+./scripts/no-pilot-env.sh cargo test -p cosmon-cli --test terminal_contract
+COSMON_CLIENT_RECEIPTS=/path/to/private/receipts \
+  ./scripts/no-pilot-env.sh cargo test -p cosmon-cli --test terminal_contract \
+  owned_herdr_client_acceptance -- --ignored --nocapture
 ```
 
-Subprocess tests use real disposable Git worktrees and recording Cosmon/Herdr
-executables to witness exact selection, safe argv, missing data and refusals.
-These tests are not GPUI acceptance or a native worker qualification. A real
-UI smoke test must use only its own named disposable workspace/panes and report
-its actual outcome separately.
+The first uses recording providers and real Git worktrees for version,
+capability, project/id, argv and context negatives. The second uses real tmux
+launch witnesses, stale tokens, reused labels and changed kernel fingerprints.
+The explicitly ignored third test uses real disposable tmux and Herdr socket/
+PTY resources with no model credit; it registers only inside verified isolated
+XDG config/state roots and removes its server/workspace afterward. It checks
+plugin discovery, actual numbered selection, exact read-only client flags,
+input/size/environment/state preservation, view close with worker alive, and
+worktree/artifact navigation. It is not a rendered GPUI inspection or evidence
+for cmux/Pi. Mutation receipts and release gates belong to the private run report.
+
+Primary schema reference: [Herdr plugins v0.9.5](https://github.com/herdrdev/herdr/blob/v0.9.5/docs/next/website/src/content/docs/plugins.mdx).
+Read-only client semantics: [tmux manual](https://man.openbsd.org/tmux.1#attach-session).
+
+Read auditing: existing `cs observe` authorization instrumentation appends its
+read decisions to `instrumentation/authz.jsonl`. View actions preserve molecule
+lifecycle/process state and artifact bytes; this existing audit append is
+retained and is not described as a zero-write filesystem operation.
+
+The generic attachment requires Python 3 on macOS/Linux for its output-only
+control-mode renderer. It launches a read-only/ignore-size tmux control client
+without sending size announcements (`refresh-client -C`), including after an
+ordinary controller resizes and detaches. Native ignore-size alone is not
+sufficient when the viewer is the only client. The renderer samples guarded
+visible-pane frames four times per second; it is not a lossless PTY byte stream
+or scrollback viewer. Local q/Escape/Ctrl-C closes it and no keyboard bytes are
+forwarded. Outer UI dimensions affect presentation only.

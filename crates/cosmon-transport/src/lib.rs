@@ -48,6 +48,7 @@ pub mod readiness;
 pub mod readiness_trace;
 pub mod registry;
 pub mod spawn;
+pub mod terminal;
 pub mod tmux;
 
 #[cfg(any(test, feature = "test-support"))]

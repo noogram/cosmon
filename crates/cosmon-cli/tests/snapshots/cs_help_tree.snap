@@ -5,6 +5,7 @@ expression: stdout
 ensemble
 nucleate
 observe
+terminal
 errors
 evolve
 collapse

@@ -2,6 +2,9 @@
 """Subprocess witnesses: real Git worktrees, recording Cosmon/Herdr executables."""
 
 import json
+import importlib.util
+from types import SimpleNamespace
+from unittest.mock import patch
 import os
 from pathlib import Path
 import subprocess
@@ -11,6 +14,10 @@ import unittest
 
 
 COMPANION = Path(__file__).with_name("cosmon-herdr.py")
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_file_location("companion", COMPANION)
+companion = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(companion)
 
 
 class CompanionTest(unittest.TestCase):
@@ -22,6 +29,8 @@ class CompanionTest(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.repo = self.root / "repo"
         self.repo.mkdir()
+        (self.repo / ".cosmon").mkdir()
+        (self.repo / ".cosmon" / "config.toml").write_text('[project]\nproject_id="fixture"\n')
         self.git("init", "-q")
         self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                  "commit", "--allow-empty", "-qm", "fixture")
@@ -50,10 +59,14 @@ with open(os.environ["COMPANION_CALL_LOG"], "a") as log:
     log.write(json.dumps([pathlib.Path(sys.argv[0]).name, args]) + "\\n")
 data = json.loads(pathlib.Path(os.environ["COMPANION_FIXTURE"]).read_text())
 if pathlib.Path(sys.argv[0]).name == "cs":
+    assert args[:2] == ["--config", str(pathlib.Path.cwd() / ".cosmon" / "state")]
+    args = args[2:]
     if args == ["--json", "observe"] or args == ["--json", "observe", "--all"]:
         print(json.dumps([data]))
     elif args == ["--json", "observe", "task-example-0001"]:
         print(json.dumps(data))
+    elif args == ["--json", "terminal", "task-example-0001"] and "_terminal" in data:
+        print(json.dumps(data["_terminal"]))
     else:
         sys.exit(91)  # Witness refuses every mutation, peek, or unexpected target.
 else:
@@ -81,20 +94,23 @@ else:
         return json.loads(p.stdout)
 
     def calls(self):
-        return [json.loads(line) for line in self.log.read_text().splitlines()]
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        # The executable itself asserts explicit project pinning above.
+        return [[name, argv[2:] if name == "cs" else argv] for name, argv in calls]
 
     def test_observations_never_propel_or_invoke_herdr_and_leave_files_unchanged(self):
         before = {p: p.read_bytes() for p in self.artifact_dir.rglob("*") if p.is_file()}
         self.assertEqual(self.invoke("list")["molecules"][0]["status"], "completed")
         view = self.invoke("show", self.detail["id"])
         self.assertEqual(view["status"], "completed")
-        self.assertEqual(view["terminal"]["presence"], "unknown")
+        self.assertEqual(view["terminal"]["availability"], "unknown")
         self.assertEqual(view["worktree"]["path"], str(self.checkout))
         self.assertEqual([f["name"] for f in view["artifacts"]["files"]],
                          ["synthesis.md", "responses/review.md"])
         self.assertEqual(before, {p: p.read_bytes() for p in before})
         self.assertEqual(self.calls(), [["cs", ["--json", "observe"]],
-                                       ["cs", ["--json", "observe", self.detail["id"]]]])
+                                       ["cs", ["--json", "observe", self.detail["id"]]],
+                                       ["cs", ["--json", "terminal", self.detail["id"]]]])
 
     def test_prefix_or_different_identity_cannot_open_a_view(self):
         self.detail["id"] = "task-example-0001-longer"
@@ -121,8 +137,8 @@ else:
     def test_terminal_is_unavailable_even_with_live_status_and_bait_addresses(self):
         self.detail.update(status="running", session_name="stale", transport={"backend": "tmux"})
         result = self.invoke("open", self.detail["id"], "--terminal", expected=1)
-        self.assertIn("incarnation", result["reason"])
-        self.assertEqual(len(self.calls()), 1)
+        self.assertIn("capability", result["reason"])
+        self.assertEqual(len(self.calls()), 2)
 
     def test_worktree_open_uses_exact_argv_and_no_close_or_worker_command(self):
         self.invoke("open", self.detail["id"], "--worktree", "--herdr-session", "fixture",
@@ -150,6 +166,79 @@ else:
         result = self.invoke("open", self.detail["id"], "--artifact", "synthesis.md",
                              "--window", "42", expected=1)
         self.assertIn("exit 3", result["reason"])
+
+    def public_terminal(self):
+        return {"schema_version": 1, "kind": "cosmon.terminal", "id": self.detail["id"],
+                "project_root": str(self.repo), "state_dir": str(self.repo / ".cosmon" / "state"),
+                "availability": "available", "capability": "read_only_ignore_size",
+                "expected": "sha256:" + "a" * 64, "additional_future_field": {"ignored": True}}
+
+    def test_public_terminal_contract_additive_fields_and_exact_attach_argv(self):
+        self.detail["_terminal"] = self.public_terminal()
+        self.fixture.write_text(json.dumps(self.detail))
+        args = SimpleNamespace(cs=str(self.cs), repo=self.repo, command="open", id=self.detail["id"],
+                               terminal=True, workspace="wTEST")
+        with patch.dict(os.environ, self.env), patch.object(companion, "open_argv", return_value={"created": True}) as opening:
+            self.assertEqual(companion.execute(args), {"created": True})
+        argv = opening.call_args.args[1]
+        self.assertEqual(argv, [str(self.cs), "--config", str(self.repo / ".cosmon" / "state"),
+                         "terminal", self.detail["id"], "--attach", "--expect", "sha256:" + "a" * 64])
+        self.assertEqual(self.calls(), [["cs", ["--json", "observe", self.detail["id"]]],
+                                       ["cs", ["--json", "terminal", self.detail["id"]]]])
+
+    def test_terminal_version_capability_identity_project_and_token_negatives(self):
+        for key, value in [("schema_version", 2), ("schema_version", True), ("kind", "other"), ("capability", "write"),
+                           ("id", "other-id"), ("project_root", str(self.checkout)),
+                           ("state_dir", str(self.root)), ("expected", "$(touch SENTINEL)")]:
+            with self.subTest(key=key):
+                terminal = self.public_terminal()
+                terminal[key] = value
+                self.detail["_terminal"] = terminal
+                self.invoke("open", self.detail["id"], "--terminal", "--workspace", "wTEST", expected=1)
+        self.assertTrue(all(call[0] == "cs" for call in self.calls()))
+
+    def test_unknown_and_unavailable_never_open_even_with_bait_address(self):
+        for availability in ("unknown", "unavailable"):
+            terminal = self.public_terminal()
+            terminal.update(availability=availability, reason="identity_unknown", identity={"session": "bait"})
+            self.detail["_terminal"] = terminal
+            result = self.invoke("open", self.detail["id"], "--terminal", "--workspace", "wTEST", expected=1)
+            self.assertIn(availability, result["reason"])
+        self.assertTrue(all(call[0] == "cs" for call in self.calls()))
+
+    def test_plugin_context_never_uses_plugin_cwd_and_rejects_ambiguity(self):
+        base = dict(repo=None, cs=str(self.cs), workspace=None)
+        with patch.dict(os.environ, {"HERDR_PLUGIN_ID": "cosmon.client"}, clear=True):
+            with self.assertRaises(companion.Unavailable):
+                companion.configure(SimpleNamespace(**base))
+        context = {"workspace_id": "wTEST", "workspace_cwd": str(self.checkout)}
+        with patch.dict(os.environ, {"HERDR_PLUGIN_CONTEXT_JSON": json.dumps(context)}, clear=True):
+            args = SimpleNamespace(**base)
+            companion.configure(args)
+            self.assertEqual(args.repo, self.repo)
+            self.assertEqual(args.workspace, "wTEST")
+        other = self.root / "other-project"
+        other.mkdir()
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        (other / ".cosmon").mkdir()
+        (other / ".cosmon" / "config.toml").write_text("[project]\nproject_id='other'\n")
+        context["focused_pane_cwd"] = str(other)
+        with patch.dict(os.environ, {"HERDR_PLUGIN_CONTEXT_JSON": json.dumps(context)}, clear=True):
+            with self.assertRaises(companion.Unavailable):
+                companion.configure(SimpleNamespace(**base))
+
+    def test_herdr_new_tab_uses_only_workspace_and_literal_argv(self):
+        args = SimpleNamespace(repo=self.repo, workspace="wTEST")
+        argv = ["cs binary;literal", "--config", str(self.repo), "terminal", self.detail["id"],
+                "--attach", "--expect", "sha256:" + "a" * 64]
+        with patch.object(companion, "api", return_value={}) as api:
+            companion.open_argv(args, argv, "Cosmon worker (read-only)")
+        method, payload = api.call_args.args[1:]
+        self.assertEqual(method, "layout.apply")
+        self.assertEqual(payload["workspace_id"], "wTEST")
+        self.assertNotIn("tab_id", payload)  # Never replace a pre-existing pane.
+        self.assertEqual(payload["root"]["command"], argv)
+        self.assertEqual(payload["root"]["cwd"], str(self.repo))
 
 
 if __name__ == "__main__":

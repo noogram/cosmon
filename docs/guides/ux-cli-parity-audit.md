@@ -2,20 +2,23 @@
 
 # CLI and UI parity audit
 
-## Optional Herdr companion
+## Client integrations
 
-`tools/herdr-companion/cosmon-herdr.py` is an explicit one-shot reader outside
-runtime paths. It lists `cs --json observe` rows and requires exact-id detail
-selection. The observed branch joins Git's existing worktree list; canonical
-conventional deliverables come from the observed `molecule_dir`. Herdr may open
-that worktree in a new shell tab or a deliverable in a read-only GPUI code tab.
-Molecule status, unknown terminal presence and file availability stay separate.
+| Capability | CLI | Herdr companion | Native UI / remote API |
+|---|---|---|---|
+| Observe exact worker terminal incarnation | `cs --json terminal EXACT_ID`, versioned available/unknown/unavailable contract | Consumes public capability; never reads private state JSON or infers a target from labels | No new route or control |
+| Attach a read-only, size-neutral worker view | `cs terminal EXACT_ID --attach --expect TOKEN`, re-read and tmux in-server identity guard, output-only control reader with `-E -r -f ignore-size` | New argv PTY tab invoking the same public command; close detaches the view | No new route or control |
+| Select molecule, worktree and deliverable | Existing `observe` plus exact Git branch join and canonical molecule_dir | Optional manifest action/pane and numbered selector; worktree shell tab and read-only artifact pager, retained CLI/GPUI code-open mode | No change |
 
-Terminal attachment is unavailable: `observe` exposes no transport backend,
-socket/session address or worker incarnation binding. No name-based fallback,
-worker spawn, lifecycle action, close hook or default transport change is added.
-Native Cosmon UI and remote API surfaces are unchanged; no generated interface
-references change. See the companion README for commands and verification limits.
+The kernel has no Herdr or other client dependency. Optional launch evidence on
+`process.terminal` is captured at spawn; missing legacy witnesses remain unknown.
+Molecule status and deliverable acceptance do not establish terminal presence.
+No input action, lifecycle authority, worker backend or default transport change
+is added. Read [the contract](../book/src/reference/read-contracts.md) and the
+[plugin instructions](../../tools/herdr-companion/README.md) for compatibility,
+installation, local consistency limits and actual verification coverage. Herdr
+socket/PTY acceptance is distinct from rendered GPUI acceptance and from other
+clients; cmux and Pi are not delivered by this change.
 
 ## Explicit empty handoff scopes (issue #209)
 
