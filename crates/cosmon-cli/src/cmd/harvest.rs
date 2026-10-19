@@ -84,6 +84,9 @@ pub struct Args {
     /// (`None` in the emitted event).
     #[arg(long)]
     pub exit_code: Option<String>,
+    /// Expected launch supplied by the supervised pane hook; stale triggers are refused.
+    #[arg(long, hide = true)]
+    pub worker_launch: Option<String>,
 }
 
 /// Outcome of a `cs harvest` invocation.
@@ -103,6 +106,8 @@ pub enum HarvestOutcome {
     Harvested,
     /// `cs done` was invoked and returned non-zero.
     HarvestFailed,
+    /// A supervised launch has no validated terminal evidence; preserve all work.
+    ReceiptUnknown,
 }
 
 impl HarvestOutcome {
@@ -113,6 +118,7 @@ impl HarvestOutcome {
             Self::DryRun => "dry_run",
             Self::Harvested => "harvested",
             Self::HarvestFailed => "harvest_failed",
+            Self::ReceiptUnknown => "receipt_unknown",
         }
     }
 }
@@ -134,14 +140,27 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let state_dir = ctx.state_dir();
     let store = ctx.store();
 
+    let expected = args
+        .worker_launch
+        .as_deref()
+        .map(serde_json::from_str::<cosmon_core::worker_exit::LaunchIdentity>)
+        .transpose()?;
+
     if args.from_pane_died {
-        record_pane_died(
+        record_pane_died_expected(
             store.as_ref(),
             &state_dir,
             &mol_id,
             args.exit_code.as_deref(),
-        );
-        record_update_from_dead_pane(ctx, store.as_ref(), &mol_id)?;
+            expected.as_ref(),
+        )?;
+        #[cfg(unix)]
+        let legacy = supervised_observation(store.as_ref(), &mol_id)?.is_none();
+        #[cfg(not(unix))]
+        let legacy = true;
+        if legacy {
+            record_update_from_dead_pane(ctx, store.as_ref(), &mol_id)?;
+        }
     }
 
     let outcome = harvest_one(store.as_ref(), &state_dir, &mol_id, args.dry_run)?;
@@ -220,15 +239,145 @@ fn record_update_from_dead_pane(
 ///
 /// All effects are best-effort: a full disk or a missing molecule must
 /// never wedge the follow-on harvest / `cs done`.
+#[cfg(test)]
 pub(crate) fn record_pane_died(
     store: &dyn StateStore,
     state_dir: &std::path::Path,
     mol_id: &MoleculeId,
     raw_exit_code: Option<&str>,
 ) {
+    let _ = record_pane_died_expected(store, state_dir, mol_id, raw_exit_code, None);
+}
+
+fn record_pane_died_expected(
+    store: &dyn StateStore,
+    state_dir: &std::path::Path,
+    mol_id: &MoleculeId,
+    raw_exit_code: Option<&str>,
+    expected: Option<&cosmon_core::worker_exit::LaunchIdentity>,
+) -> anyhow::Result<()> {
+    // Dispatch B cannot replace A between receipt validation and status projection.
+    let _guard = store.lock_fleet()?;
+    #[cfg(unix)]
+    match supervised_observation(store, mol_id) {
+        Ok(Some((identity, observation))) => {
+            anyhow::ensure!(
+                expected.is_none_or(|expected| expected == &identity)
+                    && identity.molecule_id == *mol_id,
+                "stale or foreign worker launch trigger"
+            );
+            record_supervised_observation(store, state_dir, mol_id, identity, observation)?;
+            if observation.is_terminal() {
+                project_dead_onto_process_status(store, mol_id);
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+        Ok(None) => {
+            anyhow::ensure!(
+                expected.is_none(),
+                "supervised launch metadata missing; result unknown"
+            );
+        }
+    }
     write_worker_exit(store, mol_id, raw_exit_code);
     emit_worker_exited(state_dir, mol_id, raw_exit_code);
     project_dead_onto_process_status(store, mol_id);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn supervised_observation(
+    store: &dyn StateStore,
+    mol_id: &MoleculeId,
+) -> anyhow::Result<
+    Option<(
+        cosmon_core::worker_exit::LaunchIdentity,
+        cosmon_core::worker_exit::WorkerExitObservation,
+    )>,
+> {
+    use cosmon_core::worker_exit::{WorkerExitObservation, WorkerExitStore as _};
+    use cosmon_state::worker_exit::FileWorkerExitStore;
+    let molecule = store.load_molecule(mol_id).ok();
+    let expected = molecule
+        .as_ref()
+        .and_then(|molecule| molecule.process.as_ref())
+        .and_then(|process| process.worker_launch.as_ref());
+    match FileWorkerExitStore::current(&store.molecule_dir(mol_id)) {
+        Ok(Some(receipts)) => {
+            let identity = &receipts.request().identity;
+            anyhow::ensure!(
+                molecule
+                    .as_ref()
+                    .is_none_or(|molecule| molecule.process.is_none())
+                    || expected.is_some(),
+                "dispatch has not bound its supervised launch identity yet"
+            );
+            anyhow::ensure!(
+                &identity.molecule_id == mol_id
+                    && expected.is_none_or(|expected| expected == identity),
+                "foreign or inconsistent supervised worker identity"
+            );
+            Ok(Some((identity.clone(), receipts.read())))
+        }
+        Ok(None) if expected.is_none() => Ok(None),
+        Ok(None) | Err(_) if expected.is_some() => {
+            Ok(expected.map(|identity| (identity.clone(), WorkerExitObservation::Unknown)))
+        }
+        Err(error) => Err(anyhow::Error::msg(error)),
+        _ => anyhow::bail!("supervised worker result is unknown"),
+    }
+}
+
+/// Serialize observation writers, then deduplicate using the ledger itself. A crash
+/// after append has no separate marker window: the next reader finds that same event.
+#[cfg(unix)]
+fn record_supervised_observation(
+    store: &dyn StateStore,
+    state_dir: &std::path::Path,
+    mol_id: &MoleculeId,
+    identity: cosmon_core::worker_exit::LaunchIdentity,
+    observation: cosmon_core::worker_exit::WorkerExitObservation,
+) -> anyhow::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(
+            store
+                .molecule_dir(mol_id)
+                .join("worker-exit-observation.lock"),
+        )?;
+    fs2::FileExt::lock_exclusive(&lock)?;
+    let events = state_dir.join("events.jsonl");
+    let prior = match event_log::read_all(&events) {
+        Ok(events) => events,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let found = prior.iter().any(|envelope| matches!(&envelope.event, EventV2::WorkerExitObserved { molecule_id, launch, observation: previous } if molecule_id == mol_id && launch == &identity && previous == &observation));
+    if found {
+        std::fs::File::open(&events)?.sync_all()?;
+    } else {
+        event_log::emit_one(
+            &events,
+            EventV2::WorkerExitObserved {
+                molecule_id: mol_id.clone(),
+                launch: identity,
+                observation,
+            },
+            None,
+        )?;
+    }
+    let projection = match observation {
+        cosmon_core::worker_exit::WorkerExitObservation::Exited { code } => format!("{code}\n"),
+        _ => "unknown\n".to_owned(),
+    };
+    std::fs::write(store.molecule_dir(mol_id).join("worker.exit"), projection)?;
+    Ok(())
 }
 
 /// Persist the dead grand-child's exit code to `<mol_dir>/worker.exit`.
@@ -322,10 +471,38 @@ pub(crate) fn harvest_one(
     mol_id: &MoleculeId,
     dry_run: bool,
 ) -> anyhow::Result<HarvestOutcome> {
+    // Keep a supervised incarnation stable across the subprocess handoff to done.
+    // Tackle takes this same per-molecule lock before it can replace a dispatch.
+    // Acquire it before fleet (the port's documented lock order).
+    #[cfg(unix)]
+    let dispatch_guard =
+        if supervised_observation(store, mol_id).map_or(true, |value| value.is_some()) {
+            Some(store.lock_molecule(mol_id)?)
+        } else {
+            None
+        };
+    let guard = store.lock_fleet()?;
     let mol = store.load_molecule(mol_id)?;
 
     if mol.status != MoleculeStatus::Completed {
         return Ok(HarvestOutcome::NotCompleted);
+    }
+    #[cfg(unix)]
+    match supervised_observation(store, mol_id) {
+        Ok(Some((identity, observation))) => {
+            // Supervision may have appeared after the preliminary read. Refuse
+            // this invocation instead of handing an unpinned launch to done.
+            if dispatch_guard.is_none() {
+                return Ok(HarvestOutcome::ReceiptUnknown);
+            }
+            record_supervised_observation(store, state_dir, mol_id, identity, observation)?;
+            if !observation.is_terminal() {
+                return Ok(HarvestOutcome::ReceiptUnknown);
+            }
+        }
+        Err(_) => return Ok(HarvestOutcome::ReceiptUnknown),
+        Ok(None) if dispatch_guard.is_some() => return Ok(HarvestOutcome::ReceiptUnknown),
+        Ok(None) => {}
     }
     // Already-terminal no-op. `merged_at` covers the merged-branch path;
     // `archived` covers the `no_branch` path (delib / drainage / empty-branch
@@ -338,6 +515,8 @@ pub(crate) fn harvest_one(
     if dry_run {
         return Ok(HarvestOutcome::DryRun);
     }
+
+    drop(guard); // The child done command takes its own authority and fleet locks.
 
     // Exec `cs done` via the running binary path when available, falling
     // back to `cs` on PATH. The walk-up state discovery done by `cs done`
@@ -376,6 +555,185 @@ mod tests {
     use cosmon_filestore::FileStore;
     use cosmon_state::MoleculeData;
     use std::collections::{BTreeSet, HashMap};
+
+    #[cfg(unix)]
+    mod supervised {
+        use super::*;
+        use cosmon_core::{
+            id::WorkerId,
+            process::MoleculeProcess,
+            worker_exit::{
+                LaunchRequest, LaunchToken, WorkerExitObservation, WorkerExitReceipt,
+                WorkerExitStore as _,
+            },
+        };
+        use cosmon_state::worker_exit::FileWorkerExitStore;
+        type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+        fn setup(
+            status: MoleculeStatus,
+        ) -> Result<
+            (
+                tempfile::TempDir,
+                FileStore,
+                MoleculeId,
+                FileWorkerExitStore,
+            ),
+            Box<dyn std::error::Error>,
+        > {
+            let root = tempfile::tempdir()?;
+            let store = FileStore::new(root.path());
+            let id = MoleculeId::new("task-20261019-bbbb")?;
+            let mut molecule = sample_mol(&id, status, false);
+            store.save_molecule(&id, &molecule)?;
+            let receipts = FileWorkerExitStore::prepare(
+                &store.molecule_dir(&id),
+                LaunchRequest::bind(
+                    id.clone(),
+                    LaunchToken::from_bytes([1; 16]),
+                    LaunchToken::from_bytes([2; 16]),
+                    "worker",
+                    &[],
+                    std::path::Path::new("/work"),
+                    &[],
+                )?,
+            )?;
+            let mut process = MoleculeProcess::new(WorkerId::new("worker-a")?, "worker-a");
+            process.worker_launch = Some(receipts.request().identity.clone());
+            molecule.process = Some(process);
+            store.save_molecule(&id, &molecule)?;
+            Ok((root, store, id, receipts))
+        }
+
+        fn terminal(receipts: &FileWorkerExitStore) -> Result<(), String> {
+            receipts.claim(123)?;
+            receipts.record_birth(123, 456)?;
+            receipts.publish(&WorkerExitReceipt {
+                identity: receipts.request().identity.clone(),
+                supervisor_pid: 123,
+                child_pid: Some(456),
+                observation: WorkerExitObservation::Exited { code: 0 },
+            })
+        }
+
+        #[test]
+        fn pane_zero_cannot_complete_or_harvest_a_missing_supervised_receipt() -> TestResult {
+            let (root, store, id, receipts) = setup(MoleculeStatus::Completed)?;
+            record_pane_died_expected(
+                &store,
+                root.path(),
+                &id,
+                Some("0"),
+                Some(&receipts.request().identity),
+            )?;
+            assert!(matches!(
+                harvest_one(&store, root.path(), &id, true)?,
+                HarvestOutcome::ReceiptUnknown
+            ));
+            assert_eq!(store.load_molecule(&id)?.status, MoleculeStatus::Completed);
+            assert_eq!(
+                std::fs::read_to_string(store.molecule_dir(&id).join("worker.exit"))?,
+                "unknown\n"
+            );
+            assert!(!event_log::read_all(root.path().join("events.jsonl"))?
+                .iter()
+                .any(|event| matches!(event.event, EventV2::WorkerExited { .. })));
+            Ok(())
+        }
+
+        #[test]
+        fn exit_zero_is_an_observation_and_repeated_concurrent_reads_emit_once() -> TestResult {
+            let (root, store, id, receipts) = setup(MoleculeStatus::Running)?;
+            terminal(&receipts)?;
+            std::thread::scope(|scope| -> TestResult {
+                let mut readers = Vec::new();
+                for _ in 0..6 {
+                    readers.push(scope.spawn(|| {
+                        record_pane_died_expected(
+                            &store,
+                            root.path(),
+                            &id,
+                            Some("143"),
+                            Some(&receipts.request().identity),
+                        )
+                    }));
+                }
+                for reader in readers {
+                    reader.join().map_err(|_| "observation reader panicked")??;
+                }
+                Ok(())
+            })?;
+            let events = event_log::read_all(root.path().join("events.jsonl"))?;
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event.event, EventV2::WorkerExitObserved { .. }))
+                    .count(),
+                1
+            );
+            assert_eq!(store.load_molecule(&id)?.status, MoleculeStatus::Running);
+            assert!(matches!(
+                harvest_one(&store, root.path(), &id, true)?,
+                HarvestOutcome::NotCompleted
+            ));
+            Ok(())
+        }
+
+        #[test]
+        fn missing_expected_metadata_never_falls_back_to_legacy_pane_status() -> TestResult {
+            let (root, store, id, receipts) = setup(MoleculeStatus::Completed)?;
+            terminal(&receipts)?;
+            std::fs::remove_file(
+                store
+                    .molecule_dir(&id)
+                    .join(cosmon_state::worker_exit::CURRENT_LAUNCH),
+            )?;
+            record_pane_died_expected(
+                &store,
+                root.path(),
+                &id,
+                Some("0"),
+                Some(&receipts.request().identity),
+            )?;
+            assert!(matches!(
+                harvest_one(&store, root.path(), &id, true)?,
+                HarvestOutcome::ReceiptUnknown
+            ));
+            let mut molecule = store.load_molecule(&id)?;
+            molecule.process = None;
+            store.save_molecule(&id, &molecule)?;
+            assert!(matches!(
+                harvest_one(&store, root.path(), &id, true)?,
+                HarvestOutcome::ReceiptUnknown
+            ));
+            Ok(())
+        }
+
+        #[test]
+        fn launch_a_trigger_cannot_project_death_onto_dispatch_b_before_b_is_prepared() -> TestResult
+        {
+            let (root, store, id, receipts) = setup(MoleculeStatus::Running)?;
+            terminal(&receipts)?;
+            let old = receipts.request().identity.clone();
+            // The dispatch ledger writes B before B can prepare its own launch identity.
+            let mut molecule = store.load_molecule(&id)?;
+            molecule.process = Some(MoleculeProcess::new(WorkerId::new("worker-b")?, "worker-b"));
+            store.save_molecule(&id, &molecule)?;
+            assert!(
+                record_pane_died_expected(&store, root.path(), &id, Some("0"), Some(&old)).is_err()
+            );
+            let observed = store.load_molecule(&id)?;
+            assert_eq!(
+                observed
+                    .process
+                    .as_ref()
+                    .map(|process| process.status.clone()),
+                Some(cosmon_core::worker::WorkerStatus::Active)
+            );
+            assert!(!root.path().join("events.jsonl").exists());
+            Ok(())
+        }
+    }
 
     fn sample_mol(id: &MoleculeId, status: MoleculeStatus, merged: bool) -> MoleculeData {
         let now = Utc::now();

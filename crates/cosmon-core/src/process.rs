@@ -86,6 +86,10 @@ pub struct MoleculeProcess {
     /// or non-terminal workers. Readers must refuse attachment when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal: Option<crate::terminal::TerminalIdentity>,
+    /// Expected direct-child evidence for an opt-in dispatch. Its absence on
+    /// legacy processes never permits ignoring a canonical supervision marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_launch: Option<crate::worker_exit::LaunchIdentity>,
     /// Opaque operating-system launch fingerprint captured with [`Self::pid`].
     ///
     /// A PID alone is not an identity: after a crash the kernel can assign its
@@ -148,6 +152,7 @@ impl MoleculeProcess {
             status: WorkerStatus::Active,
             pid: None,
             terminal: None,
+            worker_launch: None,
             pid_start_time: None,
             adapter_name: None,
             model: None,

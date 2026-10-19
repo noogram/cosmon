@@ -271,6 +271,9 @@ enum Command {
     /// Execute a detached Ollama-backed local worker (internal transport command).
     #[command(hide = true)]
     LocalWorker(cmd::tackle::LocalWorkerArgs),
+    /// Wait for a direct child and publish launch-bound OS evidence (internal transport).
+    #[command(hide = true)]
+    WorkerSupervise(cmd::worker_supervise::Args),
 
     /// Claim a molecule for the pilot; the runtime defers until it is released
     #[command(after_help = cmd::examples::CLAIM)]
@@ -823,6 +826,7 @@ fn main() {
         Command::Status(args) => cmd::status::run(&ctx, &args),
         Command::Tackle(args) => cmd::tackle::run(&ctx, &args),
         Command::LocalWorker(args) => cmd::tackle::run_local_worker(&args),
+        Command::WorkerSupervise(args) => cmd::worker_supervise::run(&args),
         Command::Claim(args) => cmd::claim::claim(&ctx, &args),
         Command::Release(args) => cmd::claim::release(&ctx, &args),
         Command::Tag(args) => cmd::tag::run(&ctx, &args),

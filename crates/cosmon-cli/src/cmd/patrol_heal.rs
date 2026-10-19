@@ -299,6 +299,9 @@ fn apply_remedy(
             use crate::cmd::harvest::HarvestOutcome as O;
             match crate::cmd::harvest::harvest_one(store, state_dir, &mol.id, false) {
                 Ok(O::Harvested) => ApplyResult::Success("harvested → cs done".to_owned()),
+                Ok(O::ReceiptUnknown) => ApplyResult::Skipped(
+                    "supervised worker exit is unknown; preserve for pilot resolution".to_owned(),
+                ),
                 Ok(O::AlreadyMerged | O::NotCompleted | O::DryRun) => {
                     ApplyResult::Success("already harvested (no-op)".to_owned())
                 }

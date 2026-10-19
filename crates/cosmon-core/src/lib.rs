@@ -86,6 +86,8 @@ pub mod usage;
 pub mod worker;
 /// Formula-bound acceptance for owned worker turns.
 pub mod worker_acceptance;
+#[doc(hidden)]
+pub mod worker_exit;
 
 // ---------------------------------------------------------------------------
 // Workspace-internal modules — `pub` for sibling crates, `#[doc(hidden)]` to

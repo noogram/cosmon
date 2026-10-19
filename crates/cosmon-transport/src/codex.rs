@@ -682,6 +682,101 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
     prefix_git_identity_env(config.git_identity.as_ref(), cmd)
 }
 
+/// Resolve argv for direct-child supervision, without interpreting a shell string.
+#[must_use]
+pub fn supervised_worker_args(config: &CodexSessionConfig) -> Vec<String> {
+    let mut args = Vec::new();
+    if config.mode == CodexMode::Exec {
+        args.push("exec".to_owned());
+    }
+    for root in &config.writable_roots {
+        args.extend(["--add-dir".to_owned(), root.to_string_lossy().into_owned()]);
+    }
+    args.extend(config.harness_args.iter().cloned());
+    args.extend(cosmon_core::worker_argv::codex_work_hook_args(
+        config.work_hook_home.is_some(),
+    ));
+    if config.mode == CodexMode::Interactive {
+        args.extend(cosmon_core::worker_argv::codex_worker_profile_args(
+            &config.session_name,
+            &[&config.extra_args, &config.harness_args],
+        ));
+    }
+    if let Some(model) = &config.model {
+        args.extend(["--model".to_owned(), model.clone()]);
+    }
+    match config.mode {
+        CodexMode::Exec => {
+            if let Some(prompt) = &config.prompt {
+                args.push(prompt.clone());
+            }
+        }
+        CodexMode::Interactive => {
+            if config.extra_args.is_empty() {
+                args.extend(
+                    DEFAULT_INTERACTIVE_ARGS
+                        .iter()
+                        .map(|value| (*value).to_owned()),
+                );
+            } else {
+                args.extend(config.extra_args.iter().cloned());
+            }
+        }
+    }
+    args
+}
+
+/// Resolve the same credential stripping, authority and identity changes as the historic
+/// command builder. Values travel only through the session environment, never a receipt.
+#[must_use]
+pub fn supervised_worker_environment(config: &CodexSessionConfig) -> Vec<(String, Option<String>)> {
+    let mut changes = std::collections::BTreeMap::new();
+    if !config.pass_api_key {
+        for name in API_KEY_ENV_VARS {
+            changes.insert((*name).to_owned(), None);
+        }
+    }
+    for (name, value) in &config.environment {
+        changes.insert(name.clone(), Some(value.clone()));
+    }
+    if config.mode == CodexMode::Interactive {
+        changes.insert(
+            "RUST_LOG".to_owned(),
+            Some(INTERACTIVE_LOG_LEVEL.to_owned()),
+        );
+    }
+    if let Some(home) = &config.work_hook_home {
+        changes.insert(
+            "CODEX_HOME".to_owned(),
+            Some(home.to_string_lossy().into_owned()),
+        );
+    }
+    if let Some(dir) = config
+        .mol_dir
+        .as_deref()
+        .or_else(|| config.work_hook_home.as_deref().and_then(Path::parent))
+    {
+        changes.insert(
+            "COSMON_MOL_DIR".to_owned(),
+            Some(dir.to_string_lossy().into_owned()),
+        );
+    }
+    if let Some(id) = &config.parent_mol_id {
+        changes.insert("COSMON_PARENT_MOL_ID".to_owned(), Some(id.clone()));
+    }
+    if let Some(identity) = &config.git_identity {
+        for (name, value) in [
+            ("GIT_AUTHOR_NAME", &identity.name),
+            ("GIT_COMMITTER_NAME", &identity.name),
+            ("GIT_AUTHOR_EMAIL", &identity.email),
+            ("GIT_COMMITTER_EMAIL", &identity.email),
+        ] {
+            changes.insert(name.to_owned(), Some(value.clone()));
+        }
+    }
+    changes.into_iter().collect()
+}
+
 /// Env vars codex reads as ambient API-key credentials, stripped by default
 /// (see [`CodexSessionConfig::pass_api_key`]).
 const API_KEY_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "CODEX_API_KEY"];
@@ -992,6 +1087,23 @@ pub fn spawn_codex_session(config: &CodexSessionConfig) -> Result<(), CodexError
 pub fn spawn_codex_session_witnessed(
     config: &CodexSessionConfig,
 ) -> Result<Option<cosmon_core::terminal::TerminalIdentity>, CodexError> {
+    prepare_codex_session(config)?;
+    let backend = TmuxBackend::new(&config.socket);
+    backend
+        .spawn_worker_with_env_witnessed(
+            &config.session_name,
+            &config.work_dir,
+            &build_codex_command(config),
+            &config.environment,
+        )
+        .map_err(|e| CodexError::SpawnFailed(e.to_string()))
+}
+
+/// Apply the existing trust and telemetry preconditions before either Codex launch shape.
+///
+/// # Errors
+/// Refuses a worker whose project trust configuration cannot be prepared.
+pub fn prepare_codex_session(config: &CodexSessionConfig) -> Result<(), CodexError> {
     if config.mode == CodexMode::Interactive {
         if let Some(home) = &config.work_hook_home {
             ensure_codex_project_trusted_at(
@@ -1002,7 +1114,6 @@ pub fn spawn_codex_session_witnessed(
             ensure_codex_project_trusted(&config.work_dir)?;
         }
     }
-    let cmd = build_codex_command(config);
 
     if let Some(t) = &config.telemetry {
         emit_worker_spawn_attempted(
@@ -1017,15 +1128,7 @@ pub fn spawn_codex_session_witnessed(
         );
     }
 
-    let backend = TmuxBackend::new(&config.socket);
-    backend
-        .spawn_worker_with_env_witnessed(
-            &config.session_name,
-            &config.work_dir,
-            &cmd,
-            &config.environment,
-        )
-        .map_err(|e| CodexError::SpawnFailed(e.to_string()))
+    Ok(())
 }
 
 /// Kill a codex session by tmux session name.
@@ -1420,6 +1523,75 @@ mod tests {
         let c = cfg(CodexMode::Exec, Some("hello"), vec![]).clone();
         assert_eq!(c.session_name, "polecat-codex");
         assert_eq!(c.prompt.as_deref(), Some("hello"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_argv_and_environment_match_the_historic_builder_in_both_modes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempdir()?;
+        let executable = root.path().join("worker with spaces");
+        fs::write(
+            &executable,
+            r#"#!/bin/sh
+printf '%s\000' "$@"
+printf '%s\000' "${OPENAI_API_KEY-unset}" "${CODEX_API_KEY-unset}" "${GIT_AUTHOR_NAME-unset}" "${GIT_COMMITTER_EMAIL-unset}" "${COSMON_MOL_DIR-unset}" "${COSMON_PARENT_MOL_ID-unset}" "${CODEX_HOME-unset}" "${RUST_LOG-unset}"
+"#,
+        )?;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+        for mode in [CodexMode::Exec, CodexMode::Interactive] {
+            let mut config = cfg(
+                mode,
+                Some("synthetic prompt ' \" $;{}"),
+                vec!["--sandbox".to_owned(), "workspace-write".to_owned()],
+            );
+            config.binary = executable.clone();
+            config.model = Some("opaque-model".to_owned());
+            config.harness_args = vec!["-c".to_owned(), "test_value=\"spaces ' $;{}\"".to_owned()];
+            config.writable_roots = vec![root.path().join("write root")];
+            config.mol_dir = Some(root.path().join("molecule"));
+            config.parent_mol_id = Some("task-20261019-aaaa".to_owned());
+            config.work_hook_home = Some(root.path().join("hook home"));
+            config.git_identity = Some(GitIdentity {
+                name: "Noogram".to_owned(),
+                email: "test@example.org".to_owned(),
+            });
+            config.environment = vec![(
+                "CODEX_API_KEY".to_owned(),
+                "synthetic-explicit-value".to_owned(),
+            )];
+            let common = |command: &mut std::process::Command| {
+                command
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("OPENAI_API_KEY", "synthetic-ambient-value")
+                    .env("CODEX_API_KEY", "synthetic-ambient-value")
+                    .envs(config.environment.iter().cloned());
+            };
+            let mut legacy = std::process::Command::new("/bin/sh");
+            legacy.args(["-c", &build_codex_command(&config)]);
+            common(&mut legacy);
+            let mut direct = std::process::Command::new(&executable);
+            direct.args(supervised_worker_args(&config));
+            common(&mut direct);
+            for (name, value) in supervised_worker_environment(&config) {
+                if let Some(value) = value {
+                    direct.env(name, value);
+                } else {
+                    direct.env_remove(name);
+                }
+            }
+            let legacy = legacy.output()?;
+            let direct = direct.output()?;
+            assert!(legacy.status.success() && direct.status.success());
+            assert_eq!(direct.stdout, legacy.stdout, "mode {mode:?}");
+            assert!(!direct
+                .stdout
+                .windows("synthetic-ambient-value".len())
+                .any(|part| part == b"synthetic-ambient-value"));
+        }
+        Ok(())
     }
 
     /// F3 (delib-20260717-194b): with no `git_identity`, the command carries

@@ -46,6 +46,8 @@ pub mod wait;
 pub mod work_location;
 pub mod work_message;
 pub mod work_ops;
+#[cfg(unix)]
+pub mod worker_exit;
 
 pub use briefing_seal::BriefingSeal;
 pub use frontier::{Frontier, FRONTIER_SCHEMA_VERSION};

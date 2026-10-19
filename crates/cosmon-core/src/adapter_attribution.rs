@@ -537,6 +537,7 @@ impl AdapterAttribution {
                 | EventV2::ModelObservationUnavailable { .. }
                 | EventV2::MoleculeCompleted { .. }
                 | EventV2::WorkerExited { .. }
+                | EventV2::WorkerExitObserved { .. }
         )
     }
 
@@ -718,6 +719,9 @@ impl AdapterAttribution {
                 }
                 EventV2::MoleculeCompleted { .. } => walk.ran_to_completion = true,
                 EventV2::WorkerExited { .. } => worker_exited = true,
+                EventV2::WorkerExitObserved { observation, .. } if observation.is_terminal() => {
+                    worker_exited = true;
+                }
                 _ => {}
             }
         }

@@ -184,6 +184,12 @@ class = "out_of_scope"
 reason = "internal transport plumbing — execs a detached Ollama-backed worker process on this machine. Not an operator verb at all (hidden from `cs --help`); it is the local-inference callee, never a wire-callable gesture."
 
 [[verb_absent_from_thin]]
+verb = "worker-supervise"
+class = "out_of_scope"
+adr_ref = "ADR-080 §4"
+reason = "hidden local transport helper invoked by cs tackle: waits for its direct child and publishes a launch-bound receipt using the local claim, cwd and terminal. No RPP route or tenant invocation; remote callers dispatch through tackle."
+
+[[verb_absent_from_thin]]
 verb = "decay"
 class = "out_of_scope"
 reason = "DAG topology mutation — not in V0 §8p subset."

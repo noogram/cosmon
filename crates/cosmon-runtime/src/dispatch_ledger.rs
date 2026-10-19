@@ -1128,6 +1128,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn terminal_cas_requires_prepared_a_and_refuses_replacement_b(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use cosmon_core::terminal::TerminalIdentity;
+        use cosmon_core::worker_exit::{LaunchIdentity, LaunchToken};
+
+        let (dir, store, mol) = fixture();
+        let worker = WorkerId::new("rewrite-briefing-aaaa")?;
+        let adapter = adapter();
+        let (mut bound, _) = commit_dispatch(&store, &mol, &record(&worker, &adapter, dir.path()))?;
+        let pre_spawn = bound.process.clone();
+        let process = bound.process.as_mut().ok_or("missing dispatch")?;
+        process.worker_launch = Some(LaunchIdentity {
+            schema: 1,
+            molecule_id: mol.id.clone(),
+            launch_id: LaunchToken::from_bytes([1; 16]),
+            incarnation: LaunchToken::from_bytes([1; 16]),
+            request_hash: "a".repeat(64),
+        });
+        let expected_a = process.clone();
+        store.save_molecule(&mol.id, &bound)?;
+        let terminal = TerminalIdentity::Tmux {
+            socket_path: "/tmp/terminal-cas.sock".to_owned(),
+            server_pid: 1,
+            server_start: 1,
+            session_id: 1,
+            session_created: 1,
+            pane_id: 1,
+            pane_pid: 2,
+            pane_start: 2,
+        };
+        assert!(!stamp_terminal_witness(
+            &store,
+            &mol.id,
+            pre_spawn.as_ref(),
+            &terminal
+        ));
+        assert!(stamp_terminal_witness(
+            &store,
+            &mol.id,
+            Some(&expected_a),
+            &terminal
+        ));
+        assert_eq!(
+            store
+                .load_molecule(&mol.id)?
+                .process
+                .as_ref()
+                .and_then(|p| p.terminal.as_ref()),
+            Some(&terminal)
+        );
+
+        // Same worker/session and all other fields: changing only the launch
+        // incarnation is enough to refuse A's terminal evidence on B.
+        let mut expected_b = expected_a.clone();
+        expected_b
+            .worker_launch
+            .as_mut()
+            .ok_or("missing launch")?
+            .incarnation = LaunchToken::from_bytes([2; 16]);
+        bound.process = Some(expected_b.clone());
+        store.save_molecule(&mol.id, &bound)?;
+        assert!(!stamp_terminal_witness(
+            &store,
+            &mol.id,
+            Some(&expected_a),
+            &terminal
+        ));
+        assert_eq!(store.load_molecule(&mol.id)?.process, Some(expected_b));
+        Ok(())
+    }
+
     /// A recorded dispatch is not a finding — otherwise every healthy
     /// worker on the fleet would be reported and the signal would be worth
     /// nothing.

@@ -2045,6 +2045,11 @@ pub enum LoopBudgetError {
 /// constructor-injection discipline.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdapterEntry {
+    /// Opt in to durable child exit receipts for the POSIX Codex tmux Exec path.
+    /// Requires explicit `mode = "exec"`; Interactive and other adapters refuse it.
+    /// Absence preserves historical supervision, including default Interactive mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_exit_receipts: Option<bool>,
     /// `pane_current_command` signatures the whisper gate accepts for this
     /// Adapter, on top of the compile-time `PaneSignatureRegistry` entries
     /// (ADR-079 §6). Empty (the default) means "the registry's signatures and
