@@ -112,6 +112,7 @@ advance → terminate → infrastructure → introspection.
 | `cs prime` | NO | — | Pre-flight checks; local-shell convenience. |
 | `cs migrate` | NO | — | Schema/state migration; operator-only. |
 | `cs harvest` | NO | — | Scheduler-only (cron-driven); not a remote act. |
+| `cs worker-supervise` | NO | — | Hidden local transport helper invoked by `cs tackle`: waits for its direct child and publishes a launch-bound receipt using the local claim, cwd and terminal. No RPP route; callers dispatch through `cs tackle`. |
 | `cs collaboration` | NO | — | Host-local provisioning, inspection and revocation of collaboration bindings (issue #147 W2). A request must never create, widen or revoke its own binding, so no route will expose it; the bindings are consumed by the W4/W7 collaboration routes. |
 | `cs harvest-authority` | NO | — | Local parent command; configure, status, challenge and import have separate classifications and routes below. |
 | `cs harvest-authority configure` | ADMIN | `PUT /v1/admin/noyaux/{noyau}/harvest-authority` | Local root recovery uses `--local-reset` and leaves a durable record; API rotation needs the current-key signature in addition to the host admin credential. No tenant scope can administer trust. |
