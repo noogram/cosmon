@@ -154,6 +154,189 @@ fn wait_for(mut predicate: impl FnMut() -> bool) -> bool {
 
 #[test]
 #[ignore = "real tmux qualification: run explicitly with --ignored on a POSIX host"]
+fn configured_exec_keeps_its_incarnation_after_configuration_and_namespace_change() -> TestResult {
+    use cosmon_core::transport::TransportBackend as _;
+    use cosmon_core::transport_selection::TransportSource;
+    for receipts_enabled in [false, true] {
+        let rig = Rig::new()?;
+        let config_path = rig.root.path().join(".cosmon/config.toml");
+        let base = fs::read_to_string(&config_path)?.replace(
+            "worker_exit_receipts=true",
+            &format!("worker_exit_receipts={receipts_enabled}"),
+        );
+        fs::write(&config_path, &base)?;
+        let global = rig.root.path().join("config-home/cosmon");
+        fs::create_dir_all(&global)?;
+        let ledger = FileStore::new(rig.state());
+        for (index, source) in [
+            TransportSource::Default,
+            TransportSource::Global,
+            TransportSource::Project,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if index > 0 {
+                fs::write(global.join("config.toml"), "[transport]\nbackend='tmux'\n")?;
+            }
+            if index == 2 {
+                fs::write(
+                    &config_path,
+                    format!("{base}\n[transport]\nbackend='tmux'\n"),
+                )?;
+            }
+            let value: serde_json::Value =
+                serde_json::from_slice(&rig.cs(&["--json", "nucleate", "witness"])?.stdout)?;
+            let id = MoleculeId::new(value["id"].as_str().ok_or("no molecule")?)?;
+            let session = format!("pinned-{index}");
+            let config_before = fs::read_to_string(&config_path)?;
+            let pending = fs::read(ledger.molecule_dir(&id).join("state.json"))?;
+            for rejected in ["herdr", "zellij", "unknown-host"] {
+                fs::write(
+                    &config_path,
+                    format!("{base}\n[transport]\nbackend='{rejected}'\n"),
+                )?;
+                let output = rig
+                    .command(env!("CARGO_BIN_EXE_cs"))
+                    .args(["tackle", id.as_str(), "--adapter", "codex"])
+                    .output()?;
+                assert!(!output.status.success());
+                assert_eq!(
+                    fs::read(ledger.molecule_dir(&id).join("state.json"))?,
+                    pending
+                );
+                assert!(!rig
+                    .root
+                    .path()
+                    .join(".worktrees")
+                    .join(id.as_str())
+                    .exists());
+                assert!(!rig
+                    .command("git")
+                    .args([
+                        "show-ref",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/feat/{id}")
+                    ])
+                    .status()?
+                    .success());
+                assert!(!rig
+                    .command("tmux")
+                    .args(["-L", "receipt-0000", "has-session", "-t", &session])
+                    .output()?
+                    .status
+                    .success());
+            }
+            fs::write(&config_path, config_before)?;
+            rig.cs(&[
+                "tackle",
+                id.as_str(),
+                "--adapter",
+                "codex",
+                "--name",
+                &session,
+            ])?;
+            let mol = ledger.load_molecule(&id)?;
+            let process = mol.process.as_ref().ok_or("no process")?;
+            assert_eq!(process.transport.ok_or("no selection")?.source, source);
+            let terminal = process.terminal.as_ref().ok_or("no incarnation")?;
+            let before = serde_json::to_value(&mol)?;
+            // Both global and project now request unimplemented hosts. Existing
+            // handles must remain usable without re-resolving either file.
+            fs::write(
+                &config_path,
+                format!("{base}\n[transport]\nbackend='herdr'\n"),
+            )?;
+            fs::write(
+                global.join("config.toml"),
+                "[transport]\nbackend='zellij'\n",
+            )?;
+            let other = tempfile::Builder::new().prefix("csb-").tempdir_in("/tmp")?;
+            let neighbor = rig
+                .command("tmux")
+                .env("TMUX_TMPDIR", other.path())
+                .args([
+                    "-L",
+                    "receipt-0000",
+                    "-f",
+                    "/dev/null",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    &session,
+                    "sleep 120",
+                ])
+                .output()?;
+            assert!(neighbor.status.success());
+            let result = (|| -> TestResult {
+                let view = rig
+                    .command(env!("CARGO_BIN_EXE_cs"))
+                    .env("TMUX_TMPDIR", other.path())
+                    .args(["terminal", id.as_str(), "--json"])
+                    .output()?;
+                assert!(
+                    view.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&view.stderr)
+                );
+                let view: serde_json::Value = serde_json::from_slice(&view.stdout)?;
+                assert_eq!(view["identity"], serde_json::to_value(terminal)?);
+                assert_eq!(view["availability"], "available");
+                for command in [
+                    vec!["freeze", session.as_str()],
+                    vec!["thaw", session.as_str()],
+                    vec!["resume", "--agent", session.as_str()],
+                    vec!["tackle", id.as_str(), "--adapter", "codex", "--force"],
+                ] {
+                    assert!(!rig
+                        .command(env!("CARGO_BIN_EXE_cs"))
+                        .args(command)
+                        .output()?
+                        .status
+                        .success());
+                }
+                assert_eq!(serde_json::to_value(ledger.load_molecule(&id)?)?, before);
+                let pinned =
+                    cosmon_transport::TmuxBackend::for_process(Some(process), "unrelated")?;
+                assert!(pinned
+                    .capture_output(&process.worker_id, 20)?
+                    .to_lowercase()
+                    .contains("codex"));
+                // The real control effect must kill A while same-name B survives.
+                let stopped = rig
+                    .command(env!("CARGO_BIN_EXE_cs"))
+                    .env("TMUX_TMPDIR", other.path())
+                    .args(["purge", &session, "--force", "--allow-unharvested"])
+                    .output()?;
+                assert!(
+                    stopped.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&stopped.stderr)
+                );
+                assert!(rig
+                    .command("tmux")
+                    .env("TMUX_TMPDIR", other.path())
+                    .args(["-L", "receipt-0000", "has-session", "-t", &session])
+                    .status()?
+                    .success());
+                Ok(())
+            })();
+            let _ = rig
+                .command("tmux")
+                .env("TMUX_TMPDIR", other.path())
+                .args(["-L", "receipt-0000", "kill-server"])
+                .output();
+            result?;
+            fs::write(&config_path, &base)?;
+            let _ = fs::remove_file(global.join("config.toml"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "real tmux qualification: run explicitly with --ignored on a POSIX host"]
 fn tackle_wait_receipts_and_harvest_preserve_os_results_without_completing_work() -> TestResult {
     let rig = Rig::new()?;
     let ledger = FileStore::new(rig.state());

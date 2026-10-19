@@ -28,6 +28,56 @@ configuration surface without reading cosmon source code.
 All sections except `[project]` are optional and default to sensible
 values. Missing sections never produce an error.
 
+## `[transport].backend` — worker hosting
+
+```toml
+[transport]
+backend = "tmux"
+```
+
+`cs tackle` resolves an explicit project value above the global value in
+`$COSMON_CONFIG_HOME/cosmon/config.toml` (default
+`~/.config/cosmon/config.toml`), then defaults to tmux. A project table with
+no `backend` key inherits the global value. Explicit empty or unknown values
+are errors; `herdr` and `zellij` are recognised but unimplemented and refused
+before dispatch resources are created. There is no environment-based UI
+detection, host installation, or silent fallback. Invalid configuration is an
+error; an explicit project choice does not require reading the global file.
+This setting chooses a worker host, independently of `[adapters]`, model
+selection, and the terminal client used by a human.
+
+The first qualified path is **`cs tackle --adapter codex` with
+`[adapters.codex] mode = "exec"` on tmux** (macOS runtime qualification).
+Its command, readiness, exit trigger, and rollback use the composed transport
+port. Both legacy pane exit observations and opt-in durable child exit
+receipts remain supported. Interactive launching keeps its historical path
+and optional terminal witness. No alternative worker backend is delivered.
+
+For new Exec dispatches, `process.transport` records the host and provenance
+(`project`, `global`, `default`) before spawn; `process.terminal` records the
+creation-time server/session/pane incarnation using the existing conditional
+writer. Missing creation evidence or a changed dispatch prevents success and
+leaves an explicitly unresolved launch for audit. `WorkerSpawned.transport`
+records the selection in the event log. `cs --json observe ID` exposes it as
+`worker_transport`; `cs terminal ID` exposes the exact terminal capability.
+The existing lossy event rebuild cannot recreate a terminal incarnation:
+keep the canonical process snapshot for control; never reconstruct it from
+labels, configuration, or a newly discovered terminal.
+
+Changing either configuration file does not migrate an existing launch.
+Terminal observation, fleet liveness probes, forced worker purge, and harvest
+use its durable binding. Replaced or unreachable terminal evidence refuses
+control rather than addressing a same-name neighbor. Exit hooks carry their
+expected incarnation and cannot project an old exit onto a new dispatch.
+New Exec pins refuse `resume`, `whisper`, `freeze`, `thaw`, resurrection, and
+forced re-tackle before their effects: Exec has no interactive continuation
+or checkpoint-resume contract, and the historical thaw path would launch
+Claude. In particular, freeze cannot promise its stop-and-resume roundtrip.
+New Exec dispatches require a fresh branch and worktree; existing resources
+require audit and explicit resolution. Use exact worker teardown and operator
+resolution before a new dispatch. Older processes without a transport pin retain historical routing;
+their missing incarnation is never fabricated or silently upgraded.
+
 ## `[worker].deny_rules` — enforced permission denials
 
 ```toml

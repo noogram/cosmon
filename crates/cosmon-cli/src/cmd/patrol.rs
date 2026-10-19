@@ -660,6 +660,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         Some(TmuxBackend::new(super::tmux_socket_name(ctx)))
     };
 
+    let routed_backend = backend.as_ref().map(|fallback| {
+        cosmon_transport::ProcessTransport::new(
+            fallback,
+            molecules.iter().filter_map(|m| m.process.as_ref()),
+        )
+    });
+
     // task-20260719-fedf — reap the completed-but-teardown-failed limbo
     // BEFORE scanning, so those entries never reach `reconcile` and never
     // get proposed for respawn. Their work is finished; a respawn would
@@ -669,7 +676,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &state_dir,
         &fleet,
         &molecules,
-        backend.as_ref().map(|b| b as &dyn TransportBackend),
+        routed_backend.as_ref().map(|b| b as &dyn TransportBackend),
     )?;
     if !reaped.is_empty() {
         fleet = store.load_fleet()?;
@@ -678,7 +685,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let scan_result = scan(
         &fleet,
         &molecules,
-        backend.as_ref().map(|b| b as &dyn TransportBackend),
+        routed_backend.as_ref().map(|b| b as &dyn TransportBackend),
         configured_dead_worker_grace(args.dead_worker_grace_secs),
     );
     let report = &scan_result.report;
@@ -724,6 +731,15 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         if let Some(ref be) = backend {
             for wid in &scan_result.needs_respawn {
                 if let Some(worker) = fleet.workers.get_mut(wid) {
+                    if super::worker_transport::refuse_interactive_control(
+                        store.as_ref(),
+                        worker,
+                        "patrol respawn",
+                    )
+                    .is_err()
+                    {
+                        continue;
+                    }
                     if respawn_worker(worker, project_root.as_deref(), be) {
                         worker.restart_count += 1;
                         worker.status = WorkerStatus::Active;
@@ -831,7 +847,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     respawned: &respawned,
                 },
                 auto_collapse: args.auto_collapse,
-                backend: backend.as_ref().map(|b| b as &dyn TransportBackend),
+                backend: routed_backend.as_ref().map(|b| b as &dyn TransportBackend),
                 dead_worker_grace: configured_dead_worker_grace(args.dead_worker_grace_secs),
             },
         )?
@@ -926,7 +942,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 store.as_ref(),
                 &state_dir,
                 &molecules,
-                backend.as_ref().map(|b| b as &dyn TransportBackend),
+                routed_backend.as_ref().map(|b| b as &dyn TransportBackend),
                 codex_update_policy,
                 &super::codex_update::InstalledCodex,
                 |mol, wid| restart_codex_worker(ctx, mol, wid, &state_dir),
@@ -936,7 +952,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             store.as_ref(),
             &state_dir,
             &molecules,
-            backend.as_ref().map(|b| b as &dyn TransportBackend),
+            routed_backend.as_ref().map(|b| b as &dyn TransportBackend),
             &DialogueScanOpts {
                 lines: args.dialogue_lines,
                 auto_confirm_safe: args.auto_confirm_safe,
@@ -2113,6 +2129,13 @@ pub(crate) fn propel_stale_molecules(
     let mut sweep = PropelSweep::default();
 
     for (wid, mid, age) in candidates {
+        if molecules
+            .iter()
+            .find(|m| m.id == mid)
+            .is_some_and(|m| super::worker_transport::refuse_exec_control(m, "propel").is_err())
+        {
+            continue;
+        }
         if !be.is_alive(&wid).unwrap_or(false) {
             // No pane-died hook fired for this molecule (tmux server
             // restart, brutal crash, hook never armed). The patrol is the
@@ -2493,6 +2516,9 @@ pub(crate) fn nudge_stalled_molecules(
     });
     let mut nudged = Vec::new();
     for (wid, mol) in candidates {
+        if mol.process.as_ref().is_some_and(|p| p.transport.is_some()) {
+            continue;
+        }
         if !be.is_alive(&wid).unwrap_or(false) {
             continue;
         }
@@ -3433,6 +3459,9 @@ pub(crate) fn dialogue_scan_sweep(
         let Some(wid) = mol.assigned_worker.as_ref() else {
             continue;
         };
+        if mol.process.as_ref().is_some_and(|p| p.transport.is_some()) {
+            continue;
+        }
         if !be.is_alive(wid).unwrap_or(false) {
             continue;
         }
@@ -3571,6 +3600,9 @@ pub(crate) fn codex_update_sweep(
         let Some(wid) = mol.assigned_worker.as_ref() else {
             continue;
         };
+        if mol.process.as_ref().is_some_and(|p| p.transport.is_some()) {
+            continue;
+        }
         if !backend.is_alive(wid).unwrap_or(false) {
             continue;
         }

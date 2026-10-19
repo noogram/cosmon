@@ -53,6 +53,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .get(&worker_id)
         .ok_or_else(|| anyhow::anyhow!("worker not found: {worker_id}"))?;
 
+    super::worker_transport::refuse_interactive_control(store.as_ref(), worker, "thaw")?;
+
     // Only Paused workers can be thawed.
     if worker.desired != DesiredState::Paused {
         return Err(anyhow::anyhow!(

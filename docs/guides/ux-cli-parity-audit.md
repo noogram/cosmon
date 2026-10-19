@@ -2,6 +2,20 @@
 
 # CLI and UI parity audit
 
+## Worker host selection
+
+| Capability | CLI / configuration | Native UI / remote API |
+|---|---|---|
+| Choose worker hosting | `[transport] backend = "tmux"`, project > existing global configuration > tmux; unknown/Herdr/Zellij refused before resource creation | No new selector, worker backend, or control route |
+| Read launch provenance | `cs --json observe ID` adds optional `worker_transport`; new Codex Exec pins persist host/source and creation-time terminal identity | Shared observe JSON includes the optional field; terminal clients keep using `cs terminal` |
+| Control existing Exec worker | Terminal views and forced purge use the durable incarnation; harvest validates launch-bound triggers and preserves OS receipt semantics | Existing explicit terminal attachment only; no new lifecycle authority |
+| Resume a new Exec pin | Interactive resume/whisper, freeze/thaw, resurrection and forced re-tackle refuse before effects because no Exec continuation contract is qualified | No equivalent continuation support added |
+
+The qualified dispatch path is Codex Exec on tmux, with macOS runtime
+evidence. Legacy Interactive and old processes retain their historical paths.
+Client integrations named below do not constitute alternative worker hosts.
+See [configuration](../project-config.md#transportbackend--worker-hosting).
+
 ## Client integrations
 
 | Capability | CLI | Herdr companion | Native UI / remote API |

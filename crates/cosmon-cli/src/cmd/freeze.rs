@@ -112,6 +112,8 @@ fn run_with_backend(
         .get_mut(&worker_id)
         .ok_or_else(|| anyhow::anyhow!("worker not found: {worker_id}"))?;
 
+    super::worker_transport::refuse_interactive_control(store.as_ref(), worker, "freeze")?;
+
     // Only Running workers can be frozen.
     if worker.desired != DesiredState::Running {
         return Err(anyhow::anyhow!(

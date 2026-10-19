@@ -1087,10 +1087,26 @@ pub fn spawn_codex_session(config: &CodexSessionConfig) -> Result<(), CodexError
 pub fn spawn_codex_session_witnessed(
     config: &CodexSessionConfig,
 ) -> Result<Option<cosmon_core::terminal::TerminalIdentity>, CodexError> {
-    prepare_codex_session(config)?;
     let backend = TmuxBackend::new(&config.socket);
+    spawn_codex_session_on(config, &backend)
+}
+
+/// Launch through the composed transport, keeping command assembly independent of hosting.
+///
+/// # Errors
+/// Refuses unsupported command sessions or failed adapter preparation/launch.
+pub fn spawn_codex_session_on(
+    config: &CodexSessionConfig,
+    backend: &dyn cosmon_core::transport::TransportBackend,
+) -> Result<Option<cosmon_core::terminal::TerminalIdentity>, CodexError> {
+    if config.mode == CodexMode::Exec && !backend.supports_command_sessions() {
+        return Err(CodexError::SpawnFailed(
+            "command sessions unavailable".into(),
+        ));
+    }
+    prepare_codex_session(config)?;
     backend
-        .spawn_worker_with_env_witnessed(
+        .spawn_command(
             &config.session_name,
             &config.work_dir,
             &build_codex_command(config),

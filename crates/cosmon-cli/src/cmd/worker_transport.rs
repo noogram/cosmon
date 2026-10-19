@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//! Application composition for worker hosting; no environment-based UI detection.
+
+use cosmon_core::transport_selection::{
+    resolve_transport, TransportConfig, TransportKind, TransportSelection,
+};
+
+/// Read the existing project/global surfaces, preserving explicit absence.
+pub(super) fn resolve(ctx: &super::Context) -> anyhow::Result<TransportSelection> {
+    let project_path = ctx.config_path();
+    let project = cosmon_filestore::load_project_config(&project_path)?;
+    let global = if project.transport.backend.is_some() {
+        TransportConfig::default()
+    } else {
+        let path = super::tackle::global_adapter_config_path();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                #[derive(serde::Deserialize)]
+                struct Global {
+                    #[serde(default)]
+                    transport: TransportConfig,
+                }
+                toml::from_str::<Global>(&text)?.transport
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                TransportConfig::default()
+            }
+            Err(error) => return Err(error.into()),
+        }
+    };
+    Ok(resolve_transport(&project.transport, &global)?)
+}
+
+/// The typed choice commands composition, even while only one implementation is qualified.
+pub(super) fn compose(kind: TransportKind, socket: &str) -> cosmon_transport::TmuxBackend {
+    match kind {
+        TransportKind::Tmux => cosmon_transport::TmuxBackend::new(socket),
+    }
+}
+
+/// New Exec pins cannot promise a freeze/thaw roundtrip or accept a TUI resume prompt.
+/// Legacy workers retain their established path.
+pub(super) fn refuse_interactive_control(
+    store: &dyn cosmon_state::StateStore,
+    worker: &cosmon_state::WorkerData,
+    operation: &str,
+) -> anyhow::Result<()> {
+    if let Some(id) = worker
+        .current_molecule
+        .as_ref()
+        .or(worker.frozen_molecule.as_ref())
+    {
+        match store.load_molecule(id) {
+            Ok(molecule) => refuse_exec_control(&molecule, operation)?,
+            // Older fleet-only workers may carry a historical molecule pointer
+            // without a process snapshot. Do not invent a new transport pin.
+            Err(cosmon_core::error::CosmonError::MoleculeNotFound(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn refuse_exec_control(
+    molecule: &cosmon_state::MoleculeData,
+    operation: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        molecule.process.as_ref().is_none_or(|p| p.transport.is_none()),
+        "{operation}: pinned Codex Exec workers have no interactive continuation contract; a new dispatch requires explicit resolution of the existing launch"
+    );
+    Ok(())
+}

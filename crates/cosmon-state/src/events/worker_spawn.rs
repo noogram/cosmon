@@ -1349,6 +1349,7 @@ mod tests {
         write_event(
             state_dir,
             EventV2::WorkerSpawned {
+                transport: None,
                 worker_id: worker.clone(),
                 molecule: Some(mol()),
                 session_name: "worker-pane".to_owned(),

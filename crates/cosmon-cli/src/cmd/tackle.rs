@@ -479,6 +479,16 @@ fn sanitize_session_name(raw: &str) -> anyhow::Result<String> {
 /// Execute the `tackle` command.
 #[allow(clippy::too_many_lines)]
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
+    run_with_transport(ctx, args, None)
+}
+
+// The injection is used by the real dispatch pipeline, including rollback and hooks.
+#[allow(clippy::too_many_lines)]
+fn run_with_transport(
+    ctx: &Context,
+    args: &Args,
+    injected: Option<&dyn TransportBackend>,
+) -> anyhow::Result<()> {
     // NOTE — no consent hook here, deliberately (ADR-163, invariant §8w).
     // `cs tackle` carried the first-run `opt-in-share` prompt until
     // 2026-07-27. Dispatch is precisely the path an orchestrator wraps in
@@ -498,6 +508,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         target: "cosmon::dispatch", phase = "tackle.enter", elapsed_ms = 0_u64,
         "dispatch stage"
     );
+
+    let transport_selection = super::worker_transport::resolve(ctx)?;
+    if let Some(backend) = injected {
+        anyhow::ensure!(
+            backend.supports_command_sessions(),
+            "transport command-session capability unavailable"
+        );
+    }
 
     // Guard: require project identity before touching transport.
     super::require_project_identity(ctx)?;
@@ -519,6 +537,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // 1. Resolve molecule (exact, prefix, or fuzzy).
     let mut mol = resolve_molecule(&store, &args.molecule)?;
     let mol_id = mol.id.clone();
+
+    anyhow::ensure!(mol.process.as_ref().is_none_or(|process| process.transport.is_none()),
+        "Codex Exec already has a durable launch binding; observe/control that incarnation with cs terminal or cs purge --force, then explicitly resolve the existing dispatch before a new launch; --force cannot adopt or replace it");
 
     // Guard: only tackle alive molecules.
     if !mol.status.is_alive() {
@@ -795,8 +816,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let reviewed_start_point = resolve_reviewed_tree_pin(&mol)?;
 
     // 3. Load project config (.cosmon/config.toml).
-    let config_path = cosmon_filestore::resolve_config_path(None);
-    let project_config = cosmon_filestore::load_project_config(&config_path).unwrap_or_default();
+    let config_path = ctx.config_path();
+    let project_config = cosmon_filestore::load_project_config(&config_path)?;
 
     // 3a. Resolve the Worker-Spawn Port Adapter (ADR-097 / C6).
     //
@@ -902,6 +923,20 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         mut model_source,
         harness,
     } = selection;
+    let socket = super::tmux_socket_name(ctx);
+    let backend = super::worker_transport::compose(transport_selection.backend, &socket);
+    let selected_backend: &dyn TransportBackend = injected.unwrap_or(&backend);
+    let pin_transport = adapter.as_str() == "codex"
+        && project_config
+            .adapters
+            .as_ref()
+            .and_then(|cfg| cfg.entry("codex"))
+            .and_then(|entry| entry.mode.as_deref())
+            .is_some_and(|mode| mode.eq_ignore_ascii_case("exec"));
+    anyhow::ensure!(
+        !pin_transport || selected_backend.supports_command_sessions(),
+        "transport lacks the command-session/creation-identity capability required by Codex Exec"
+    );
     super::worker_supervise::check_configuration(
         adapter.as_str(),
         project_config
@@ -1579,6 +1614,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .clone()
         .or_else(|| resolve_branch_start_point(&repo_root, &mol))
         .or_else(|| base_branch.clone());
+    let mut owns_worktree = false;
     let worktree_path = if args.no_worktree {
         args.workdir
             .as_deref()
@@ -1588,6 +1624,20 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             || repo_root.join(".worktrees").join(mol_id.as_str()),
             PathBuf::from,
         );
+        owns_worktree = !wt_dir.exists()
+            && !ProcessCommand::new("git")
+                .arg("-C")
+                .arg(&repo_root)
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch_name}"),
+                ])
+                .status()?
+                .success();
+        anyhow::ensure!(!pin_transport || owns_worktree,
+            "Codex Exec requires a fresh worktree and branch; existing resources require explicit audit/resolution");
         // The pressure check fires *before* the new worktree exists, so the
         // bytes it frees are available to the build that is about to start.
         if args.reclaim_derived {
@@ -1619,13 +1669,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //    caller override the whole thing. The branch and worktree paths
     //    still use `mol_id` — those are stable git/fs refs and any
     //    in-flight worker would break if they were renamed.
-    let socket = super::tmux_socket_name(ctx);
     let session_name = if let Some(ref raw) = args.name {
         sanitize_session_name(raw)?
     } else {
         cosmon_core::slugify::session_name_for(mol.display_topic(), mol_id.as_str())
     };
-    let backend = TmuxBackend::new(&socket);
     let wid = cosmon_core::id::WorkerId::new(&session_name)?;
 
     // Idempotency: if a session already exists, handle it.
@@ -1640,8 +1688,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // collided with the carcass patrol had left standing. Only an undocumented
     // `tmux -L <socket> kill-session` — whose socket name the operator had to
     // dig out of the process table — unblocked it.
-    let session_present = backend.session_exists(&session_name).unwrap_or(false);
-    let already_running = session_present && backend.is_alive(&wid).unwrap_or(false);
+    let session_present = selected_backend
+        .session_exists(&session_name)
+        .unwrap_or(false);
+    let already_running = session_present && selected_backend.is_alive(&wid).unwrap_or(false);
     if already_running && !args.force {
         report_existing_session(
             ctx,
@@ -1659,7 +1709,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // directly (not re-derived) by
     // `tests::forced_reclaim_holds_the_lease_across_the_teardown`.
     let _retackle_lease = reclaim_session_if_present(
-        &backend,
+        selected_backend,
         session_present,
         already_running,
         &session_name,
@@ -1796,6 +1846,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             &store,
             &mol,
             &dispatch_ledger::DispatchRecord {
+                transport: pin_transport.then_some(transport_selection),
                 worker: &wid,
                 session_name: &session_name,
                 adapter: &adapter,
@@ -1819,14 +1870,20 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             // half. Falsifier for the ledger half:
             // `dispatch_ledger::tests::an_unwritable_event_log_refuses_the_\
             // dispatch_and_leaves_no_ledger_entry`.
-            cleanup_partial_tackle(
-                &backend,
-                &wid,
-                &repo_root,
-                &worktree_path,
-                &branch_name,
-                args.no_worktree,
-            );
+            if pin_transport {
+                if owns_worktree {
+                    cleanup_partial_worktree(&repo_root, &worktree_path, &branch_name, false);
+                }
+            } else {
+                cleanup_partial_tackle(
+                    selected_backend,
+                    &wid,
+                    &repo_root,
+                    &worktree_path,
+                    &branch_name,
+                    args.no_worktree,
+                );
+            }
             anyhow::anyhow!(
                 "cs tackle: refusing to spawn a worker for {mol_id}: the dispatch \
                  could not be recorded ({e}). No worker was started — an \
@@ -1848,6 +1905,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // written just above — before surfacing the error.
     let spawn_outcome = match spawn_and_prompt(
         &backend,
+        selected_backend,
         &wid,
         &session_name,
         &worktree_path,
@@ -1899,16 +1957,30 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 harness_version(adapter.as_str()).as_deref(),
                 cosmon_core::event_v2::HarnessLaunchStatus::LaunchFailed,
             );
-            dispatch_ledger::rollback_dispatch(&store, &pre_dispatch_snapshot, &wid);
-            emit_worker_spawn_rolled_back(&state_dir, &mol_id, &wid, adapter.as_str(), "spawn");
-            cleanup_partial_tackle(
-                &backend,
-                &wid,
-                &repo_root,
-                &worktree_path,
-                &branch_name,
-                args.no_worktree,
-            );
+            if pin_transport {
+                let rolled_back = mol.process.as_ref().is_some_and(|expected| {
+                    dispatch_ledger::rollback_dispatch_incarnation(
+                        &store,
+                        &pre_dispatch_snapshot,
+                        expected,
+                    )
+                });
+                emit_worker_spawn_rolled_back(&state_dir, &mol_id, &wid, adapter.as_str(), "spawn");
+                if rolled_back && owns_worktree {
+                    cleanup_partial_worktree(&repo_root, &worktree_path, &branch_name, false);
+                }
+            } else {
+                dispatch_ledger::rollback_dispatch(&store, &pre_dispatch_snapshot, &wid);
+                emit_worker_spawn_rolled_back(&state_dir, &mol_id, &wid, adapter.as_str(), "spawn");
+                cleanup_partial_tackle(
+                    selected_backend,
+                    &wid,
+                    &repo_root,
+                    &worktree_path,
+                    &branch_name,
+                    args.no_worktree,
+                );
+            }
             return Err(e);
         }
     };
@@ -1933,6 +2005,21 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         harness_version(adapter.as_str()).as_deref(),
         cosmon_core::event_v2::HarnessLaunchStatus::Launched,
     );
+
+    let identity_recorded = spawn_outcome.terminal.as_ref().is_some_and(|identity| {
+        let expected = spawn_outcome
+            .terminal_expected_process
+            .as_ref()
+            .or(mol.process.as_ref());
+        dispatch_ledger::stamp_terminal_witness(&store, &mol.id, expected, identity)
+    });
+    anyhow::ensure!(!pin_transport || identity_recorded,
+        "Codex Exec launched but creation identity could not be persisted; dispatch remains unresolved for audit, no name-based adoption or automatic retry");
+    if spawn_outcome.terminal.is_some() && !identity_recorded {
+        eprintln!(
+            "cs tackle: terminal identity not recorded; read-only attachment will be unavailable"
+        );
+    }
 
     // Two post-spawn steps below presuppose a tmux-backed worker —
     // install_harvest_hook (kernel-level pane-died witness) and the
@@ -1981,9 +2068,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // emission is the structural counter-measure that prevents the
         // operator from mistaking an unsupervised molecule for a
         // normally-supervised one.
-        if let Err(e) =
-            install_harvest_hook(&backend, &session_name, &mol_id, &repo_root, &mol_state_dir)
-        {
+        if let Err(e) = install_harvest_hook(
+            selected_backend,
+            &session_name,
+            &mol_id,
+            &repo_root,
+            &mol_state_dir,
+            spawn_outcome.terminal.as_ref().filter(|_| pin_transport),
+        ) {
             emit_supervision_setup_failed_event(
                 &mol_id,
                 &wid,
@@ -2008,14 +2100,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // restate the surface lie. So we re-observe, and if the session has
         // died in the meantime we roll the ledger entry back and tear down
         // the partial state.
-        let still_alive = backend.is_alive(&wid).unwrap_or(false);
+        let still_alive = selected_backend.is_alive(&wid).unwrap_or(false);
         let status = if still_alive {
-            cosmon_transport::readiness::detect_status(&backend, &wid)
+            cosmon_transport::readiness::detect_status(selected_backend, &wid)
                 .unwrap_or(cosmon_transport::readiness::SessionStatus::Unknown)
         } else {
             cosmon_transport::readiness::SessionStatus::Dead
         };
         if !still_alive || status == cosmon_transport::readiness::SessionStatus::Dead {
+            anyhow::ensure!(!pin_transport, "Codex Exec exited during setup; launch binding and owned worktree preserved for audit, no name-addressed cleanup");
+
             dispatch_ledger::rollback_dispatch(&store, &pre_dispatch_snapshot, &wid);
             emit_worker_spawn_rolled_back(
                 &state_dir,
@@ -2025,7 +2119,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 &status.to_string(),
             );
             cleanup_partial_tackle(
-                &backend,
+                selected_backend,
                 &wid,
                 &repo_root,
                 &worktree_path,
@@ -2037,16 +2131,6 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                  (status={status}); the dispatch record was rolled back and the \
                  partial tmux/branch/worktree cleaned up"
             ));
-        }
-    }
-
-    if let Some(identity) = &spawn_outcome.terminal {
-        let expected = spawn_outcome
-            .terminal_expected_process
-            .as_ref()
-            .or(mol.process.as_ref());
-        if !dispatch_ledger::stamp_terminal_witness(&store, &mol.id, expected, identity) {
-            eprintln!("cs tackle: terminal identity not recorded; read-only attachment will be unavailable");
         }
     }
 
@@ -2136,6 +2220,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 &observed.status.to_string(),
             );
 
+            anyhow::ensure!(!pin_transport, "Codex Exec dispatch changed during setup; resources preserved for audit, no cleanup of a possible replacement");
+
             // Roll back the worker registration (best-effort: another
             // writer may have already mutated fleet.json), then tear
             // down tmux + worktree + branch via the same helper that
@@ -2149,7 +2235,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 let _ = store.save_fleet(&fleet);
             }
             cleanup_partial_tackle(
-                &backend,
+                selected_backend,
                 &wid,
                 &repo_root,
                 &worktree_path,
@@ -2293,10 +2379,18 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             out["tmux_session"] = serde_json::json!(session_name);
             // The attach line carries a UTF-8 locale when the spawn env
             // declares none — see `cosmon_transport::locale` for the measurement.
-            out["attach"] = serde_json::json!(cosmon_transport::locale::attach_command_from_env(
-                &socket,
-                &session_name
-            ));
+            out["attach"] = if pin_transport {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(cosmon_transport::locale::attach_command_from_env(
+                    &socket,
+                    &session_name
+                ))
+            };
+            if pin_transport {
+                out["terminal"] =
+                    serde_json::json!({"molecule": mol_id.as_str(), "command": "cs terminal"});
+            }
         } else {
             // No tmux session exists for this adapter; expose the log path the
             // in-process / detached worker writes so tooling never emits a
@@ -2316,10 +2410,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         println!("  worktree: {}", worktree_path.display());
         if uses_tmux {
             println!("  session:  {session_name}");
-            println!(
-                "  attach:   {}",
-                cosmon_transport::locale::attach_command_from_env(&socket, &session_name)
-            );
+            if pin_transport {
+                println!("  terminal: cs terminal {mol_id}");
+            } else {
+                println!(
+                    "  attach:   {}",
+                    cosmon_transport::locale::attach_command_from_env(&socket, &session_name)
+                );
+            }
         } else {
             // In-process/detached local worker: no tmux to attach to.
             println!("  log:      {}", worker_log.display());
@@ -4610,6 +4708,7 @@ fn harness_argv(args: &[cosmon_core::harness_settings::HarnessArg]) -> Vec<Strin
 #[allow(clippy::too_many_lines)]
 pub(super) fn spawn_and_prompt(
     backend: &TmuxBackend,
+    selected_backend: &dyn TransportBackend,
     wid: &cosmon_core::id::WorkerId,
     session_name: &str,
     worktree_path: &std::path::Path,
@@ -4761,6 +4860,7 @@ pub(super) fn spawn_and_prompt(
         // liveness through the substrate-agnostic `LiveProbe` contract.
         "codex" => spawn_codex_and_prompt(
             backend,
+            selected_backend,
             wid,
             session_name,
             worktree_path,
@@ -7001,6 +7101,7 @@ fn mint_codex_work_hook_home(mol_state_dir: &std::path::Path) -> Option<std::pat
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn spawn_codex_and_prompt(
     backend: &TmuxBackend,
+    selected_backend: &dyn TransportBackend,
     wid: &cosmon_core::id::WorkerId,
     session_name: &str,
     worktree_path: &std::path::Path,
@@ -7130,17 +7231,23 @@ fn spawn_codex_and_prompt(
         .unwrap_or(false);
     #[cfg(unix)]
     if supervised {
-        let spawned =
-            super::worker_supervise::spawn_codex(&config, state_dir, mol, wid, mol_state_dir)?;
+        let spawned = super::worker_supervise::spawn_codex(
+            &config,
+            selected_backend,
+            state_dir,
+            mol,
+            wid,
+            mol_state_dir,
+        )?;
         *terminal = spawned.terminal;
         *terminal_expected_process = Some(spawned.expected_process);
     } else {
-        *terminal = codex::spawn_codex_session_witnessed(&config)?;
+        *terminal = codex::spawn_codex_session_on(&config, selected_backend)?;
     }
     #[cfg(not(unix))]
     {
         let _ = terminal_expected_process;
-        *terminal = codex::spawn_codex_session_witnessed(&config)?;
+        *terminal = codex::spawn_codex_session_on(&config, selected_backend)?;
     }
 
     // Postcondition: demand evidence codex actually came up, via the same
@@ -7151,14 +7258,14 @@ fn spawn_codex_and_prompt(
     // watcher (godel's Q6).
     let probe = cosmon_transport::readiness::CodexProbe;
     match probe.await_live(
-        backend,
+        selected_backend,
         wid,
         std::time::Duration::from_secs(30),
         std::time::Duration::from_millis(200),
     ) {
         Ok(cosmon_transport::readiness::Liveness::Live) => {}
         Ok(other) => {
-            let _ = backend.terminate(wid);
+            let _ = selected_backend.terminate(wid);
             return Err(anyhow::anyhow!(
                 "cs tackle: codex session {session_name} never produced live \
                  output within 30s (last verdict={other}). Treating as a failed \
@@ -7168,7 +7275,7 @@ fn spawn_codex_and_prompt(
             ));
         }
         Err(e) => {
-            let _ = backend.terminate(wid);
+            let _ = selected_backend.terminate(wid);
             return Err(anyhow::anyhow!(
                 "cs tackle: codex readiness wait failed for {session_name}: {e}. \
                  Inspect with `tmux -L {} capture-pane -pS - -t {session_name}`",
@@ -10138,11 +10245,12 @@ fn spawn_anthropic_session(
 /// Returns the transport error from `install_pane_died_hook` verbatim
 /// so the caller can log a diagnostic and tear down partial state.
 pub(super) fn install_harvest_hook(
-    backend: &cosmon_transport::TmuxBackend,
+    backend: &dyn TransportBackend,
     session_name: &str,
     mol_id: &MoleculeId,
     repo_root: &std::path::Path,
     molecule_dir: &std::path::Path,
+    terminal_identity: Option<&cosmon_core::terminal::TerminalIdentity>,
 ) -> Result<(), cosmon_core::transport::TransportError> {
     let cs_bin = std::env::current_exe()
         .map_or_else(|_| "cs".to_owned(), |p| p.to_string_lossy().into_owned());
@@ -10162,6 +10270,14 @@ pub(super) fn install_harvest_hook(
             .map_err(|error| cosmon_core::transport::TransportError::Io(error.to_string()))?;
         launch_option = format!(" --worker-launch '{}'", expected.replace('\'', "'\\''"));
     }
+    if let Some(identity) = terminal_identity {
+        let encoded = serde_json::to_string(identity)
+            .map_err(|error| cosmon_core::transport::TransportError::Io(error.to_string()))?;
+        launch_option = format!(
+            "{launch_option} --terminal-identity '{}'",
+            encoded.replace('\'', "'\\''")
+        );
+    }
     // `#{pane_dead_status}` is a tmux format that expands to the exit
     // status of the dead pane in the hook context. When tmux cannot
     // supply it (older versions, unusual pane types) the literal string
@@ -10172,7 +10288,7 @@ pub(super) fn install_harvest_hook(
          --from-pane-died --exit-code '#{{pane_dead_status}}'{launch_option} \
          >/dev/null 2>&1 || true"
     );
-    backend.install_pane_died_hook(session_name, &command)
+    backend.install_exit_hook(session_name, &command)
 }
 
 /// Emit a forensic `EventV2::SF6SupervisionSetupFailed` receipt to
@@ -10271,7 +10387,7 @@ fn truncate_at_utf8_boundary(s: &str, max_bytes: usize) -> String {
 /// original error the caller is about to return — the operator needs to
 /// see the spawn/readiness diagnostic, not a branch-delete failure.
 fn cleanup_partial_tackle(
-    backend: &TmuxBackend,
+    backend: &dyn TransportBackend,
     wid: &cosmon_core::id::WorkerId,
     repo_root: &Path,
     worktree_path: &Path,
@@ -10279,6 +10395,15 @@ fn cleanup_partial_tackle(
     no_worktree: bool,
 ) {
     let _ = backend.terminate(wid);
+    cleanup_partial_worktree(repo_root, worktree_path, branch_name, no_worktree);
+}
+
+fn cleanup_partial_worktree(
+    repo_root: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+    no_worktree: bool,
+) {
     if no_worktree {
         return;
     }
@@ -10543,7 +10668,7 @@ fn default_permission_mode(_mol: &MoleculeData) -> &'static str {
 /// reached *outside* a galaxy). This is the operator's machine-wide
 /// adapter preference, a separate surface from the per-galaxy
 /// `.cosmon/config.toml`.
-fn global_adapter_config_path() -> PathBuf {
+pub(super) fn global_adapter_config_path() -> PathBuf {
     let config_home = std::env::var_os("COSMON_CONFIG_HOME").map_or_else(
         || PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into())).join(".config"),
         PathBuf::from,
@@ -10891,6 +11016,7 @@ mod issue61_pressure_check {
 #[cfg(test)]
 mod tests {
     mod terminal_writers;
+    mod worker_transport;
 
     use std::collections::HashMap;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};

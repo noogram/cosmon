@@ -285,6 +285,7 @@ fn run_to_molecule(
     let mol = store
         .load_molecule(&mol_id)
         .map_err(|e| anyhow::anyhow!("failed to load molecule: {e}"))?;
+    super::worker_transport::refuse_exec_control(&mol, "whisper")?;
     let session_name = mol
         .session_name
         .clone()

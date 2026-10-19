@@ -408,6 +408,9 @@ pub fn detect_ghost(mol: &MoleculeData) -> Option<GhostKind> {
 /// state dir.
 #[derive(Debug, Clone, Serialize)]
 pub struct ObserveJson {
+    /// Qualified worker host and configuration provenance recorded at dispatch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_transport: Option<cosmon_core::transport_selection::TransportSelection>,
     /// Molecule id (string form).
     pub id: String,
     /// Formula id (string form).
@@ -572,6 +575,11 @@ impl ObserveJson {
     ) -> Self {
         let mol = &view.data;
         Self {
+            worker_transport: view
+                .data
+                .process
+                .as_ref()
+                .and_then(|process| process.transport),
             id: mol.id.to_string(),
             formula: mol.formula_id.to_string(),
             status: mol.status.to_string(),

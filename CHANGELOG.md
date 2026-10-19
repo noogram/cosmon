@@ -21,6 +21,14 @@ this stage.
 
 ### Added
 
+- Worker host configuration: `[transport] backend = "tmux"` resolves project,
+  global, then default with recorded provenance. The first qualified path is
+  Codex Exec on tmux: launch-bound terminal identity keeps observation,
+  teardown and harvest independent of later configuration changes. Unsupported
+  hosts fail before dispatch resources; Herdr and Zellij are not available.
+  New Exec pins refuse interactive continuation and freeze/thaw rather than
+  launching a different adapter. Legacy Interactive behavior is preserved.
+
 - Supervision portable des workers: opt-in durable child exit receipts for
   POSIX Codex workers launched through `cs tackle` in tmux with explicit
   `mode = "exec"`. Opt-in Interactive is refused before dispatch effects;

@@ -435,6 +435,7 @@ mod tests {
                 loop_ownership: LoopOwnershipTag::default(),
             },
             EventV2::WorkerSpawned {
+                transport: None,
                 worker_id: worker.clone(),
                 molecule: Some(m.clone()),
                 session_name: "example".into(),
@@ -774,6 +775,7 @@ mod tests {
         emit_one(
             &log,
             EventV2::WorkerSpawned {
+                transport: None,
                 worker_id: worker.clone(),
                 molecule: Some(m.clone()),
                 session_name: "seat".to_owned(),
@@ -857,6 +859,7 @@ mod tests {
         emit_one(
             &log,
             EventV2::WorkerSpawned {
+                transport: None,
                 worker_id: worker.clone(),
                 molecule: Some(m.clone()),
                 session_name: "seat".to_owned(),
@@ -931,6 +934,7 @@ mod tests {
         emit_one(
             &log,
             EventV2::WorkerSpawned {
+                transport: None,
                 worker_id: worker.clone(),
                 molecule: Some(m.clone()),
                 session_name: "seat".to_owned(),
@@ -1011,6 +1015,7 @@ mod tests {
             emit_one(
                 &log,
                 EventV2::WorkerSpawned {
+                    transport: None,
                     worker_id: worker.clone(),
                     molecule: Some(m.clone()),
                     session_name: "seat".to_owned(),

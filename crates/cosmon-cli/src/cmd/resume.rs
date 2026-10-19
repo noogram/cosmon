@@ -85,6 +85,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             }
         }
 
+        super::worker_transport::refuse_interactive_control(store.as_ref(), worker, "resume")?;
+
         // Try to send the nudge via all backends.
         let mut sent = false;
         // A resumed worker may or may not carry a molecule; without one the

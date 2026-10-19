@@ -63,6 +63,17 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let mol = resolve_molecule(&store, &args.molecule)?;
     let mol_id = mol.id.clone();
+    super::worker_transport::refuse_exec_control(&mol, "resurrect")?;
+    // Frozen/recovered snapshots may have released the process. A historical
+    // qualified Exec dispatch still cannot be resumed as an unpinned Claude worker.
+    let history = match cosmon_state::event_log::read_all(state_dir.join("events.jsonl")) {
+        Ok(events) => events,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(!history.iter().any(|envelope| matches!(&envelope.event,
+        cosmon_core::event_v2::EventV2::WorkerSpawned { molecule: Some(id), transport: Some(_), .. } if id == &mol_id)),
+        "resurrect: pinned Codex Exec has no qualified continuation contract; resolve explicitly before a new dispatch");
 
     // Pre-condition: state == Frozen (the wreck state produced by `cs recover`).
     if mol.status != MoleculeStatus::Frozen {
@@ -206,6 +217,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &store,
         &mol,
         &crate::cmd::dispatch_ledger::DispatchRecord {
+            transport: None,
             worker: &wid,
             session_name: &session_name,
             adapter: &adapter,
@@ -257,6 +269,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     };
 
     if let Err(e) = crate::cmd::tackle::spawn_and_prompt(
+        &backend,
         &backend,
         &wid,
         &session_name,
@@ -312,6 +325,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &mol_id,
         &repo_root,
         &mol_dir,
+        None,
     ) {
         eprintln!(
             "cs resurrect: warning: failed to install pane-died hook on \

@@ -2272,7 +2272,8 @@ fn run_with_remote_before_lock(
         }
     }
 
-    let socket = tmux_socket_name(ctx);
+    let pinned_backend = TmuxBackend::for_process(mol.process.as_ref(), &tmux_socket_name(ctx))?;
+    let socket = pinned_backend.socket().to_owned();
 
     // Resolve the tmux session name the worker was tackled with. Stored
     // on the molecule at tackle time so renames stay in lockstep with
@@ -2377,7 +2378,7 @@ fn run_with_remote_before_lock(
     // by proceeding, and forcing the operator to add `--force` (plus the
     // `--no-merge --no-worktree-remove --no-branch-delete` triad reported
     // in df4c) is unnecessary friction.
-    let backend_probe = TmuxBackend::new(&socket);
+    let backend_probe = pinned_backend.clone();
     let session_alive = backend_probe.is_alive(&wid).unwrap_or(false);
     let worker_registered = store
         .load_fleet()
@@ -3905,9 +3906,9 @@ fn run_with_remote_before_lock(
 
     // 3. Kill tmux session (if alive).
     if !args.no_kill {
-        let backend = TmuxBackend::new(&socket);
-        if backend.is_alive(&wid).unwrap_or(false) {
-            if backend.terminate(&wid).is_ok() {
+        let backend = &pinned_backend;
+        if backend.session_exists(&session_name).unwrap_or(false) {
+            if backend.terminate_session(&session_name).is_ok() {
                 actions.push("killed_session".to_owned());
             } else {
                 warnings.push(format!("failed to kill tmux session {session_name}"));

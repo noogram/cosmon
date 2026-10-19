@@ -632,6 +632,9 @@ pub enum EventV2 {
     },
     /// A worker was spawned by `cs tackle`.
     WorkerSpawned {
+        /// Host selection pinned before a qualified dispatch; absent on legacy rows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport: Option<crate::transport_selection::TransportSelection>,
         /// The worker's identity.
         worker_id: WorkerId,
         /// The molecule the worker was created to tackle, if any.
@@ -3268,6 +3271,12 @@ pub fn migrate_legacy_line(line: &str) -> Result<Envelope, serde_json::Error> {
             reason: StuckReason::from(reason("reason")),
         },
         "worker_spawned" => EventV2::WorkerSpawned {
+            transport: obj
+                .get("transport")
+                .filter(|v| !v.is_null())
+                .map(|v| serde_json::from_value(v.clone()))
+                .transpose()
+                .map_err(|_| invalid_shape())?,
             worker_id: worker_id("worker_id").ok_or_else(invalid_shape)?,
             molecule: molecule_id("molecule"),
             session_name: obj
@@ -4196,6 +4205,7 @@ mod tests {
                 },
             },
             EventV2::WorkerSpawned {
+                transport: None,
                 worker_id: wid("quartz"),
                 molecule: Some(mid("cs-20260411-aaaa")),
                 session_name: "cs-task-aaaa".to_owned(),

@@ -2086,6 +2086,7 @@ pub(crate) mod test_support {
         cosmon_state::event_log::emit_one(
             &log,
             EventV2::WorkerSpawned {
+                transport: None,
                 worker_id: WorkerId::new(worker).unwrap(),
                 molecule: Some(mol.clone()),
                 session_name: "sess".to_owned(),

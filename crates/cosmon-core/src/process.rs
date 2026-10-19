@@ -52,6 +52,11 @@ use crate::worker::WorkerStatus;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct MoleculeProcess {
+    /// Host and resolution provenance pinned before a qualified terminal dispatch.
+    /// Its terminal incarnation is recorded separately in `terminal`; absence of
+    /// that witness never permits reconstructing a destination from current config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<crate::transport_selection::TransportSelection>,
     /// Worker identity bound to this molecule.
     ///
     /// In the legacy three-back-pointer arrangement this lived on
@@ -146,6 +151,7 @@ impl MoleculeProcess {
     #[must_use]
     pub fn new(worker_id: WorkerId, tmux_session: impl Into<String>) -> Self {
         Self {
+            transport: None,
             worker_id,
             tmux_session: tmux_session.into(),
             started_at: Utc::now(),

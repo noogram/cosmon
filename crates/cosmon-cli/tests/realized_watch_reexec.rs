@@ -98,6 +98,7 @@ impl Dispatch {
         cosmon_state::event_log::emit_one(
             &log,
             EventV2::WorkerSpawned {
+                transport: None,
                 worker_id: WorkerId::new("worker-1").unwrap(),
                 molecule: Some(mol.clone()),
                 session_name: "sess".to_owned(),
@@ -593,6 +594,7 @@ fn concurrent_watchers_preserve_degraded_receipt_through_recovery_and_replay() {
     cosmon_state::event_log::emit_one(
         &cosmon_state::event_log::resolve_events_log_path(&d.state_dir),
         EventV2::WorkerSpawned {
+            transport: None,
             worker_id: WorkerId::new("worker-2").unwrap(),
             molecule: Some(d.mol.clone()),
             session_name: "next".into(),

@@ -55,6 +55,7 @@ fn seed_worker(dir: &std::path::Path, m: &MoleculeId, adapter: &str, worker: &st
     emit_one(
         &log,
         EventV2::WorkerSpawned {
+            transport: None,
             worker_id: WorkerId::new(worker).unwrap(),
             molecule: Some(m.clone()),
             session_name: "sess".to_owned(),

@@ -3376,6 +3376,7 @@ mod tests {
             emit_one(
                 &events,
                 EventV2::WorkerSpawned {
+                    transport: None,
                     worker_id: WorkerId::new(format!("worker-{id}")).expect("worker"),
                     molecule: Some(mol.id.clone()),
                     session_name: "fixture".to_owned(),

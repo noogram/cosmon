@@ -879,6 +879,7 @@ fn refuse_if_unharvested(
 /// tmux session; with `force = false`, only the fleet record is cleaned up
 /// (the worker is expected to already have exited). The fleet entry is
 /// removed on success, emitting a `WorkerKilled` audit event.
+#[allow(clippy::too_many_lines)]
 fn run_targeted(
     ctx: &Context,
     store: &dyn StateStore,
@@ -930,6 +931,29 @@ fn run_targeted(
         anyhow::bail!("worker not found: {worker_id}");
     };
 
+    let pinned_process = worker
+        .current_molecule
+        .as_ref()
+        .or(worker.frozen_molecule.as_ref())
+        .map(|id| match store.load_molecule(id) {
+            Ok(molecule) => Ok(Some(molecule)),
+            Err(cosmon_core::error::CosmonError::MoleculeNotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        })
+        .transpose()?
+        .flatten()
+        .and_then(|m| m.process)
+        .filter(|p| p.transport.is_some());
+    let pinned_backend = pinned_process
+        .as_ref()
+        .map(|process| TmuxBackend::for_process(Some(process), ""))
+        .transpose()?;
+    if force {
+        if let Some(backend) = &pinned_backend {
+            backend.terminate_session(worker_id.as_str())?;
+        }
+    }
+
     let previous_status = worker.status.to_string();
     // Purge reclaims only the worker. A Running molecule retains its state
     // and worktree for a forced tackle in place.
@@ -940,7 +964,9 @@ fn run_targeted(
 
     // Force mode: try a quick graceful exit (triggers SessionEnd hooks,
     // memory flush), then terminate what survives.
-    let tmux_killed = if force {
+    let tmux_killed = if pinned_backend.is_some() {
+        force
+    } else if force {
         let backend = TmuxBackend::new(super::tmux_socket_name(ctx));
         backend
             .graceful_exit(&worker_id, std::time::Duration::from_secs(5))

@@ -87,6 +87,9 @@ pub struct Args {
     /// Expected launch supplied by the supervised pane hook; stale triggers are refused.
     #[arg(long, hide = true)]
     pub worker_launch: Option<String>,
+    /// Exact terminal supplied by new unsupervised Exec hooks; never reconstructed from a name.
+    #[arg(long, hide = true)]
+    pub terminal_identity: Option<String>,
 }
 
 /// Outcome of a `cs harvest` invocation.
@@ -147,12 +150,18 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .transpose()?;
 
     if args.from_pane_died {
-        record_pane_died_expected(
+        let terminal = args
+            .terminal_identity
+            .as_deref()
+            .map(serde_json::from_str::<cosmon_core::terminal::TerminalIdentity>)
+            .transpose()?;
+        record_pane_died_bound(
             store.as_ref(),
             &state_dir,
             &mol_id,
             args.exit_code.as_deref(),
             expected.as_ref(),
+            terminal.as_ref(),
         )?;
         #[cfg(unix)]
         let legacy = supervised_observation(store.as_ref(), &mol_id)?.is_none();
@@ -204,7 +213,10 @@ fn record_update_from_dead_pane(
     let Some(session) = mol.tmux_session() else {
         return Ok(());
     };
-    let backend = cosmon_transport::TmuxBackend::new(super::tmux_socket_name(ctx));
+    let backend = cosmon_transport::TmuxBackend::for_process(
+        mol.process.as_ref(),
+        &super::tmux_socket_name(ctx),
+    )?;
     let Ok(pane) = backend.capture_session_output(session, 80) else {
         return Ok(());
     };
@@ -249,6 +261,7 @@ pub(crate) fn record_pane_died(
     let _ = record_pane_died_expected(store, state_dir, mol_id, raw_exit_code, None);
 }
 
+#[cfg(test)]
 fn record_pane_died_expected(
     store: &dyn StateStore,
     state_dir: &std::path::Path,
@@ -256,8 +269,41 @@ fn record_pane_died_expected(
     raw_exit_code: Option<&str>,
     expected: Option<&cosmon_core::worker_exit::LaunchIdentity>,
 ) -> anyhow::Result<()> {
+    record_pane_died_bound(store, state_dir, mol_id, raw_exit_code, expected, None)
+}
+
+fn record_pane_died_bound(
+    store: &dyn StateStore,
+    state_dir: &std::path::Path,
+    mol_id: &MoleculeId,
+    raw_exit_code: Option<&str>,
+    expected: Option<&cosmon_core::worker_exit::LaunchIdentity>,
+    terminal: Option<&cosmon_core::terminal::TerminalIdentity>,
+) -> anyhow::Result<()> {
     // Dispatch B cannot replace A between receipt validation and status projection.
     let _guard = store.lock_fleet()?;
+    let molecule = store.load_molecule(mol_id)?;
+    if let Some(terminal) = terminal {
+        anyhow::ensure!(
+            molecule.process.as_ref().and_then(|p| p.terminal.as_ref()) == Some(terminal),
+            "stale terminal exit trigger"
+        );
+    }
+
+    if let Some(process) = molecule.process.as_ref().filter(|p| p.transport.is_some()) {
+        if let Some(launch) = &process.worker_launch {
+            anyhow::ensure!(
+                expected == Some(launch),
+                "stale or unbound supervised exit trigger"
+            );
+        } else {
+            anyhow::ensure!(
+                terminal.is_some() && terminal == process.terminal.as_ref(),
+                "stale or unbound terminal exit trigger"
+            );
+        }
+    }
+
     #[cfg(unix)]
     match supervised_observation(store, mol_id) {
         Ok(Some((identity, observation))) => {
@@ -614,6 +660,64 @@ mod tests {
                 child_pid: Some(456),
                 observation: WorkerExitObservation::Exited { code: 0 },
             })
+        }
+
+        #[test]
+        fn old_terminal_trigger_cannot_write_exit_or_condemn_replacement() -> TestResult {
+            use cosmon_core::terminal::TerminalIdentity;
+            use cosmon_core::transport_selection::{
+                TransportKind, TransportSelection, TransportSource,
+            };
+            let (root, store, id, receipts) = setup(MoleculeStatus::Running)?;
+            let old = TerminalIdentity::Tmux {
+                socket_path: "/old.sock".into(),
+                server_pid: 1,
+                server_start: 1,
+                session_id: 1,
+                session_created: 1,
+                pane_id: 1,
+                pane_pid: 1,
+                pane_start: 1,
+            };
+            let mut replacement = old.clone();
+            let TerminalIdentity::Tmux { pane_id, .. } = &mut replacement;
+            *pane_id = 2;
+            for supervised in [false, true] {
+                let mut molecule = store.load_molecule(&id)?;
+                let process = molecule.process.as_mut().ok_or("missing process")?;
+                process.transport = Some(TransportSelection {
+                    backend: TransportKind::Tmux,
+                    source: TransportSource::Default,
+                });
+                process.terminal = Some(replacement.clone());
+                process.worker_launch = supervised.then(|| receipts.request().identity.clone());
+                store.save_molecule(&id, &molecule)?;
+                let before = std::fs::read(store.molecule_dir(&id).join("state.json"))?;
+                let log = std::fs::read(root.path().join("events.jsonl")).unwrap_or_default();
+                assert!(record_pane_died_bound(
+                    &store,
+                    root.path(),
+                    &id,
+                    Some("0"),
+                    None,
+                    Some(&old)
+                )
+                .is_err());
+                assert!(
+                    record_pane_died_bound(&store, root.path(), &id, Some("0"), None, None)
+                        .is_err()
+                );
+                assert_eq!(
+                    std::fs::read(store.molecule_dir(&id).join("state.json"))?,
+                    before
+                );
+                assert_eq!(
+                    std::fs::read(root.path().join("events.jsonl")).unwrap_or_default(),
+                    log
+                );
+                assert!(!store.molecule_dir(&id).join("worker.exit").exists());
+            }
+            Ok(())
         }
 
         #[test]

@@ -111,6 +111,7 @@ pub(super) struct SpawnWitness {
 #[cfg(unix)]
 pub(super) fn spawn_codex(
     config: &cosmon_transport::codex::CodexSessionConfig,
+    backend: &dyn cosmon_core::transport::TransportBackend,
     state_dir: &Path,
     molecule: &cosmon_state::MoleculeData,
     worker: &cosmon_core::id::WorkerId,
@@ -190,13 +191,12 @@ pub(super) fn spawn_codex(
         .into_iter()
         .filter_map(|(name, value)| value.map(|value| (name, value)))
         .collect();
-    let terminal = cosmon_transport::TmuxBackend::new(&config.socket)
-        .spawn_worker_with_env_witnessed(
-            &config.session_name,
-            &config.work_dir,
-            &command.join(" "),
-            &assignments,
-        )?;
+    let terminal = backend.spawn_command(
+        &config.session_name,
+        &config.work_dir,
+        &command.join(" "),
+        &assignments,
+    )?;
     Ok(SpawnWitness {
         terminal,
         expected_process,

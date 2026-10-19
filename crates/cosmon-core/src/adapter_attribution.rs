@@ -1293,6 +1293,7 @@ mod tests {
 
     fn worker_spawned(adapter: &str, worker: &str) -> EventV2 {
         EventV2::WorkerSpawned {
+            transport: None,
             worker_id: crate::id::WorkerId::new(worker).unwrap(),
             molecule: Some(mid()),
             session_name: "sess".to_string(),
