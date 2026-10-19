@@ -538,24 +538,27 @@ async fn explicit_scoped_policy_merges_with_harvest_scope_and_no_grant() {
         .exists());
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn explicit_policy_refuses_configured_binary_before_it_runs(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use std::os::unix::fs::PermissionsExt;
-
-    // The same executable bytes must produce a witness when run directly,
-    // and leave none when configured behind the explicit-policy refusal.
+    #[cfg(unix)]
     let sentinel = b"#!/bin/sh\nprintf 'spawned\\n' > \"$0.marker\"\nexit 0\n";
-    let control_dir = tempfile::tempdir()?;
-    let control_binary = control_dir.path().join("cs-sentinel");
-    let control_marker = control_dir.path().join("cs-sentinel.marker");
-    std::fs::write(&control_binary, sentinel)?;
-    std::fs::set_permissions(&control_binary, std::fs::Permissions::from_mode(0o755))?;
-    assert!(!control_marker.exists());
-    let control = Command::new(&control_binary).output()?;
-    assert!(control.status.success(), "{control:?}");
-    assert_eq!(std::fs::read(&control_marker)?, b"spawned\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The same executable bytes must produce a witness when run directly,
+        // and leave none when configured behind the explicit-policy refusal.
+        let control_dir = tempfile::tempdir()?;
+        let control_binary = control_dir.path().join("cs-sentinel");
+        let control_marker = control_dir.path().join("cs-sentinel.marker");
+        std::fs::write(&control_binary, sentinel)?;
+        std::fs::set_permissions(&control_binary, std::fs::Permissions::from_mode(0o755))?;
+        assert!(!control_marker.exists());
+        let control = Command::new(&control_binary).output()?;
+        assert!(control.status.success(), "{control:?}");
+        assert_eq!(std::fs::read(&control_marker)?, b"spawned\n");
+    }
 
     let mut tenants = TenantWorkspaces::new();
     let tenant = tenants.add("a");
@@ -572,12 +575,21 @@ async fn explicit_policy_refuses_configured_binary_before_it_runs(
     let oidc = oidc_mock().await;
     let security_dir = tempfile::tempdir()?;
     let mut state = stock_state(&oidc, &tenants, security_dir.path());
-    let binary = security_dir.path().join("cs-sentinel");
-    let marker = security_dir.path().join("cs-sentinel.marker");
-    std::fs::write(&binary, sentinel)?;
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))?;
-    assert!(!marker.exists());
-    state.harvest_effect = cosmon_rpp_adapter::harvest_effect::from_config(Some(binary));
+    #[cfg(unix)]
+    let (binary, marker) = {
+        use std::os::unix::fs::PermissionsExt;
+
+        let binary = security_dir.path().join("cs-sentinel");
+        let marker = security_dir.path().join("cs-sentinel.marker");
+        std::fs::write(&binary, sentinel)?;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))?;
+        assert!(!marker.exists());
+        (binary, marker)
+    };
+    // Retain the original refusal test on hosts without the Unix sentinel.
+    #[cfg(not(unix))]
+    let binary = security_dir.path().join("missing-cs");
+    state.harvest_effect = cosmon_rpp_adapter::harvest_effect::from_config(Some(binary.clone()));
     let jwt = oidc.issue(&IssueJwt {
         subject: "sub-a",
         audience: Some("cosmon-rpp-a"),
@@ -590,10 +602,13 @@ async fn explicit_policy_refuses_configured_binary_before_it_runs(
         .await?;
     let status = response.status();
     let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 8192).await?)?;
+    #[cfg(unix)]
     assert!(
         !marker.exists(),
         "the configured executor ran despite the explicit-policy refusal: {body}"
     );
+    #[cfg(not(unix))]
+    assert!(!binary.exists());
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
     assert_eq!(body["error"], "harvest_effect_unavailable", "{body}");
     assert_eq!(
