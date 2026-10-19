@@ -39,13 +39,23 @@ pub(super) fn compose(kind: TransportKind, socket: &str) -> cosmon_transport::Tm
     }
 }
 
+/// Positive dispatch history survives loss of a process snapshot. Only a later
+/// explicit legacy dispatch may restore name-based routing for that worker.
+pub(super) fn pinned_workers(
+    state_dir: &std::path::Path,
+) -> anyhow::Result<std::collections::HashSet<cosmon_core::id::WorkerId>> {
+    Ok(cosmon_state::transport_pin::pinned_workers(state_dir)?)
+}
+
 /// New Exec pins cannot promise a freeze/thaw roundtrip or accept a TUI resume prompt.
 /// Legacy workers retain their established path.
 pub(super) fn refuse_interactive_control(
     store: &dyn cosmon_state::StateStore,
     worker: &cosmon_state::WorkerData,
+    pinned: &std::collections::HashSet<cosmon_core::id::WorkerId>,
     operation: &str,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(!pinned.contains(&worker.id), "{operation}: recorded Codex Exec dispatch has no interactive continuation contract; missing process identity cannot authorize legacy fallback");
     if let Some(id) = worker
         .current_molecule
         .as_ref()

@@ -652,6 +652,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let mut fleet = store.load_fleet()?;
     let molecules = store.list_molecules(&MoleculeFilter::default())?;
+    let pinned_workers = super::worker_transport::pinned_workers(&state_dir)?;
 
     // Use tmux backend for liveness cross-check unless --no-tmux.
     let backend = if args.no_tmux {
@@ -665,6 +666,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             fallback,
             molecules.iter().filter_map(|m| m.process.as_ref()),
         )
+        .without_fallback_for(pinned_workers.iter().cloned())
     });
 
     // task-20260719-fedf — reap the completed-but-teardown-failed limbo
@@ -734,6 +736,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     if super::worker_transport::refuse_interactive_control(
                         store.as_ref(),
                         worker,
+                        &pinned_workers,
                         "patrol respawn",
                     )
                     .is_err()
@@ -780,6 +783,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             store.as_ref(),
             &molecules,
             &fleet,
+            &pinned_workers,
             backend.as_ref(),
             args.stale_after,
         )
@@ -2115,6 +2119,7 @@ pub(crate) fn propel_stale_molecules(
     store: &dyn StateStore,
     molecules: &[MoleculeData],
     fleet: &Fleet,
+    pinned_workers: &std::collections::HashSet<WorkerId>,
     backend: Option<&TmuxBackend>,
     stale_after: u64,
 ) -> PropelSweep {
@@ -2129,10 +2134,11 @@ pub(crate) fn propel_stale_molecules(
     let mut sweep = PropelSweep::default();
 
     for (wid, mid, age) in candidates {
-        if molecules
-            .iter()
-            .find(|m| m.id == mid)
-            .is_some_and(|m| super::worker_transport::refuse_exec_control(m, "propel").is_err())
+        if pinned_workers.contains(&wid)
+            || molecules
+                .iter()
+                .find(|m| m.id == mid)
+                .is_some_and(|m| super::worker_transport::refuse_exec_control(m, "propel").is_err())
         {
             continue;
         }
@@ -2508,6 +2514,9 @@ pub(crate) fn nudge_stalled_molecules(
     let Some(be) = backend else {
         return Vec::new();
     };
+    let Ok(pinned_workers) = super::worker_transport::pinned_workers(state_dir) else {
+        return Vec::new();
+    };
     let formulas_dir = cosmon_filestore::resolve_formulas_dir_from(state_dir);
     let candidates = find_stalled_for_nudge(molecules, now, |fid| {
         let fp = formulas_dir.join(format!("{fid}.formula.toml"));
@@ -2516,7 +2525,9 @@ pub(crate) fn nudge_stalled_molecules(
     });
     let mut nudged = Vec::new();
     for (wid, mol) in candidates {
-        if mol.process.as_ref().is_some_and(|p| p.transport.is_some()) {
+        if pinned_workers.contains(&wid)
+            || mol.process.as_ref().is_some_and(|p| p.transport.is_some())
+        {
             continue;
         }
         if !be.is_alive(&wid).unwrap_or(false) {
@@ -3454,12 +3465,15 @@ pub(crate) fn dialogue_scan_sweep(
         return Ok(report);
     };
 
+    let pinned_workers = super::worker_transport::pinned_workers(state_dir)?;
     let events_path = state_dir.join("events.jsonl");
     for mol in running {
         let Some(wid) = mol.assigned_worker.as_ref() else {
             continue;
         };
-        if mol.process.as_ref().is_some_and(|p| p.transport.is_some()) {
+        if pinned_workers.contains(wid)
+            || mol.process.as_ref().is_some_and(|p| p.transport.is_some())
+        {
             continue;
         }
         if !be.is_alive(wid).unwrap_or(false) {
@@ -3590,6 +3604,9 @@ pub(crate) fn codex_update_sweep(
         return;
     }
     let Some(backend) = backend else { return };
+    let Ok(pinned_workers) = super::worker_transport::pinned_workers(state_dir) else {
+        return;
+    };
     for mol in molecules
         .iter()
         .filter(|m| m.status == MoleculeStatus::Running)
@@ -3600,7 +3617,9 @@ pub(crate) fn codex_update_sweep(
         let Some(wid) = mol.assigned_worker.as_ref() else {
             continue;
         };
-        if mol.process.as_ref().is_some_and(|p| p.transport.is_some()) {
+        if pinned_workers.contains(wid)
+            || mol.process.as_ref().is_some_and(|p| p.transport.is_some())
+        {
             continue;
         }
         if !backend.is_alive(wid).unwrap_or(false) {
@@ -4894,7 +4913,7 @@ mod tests {
 
         // No transport: the sweep short-circuits before any send_input, which
         // is precisely what we assert — nothing is ever pushed at this worker.
-        let sweep = propel_stale_molecules(&store, &[mol], &fleet, None, 300);
+        let sweep = propel_stale_molecules(&store, &[mol], &fleet, &Default::default(), None, 300);
         assert!(sweep.propelled.is_empty(), "a gated worker was nudged");
     }
 

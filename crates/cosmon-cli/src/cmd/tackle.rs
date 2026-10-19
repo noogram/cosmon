@@ -538,6 +538,10 @@ fn run_with_transport(
     let mut mol = resolve_molecule(&store, &args.molecule)?;
     let mol_id = mol.id.clone();
 
+    let pinned_workers = super::worker_transport::pinned_workers(&state_dir)?;
+    anyhow::ensure!(!mol.assigned_worker.as_ref().is_some_and(|worker| pinned_workers.contains(worker)),
+        "recorded Codex Exec dispatch has no qualified continuation; missing process identity cannot authorize a replacement launch");
+
     anyhow::ensure!(mol.process.as_ref().is_none_or(|process| process.transport.is_none()),
         "Codex Exec already has a durable launch binding; observe/control that incarnation with cs terminal or cs purge --force, then explicitly resolve the existing dispatch before a new launch; --force cannot adopt or replace it");
 

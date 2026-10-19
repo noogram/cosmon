@@ -309,16 +309,99 @@ fn configured_exec_keeps_its_incarnation_after_configuration_and_namespace_chang
                 lost.process = None;
                 ledger.save_molecule(&id, &lost)?;
                 let lost_bytes = fs::read(ledger.molecule_dir(&id).join("state.json"))?;
+                // The detached startup model observer is an independent writer.
+                // Let its negative observation finish before asserting no control effects.
+                assert!(wait_for(|| {
+                    event_log::read_all(
+                    rig.state().join("events.jsonl")
+                )
+                .is_ok_and(|events| events.iter().any(|e| matches!(
+                    &e.event,
+                    cosmon_core::event_v2::EventV2::ModelObservationUnavailable { mol_id, .. } if mol_id == &id
+                )))
+                }));
+                let fleet_bytes = fs::read(rig.state().join("fleet.json"))?;
+                let event_bytes = fs::read(rig.state().join("events.jsonl"))?;
+                for command in [
+                    vec!["freeze", session.as_str(), "--timeout", "0"],
+                    vec!["thaw", session.as_str()],
+                    vec!["resume", "--agent", session.as_str()],
+                    vec!["whisper", id.as_str(), "--message", "resume"],
+                ] {
+                    let refused = rig
+                        .command(env!("CARGO_BIN_EXE_cs"))
+                        .env("TMUX_TMPDIR", other.path())
+                        .args(&command)
+                        .output()?;
+                    assert!(!refused.status.success(), "unexpected success: {command:?}");
+                    assert!(
+                        String::from_utf8_lossy(&refused.stderr).contains("identity")
+                            || String::from_utf8_lossy(&refused.stderr).contains("continuation"),
+                        "wrong refusal: {command:?}: {}",
+                        String::from_utf8_lossy(&refused.stderr)
+                    );
+                    assert_eq!(
+                        fs::read(ledger.molecule_dir(&id).join("state.json"))?,
+                        lost_bytes
+                    );
+                    assert_eq!(fs::read(rig.state().join("fleet.json"))?, fleet_bytes);
+                    assert_eq!(fs::read(rig.state().join("events.jsonl"))?, event_bytes);
+                    assert!(
+                        rig.command("tmux")
+                            .env("TMUX_TMPDIR", other.path())
+                            .args(["-L", "receipt-0000", "has-session", "-t", &session])
+                            .status()?
+                            .success(),
+                        "same-name neighbor changed: {command:?}"
+                    );
+                }
+                // Absence of the entire molecule snapshot is also positive unknown,
+                // whereas genuinely old fleet-only records keep their legacy path.
+                let state_path = ledger.molecule_dir(&id).join("state.json");
+                let hidden_path = ledger.molecule_dir(&id).join("state.unavailable");
+                fs::rename(&state_path, &hidden_path)?;
+                let refused = rig
+                    .command(env!("CARGO_BIN_EXE_cs"))
+                    .env("TMUX_TMPDIR", other.path())
+                    .args(["freeze", &session, "--timeout", "0"])
+                    .output()?;
+                fs::rename(&hidden_path, &state_path)?;
+                assert!(!refused.status.success());
+                assert_eq!(fs::read(rig.state().join("fleet.json"))?, fleet_bytes);
+                assert_eq!(fs::read(rig.state().join("events.jsonl"))?, event_bytes);
+                assert!(rig
+                    .command("tmux")
+                    .env("TMUX_TMPDIR", other.path())
+                    .args(["-L", "receipt-0000", "has-session", "-t", &session])
+                    .status()?
+                    .success());
                 let refused = rig
                     .command(env!("CARGO_BIN_EXE_cs"))
                     .env("TMUX_TMPDIR", other.path())
                     .args(["purge", &session, "--force", "--allow-unharvested"])
                     .output()?;
                 assert!(!refused.status.success());
-                assert_eq!(
-                    fs::read(ledger.molecule_dir(&id).join("state.json"))?,
-                    lost_bytes
-                );
+                assert!(String::from_utf8_lossy(&refused.stderr).contains("identity"));
+                assert_eq!(fs::read(&state_path)?, lost_bytes);
+                assert_eq!(fs::read(rig.state().join("fleet.json"))?, fleet_bytes);
+                let audit = fs::read(rig.state().join("events.jsonl"))?;
+                assert!(audit.starts_with(&event_bytes));
+                let appended: Vec<serde_json::Value> = audit[event_bytes.len()..]
+                    .split(|byte| *byte == b'\n')
+                    .filter(|line| !line.is_empty())
+                    .map(serde_json::from_slice)
+                    .collect::<Result<_, _>>()?;
+                assert_eq!(appended.len(), 1, "unexpected audit delta: {appended:?}");
+                let appended = &appended[0];
+                assert_eq!(appended["type"], "operator_signed");
+                assert_eq!(appended["action"], "cs purge");
+                assert_eq!(appended["signature_method"], "shell");
+                assert!(rig
+                    .command("tmux")
+                    .env("TMUX_TMPDIR", other.path())
+                    .args(["-L", "receipt-0000", "has-session", "-t", &session])
+                    .status()?
+                    .success());
                 ledger.save_molecule(&id, &mol)?;
                 // The real control effect must kill A while same-name B survives.
                 let stopped = rig

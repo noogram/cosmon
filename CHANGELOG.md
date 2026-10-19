@@ -26,6 +26,8 @@ this stage.
   Codex Exec on tmux: launch-bound terminal identity keeps observation,
   teardown and harvest independent of later configuration changes. Unsupported
   hosts fail before dispatch resources; Herdr and Zellij are not available.
+  Positive dispatch history prevents name-based fallback even after loss of
+  a modern process snapshot; genuine legacy fleet records remain compatible.
   New Exec pins refuse interactive continuation and freeze/thaw rather than
   launching a different adapter. Legacy Interactive behavior is preserved.
 

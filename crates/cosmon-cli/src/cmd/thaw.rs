@@ -43,6 +43,7 @@ pub struct Args {
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let state_dir = ctx.config.clone().unwrap_or_else(super::default_state_dir);
     let store = ctx.store_at(&state_dir);
+    let pinned_workers = super::worker_transport::pinned_workers(&state_dir)?;
 
     let worker_id = WorkerId::new(&args.worker)?;
 
@@ -53,7 +54,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .get(&worker_id)
         .ok_or_else(|| anyhow::anyhow!("worker not found: {worker_id}"))?;
 
-    super::worker_transport::refuse_interactive_control(store.as_ref(), worker, "thaw")?;
+    super::worker_transport::refuse_interactive_control(
+        store.as_ref(),
+        worker,
+        &pinned_workers,
+        "thaw",
+    )?;
 
     // Only Paused workers can be thawed.
     if worker.desired != DesiredState::Paused {

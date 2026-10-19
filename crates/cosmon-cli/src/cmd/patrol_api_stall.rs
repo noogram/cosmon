@@ -209,6 +209,9 @@ pub(crate) fn propel_api_stalled_molecules(inputs: &SweepInputs<'_>) -> ApiStall
     let Some(be) = inputs.backend else {
         return out;
     };
+    let Ok(pinned_workers) = super::worker_transport::pinned_workers(inputs.state_dir) else {
+        return out;
+    };
     let store = inputs.store;
     let now = Utc::now();
     // Every running molecule with a live-desired worker: staleness is *not* a
@@ -224,6 +227,16 @@ pub(crate) fn propel_api_stalled_molecules(inputs: &SweepInputs<'_>) -> ApiStall
     let kill_switched = cosmon_cli::kill_switches::halting(Autonomous::ApiStallSweep).is_some();
 
     for (wid, mid, age) in candidates {
+        if pinned_workers.contains(&wid)
+            || inputs
+                .molecules
+                .iter()
+                .find(|m| m.id == mid)
+                .and_then(|m| m.process.as_ref())
+                .is_some_and(|p| p.transport.is_some())
+        {
+            continue;
+        }
         if !be.is_alive(&wid).unwrap_or(false) {
             continue;
         }

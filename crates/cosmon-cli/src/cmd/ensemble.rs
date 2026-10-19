@@ -520,6 +520,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // molecule (which model is running where, at a glance). Single pass —
     // never re-read per molecule.
     let model_selections = cosmon_state::ops::model_selections(&state_dir);
+    let pinned_workers = super::worker_transport::pinned_workers(&state_dir)?;
     let mut rows: Vec<WorkerRow> = fleet
         .workers
         .values()
@@ -536,6 +537,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     Ok(backend) => observe_transport(&[backend], &w.id),
                     Err(_) => (TransportState::Unknown, None),
                 }
+            } else if pinned_workers.contains(&w.id) {
+                (TransportState::Unknown, None)
             } else {
                 observe_transport(&backends, &w.id)
             };

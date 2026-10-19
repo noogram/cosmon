@@ -2131,6 +2131,15 @@ fn run_with_remote_before_lock(
     )?;
 
     let mol = store.load_molecule(&mol_id)?;
+    let pinned_workers = cosmon_state::transport_pin::pinned_workers(&state_dir)?;
+    anyhow::ensure!(
+        mol.process.as_ref().is_some_and(|p| p.transport.is_some())
+            || !mol
+                .assigned_worker
+                .as_ref()
+                .is_some_and(|id| pinned_workers.contains(id)),
+        "recorded worker transport identity unavailable; refusing name-based harvest teardown"
+    );
 
     require_security_review_verdict(&state_dir, &mol)?;
 

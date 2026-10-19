@@ -62,7 +62,10 @@ records the selection in the event log. `cs --json observe ID` exposes it as
 `worker_transport`; `cs terminal ID` exposes the exact terminal capability.
 The existing lossy event rebuild cannot recreate a terminal incarnation:
 keep the canonical process snapshot for control; never reconstruct it from
-labels, configuration, or a newly discovered terminal.
+labels, configuration, or a newly discovered terminal. Positive pinned dispatch
+history still forbids name-based control if the process snapshot is lost; fleet
+observation reports unknown in that case. Missing history on a genuinely legacy
+fleet record does not manufacture a modern pin.
 
 Changing either configuration file does not migrate an existing launch.
 Terminal observation, fleet liveness probes, forced worker purge, and harvest

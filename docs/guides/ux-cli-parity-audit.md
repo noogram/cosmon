@@ -490,3 +490,8 @@ The stale-writer limitation in ADR-187 remains until the separate D8/B3 change l
 
 See [worker exit receipts](worker-exit-receipts.md) for launch residence,
 signal/TTY policy, explicit unknown states, qualification and limitations.
+
+Pinned Exec safety also survives a missing process snapshot: positive dispatch
+history refuses legacy freeze/thaw/resume, input and teardown; fleet probes
+report unknown without adopting a same-name terminal. Genuine legacy fleet-only
+records retain their established behavior.

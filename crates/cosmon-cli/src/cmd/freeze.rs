@@ -96,6 +96,7 @@ fn run_with_backend(
 ) -> anyhow::Result<()> {
     let state_dir = ctx.config.clone().unwrap_or_else(super::default_state_dir);
     let store = ctx.store_at(&state_dir);
+    let pinned_workers = super::worker_transport::pinned_workers(&state_dir)?;
 
     let worker_id = WorkerId::new(&args.worker)?;
 
@@ -112,7 +113,12 @@ fn run_with_backend(
         .get_mut(&worker_id)
         .ok_or_else(|| anyhow::anyhow!("worker not found: {worker_id}"))?;
 
-    super::worker_transport::refuse_interactive_control(store.as_ref(), worker, "freeze")?;
+    super::worker_transport::refuse_interactive_control(
+        store.as_ref(),
+        worker,
+        &pinned_workers,
+        "freeze",
+    )?;
 
     // Only Running workers can be frozen.
     if worker.desired != DesiredState::Running {
