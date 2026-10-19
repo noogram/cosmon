@@ -1925,6 +1925,18 @@ fn run_with_transport(
     ) {
         Ok(outcome) => outcome,
         Err(e) => {
+            if let Some(created) = e.downcast_ref::<ExecLaunchUnresolved>() {
+                if let Some(identity) = &created.terminal {
+                    let _ = dispatch_ledger::stamp_terminal_witness(
+                        &store,
+                        &mol.id,
+                        created.expected_process.as_ref(),
+                        identity,
+                    );
+                }
+                return Err(e);
+            }
+
             if let Some(failure) = e.downcast_ref::<InprocessLoopFailure>() {
                 if failure.progress.tools_executed > 0 {
                     let reason = format!(
@@ -1965,7 +1977,15 @@ fn run_with_transport(
                         expected,
                     )
                 });
-                emit_worker_spawn_rolled_back(&state_dir, &mol_id, &wid, adapter.as_str(), "spawn");
+                if rolled_back {
+                    emit_worker_spawn_rolled_back(
+                        &state_dir,
+                        &mol_id,
+                        &wid,
+                        adapter.as_str(),
+                        "spawn",
+                    );
+                }
                 if rolled_back && owns_worktree {
                     cleanup_partial_worktree(&repo_root, &worktree_path, &branch_name, false);
                 }
@@ -4614,6 +4634,14 @@ pub(super) struct SpawnOutcome {
     pub inprocess_work: Option<InprocessWork>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("Codex Exec transport launch was attempted; outcome unresolved and resources remain for audit: {message}")]
+struct ExecLaunchUnresolved {
+    message: String,
+    terminal: Option<cosmon_core::terminal::TerminalIdentity>,
+    expected_process: Option<cosmon_core::process::MoleculeProcess>,
+}
+
 /// The observable output of a synchronous in-process Direct-API agent loop.
 ///
 /// Carried out of each direct-provider spawn so the dispatch site can publish
@@ -4816,6 +4844,7 @@ pub(super) fn spawn_and_prompt(
     // [`SpawnOutcome::claude_config_dir`]).
     let mut terminal = None;
     let mut terminal_expected_process = None;
+    let mut codex_attempted = false;
     if adapter.as_str() == "claude" {
         let claude_config_dir = spawn_claude_and_prompt(
             backend,
@@ -4873,7 +4902,25 @@ pub(super) fn spawn_and_prompt(
             &harness_argv(harness_args),
             &mut terminal,
             &mut terminal_expected_process,
+            &mut codex_attempted,
         )
+        .map_err(|error| {
+            if codex_attempted
+                && adapter_entry
+                    .and_then(|entry| entry.mode.as_deref())
+                    .is_some_and(|mode| mode.eq_ignore_ascii_case("exec"))
+            {
+                anyhow::Error::new(ExecLaunchUnresolved {
+                    message: error.to_string(),
+                    terminal: terminal.clone(),
+                    expected_process: terminal_expected_process
+                        .clone()
+                        .or_else(|| mol.process.clone()),
+                })
+            } else {
+                error
+            }
+        })
         .map(|dialogue| SpawnOutcome {
             codex_launch_dialogue: dialogue,
             ..SpawnOutcome::default()
@@ -7119,6 +7166,7 @@ fn spawn_codex_and_prompt(
     harness_args: &[String],
     terminal: &mut Option<cosmon_core::terminal::TerminalIdentity>,
     terminal_expected_process: &mut Option<cosmon_core::process::MoleculeProcess>,
+    attempted: &mut bool,
 ) -> anyhow::Result<Option<cosmon_core::dialogue::DialogueScan>> {
     use cosmon_transport::codex;
     use cosmon_transport::readiness::LiveProbe as _;
@@ -7226,6 +7274,9 @@ fn spawn_codex_and_prompt(
         parent_mol_id: Some(mol.id.as_str().to_owned()),
     };
 
+    // Once the transport effect is attempted, a lost response cannot establish
+    // that creation did not happen. Preserve the ex-ante binding on any error.
+    *attempted = true;
     let supervised = adapter_entry
         .and_then(|entry| entry.worker_exit_receipts)
         .unwrap_or(false);
@@ -7265,17 +7316,21 @@ fn spawn_codex_and_prompt(
     ) {
         Ok(cosmon_transport::readiness::Liveness::Live) => {}
         Ok(other) => {
-            let _ = selected_backend.terminate(wid);
+            if mode == codex::CodexMode::Interactive {
+                let _ = selected_backend.terminate(wid);
+            }
             return Err(anyhow::anyhow!(
                 "cs tackle: codex session {session_name} never produced live \
                  output within 30s (last verdict={other}). Treating as a failed \
-                 spawn; tearing down. Inspect with \
+                 setup; inspect with \
                  `tmux -L {} capture-pane -pS - -t {session_name}`",
                 backend.socket()
             ));
         }
         Err(e) => {
-            let _ = selected_backend.terminate(wid);
+            if mode == codex::CodexMode::Interactive {
+                let _ = selected_backend.terminate(wid);
+            }
             return Err(anyhow::anyhow!(
                 "cs tackle: codex readiness wait failed for {session_name}: {e}. \
                  Inspect with `tmux -L {} capture-pane -pS - -t {session_name}`",

@@ -17,6 +17,8 @@ struct CommandBackend {
     hooks: RefCell<Vec<String>>,
     failure_with_neighbor: std::cell::Cell<bool>,
     missing_identity: std::cell::Cell<bool>,
+    readiness_failure: std::cell::Cell<bool>,
+    replaced: std::cell::Cell<bool>,
 }
 
 fn identity() -> cosmon_core::terminal::TerminalIdentity {
@@ -83,6 +85,33 @@ impl TransportBackend for CommandBackend {
         w: &cosmon_core::id::WorkerId,
         n: usize,
     ) -> Result<String, TransportError> {
+        if self.readiness_failure.get() {
+            if !self.replaced.replace(true) {
+                let state = std::env::current_dir()
+                    .map_err(|e| TransportError::Io(e.to_string()))?
+                    .join(".cosmon/state");
+                let store = FileStore::new(state);
+                let id =
+                    MoleculeId::new(w.as_str()).map_err(|e| TransportError::Io(e.to_string()))?;
+                let mut molecule = store
+                    .load_molecule(&id)
+                    .map_err(|e| TransportError::Io(e.to_string()))?;
+                if let Some(process) = molecule.process.as_mut() {
+                    process.started_at += chrono::Duration::seconds(1);
+                    let mut replacement = identity();
+                    let cosmon_core::terminal::TerminalIdentity::Tmux { pane_id, .. } =
+                        &mut replacement;
+                    *pane_id = 99;
+                    process.terminal = Some(replacement);
+                }
+                store
+                    .save_molecule(&id, &molecule)
+                    .map_err(|e| TransportError::Io(e.to_string()))?;
+            }
+            return Err(TransportError::Io(
+                "replacement won during readiness".into(),
+            ));
+        }
         self.inner.capture_output(w, n)
     }
     fn list_sessions(&self) -> Result<Vec<SessionInfo>, TransportError> {
@@ -193,8 +222,12 @@ fn configured_dispatch_reaches_the_injected_command_backend() -> TestResult {
                     .ok_or("unresolved dispatch lost")?;
                 assert!(unknown.transport.is_some() && unknown.terminal.is_none());
             } else {
-                assert_eq!(store.load_molecule(&other.id)?.process, None);
-                assert!(!root.join(".worktrees").join(id).exists());
+                let unknown = store
+                    .load_molecule(&other.id)?
+                    .process
+                    .ok_or("attempted launch intention erased")?;
+                assert!(unknown.transport.is_some() && unknown.terminal.is_none());
+                assert!(root.join(".worktrees").join(id).exists());
                 // The late same-name occupant is foreign to our failed launch.
                 assert!(failing
                     .inner
@@ -205,6 +238,37 @@ fn configured_dispatch_reaches_the_injected_command_backend() -> TestResult {
                 )));
             }
         }
+
+        let id = "witness-20261019-abd0";
+        let mut replacement_case = sample_molecule(id, MoleculeStatus::Pending);
+        replacement_case.formula_id = FormulaId::new("witness")?;
+        store.save_molecule(&replacement_case.id, &replacement_case)?;
+        let cli =
+            crate::Cli::try_parse_from(["cs", "tackle", id, "--adapter", "codex", "--name", id])?;
+        let crate::Command::Tackle(args) = cli.command else {
+            return Err("wrong command".into());
+        };
+        let raced = CommandBackend::default();
+        raced.readiness_failure.set(true);
+        let error = run_with_transport(&ctx, &args, Some(&raced))
+            .err()
+            .ok_or("readiness failure was accepted")?;
+        assert!(error.downcast_ref::<ExecLaunchUnresolved>().is_some());
+        let observed = store
+            .load_molecule(&replacement_case.id)?
+            .process
+            .ok_or("replacement was erased")?;
+        assert!(matches!(
+            observed.terminal,
+            Some(cosmon_core::terminal::TerminalIdentity::Tmux { pane_id: 99, .. })
+        ));
+        assert!(root.join(".worktrees").join(id).exists());
+        assert!(!raced
+            .inner
+            .calls()
+            .iter()
+            .any(|call| matches!(call, cosmon_transport::mock::MockCall::Terminate { .. })));
+        assert!(!cosmon_state::event_log::read_all(state.join("events.jsonl"))?.iter().any(|event| matches!(&event.event, cosmon_core::event_v2::EventV2::WorkerSpawnRolledBack { mol_id, .. } if mol_id.as_str() == id)));
         return Ok(());
     }
     // Process isolation avoids changing CWD, PATH or HOME for other Rust tests.
