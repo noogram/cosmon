@@ -2,6 +2,8 @@
 
 //! Internal waiting parent for the opt-in Codex tmux launch. Receipt evidence
 //! never grants completion, harvest, signal, or process adoption authority.
+//! The parent alone may stop its child, through the identity-bound channel of
+//! ADR-188.
 
 use std::path::{Path, PathBuf};
 
@@ -22,7 +24,8 @@ pub struct Args {
     pub arguments: Vec<String>,
 }
 
-/// Run one direct child; inherited signal dispositions intentionally permit unknown after death.
+/// Run one direct child; inherited signal dispositions intentionally permit unknown after
+/// death of this parent. A stop through its control channel yields the child's real status.
 #[cfg(unix)]
 pub fn run(args: &Args) -> anyhow::Result<()> {
     use cosmon_core::worker_exit::LaunchIdentity;
@@ -49,7 +52,11 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         std::process::id(),
         &args.program,
         &args.arguments,
-        &cosmon_transport::worker_supervisor::DirectWorkerLaunch,
+        &cosmon_transport::worker_supervisor::DirectWorkerLaunch::default(),
+        // ADR-188: the stop channel is bound after the claim, before spawn.
+        &cosmon_transport::worker_control::UnixWorkerControl {
+            root: cosmon_transport::worker_control::default_root().map_err(anyhow::Error::msg)?,
+        },
         &store,
         &|_| {},
     )

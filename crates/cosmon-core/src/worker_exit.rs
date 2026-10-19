@@ -231,11 +231,149 @@ pub enum SupervisionPoint {
 }
 
 /// An owned child handle; only its spawning parent may obtain its wait result.
-pub trait OwnedWorker {
+///
+/// The handle is shared between the waiting thread and the stop listener
+/// (ADR-188), so both operations take `&self` and the implementation keeps
+/// reaping and signalling behind one lock.
+pub trait OwnedWorker: Send + Sync {
     /// Diagnostic child PID, never an authority handle.
     fn pid(&self) -> u32;
     /// Wait for this child, preserving signal versus exit-code semantics.
-    fn wait(&mut self) -> Result<WorkerExitObservation, String>;
+    fn wait(&self) -> Result<WorkerExitObservation, String>;
+    /// Stop the child's process group: `SIGTERM`, then `SIGKILL` after a grace
+    /// period. `authorize` runs under the same lock that records the child's
+    /// exit, before the exit check; a refusal from it has no effect.
+    ///
+    /// # Errors
+    /// Returns the authorisation refusal, `AlreadyExited` once the exit is
+    /// recorded, or `Unsupported` when the OS refuses the signal.
+    fn terminate_group(
+        &self,
+        authorize: &dyn Fn() -> Result<(), StopRefused>,
+    ) -> Result<StopAccepted, StopRefused>;
+}
+
+/// Why a stop request had no effect. No refusal licenses another stop route:
+/// a caller never falls back to a name-, pane- or PID-addressed kill (ADR-188).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopRefused {
+    /// No supervisor answered for this launch: no listener, another user, a
+    /// malformed reply, or a timeout. Ambiguous after a lost reply: the stop
+    /// may have been delivered.
+    Unreachable,
+    /// The supervisor that answered holds a different launch identity.
+    IdentityMismatch,
+    /// The child's exit was recorded before the request; nothing was signalled.
+    AlreadyExited,
+    /// The platform, the request version, or the OS signal call is unsupported.
+    Unsupported,
+}
+
+impl std::fmt::Display for StopRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unreachable => "unreachable",
+            Self::IdentityMismatch => "identity_mismatch",
+            Self::AlreadyExited => "already_exited",
+            Self::Unsupported => "unsupported",
+        })
+    }
+}
+
+/// A stop the supervisor carried out; the receipt still comes from its wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StopAccepted {
+    /// Whether the group outlived the grace period and received `SIGKILL`.
+    pub escalated: bool,
+}
+
+/// Ask the supervising parent of one launch to stop its child (ADR-188).
+/// The identity is the only address that carries authority.
+pub trait WorkerStopPort {
+    /// Request a stop of exactly this launch.
+    ///
+    /// # Errors
+    /// Every failure is a [`StopRefused`]. A refusal guarantees that the
+    /// caller performs no fallback effect, not that the supervisor did
+    /// nothing: an `Unreachable` after a lost reply may follow a delivered
+    /// `SIGTERM`, so callers keep the launch unresolved until its receipt is
+    /// terminal.
+    fn request_stop(&self, identity: &LaunchIdentity) -> Result<StopAccepted, StopRefused>;
+}
+
+/// A bound stop listener for one launch, alive until dropped.
+pub trait WorkerControl {
+    /// Start answering stop requests against the owned child.
+    fn serve(&mut self, worker: std::sync::Arc<dyn OwnedWorker>);
+}
+
+/// Binds the stop listener of a launch after its claim and before its spawn.
+pub trait WorkerControlPort {
+    /// Bind the rendezvous for `identity`; failure must prevent the spawn.
+    ///
+    /// # Errors
+    /// Reports why no listener could be bound.
+    fn bind(&self, identity: &LaunchIdentity) -> Result<Box<dyn WorkerControl>, String>;
+}
+
+/// What a teardown caller may do after asking for a supervised stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupervisedStop {
+    /// The launch had a terminal receipt before any request, or produced one
+    /// after an accepted stop; teardown of its dead terminal may proceed.
+    Stopped(WorkerExitObservation),
+    /// The stop was refused and the receipt is not terminal: kill nothing.
+    Refused(StopRefused),
+    /// The stop was accepted but no terminal receipt appeared in time: kill nothing.
+    Pending,
+}
+
+/// Stop one supervised launch before teardown, without any fallback effect.
+///
+/// A receipt that is terminal before any request short-circuits it (ADR-079
+/// obligation 4: a second stop is the first). Otherwise every refusal of this
+/// invocation is returned as is, even if a receipt appears later: the caller
+/// kills nothing on a refusal, and a later invocation short-circuits on the
+/// receipt. After an accepted stop, `settle` waits for the supervisor's
+/// receipt.
+pub fn stop_supervised(
+    identity: &LaunchIdentity,
+    receipts: &dyn WorkerExitStore,
+    port: &dyn WorkerStopPort,
+    settle: &dyn Fn() -> WorkerExitObservation,
+) -> SupervisedStop {
+    let before = receipts.read();
+    if before.is_terminal() {
+        return SupervisedStop::Stopped(before);
+    }
+    match port.request_stop(identity) {
+        Ok(_) => {
+            let after = settle();
+            if after.is_terminal() {
+                SupervisedStop::Stopped(after)
+            } else {
+                SupervisedStop::Pending
+            }
+        }
+        Err(refused) => SupervisedStop::Refused(refused),
+    }
+}
+
+impl LaunchIdentity {
+    /// Short rendezvous key for the stop socket: the first 16 hex digits of
+    /// SHA-256 over the identity's JSON. It locates a listener and never
+    /// authorises one (ADR-188).
+    ///
+    /// # Errors
+    /// Fails only if the identity cannot be encoded.
+    pub fn rendezvous_key(&self) -> Result<String, String> {
+        let bytes =
+            serde_json::to_vec(self).map_err(|_| "worker identity cannot be encoded".to_owned())?;
+        let digest = format!("{:x}", Sha256::digest(bytes));
+        Ok(digest[..16].to_owned())
+    }
 }
 
 /// Injectable direct-executable launch; implementations inherit TTY and signal dispositions.
@@ -277,6 +415,116 @@ mod tests {
         let json = serde_json::to_string(&request).map_err(|e| e.to_string())?;
         assert!(!json.contains("secret-canary"));
         assert!(!json.contains("a b"));
+        Ok(())
+    }
+
+    struct FixedReceipt(std::cell::Cell<WorkerExitObservation>);
+    impl WorkerExitStore for FixedReceipt {
+        fn claim(&self, _: u32) -> Result<(), String> {
+            Ok(())
+        }
+        fn record_birth(&self, _: u32, _: u32) -> Result<(), String> {
+            Ok(())
+        }
+        fn publish(&self, receipt: &WorkerExitReceipt) -> Result<(), String> {
+            self.0.set(receipt.observation);
+            Ok(())
+        }
+        fn read(&self) -> WorkerExitObservation {
+            self.0.get()
+        }
+    }
+
+    struct FixedPort {
+        reply: Result<StopAccepted, StopRefused>,
+        calls: std::cell::Cell<u32>,
+    }
+    impl WorkerStopPort for FixedPort {
+        fn request_stop(&self, _: &LaunchIdentity) -> Result<StopAccepted, StopRefused> {
+            self.calls.set(self.calls.get() + 1);
+            self.reply
+        }
+    }
+
+    fn identity() -> Result<LaunchIdentity, String> {
+        Ok(LaunchRequest::bind(
+            MoleculeId::new("task-20261019-aaaa").map_err(|e| e.to_string())?,
+            LaunchToken::from_bytes([1; 16]),
+            LaunchToken::from_bytes([2; 16]),
+            "worker",
+            &[],
+            Path::new("/work"),
+            &[],
+        )?
+        .identity)
+    }
+
+    const SIGTERM: WorkerExitObservation = WorkerExitObservation::Signaled {
+        signal: 15,
+        core_dumped: false,
+    };
+
+    #[test]
+    fn a_terminal_receipt_short_circuits_the_request() -> Result<(), String> {
+        let receipts = FixedReceipt(std::cell::Cell::new(WorkerExitObservation::Exited {
+            code: 0,
+        }));
+        let port = FixedPort {
+            reply: Ok(StopAccepted { escalated: false }),
+            calls: std::cell::Cell::new(0),
+        };
+        assert_eq!(
+            stop_supervised(&identity()?, &receipts, &port, &|| SIGTERM),
+            SupervisedStop::Stopped(WorkerExitObservation::Exited { code: 0 })
+        );
+        assert_eq!(port.calls.get(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn an_accepted_stop_waits_for_the_receipt_and_every_refusal_is_kept() -> Result<(), String> {
+        let unknown = || FixedReceipt(std::cell::Cell::new(WorkerExitObservation::Unknown));
+        let accepted = FixedPort {
+            reply: Ok(StopAccepted { escalated: false }),
+            calls: std::cell::Cell::new(0),
+        };
+        assert_eq!(
+            stop_supervised(&identity()?, &unknown(), &accepted, &|| SIGTERM),
+            SupervisedStop::Stopped(SIGTERM)
+        );
+        assert_eq!(
+            stop_supervised(&identity()?, &unknown(), &accepted, &|| {
+                WorkerExitObservation::Unknown
+            }),
+            SupervisedStop::Pending
+        );
+        for refused in [
+            StopRefused::Unreachable,
+            StopRefused::IdentityMismatch,
+            StopRefused::AlreadyExited,
+            StopRefused::Unsupported,
+        ] {
+            let port = FixedPort {
+                reply: Err(refused),
+                calls: std::cell::Cell::new(0),
+            };
+            // Even a receipt that appears after the refusal does not turn
+            // this invocation into a teardown.
+            assert_eq!(
+                stop_supervised(&identity()?, &unknown(), &port, &|| SIGTERM),
+                SupervisedStop::Refused(refused)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_rendezvous_key_is_short_and_bound_to_the_whole_identity() -> Result<(), String> {
+        let a = identity()?;
+        let mut b = a.clone();
+        b.request_hash = "0".repeat(64);
+        assert_eq!(a.rendezvous_key()?.len(), 16);
+        assert_ne!(a.rendezvous_key()?, b.rendezvous_key()?);
         Ok(())
     }
 

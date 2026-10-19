@@ -8,13 +8,25 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use cosmon_core::worker_exit::{
-    LaunchIdentity, LaunchRequest, SupervisionPoint, WorkerExitObservation, WorkerExitReceipt,
-    WorkerExitStore,
+    LaunchIdentity, LaunchRequest, StopAccepted, StopRefused, SupervisionPoint,
+    WorkerExitObservation, WorkerExitReceipt, WorkerExitStore,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 /// Ex ante launch identity retained independently of worktree and terminal lifetime.
 pub const CURRENT_LAUNCH: &str = "worker-launch.json";
+
+/// Append-only audit of stop requests for one launch (ADR-188). Evidence only:
+/// it is never read as authority or as a receipt.
+pub const STOP_REQUESTS: &str = "stop-requests.jsonl";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopRequestEvidence {
+    identity: LaunchIdentity,
+    requested_at: String,
+    outcome: Result<StopAccepted, StopRefused>,
+}
 
 /// File adapter for one launch/incarnation, reconstructed using an expected identity.
 pub struct FileWorkerExitStore {
@@ -113,6 +125,31 @@ impl FileWorkerExitStore {
     #[must_use]
     pub fn directory(&self) -> &Path {
         &self.directory
+    }
+
+    /// Append one stop request and its outcome to [`STOP_REQUESTS`].
+    ///
+    /// # Errors
+    /// Reports encoding and I/O failures; callers treat them as non-fatal.
+    pub fn record_stop_request(
+        &self,
+        outcome: Result<StopAccepted, StopRefused>,
+    ) -> Result<(), String> {
+        let mut line = serde_json::to_vec(&StopRequestEvidence {
+            identity: self.request.identity.clone(),
+            requested_at: chrono::Utc::now().to_rfc3339(),
+            outcome,
+        })
+        .map_err(|_| "stop request evidence cannot be encoded".to_owned())?;
+        line.push(b'\n');
+        let mut file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(self.directory.join(STOP_REQUESTS))
+            .map_err(io_error)?;
+        file.write_all(&line).map_err(io_error)?;
+        file.sync_all().map_err(io_error)
     }
 
     fn witness(&self, supervisor_pid: u32, child_pid: Option<u32>) -> ProcessWitness {

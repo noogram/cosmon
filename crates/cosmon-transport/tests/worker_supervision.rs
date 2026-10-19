@@ -16,6 +16,7 @@ use cosmon_core::worker_exit::{
     LaunchRequest, LaunchToken, SupervisionPoint, WorkerExitObservation, WorkerExitStore,
 };
 use cosmon_state::worker_exit::FileWorkerExitStore;
+use cosmon_transport::worker_control::UnixWorkerControl;
 use cosmon_transport::worker_supervisor::{supervise, DirectWorkerLaunch};
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -106,7 +107,10 @@ fn crash_child() -> TestResult {
         std::process::id(),
         "/bin/sh",
         &command_args(&root),
-        &DirectWorkerLaunch,
+        &DirectWorkerLaunch::default(),
+        &UnixWorkerControl {
+            root: root.join("w"),
+        },
         &store,
         &|observed| {
             if format!("{observed:?}") == point {
@@ -244,7 +248,10 @@ fn direct_wait_keeps_exit_143_signal_15_and_exec_failure_distinct() -> TestResul
             std::process::id(),
             program,
             &args,
-            &DirectWorkerLaunch,
+            &DirectWorkerLaunch::default(),
+            &UnixWorkerControl {
+                root: root.path().join("w"),
+            },
             &store,
             &|_| {},
         )?;
