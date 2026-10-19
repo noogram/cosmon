@@ -2,6 +2,20 @@
 
 # CLI and UI parity audit
 
+## Worker host selection
+
+| Capability | CLI / configuration | Native UI / remote API |
+|---|---|---|
+| Choose worker hosting | `[transport] backend = "tmux"`, project > existing global configuration > tmux; unknown/Herdr/Zellij refused before resource creation | No new selector, worker backend, or control route |
+| Read launch provenance | `cs --json observe ID` adds optional `worker_transport`; new Codex Exec pins persist host/source and creation-time terminal identity | Shared observe JSON includes the optional field; terminal clients keep using `cs terminal` |
+| Control existing Exec worker | Terminal views and forced purge use the durable incarnation; harvest validates launch-bound triggers and preserves OS receipt semantics | Existing explicit terminal attachment only; no new lifecycle authority |
+| Resume a new Exec pin | Interactive resume/whisper, freeze/thaw, resurrection and forced re-tackle refuse before effects because no Exec continuation contract is qualified | No equivalent continuation support added |
+
+The qualified dispatch path is Codex Exec on tmux, with macOS runtime
+evidence. Legacy Interactive and old processes retain their historical paths.
+Client integrations named below do not constitute alternative worker hosts.
+See [configuration](../project-config.md#transportbackend--worker-hosting).
+
 ## Client integrations
 
 | Capability | CLI | Herdr companion | Native UI / remote API |
@@ -476,3 +490,19 @@ The stale-writer limitation in ADR-187 remains until the separate D8/B3 change l
 
 See [worker exit receipts](worker-exit-receipts.md) for launch residence,
 signal/TTY policy, explicit unknown states, qualification and limitations.
+
+Pinned Exec safety also survives a missing process snapshot: positive dispatch
+history refuses legacy freeze/thaw/resume, input and teardown; fleet probes
+report unknown without adopting a same-name terminal. Genuine legacy fleet-only
+records retain their established behavior.
+
+A legacy dispatch that reuses a worker name for a different molecule does not
+erase the old molecule's positive hosting history. Molecule-addressed controls
+and propulsion preserve that distinction; the new legacy molecule retains its
+existing path.
+
+Harvest of a molecule without any recorded worker/session/fleet assignment
+or historical tackle fleet record
+performs no transport or fleet teardown inferred from its id. Legacy fleet-only
+assignments still select their recorded worker name; unavailable history never
+grants a legacy control target.

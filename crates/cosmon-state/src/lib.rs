@@ -42,6 +42,7 @@ pub mod ops;
 pub mod plan_observation;
 pub mod rebuild;
 pub mod token_meter;
+pub mod transport_pin;
 pub mod wait;
 pub mod work_location;
 pub mod work_message;

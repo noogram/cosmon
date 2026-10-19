@@ -79,6 +79,7 @@ fn degraded_receipt_survives_observe_text_and_json_with_or_without_pin() {
                 selected_at,
             },
             EventV2::WorkerSpawned {
+                transport: None,
                 worker_id: worker.clone(),
                 molecule: Some(mol.clone()),
                 session_name: "example".into(),

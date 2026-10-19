@@ -521,6 +521,7 @@ impl Drop for TmuxBuffer<'_> {
 #[derive(Debug, Clone)]
 pub struct TmuxBackend {
     socket: String,
+    identity: Option<cosmon_core::terminal::TerminalIdentity>,
 }
 
 impl TmuxBackend {
@@ -529,6 +530,37 @@ impl TmuxBackend {
     pub fn new(socket: impl Into<String>) -> Self {
         Self {
             socket: socket.into(),
+            identity: None,
+        }
+    }
+
+    /// Route an existing process using its creation witness, never today's configuration.
+    /// Legacy records keep their historical namespace; new pins without an incarnation refuse.
+    ///
+    /// # Errors
+    /// Refuses incomplete durable bindings rather than adopting a same-name terminal.
+    pub fn for_process(
+        process: Option<&cosmon_core::process::MoleculeProcess>,
+        legacy_socket: &str,
+    ) -> Result<Self, TransportError> {
+        let Some(process) = process.filter(|p| p.transport.is_some()) else {
+            return Ok(Self::new(legacy_socket));
+        };
+        let identity = process.terminal.as_ref().ok_or_else(|| {
+            TransportError::Io("pinned transport has no creation-time terminal incarnation".into())
+        })?;
+        let cosmon_core::terminal::TerminalIdentity::Tmux { socket_path, .. } = identity;
+        Ok(Self {
+            socket: socket_path.clone(),
+            identity: Some(identity.clone()),
+        })
+    }
+
+    fn socket_flag(&self) -> &str {
+        if self.identity.is_some() || std::path::Path::new(&self.socket).is_absolute() {
+            "-S"
+        } else {
+            "-L"
         }
     }
 
@@ -577,7 +609,7 @@ impl TmuxBackend {
     }
 
     /// Shell-quote a string for safe embedding in a shell command.
-    fn shell_quote(s: &str) -> String {
+    pub(crate) fn shell_quote(s: &str) -> String {
         if s.is_empty() {
             return "''".to_owned();
         }
@@ -935,8 +967,11 @@ impl TmuxBackend {
 
     /// Run a tmux command and return its stdout on success.
     fn tmux_cmd(&self, args: &[&str]) -> Result<String, TransportError> {
+        if let Some(identity) = &self.identity {
+            return crate::terminal::bound_command(identity, args);
+        }
         let output = Command::new("tmux")
-            .arg("-L")
+            .arg(self.socket_flag())
             .arg(&self.socket)
             .args(args)
             .output()
@@ -1012,6 +1047,31 @@ fn record_injection(
 }
 
 impl TransportBackend for TmuxBackend {
+    fn supports_command_sessions(&self) -> bool {
+        cosmon_process_witness::process_start_time(std::process::id()).is_some()
+            && Command::new("tmux").arg("-V").output().is_ok_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .split_whitespace()
+                        .nth(1)
+                        .is_some_and(crate::terminal::supports_client_flags)
+            })
+    }
+
+    fn spawn_command(
+        &self,
+        session: &str,
+        directory: &str,
+        command: &str,
+        environment: &[(String, String)],
+    ) -> Result<Option<cosmon_core::terminal::TerminalIdentity>, TransportError> {
+        self.spawn_worker_with_env_witnessed(session, directory, command, environment)
+    }
+
+    fn install_exit_hook(&self, session: &str, command: &str) -> Result<(), TransportError> {
+        self.install_pane_died_hook(session, command)
+    }
+
     fn spawn(
         &self,
         agent: &AgentDefinition,
@@ -1432,6 +1492,10 @@ impl TransportBackend for TmuxBackend {
     }
 
     fn list_sessions(&self) -> Result<Vec<SessionInfo>, TransportError> {
+        if self.identity.is_some() {
+            let output = self.tmux_cmd(&["list-panes", "-F", "#{session_name}|#{pane_dead}"])?;
+            return Ok(parse_pane_listing(&output));
+        }
         // We query at pane granularity because `pane_dead` is a per-pane
         // attribute. When a tmux config carries `set -g remain-on-exit on`
         // (common in operator shells) a session whose wrapped process has
@@ -1442,7 +1506,7 @@ impl TransportBackend for TmuxBackend {
         // while claude was long gone. Filtering on `pane_dead` here is the
         // single-place fix that repairs every downstream check.
         let output = Command::new("tmux")
-            .arg("-L")
+            .arg(self.socket_flag())
             .arg(&self.socket)
             .args(["list-panes", "-a", "-F", "#{session_name}|#{pane_dead}"])
             .output()
@@ -1478,8 +1542,13 @@ impl TransportBackend for TmuxBackend {
     /// the pane's state. See [`TransportBackend::session_exists`] for why the
     /// two questions must stay separate.
     fn session_exists(&self, session_name: &str) -> Result<bool, TransportError> {
+        if self.identity.is_some() {
+            return self
+                .tmux_cmd(&["has-session", "-t", session_name])
+                .map(|_| true);
+        }
         let output = Command::new("tmux")
-            .arg("-L")
+            .arg(self.socket_flag())
             .arg(&self.socket)
             .args(["has-session", "-t", &format!("={session_name}")])
             .output()

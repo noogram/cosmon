@@ -63,6 +63,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let mol = resolve_molecule(&store, &args.molecule)?;
     let mol_id = mol.id.clone();
+    super::worker_transport::refuse_exec_control(&mol, "resurrect")?;
+    // Frozen/recovered snapshots may have released the process. A historical
+    // qualified Exec dispatch still cannot be resumed as an unpinned Claude worker.
+    anyhow::ensure!(!cosmon_state::transport_pin::pinned_molecules(&state_dir)?.contains(&mol_id),
+        "resurrect: pinned Codex Exec has no qualified continuation contract; resolve explicitly before a new dispatch");
 
     // Pre-condition: state == Frozen (the wreck state produced by `cs recover`).
     if mol.status != MoleculeStatus::Frozen {
@@ -206,6 +211,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &store,
         &mol,
         &crate::cmd::dispatch_ledger::DispatchRecord {
+            transport: None,
             worker: &wid,
             session_name: &session_name,
             adapter: &adapter,
@@ -257,6 +263,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     };
 
     if let Err(e) = crate::cmd::tackle::spawn_and_prompt(
+        &backend,
         &backend,
         &wid,
         &session_name,
@@ -312,6 +319,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &mol_id,
         &repo_root,
         &mol_dir,
+        None,
     ) {
         eprintln!(
             "cs resurrect: warning: failed to install pane-died hook on \

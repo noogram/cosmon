@@ -33,6 +33,9 @@ use crate::id::ProjectId;
 /// sensible values when absent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectConfig {
+    /// Worker host selection, separate from model adapters and client UIs.
+    #[serde(default)]
+    pub transport: crate::transport_selection::TransportConfig,
     /// Project identity — required after `cs init`.
     #[serde(default)]
     pub project: ProjectSection,

@@ -304,6 +304,7 @@ fn immediate_done_archives_the_workers_realized_model() {
     event_log::emit_one(
         &log,
         EventV2::WorkerSpawned {
+            transport: None,
             worker_id: worker,
             molecule: Some(mol),
             session_name: mol_id.clone(),

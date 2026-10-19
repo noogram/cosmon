@@ -285,6 +285,9 @@ fn run_to_molecule(
     let mol = store
         .load_molecule(&mol_id)
         .map_err(|e| anyhow::anyhow!("failed to load molecule: {e}"))?;
+    super::worker_transport::refuse_exec_control(&mol, "whisper")?;
+    let pinned = cosmon_state::transport_pin::pinned_molecules(&state_dir)?;
+    anyhow::ensure!(!pinned.contains(&mol.id), "whisper: recorded Exec dispatch cannot accept interactive input without its process identity");
     let session_name = mol
         .session_name
         .clone()

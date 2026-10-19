@@ -101,7 +101,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         mol.project_id.as_ref().is_none_or(|p| p == &project_id),
         "terminal molecule project mismatch"
     );
-    let backend = cosmon_transport::TmuxBackend::new(super::tmux_socket_name(ctx));
+    let backend = cosmon_transport::TmuxBackend::for_process(
+        mol.process.as_ref(),
+        &super::tmux_socket_name(ctx),
+    )?;
     let mut capability = capability(&mol, &backend, &project_id, &state_dir)?;
     if args.mode == Mode::Interactive {
         if let Capability::Available { capability, .. } = &mut capability {

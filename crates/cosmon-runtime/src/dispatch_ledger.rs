@@ -169,6 +169,8 @@ impl DispatchRecorded {
 /// (`session_name`, `model`) are trivially transposable and a mix-up would
 /// bind a molecule to the wrong tmux session.
 pub struct DispatchRecord<'a> {
+    /// Qualified host selection pinned before process creation; absent for legacy paths.
+    pub transport: Option<cosmon_core::transport_selection::TransportSelection>,
     /// The worker identity about to be spawned.
     pub worker: &'a WorkerId,
     /// The tmux session name (or in-process sentinel) the worker will own.
@@ -276,13 +278,14 @@ pub fn commit_dispatch(
     ) {
         updated.status = MoleculeStatus::Running;
     }
-    let process = cosmon_core::process::MoleculeProcess::new(
+    let mut process = cosmon_core::process::MoleculeProcess::new(
         record.worker.clone(),
         record.session_name.to_owned(),
     )
     .with_adapter_name(record.adapter.as_str())
     .with_model(record.model)
     .with_worktree_path(record.worktree_path.to_string_lossy());
+    process.transport = record.transport;
     updated.bind_process(process);
     updated.mark_tackled(record.tackled_by.clone());
     store.save_molecule(&mol_id, &updated)?;
@@ -422,6 +425,7 @@ pub fn register_tackle_worker(
     cosmon_state::event_log::emit_one(
         &events_path,
         cosmon_core::event_v2::EventV2::WorkerSpawned {
+            transport: mol.process.as_ref().and_then(|process| process.transport),
             worker_id: wid.clone(),
             molecule: Some(mol.id.clone()),
             session_name: wid.as_str().to_owned(),
@@ -515,6 +519,52 @@ pub fn rollback_dispatch(store: &FileStore, prior: &MoleculeData, worker: &Worke
     if let Ok(_g) = store.lock_fleet() {
         undo_committed_writes(store, prior, worker);
     }
+}
+
+/// Undo a failed qualified launch only while its original dispatch incarnation is bound.
+/// Later terminal/receipt enrichment is allowed; a replacement process is never undone.
+#[must_use]
+pub fn rollback_dispatch_incarnation(
+    store: &FileStore,
+    prior: &MoleculeData,
+    expected: &cosmon_core::process::MoleculeProcess,
+) -> bool {
+    let Ok(_guard) = store.lock_fleet() else {
+        return false;
+    };
+    let Ok(revision) = cosmon_state::ops::collapse::current_revision(store, &prior.id) else {
+        return false;
+    };
+    let Ok(mut current) = store.load_molecule(&prior.id) else {
+        return false;
+    };
+    if !current.process.as_ref().is_some_and(|p| {
+        p.worker_id == expected.worker_id
+            && p.started_at == expected.started_at
+            && p.transport == expected.transport
+    }) {
+        return false;
+    }
+    if current.status == MoleculeStatus::Running {
+        current.status = prior.status;
+    }
+    current.process.clone_from(&prior.process);
+    current.assigned_worker.clone_from(&prior.assigned_worker);
+    current.session_name.clone_from(&prior.session_name);
+    current.tackled_by.clone_from(&prior.tackled_by);
+    current.tackled_at.clone_from(&prior.tackled_at);
+    current.updated_at = chrono::Utc::now();
+    if store
+        .save_molecule_if_revision(&prior.id, &current, &revision)
+        .is_err()
+    {
+        return false;
+    }
+    let Ok(mut fleet) = store.load_fleet() else {
+        return false;
+    };
+    fleet.workers.remove(&expected.worker_id);
+    store.save_fleet(&fleet).is_ok()
 }
 
 /// The undo itself, with the fleet lock left to the caller.
@@ -731,6 +781,7 @@ mod tests {
         path: &'a std::path::Path,
     ) -> DispatchRecord<'a> {
         DispatchRecord {
+            transport: None,
             worker,
             session_name: "rewrite-briefing-aaaa",
             adapter,
@@ -740,6 +791,28 @@ mod tests {
             worktree_path: path,
             repo_root: path,
         }
+    }
+
+    #[test]
+    fn failed_launch_undo_preserves_a_same_worker_replacement(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (dir, store, mol) = fixture();
+        let worker = WorkerId::new("rewrite-briefing-aaaa")?;
+        let adapter = adapter();
+        let (dispatched, _) =
+            commit_dispatch(&store, &mol, &record(&worker, &adapter, dir.path()))?;
+        let expected = dispatched.process.as_ref().ok_or("missing dispatch")?;
+        let mut replacement = dispatched.clone();
+        replacement
+            .process
+            .as_mut()
+            .ok_or("missing dispatch")?
+            .started_at += chrono::Duration::seconds(1);
+        store.save_molecule(&mol.id, &replacement)?;
+        assert!(!rollback_dispatch_incarnation(&store, &mol, expected));
+        assert_eq!(store.load_molecule(&mol.id)?.process, replacement.process);
+        assert!(store.load_fleet()?.workers.contains_key(&worker));
+        Ok(())
     }
 
     /// The defect, stated as a test: after the commit and BEFORE any spawn

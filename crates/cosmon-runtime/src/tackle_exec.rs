@@ -1530,6 +1530,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             store,
             mol,
             &DispatchRecord {
+                transport: None,
                 worker: &wid,
                 session_name: &session_name,
                 adapter: &plan.adapter,

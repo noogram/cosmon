@@ -130,6 +130,37 @@ pub enum TransportError {
 /// and capturing output. The domain layer programs against this trait without
 /// knowing whether the backend is tmux, Docker, or a test mock.
 pub trait TransportBackend {
+    /// Whether literal command/environment launch and exit triggers are implemented.
+    /// Composition checks this before creating any dispatch resources.
+    fn supports_command_sessions(&self) -> bool {
+        false
+    }
+
+    /// Launch an adapter-built command in its requested directory and environment.
+    /// Returns only the incarnation witnessed by creation, never a later name lookup.
+    ///
+    /// # Errors
+    /// Refuses unsupported command sessions or failed creation.
+    fn spawn_command(
+        &self,
+        _session: &str,
+        _directory: &str,
+        _command: &str,
+        _environment: &[(String, String)],
+    ) -> Result<Option<crate::terminal::TerminalIdentity>, TransportError> {
+        Err(TransportError::SpawnFailed(
+            "command sessions unavailable".into(),
+        ))
+    }
+
+    /// Install a termination notification. It triggers collection, not an OS exit verdict.
+    ///
+    /// # Errors
+    /// Refuses an unsupported notification mechanism or failed installation.
+    fn install_exit_hook(&self, _session: &str, _command: &str) -> Result<(), TransportError> {
+        Err(TransportError::Io("exit notifications unavailable".into()))
+    }
+
     /// Spawn a new worker agent.
     ///
     /// Implementations MUST start the worker in

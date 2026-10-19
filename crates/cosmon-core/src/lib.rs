@@ -313,6 +313,7 @@ pub mod terminal;
 pub mod toposort;
 #[doc(hidden)]
 pub mod transport;
+pub mod transport_selection;
 #[doc(hidden)]
 pub mod visual;
 #[doc(hidden)]

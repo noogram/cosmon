@@ -520,12 +520,28 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // molecule (which model is running where, at a glance). Single pass —
     // never re-read per molecule.
     let model_selections = cosmon_state::ops::model_selections(&state_dir);
+    let pinned_workers = super::worker_transport::pinned_workers(&state_dir)?;
     let mut rows: Vec<WorkerRow> = fleet
         .workers
         .values()
         .map(|w| {
             // 1. Observe transport: is the tmux session alive?
-            let (probed_transport, raw_session_str) = observe_transport(&backends, &w.id);
+            let pinned = w
+                .current_molecule
+                .as_ref()
+                .and_then(|id| molecules.iter().find(|m| &m.id == id))
+                .and_then(|m| m.process.as_ref())
+                .filter(|p| p.transport.is_some());
+            let (probed_transport, raw_session_str) = if let Some(process) = pinned {
+                match cosmon_transport::TmuxBackend::for_process(Some(process), "") {
+                    Ok(backend) => observe_transport(&[backend], &w.id),
+                    Err(_) => (TransportState::Unknown, None),
+                }
+            } else if pinned_workers.contains(&w.id) {
+                (TransportState::Unknown, None)
+            } else {
+                observe_transport(&backends, &w.id)
+            };
 
             // 2. Observe cognitive: agent self-declared status.
             let (cognitive, cognitive_display) = observe_cognitive(&cognitive_dir, w.id.as_str());

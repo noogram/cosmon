@@ -174,6 +174,10 @@ impl TerminalInteractionBackend for TmuxBackend {
 }
 
 fn identity_guard(identity: &TerminalIdentity) -> String {
+    identity_guard_for(identity, true)
+}
+
+fn identity_guard_for(identity: &TerminalIdentity, live: bool) -> String {
     let TerminalIdentity::Tmux {
         server_pid,
         session_id,
@@ -188,7 +192,11 @@ fn identity_guard(identity: &TerminalIdentity) -> String {
         format!("#{{==:#{{session_created}},{session_created}}}"),
         format!("#{{==:#{{pane_id}},%{pane_id}}}"),
         format!("#{{==:#{{pane_pid}},{pane_pid}}}"),
-        "#{==:#{pane_dead},0}".into(),
+        if live {
+            "#{==:#{pane_dead},0}".into()
+        } else {
+            "1".into()
+        },
         "#{==:#{session_windows},1}".into(),
         "#{==:#{window_panes},1}".into(),
     ];
@@ -198,9 +206,98 @@ fn identity_guard(identity: &TerminalIdentity) -> String {
         .unwrap_or_default()
 }
 
+/// Execute only observation or exact teardown on a durable Exec terminal.
+/// Server fingerprints are checked before using numeric targets; the incarnation
+/// format guard and the operation run together on tmux's command queue.
+pub(crate) fn bound_command(
+    identity: &TerminalIdentity,
+    args: &[&str],
+) -> Result<String, cosmon_core::transport::TransportError> {
+    use cosmon_core::transport::TransportError;
+    let error = || TransportError::Io("pinned terminal incarnation changed or unavailable".into());
+    let TerminalIdentity::Tmux {
+        socket_path,
+        server_pid,
+        server_start,
+        pane_id,
+        session_id,
+        pane_pid,
+        pane_start,
+        ..
+    } = identity;
+    if process_start_time(*server_pid) != Some(*server_start) {
+        return Err(error());
+    }
+    let operation = args.first().copied().ok_or_else(error)?;
+    if !matches!(
+        operation,
+        "capture-pane" | "list-panes" | "display-message" | "has-session" | "kill-session"
+    ) {
+        return Err(TransportError::Io(
+            "pinned Codex Exec transport does not support this operation".into(),
+        ));
+    }
+    let target = if operation == "capture-pane" {
+        format!("%{pane_id}")
+    } else {
+        format!("${session_id}")
+    };
+    let output = probe(Command::new("tmux").args([
+        "-S",
+        socket_path,
+        "display-message",
+        "-p",
+        "-t",
+        &format!("%{pane_id}"),
+        "#{pane_dead}",
+    ]))
+    .map_err(|_| error())?;
+    let dead = output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1";
+    if !dead && process_start_time(*pane_pid) != Some(*pane_start) {
+        return Err(error());
+    }
+    // Never pass a caller's name-addressed target through to the effect.
+    let mut command = vec![operation.to_owned()];
+    let mut index = 1;
+    while index < args.len() {
+        if args[index] == "-t" {
+            index += 2;
+        } else if args[index] == "-a" {
+            index += 1;
+        } else {
+            command.push(args[index].to_owned());
+            index += 1;
+        }
+    }
+    command.extend(["-t".into(), target]);
+    let command = command
+        .iter()
+        .map(|s| crate::TmuxBackend::shell_quote(s))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let guard = identity_guard_for(identity, false);
+    let output = probe(Command::new("tmux").args([
+        "-S",
+        socket_path,
+        "if-shell",
+        "-F",
+        "-t",
+        &format!("%{pane_id}"),
+        &guard,
+        &command,
+        "display-message -p cosmon-incarnation-refused",
+    ]))
+    .map_err(|_| error())?;
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.status.success() || text.trim() == "cosmon-incarnation-refused" {
+        return Err(error());
+    }
+    Ok(text)
+}
+
 // This is a capability floor, not a liveness or provider-version heuristic.
 // tmux 3.2's manual specifies -E, read-only and ignore-size client semantics.
-fn supports_client_flags(version: &str) -> bool {
+pub(crate) fn supports_client_flags(version: &str) -> bool {
     let Some((major, minor)) = version.split_once('.') else {
         return false;
     };
