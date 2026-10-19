@@ -50,6 +50,8 @@ pub mod registry;
 pub mod spawn;
 pub mod terminal;
 pub mod tmux;
+#[cfg(unix)]
+pub mod worker_supervisor;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use mock::MockBackend;

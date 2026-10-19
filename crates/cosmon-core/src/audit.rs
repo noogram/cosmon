@@ -71,10 +71,12 @@ impl Action {
             EventV2::MergeCompleted { .. } => Some(Action::Done),
             EventV2::WorkerKilled { .. } => Some(Action::Purge),
             EventV2::WorkerExited { .. } => Some(Action::ProcessCrash),
+            EventV2::WorkerExitObserved { observation, .. } => observation.is_terminal().then_some(Action::ProcessCrash),
             // Every other variant is telemetry / receipt / advisory — the
             // state machine is not affected. Listing them exhaustively keeps
             // this match honest when new variants are added.
             EventV2::MoleculeStuck { .. }
+            | EventV2::WorkerLaunchPrepared { .. }
             | EventV2::DecaySpliced { .. }
             | EventV2::MergeDispatched { .. }
             | EventV2::WorkerSpawned { .. }

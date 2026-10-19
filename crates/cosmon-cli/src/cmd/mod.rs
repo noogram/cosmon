@@ -134,6 +134,7 @@ pub mod whisper;
 pub mod witness;
 pub mod work;
 pub(crate) mod work_location;
+pub mod worker_supervise;
 pub mod worktree_reclaim;
 
 /// Shared context derived from global CLI flags.

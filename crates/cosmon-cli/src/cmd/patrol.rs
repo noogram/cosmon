@@ -1381,6 +1381,7 @@ pub(crate) fn harvest_sweep(
             Ok(
                 crate::cmd::harvest::HarvestOutcome::AlreadyMerged
                 | crate::cmd::harvest::HarvestOutcome::NotCompleted
+                | crate::cmd::harvest::HarvestOutcome::ReceiptUnknown
                 | crate::cmd::harvest::HarvestOutcome::DryRun,
             ) => {
                 report.skipped.push(mol.id.clone());

@@ -69,3 +69,21 @@ replay preserves a historical gap through latest-response recovery. These are
 checked in the model-evidence assessment, ledger, and watcher integration
 tests. A future change that lets quality affect dispatch or a lifecycle
 transition must revisit the TLA+ model before that coupling ships.
+## Launch-bound worker exit receipts (2026-10-19)
+
+`MoleculeProcess.worker_launch` and the canonical worker receipt residence
+bind observations to a dispatch, incarnation and request. They are evidence
+metadata, not new lifecycle states or authority. `WorkerLaunchPrepared` is
+telemetry; a terminal `WorkerExitObserved` maps to the existing `ProcessCrash`
+action, while unknown produces no action. Exit zero never maps to Complete.
+`CosmonRun.tla` therefore needs no new action or state variable for this
+increment. Its abstract model does not encode filesystem publication phases.
+
+Executable coverage lives in `worker_supervision` (six real crash windows,
+first-launch contention, replay refusal and direct wait), `worker_exit`
+(identity/claim/birth/publication reads), and the harvest supervised tests
+(unknown, completion separation, duplicate observations and stale launch
+triggers). The explicit real-tmux `worker_exit_receipts` test exercises the
+actual tackle path with a fake executable and no provider call. A future
+change allowing unknown to drive restart or changing lifecycle/harvest
+authority must revisit the model before that coupling ships.

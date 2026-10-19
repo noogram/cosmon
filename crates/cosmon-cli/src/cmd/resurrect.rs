@@ -306,9 +306,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // exists). A patrol-driven witness + the backstop `cs patrol
     // --harvest` sweep still covers the gap. Tackle-time install
     // remains the only path that refuses to proceed on install failure.
-    if let Err(e) =
-        crate::cmd::tackle::install_harvest_hook(&backend, &session_name, &mol_id, &repo_root)
-    {
+    if let Err(e) = crate::cmd::tackle::install_harvest_hook(
+        &backend,
+        &session_name,
+        &mol_id,
+        &repo_root,
+        &mol_dir,
+    ) {
         eprintln!(
             "cs resurrect: warning: failed to install pane-died hook on \
              {session_name}: {e}. Patrol sweeps will backstop liveness."

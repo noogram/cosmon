@@ -1229,6 +1229,22 @@ pub enum EventV2 {
         /// Short tag identifying the probe that fired (e.g. `pane_died`).
         reason: String,
     },
+    /// An opt-in launch identity was durably prepared before its child could start.
+    WorkerLaunchPrepared {
+        /// Molecule owning the canonical receipt residence.
+        molecule_id: MoleculeId,
+        /// Expected launch, incarnation and request binding; never a kill capability.
+        launch: crate::worker_exit::LaunchIdentity,
+    },
+    /// A validated direct-child observation, distinct from the legacy pane status.
+    WorkerExitObserved {
+        /// Molecule whose launch was observed.
+        molecule_id: MoleculeId,
+        /// Exact launch whose receipt was read.
+        launch: crate::worker_exit::LaunchIdentity,
+        /// Wait/exec evidence, or explicit unknown when evidence was lost.
+        observation: crate::worker_exit::WorkerExitObservation,
+    },
     /// A fleet was loaded with an advisory `organization_type` field.
     ///
     /// Pure IFBDD instrumentation: the field is free-form and never
@@ -2948,6 +2964,8 @@ impl EventV2 {
             | Self::Resurrected { molecule_id, .. }
             | Self::Harvested { molecule_id, .. }
             | Self::WorkerExited { molecule_id, .. }
+            | Self::WorkerLaunchPrepared { molecule_id, .. }
+            | Self::WorkerExitObserved { molecule_id, .. }
             | Self::WorkerSilenceDetected { molecule_id, .. }
             | Self::BlockingDialogueDetected { molecule_id, .. }
             | Self::CodexUpdated { molecule_id, .. }
@@ -3991,6 +4009,16 @@ mod tests {
         WorkerId::new(s).unwrap()
     }
 
+    fn worker_launch() -> crate::worker_exit::LaunchIdentity {
+        crate::worker_exit::LaunchIdentity {
+            schema: 1,
+            molecule_id: mid("cs-20260411-aaaa"),
+            launch_id: crate::worker_exit::LaunchToken::from_bytes([1; 16]),
+            incarnation: crate::worker_exit::LaunchToken::from_bytes([2; 16]),
+            request_hash: "0".repeat(64),
+        }
+    }
+
     #[test]
     fn seq_is_monotone() {
         let a = Seq(0);
@@ -4232,6 +4260,15 @@ mod tests {
                 molecule_id: mid("cs-20260411-aaaa"),
                 exit_code: None,
                 reason: "pane_died".to_owned(),
+            },
+            EventV2::WorkerLaunchPrepared {
+                molecule_id: mid("cs-20260411-aaaa"),
+                launch: worker_launch(),
+            },
+            EventV2::WorkerExitObserved {
+                molecule_id: mid("cs-20260411-aaaa"),
+                launch: worker_launch(),
+                observation: crate::worker_exit::WorkerExitObservation::Unknown,
             },
             EventV2::WorkerSilenceDetected {
                 molecule_id: mid("cs-20260411-aaaa"),
@@ -4915,6 +4952,8 @@ mod tests {
             | EventV2::ExternalChannelTimeout { .. }
             | EventV2::InvocationCompleted { .. }
             | EventV2::WorkerExited { .. }
+            | EventV2::WorkerLaunchPrepared { .. }
+            | EventV2::WorkerExitObserved { .. }
             | EventV2::FleetTyped { .. }
             | EventV2::OperatorPresent { .. }
             | EventV2::OperatorAbsent { .. }

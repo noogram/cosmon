@@ -902,6 +902,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         mut model_source,
         harness,
     } = selection;
+    super::worker_supervise::check_configuration(
+        adapter.as_str(),
+        project_config
+            .adapters
+            .as_ref()
+            .and_then(|cfg| cfg.entry(adapter.as_str())),
+        &store.molecule_dir(&mol_id),
+    )?;
     // Capability-aware formula gate (noogram/cosmon #4 clause 2). The
     // formula declares what its steps need of a worker
     // (`requires_capabilities = ["shell", "vcs"]`); refuse here when the
@@ -1973,7 +1981,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // emission is the structural counter-measure that prevents the
         // operator from mistaking an unsupervised molecule for a
         // normally-supervised one.
-        if let Err(e) = install_harvest_hook(&backend, &session_name, &mol_id, &repo_root) {
+        if let Err(e) =
+            install_harvest_hook(&backend, &session_name, &mol_id, &repo_root, &mol_state_dir)
+        {
             emit_supervision_setup_failed_event(
                 &mol_id,
                 &wid,
@@ -4668,6 +4678,7 @@ pub(super) fn spawn_and_prompt(
     // default_model from. `None` means "fall back to env-var + compile-time
     // defaults", which is the historical pre-C6 behaviour.
     let adapter_entry = adapters_cfg.and_then(|cfg| cfg.entry(adapter.as_str()));
+    super::worker_supervise::check_configuration(adapter.as_str(), adapter_entry, mol_state_dir)?;
     // The detached local-worker arm is the only one that yields a PID witness
     // (noogram/cosmon#3 Defect 1); handle it with an early return so the
     // remaining match stays uniformly `Result<()>` and is wrapped into an
@@ -7103,8 +7114,20 @@ fn spawn_codex_and_prompt(
         parent_mol_id: Some(mol.id.as_str().to_owned()),
     };
 
-    *terminal = codex::spawn_codex_session_witnessed(&config)
-        .map_err(|e| anyhow::anyhow!("cs tackle: codex spawn failed: {e}"))?;
+    let supervised = adapter_entry
+        .and_then(|entry| entry.worker_exit_receipts)
+        .unwrap_or(false);
+    #[cfg(unix)]
+    if supervised {
+        *terminal =
+            super::worker_supervise::spawn_codex(&config, state_dir, mol, wid, mol_state_dir)?;
+    } else {
+        *terminal = codex::spawn_codex_session_witnessed(&config)?;
+    }
+    #[cfg(not(unix))]
+    {
+        *terminal = codex::spawn_codex_session_witnessed(&config)?;
+    }
 
     // Postcondition: demand evidence codex actually came up, via the same
     // `LiveProbe` contract the claude/aider paths use. `CodexProbe::observe`
@@ -7163,6 +7186,10 @@ fn spawn_codex_and_prompt(
             update_policy,
             &provenance,
             || {
+                anyhow::ensure!(
+                    !supervised,
+                    "automatic relaunch of a supervised incarnation is forbidden"
+                );
                 backend.terminate(wid)?;
                 *terminal = codex::spawn_codex_session_witnessed(&config)?;
                 let probe = cosmon_transport::readiness::CodexProbe;
@@ -10100,6 +10127,7 @@ pub(super) fn install_harvest_hook(
     session_name: &str,
     mol_id: &MoleculeId,
     repo_root: &std::path::Path,
+    molecule_dir: &std::path::Path,
 ) -> Result<(), cosmon_core::transport::TransportError> {
     let cs_bin = std::env::current_exe()
         .map_or_else(|_| "cs".to_owned(), |p| p.to_string_lossy().into_owned());
@@ -10110,6 +10138,15 @@ pub(super) fn install_harvest_hook(
     let safe_repo = repo_root.to_string_lossy().replace('\'', "'\\''");
     let safe_bin = cs_bin.replace('\'', "'\\''");
     let safe_mol = mol_id.as_str().replace('\'', "'\\''");
+    let mut launch_option = String::new();
+    #[cfg(unix)]
+    if let Some(receipts) = cosmon_state::worker_exit::FileWorkerExitStore::current(molecule_dir)
+        .map_err(cosmon_core::transport::TransportError::Io)?
+    {
+        let expected = serde_json::to_string(&receipts.request().identity)
+            .map_err(|error| cosmon_core::transport::TransportError::Io(error.to_string()))?;
+        launch_option = format!(" --worker-launch '{}'", expected.replace('\'', "'\\''"));
+    }
     // `#{pane_dead_status}` is a tmux format that expands to the exit
     // status of the dead pane in the hook context. When tmux cannot
     // supply it (older versions, unusual pane types) the literal string
@@ -10117,7 +10154,7 @@ pub(super) fn install_harvest_hook(
     // "no information" and emits `exit_code = None`.
     let command = format!(
         "cd '{safe_repo}' && '{safe_bin}' harvest --molecule '{safe_mol}' \
-         --from-pane-died --exit-code '#{{pane_dead_status}}' \
+         --from-pane-died --exit-code '#{{pane_dead_status}}'{launch_option} \
          >/dev/null 2>&1 || true"
     );
     backend.install_pane_died_hook(session_name, &command)

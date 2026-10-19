@@ -466,3 +466,13 @@ and other CLI surfaces in this table remain unverified for this capability.
 
 Both HTTP collapse routes refuse leased missions through the shared authority.
 The stale-writer limitation in ADR-187 remains until the separate D8/B3 change lands.
+## Supervision portable des workers
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Opt-in durable direct-child exit evidence | Galaxy configuration `[adapters.codex] worker_exit_receipts = true`, with `update = "skip"` or `"operator"`, applies only to POSIX Codex tmux launches through `cs tackle`. Default is unchanged; other adapters refuse the option. | No toggle or backend qualification in this increment. Read existing canonical observations; no new lifecycle authority. | No new API option or worker backend. |
+| Internal waiting parent | Hidden `cs worker-supervise` consumes the launch prepared by `cs tackle`; it is not a user dispatch entry point. | No equivalent command. | Not exposed. |
+| Conservative receipt consumption | Hidden `cs harvest --worker-launch` pins the hook trigger to one launch. Validated child wait/exec evidence is distinct from legacy pane status; unknown blocks automatic harvest and redispatch. | No new harvest authorization. | Existing authorization remains required. |
+
+See [worker exit receipts](worker-exit-receipts.md) for launch residence,
+signal/TTY policy, explicit unknown states, qualification and limitations.
