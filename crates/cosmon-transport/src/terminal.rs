@@ -192,8 +192,16 @@ fn identity_guard_for_scope(identity: &TerminalIdentity, live: bool, layout: boo
     } = identity;
     let conditions = [
         format!("#{{==:#{{pid}},{server_pid}}}"),
-        format!("#{{==:#{{session_id}},${session_id}}}"),
-        format!("#{{==:#{{session_created}},{session_created}}}"),
+        if layout {
+            format!("#{{==:#{{session_id}},${session_id}}}")
+        } else {
+            "1".into()
+        },
+        if layout {
+            format!("#{{==:#{{session_created}},{session_created}}}")
+        } else {
+            "1".into()
+        },
         format!("#{{==:#{{pane_id}},%{pane_id}}}"),
         format!("#{{==:#{{pane_pid}},{pane_pid}}}"),
         if live {
@@ -385,8 +393,9 @@ fn checked_bound_command(
         .collect::<Vec<_>>()
         .join(" ");
     let guard = identity_guard_for(identity, false);
-    // A layout-only refusal does not establish that the original worker is
-    // gone. Distinguish it from a changed binding on the same server queue.
+    // A layout-only refusal (including session relocation) does not establish
+    // that the original worker is gone. Compare only the server/pane incarnation
+    // in the nested predicate, on the same server queue.
     let refusal = format!(
         "if-shell -F -t %{pane_id} '{}' 'display-message -p cosmon-terminal-layout-refused' 'display-message -p cosmon-incarnation-refused'",
         identity_guard_for_scope(identity, false, false),
@@ -404,10 +413,10 @@ fn checked_bound_command(
             &refusal,
         ],
     )?;
-    bound_output(output)
+    bound_output(&output)
 }
 
-fn bound_output(output: std::process::Output) -> Result<String, BoundCommandFailure> {
+fn bound_output(output: &std::process::Output) -> Result<String, BoundCommandFailure> {
     use cosmon_core::transport::TransportError;
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     if text.trim() == "cosmon-terminal-layout-refused" {
@@ -419,7 +428,7 @@ fn bound_output(output: std::process::Output) -> Result<String, BoundCommandFail
         return Err(BoundCommandFailure::IncarnationChanged);
     }
     if !output.status.success() {
-        return Err(classify_tmux_failure(&output));
+        return Err(classify_tmux_failure(output));
     }
     Ok(text)
 }

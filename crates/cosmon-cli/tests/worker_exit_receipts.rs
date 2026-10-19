@@ -1134,3 +1134,91 @@ fn force_purge_pinned_transport_error_retains_entry_then_exact_purge_kills() -> 
         .success());
     Ok(())
 }
+
+#[test]
+#[ignore = "real tmux qualification: run explicitly with --ignored on a POSIX host"]
+fn force_purge_pinned_relocated_pane_retains_live_worker() -> TestResult {
+    use cosmon_core::terminal::TerminalIdentity;
+    let rig = Rig::new()?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&rig.cs(&["--json", "nucleate", "witness"])?.stdout)?;
+    let id = MoleculeId::new(value["id"].as_str().ok_or("no molecule")?)?;
+    let session = "relocated-pin";
+    rig.cs(&[
+        "tackle",
+        id.as_str(),
+        "--adapter",
+        "codex",
+        "--name",
+        session,
+    ])?;
+    let ledger = FileStore::new(rig.state());
+    let original = ledger.load_molecule(&id)?;
+    let TerminalIdentity::Tmux {
+        pane_id,
+        pane_pid,
+        pane_start,
+        ..
+    } = original
+        .process
+        .as_ref()
+        .and_then(|process| process.terminal.as_ref())
+        .ok_or("no terminal")?;
+    let moved = rig
+        .command("tmux")
+        .args([
+            "-L",
+            "receipt-0000",
+            "join-pane",
+            "-d",
+            "-s",
+            &format!("%{pane_id}"),
+            "-t",
+            "neighbor",
+        ])
+        .output()?;
+    assert!(
+        moved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    assert_eq!(
+        cosmon_process_witness::process_start_time(*pane_pid),
+        Some(*pane_start)
+    );
+    let before = fs::read(rig.state().join("fleet.json"))?;
+    let refused = rig
+        .command(env!("CARGO_BIN_EXE_cs"))
+        .args(["--json", "purge", session, "--force", "--allow-unharvested"])
+        .output()?;
+    assert!(
+        !refused.status.success(),
+        "moving a live pane cannot make its worker stale"
+    );
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("layout changed"));
+    assert_eq!(fs::read(rig.state().join("fleet.json"))?, before);
+    assert_eq!(
+        cosmon_process_witness::process_start_time(*pane_pid),
+        Some(*pane_start)
+    );
+    assert!(rig
+        .command("tmux")
+        .args([
+            "-L",
+            "receipt-0000",
+            "display-message",
+            "-p",
+            "-t",
+            &format!("%{pane_id}"),
+            "#{pane_pid}",
+        ])
+        .output()?
+        .status
+        .success());
+    fs::write(ledger.molecule_dir(&id).join("control"), "exit 0\n")?;
+    assert!(wait_for(|| !ledger
+        .molecule_dir(&id)
+        .join("control")
+        .exists()));
+    Ok(())
+}
