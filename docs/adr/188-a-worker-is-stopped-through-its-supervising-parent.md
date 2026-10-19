@@ -50,8 +50,15 @@ identifier can carry kill authority:
   (probe 12). A different process group in the same session is killed.
 - Herdr's waiter sees the child's `ExitStatus` but reduces it to a coarse
   exit reason, and the public `pane_exited` event carries no status.
+- The binary client-shell lane does carry a server-boot guard:
+  `ClientShellEndpointRequest` has a `boot_id` (`src/protocol/wire.rs:592`)
+  and the server refuses a stale boot before dispatch
+  (`src/server/headless/endpoint_requests.rs:28`). That guard covers a
+  server restart for that lane only; it is not a per-pane incarnation check
+  and JSON `pane.close` has no equivalent.
 - An argv pane's command is not replayed on restore; `resume_argv` of a
-  recognised agent is a separate replay path. A server may ignore unknown
+  recognised agent is a separate replay path, which types the quoted argv
+  into a fresh shell (`src/app/agent_resume.rs:226-315`). A server may ignore unknown
   request keys, so an upstream conditional close needs capability
   negotiation, not only a new optional field.
 
