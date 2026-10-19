@@ -652,8 +652,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let mut fleet = store.load_fleet()?;
     let molecules = store.list_molecules(&MoleculeFilter::default())?;
-    let pinned_workers = super::worker_transport::pinned_workers(&state_dir)?;
-    let pinned_molecules = cosmon_state::transport_pin::pinned_molecules(&state_dir)?;
+    let cosmon_state::transport_pin::TransportPins {
+        workers: pinned_workers,
+        molecules: pinned_molecules,
+    } = cosmon_state::transport_pin::pins(&state_dir)?;
 
     // Use tmux backend for liveness cross-check unless --no-tmux.
     let backend = if args.no_tmux {
@@ -2518,10 +2520,11 @@ pub(crate) fn nudge_stalled_molecules(
     let Some(be) = backend else {
         return Vec::new();
     };
-    let Ok(pinned_workers) = super::worker_transport::pinned_workers(state_dir) else {
-        return Vec::new();
-    };
-    let Ok(pinned_molecules) = cosmon_state::transport_pin::pinned_molecules(state_dir) else {
+    let Ok(cosmon_state::transport_pin::TransportPins {
+        workers: pinned_workers,
+        molecules: pinned_molecules,
+    }) = cosmon_state::transport_pin::pins(state_dir)
+    else {
         return Vec::new();
     };
     let formulas_dir = cosmon_filestore::resolve_formulas_dir_from(state_dir);
@@ -3473,8 +3476,10 @@ pub(crate) fn dialogue_scan_sweep(
         return Ok(report);
     };
 
-    let pinned_workers = super::worker_transport::pinned_workers(state_dir)?;
-    let pinned_molecules = cosmon_state::transport_pin::pinned_molecules(state_dir)?;
+    let cosmon_state::transport_pin::TransportPins {
+        workers: pinned_workers,
+        molecules: pinned_molecules,
+    } = cosmon_state::transport_pin::pins(state_dir)?;
     let events_path = state_dir.join("events.jsonl");
     for mol in running {
         let Some(wid) = mol.assigned_worker.as_ref() else {
@@ -3614,10 +3619,11 @@ pub(crate) fn codex_update_sweep(
         return;
     }
     let Some(backend) = backend else { return };
-    let Ok(pinned_workers) = super::worker_transport::pinned_workers(state_dir) else {
-        return;
-    };
-    let Ok(pinned_molecules) = cosmon_state::transport_pin::pinned_molecules(state_dir) else {
+    let Ok(cosmon_state::transport_pin::TransportPins {
+        workers: pinned_workers,
+        molecules: pinned_molecules,
+    }) = cosmon_state::transport_pin::pins(state_dir)
+    else {
         return;
     };
     for mol in molecules

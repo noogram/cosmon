@@ -828,3 +828,269 @@ fn harvesting_an_unbound_molecule_never_adopts_a_same_name_neighbor() -> TestRes
     assert!(!ledger.load_fleet()?.workers.contains_key(&worker_id));
     Ok(())
 }
+
+#[test]
+#[ignore = "real tmux qualification: run explicitly with --ignored on a POSIX host"]
+fn force_purge_pinned_server_gone_preserves_replacement() -> TestResult {
+    force_purge_stale_pin(true)
+}
+
+#[test]
+#[ignore = "real tmux qualification: run explicitly with --ignored on a POSIX host"]
+fn force_purge_pinned_live_server_preserves_replacement() -> TestResult {
+    force_purge_stale_pin(false)
+}
+
+fn force_purge_stale_pin(restart_server: bool) -> TestResult {
+    use cosmon_core::terminal::TerminalIdentity;
+    let rig = Rig::new()?;
+    let config = rig.root.path().join(".cosmon/config.toml");
+    fs::write(
+        &config,
+        fs::read_to_string(&config)?
+            .replace("worker_exit_receipts=true", "worker_exit_receipts=false"),
+    )?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&rig.cs(&["--json", "nucleate", "witness"])?.stdout)?;
+    let id = MoleculeId::new(value["id"].as_str().ok_or("no molecule")?)?;
+    let session = "stale-pin";
+    rig.cs(&[
+        "tackle",
+        id.as_str(),
+        "--adapter",
+        "codex",
+        "--name",
+        session,
+    ])?;
+    let ledger = FileStore::new(rig.state());
+    let molecule = ledger.load_molecule(&id)?;
+    let process = molecule.process.as_ref().ok_or("no process")?;
+    let TerminalIdentity::Tmux {
+        server_pid,
+        server_start,
+        socket_path,
+        ..
+    } = process.terminal.as_ref().ok_or("no terminal")?;
+    assert_eq!(
+        cosmon_process_witness::process_start_time(*server_pid),
+        Some(*server_start)
+    );
+    // End the dummy executable before replacing its terminal, avoiding an orphan.
+    fs::write(ledger.molecule_dir(&id).join("control"), "exit 0\n")?;
+    assert!(wait_for(|| !ledger
+        .molecule_dir(&id)
+        .join("control")
+        .exists()));
+    let removal = if restart_server {
+        rig.command("tmux")
+            .args(["-S", socket_path, "kill-server"])
+            .output()?
+    } else {
+        rig.command("tmux")
+            .args(["-S", socket_path, "kill-session", "-t", session])
+            .output()?
+    };
+    assert!(
+        removal.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removal.stderr)
+    );
+    if restart_server {
+        assert!(wait_for(|| cosmon_process_witness::process_start_time(
+            *server_pid
+        ) != Some(*server_start)));
+    }
+    let replacement = rig
+        .command("tmux")
+        .args([
+            "-S",
+            socket_path,
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "sleep 120",
+        ])
+        .output()?;
+    assert!(
+        replacement.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replacement.stderr)
+    );
+    if !restart_server {
+        assert_eq!(
+            cosmon_process_witness::process_start_time(*server_pid),
+            Some(*server_start)
+        );
+    }
+    let replacement_identity = || -> Result<Vec<u8>, Box<dyn Error>> {
+        let out = rig
+            .command("tmux")
+            .args([
+                "-S",
+                socket_path,
+                "display-message",
+                "-p",
+                "-t",
+                session,
+                "#{pid}:#{session_id}:#{session_created}:#{pane_id}:#{pane_pid}",
+            ])
+            .output()?;
+        assert!(out.status.success(), "replacement must remain alive");
+        Ok(out.stdout)
+    };
+    let before = replacement_identity()?;
+    // load_molecule derives process liveness; compare persisted bytes instead
+    // to assert that reclamation itself never rewrites the molecule.
+    let molecule_path = ledger.molecule_dir(&id).join("state.json");
+    let molecule_before_purge = fs::read(&molecule_path)?;
+    let purged = rig.cs(&["--json", "purge", session, "--force", "--allow-unharvested"])?;
+    let purged: serde_json::Value = serde_json::from_slice(&purged.stdout)?;
+    assert_eq!(purged["tmux_killed"], false);
+    let message = purged["terminal_cleanup"]
+        .as_str()
+        .ok_or("missing cleanup reason")?;
+    if restart_server {
+        assert!(
+            message.contains("recorded tmux server is gone"),
+            "{message}"
+        );
+    } else {
+        assert!(
+            message.contains("incarnation changed or unavailable"),
+            "{message}"
+        );
+    }
+    assert!(!ledger
+        .load_fleet()?
+        .workers
+        .contains_key(&process.worker_id));
+    assert_eq!(fs::read(&molecule_path)?, molecule_before_purge);
+    assert_eq!(
+        replacement_identity()?,
+        before,
+        "purge must never kill the same-name replacement"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "real tmux qualification: run explicitly with --ignored on a POSIX host"]
+fn force_purge_pinned_transport_error_retains_entry_then_exact_purge_kills() -> TestResult {
+    use cosmon_core::terminal::TerminalIdentity;
+    let rig = Rig::new()?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&rig.cs(&["--json", "nucleate", "witness"])?.stdout)?;
+    let id = MoleculeId::new(value["id"].as_str().ok_or("no molecule")?)?;
+    let session = "unavailable-pin";
+    rig.cs(&[
+        "tackle",
+        id.as_str(),
+        "--adapter",
+        "codex",
+        "--name",
+        session,
+    ])?;
+    let ledger = FileStore::new(rig.state());
+    let original = ledger.load_molecule(&id)?;
+    let mut unavailable = original.clone();
+    let TerminalIdentity::Tmux { socket_path, .. } = unavailable
+        .process
+        .as_mut()
+        .and_then(|process| process.terminal.as_mut())
+        .ok_or("no terminal")?;
+    // The recorded server is still alive, but this socket cannot be contacted.
+    *socket_path = rig
+        .sockets
+        .path()
+        .join("missing.socket")
+        .to_string_lossy()
+        .into_owned();
+    ledger.save_molecule(&id, &unavailable)?;
+    let fleet_before = fs::read(rig.state().join("fleet.json"))?;
+    let refused = rig
+        .command(env!("CARGO_BIN_EXE_cs"))
+        .args(["--json", "purge", session, "--force", "--allow-unharvested"])
+        .output()?;
+    assert!(
+        !refused.status.success(),
+        "transport errors cannot authorize fleet removal"
+    );
+    assert_eq!(fs::read(rig.state().join("fleet.json"))?, fleet_before);
+    assert!(rig
+        .command("tmux")
+        .args(["-L", "receipt-0000", "has-session", "-t", session])
+        .output()?
+        .status
+        .success());
+    // A different server at the recorded socket path must not turn an absent
+    // numeric pane on that server into proof about the original live worker.
+    let other_socket = rig.sockets.path().join("missing.socket");
+    let other_socket = other_socket.to_str().ok_or("non UTF-8 socket")?;
+    let created = rig
+        .command("tmux")
+        .args([
+            "-S",
+            other_socket,
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-s",
+            "decoy",
+            "sleep 120",
+        ])
+        .output()?;
+    assert!(created.status.success());
+    let refused = rig
+        .command(env!("CARGO_BIN_EXE_cs"))
+        .args(["--json", "purge", session, "--force", "--allow-unharvested"])
+        .output()?;
+    let other_alive = rig
+        .command("tmux")
+        .args(["-S", other_socket, "has-session", "-t", "decoy"])
+        .output()?
+        .status
+        .success();
+    let _ = rig
+        .command("tmux")
+        .args(["-S", other_socket, "kill-server"])
+        .output()?;
+    assert!(
+        !refused.status.success(),
+        "a replacement socket server cannot authorize fleet removal"
+    );
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("server endpoint unavailable or changed")
+    );
+    assert!(other_alive);
+    assert_eq!(fs::read(rig.state().join("fleet.json"))?, fleet_before);
+    ledger.save_molecule(&id, &original)?;
+    // End the dummy executable cleanly; exact teardown must reclaim its retained pane.
+    fs::write(ledger.molecule_dir(&id).join("control"), "exit 0\n")?;
+    assert!(wait_for(|| !ledger
+        .molecule_dir(&id)
+        .join("control")
+        .exists()));
+    let purged: serde_json::Value = serde_json::from_slice(
+        &rig.cs(&["--json", "purge", session, "--force", "--allow-unharvested"])?
+            .stdout,
+    )?;
+    assert_eq!(purged["tmux_killed"], true);
+    assert!(purged["terminal_cleanup"].is_null());
+    assert!(!rig
+        .command("tmux")
+        .args(["-L", "receipt-0000", "has-session", "-t", session])
+        .output()?
+        .status
+        .success());
+    assert!(rig
+        .command("tmux")
+        .args(["-L", "receipt-0000", "has-session", "-t", "neighbor"])
+        .output()?
+        .status
+        .success());
+    Ok(())
+}

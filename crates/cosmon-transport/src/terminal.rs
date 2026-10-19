@@ -206,6 +206,71 @@ fn identity_guard_for(identity: &TerminalIdentity, live: bool) -> String {
         .unwrap_or_default()
 }
 
+/// Outcome of reclaiming a pinned terminal, so purge can report whether it killed anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinnedPurgeOutcome {
+    /// The guarded kill addressed the recorded incarnation only.
+    Terminated,
+    /// The recorded server process no longer exists with its recorded start time.
+    ServerGone,
+    /// The exact terminal could not be addressed; no replacement was killed.
+    IncarnationUnavailable,
+}
+
+/// Reclaim an exact pinned terminal without falling back to a session name.
+///
+/// A disappeared server and a refused incarnation both permit forgetting the
+/// stale fleet record. Neither grants authority over a replacement terminal.
+///
+/// # Errors
+/// Refuses an unobservable server whose disappearance cannot be established.
+pub fn purge_pinned_terminal(
+    identity: &TerminalIdentity,
+) -> Result<PinnedPurgeOutcome, cosmon_core::transport::TransportError> {
+    let TerminalIdentity::Tmux {
+        server_pid,
+        server_start,
+        ..
+    } = identity;
+    let observed = process_start_time(*server_pid);
+    let absent = observed.is_some_and(|start| start != *server_start)
+        || (observed.is_none() && server_process_absent(*server_pid));
+    if absent {
+        return Ok(PinnedPurgeOutcome::ServerGone);
+    }
+    if observed != Some(*server_start) {
+        return Err(cosmon_core::transport::TransportError::Io(
+            "pinned tmux server identity is unavailable; disappearance is unproven".into(),
+        ));
+    }
+    match checked_bound_command(identity, &["kill-session"]) {
+        Ok(_) => Ok(PinnedPurgeOutcome::Terminated),
+        Err(BoundCommandFailure::IncarnationChanged) => {
+            Ok(PinnedPurgeOutcome::IncarnationUnavailable)
+        }
+        Err(BoundCommandFailure::Unavailable(error)) => Err(error),
+    }
+}
+
+fn server_process_absent(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = i32::try_from(pid) else {
+            return false;
+        };
+        // Signal zero observes existence only. EPERM/unknown is not absence.
+        matches!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+            Err(nix::errno::Errno::ESRCH)
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 /// Execute only observation or exact teardown on a durable Exec terminal.
 /// Server fingerprints are checked before using numeric targets; the incarnation
 /// format guard and the operation run together on tmux's command queue.
@@ -213,8 +278,29 @@ pub(crate) fn bound_command(
     identity: &TerminalIdentity,
     args: &[&str],
 ) -> Result<String, cosmon_core::transport::TransportError> {
+    checked_bound_command(identity, args).map_err(|error| match error {
+        BoundCommandFailure::IncarnationChanged => cosmon_core::transport::TransportError::Io(
+            "pinned terminal incarnation changed or unavailable".into(),
+        ),
+        BoundCommandFailure::Unavailable(error) => error,
+    })
+}
+
+enum BoundCommandFailure {
+    IncarnationChanged,
+    Unavailable(cosmon_core::transport::TransportError),
+}
+
+fn checked_bound_command(
+    identity: &TerminalIdentity,
+    args: &[&str],
+) -> Result<String, BoundCommandFailure> {
     use cosmon_core::transport::TransportError;
-    let error = || TransportError::Io("pinned terminal incarnation changed or unavailable".into());
+    let error = || {
+        BoundCommandFailure::Unavailable(TransportError::Io(
+            "pinned terminal incarnation changed or unavailable".into(),
+        ))
+    };
     let TerminalIdentity::Tmux {
         socket_path,
         server_pid,
@@ -233,28 +319,39 @@ pub(crate) fn bound_command(
         operation,
         "capture-pane" | "list-panes" | "display-message" | "has-session" | "kill-session"
     ) {
-        return Err(TransportError::Io(
+        return Err(BoundCommandFailure::Unavailable(TransportError::Io(
             "pinned Codex Exec transport does not support this operation".into(),
-        ));
+        )));
     }
     let target = if operation == "capture-pane" {
         format!("%{pane_id}")
     } else {
         format!("${session_id}")
     };
-    let output = probe(Command::new("tmux").args([
-        "-S",
+    let output = pinned_probe(
         socket_path,
-        "display-message",
-        "-p",
-        "-t",
-        &format!("%{pane_id}"),
-        "#{pane_dead}",
-    ]))
-    .map_err(|_| error())?;
-    let dead = output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "1";
-    if !dead && process_start_time(*pane_pid) != Some(*pane_start) {
-        return Err(error());
+        *server_pid,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            &format!("%{pane_id}"),
+            "#{pane_dead}",
+        ],
+    )?;
+    if !output.status.success() {
+        return Err(classify_tmux_failure(&output));
+    }
+    let dead = String::from_utf8_lossy(&output.stdout).trim() == "1";
+    if !dead {
+        match process_start_time(*pane_pid) {
+            Some(start) if start == *pane_start => {}
+            Some(_) => return Err(BoundCommandFailure::IncarnationChanged),
+            None if server_process_absent(*pane_pid) => {
+                return Err(BoundCommandFailure::IncarnationChanged)
+            }
+            None => return Err(error()),
+        }
     }
     // Never pass a caller's name-addressed target through to the effect.
     let mut command = vec![operation.to_owned()];
@@ -276,23 +373,74 @@ pub(crate) fn bound_command(
         .collect::<Vec<_>>()
         .join(" ");
     let guard = identity_guard_for(identity, false);
-    let output = probe(Command::new("tmux").args([
-        "-S",
+    let output = pinned_probe(
         socket_path,
-        "if-shell",
-        "-F",
-        "-t",
-        &format!("%{pane_id}"),
-        &guard,
-        &command,
-        "display-message -p cosmon-incarnation-refused",
-    ]))
-    .map_err(|_| error())?;
+        *server_pid,
+        &[
+            "if-shell",
+            "-F",
+            "-t",
+            &format!("%{pane_id}"),
+            &guard,
+            &command,
+            "display-message -p cosmon-incarnation-refused",
+        ],
+    )?;
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
-    if !output.status.success() || text.trim() == "cosmon-incarnation-refused" {
-        return Err(error());
+    if text.trim() == "cosmon-incarnation-refused" {
+        return Err(BoundCommandFailure::IncarnationChanged);
+    }
+    if !output.status.success() {
+        return Err(classify_tmux_failure(&output));
     }
     Ok(text)
+}
+
+// The witness and operation share one connection/command queue. A live original
+// server may lose its socket while another server binds that same path. Such a
+// replacement's missing numeric target cannot prove the original target absent.
+fn pinned_probe(
+    socket_path: &str,
+    server_pid: u32,
+    args: &[&str],
+) -> Result<std::process::Output, BoundCommandFailure> {
+    let unavailable = || {
+        BoundCommandFailure::Unavailable(cosmon_core::transport::TransportError::Io(
+            "pinned terminal server endpoint unavailable or changed".into(),
+        ))
+    };
+    let mut output = probe(
+        Command::new("tmux")
+            .args(["-S", socket_path, "display-message", "-p", "#{pid}", ";"])
+            .args(args),
+    )
+    .map_err(|_| unavailable())?;
+    let newline = output
+        .stdout
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .ok_or_else(unavailable)?;
+    let observed = std::str::from_utf8(&output.stdout[..newline])
+        .ok()
+        .and_then(|pid| pid.trim().parse::<u32>().ok());
+    if observed != Some(server_pid) {
+        return Err(unavailable());
+    }
+    output.stdout.drain(..=newline);
+    Ok(output)
+}
+
+fn classify_tmux_failure(output: &std::process::Output) -> BoundCommandFailure {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // These diagnostics establish that the exact numeric target is absent.
+    // Socket failures, process launch errors and timeouts are not absence.
+    if stderr.starts_with("can't find pane:") || stderr.starts_with("can't find session:") {
+        BoundCommandFailure::IncarnationChanged
+    } else {
+        BoundCommandFailure::Unavailable(cosmon_core::transport::TransportError::Io(
+            "pinned terminal transport unavailable".into(),
+        ))
+    }
 }
 
 // This is a capability floor, not a liveness or provider-version heuristic.
@@ -314,7 +462,7 @@ pub(crate) fn supports_client_flags(version: &str) -> bool {
 fn probe(command: &mut Command) -> Result<std::process::Output, TerminalUnavailable> {
     let mut child = command
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| TerminalUnavailable::BackendUnavailable)?;
     let deadline = Instant::now() + Duration::from_secs(3);

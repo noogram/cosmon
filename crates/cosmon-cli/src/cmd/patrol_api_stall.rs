@@ -209,10 +209,10 @@ pub(crate) fn propel_api_stalled_molecules(inputs: &SweepInputs<'_>) -> ApiStall
     let Some(be) = inputs.backend else {
         return out;
     };
-    let Ok(pinned_workers) = super::worker_transport::pinned_workers(inputs.state_dir) else {
-        return out;
-    };
-    let Ok(pinned_molecules) = cosmon_state::transport_pin::pinned_molecules(inputs.state_dir)
+    let Ok(cosmon_state::transport_pin::TransportPins {
+        workers: pinned_workers,
+        molecules: pinned_molecules,
+    }) = cosmon_state::transport_pin::pins(inputs.state_dir)
     else {
         return out;
     };

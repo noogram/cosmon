@@ -953,11 +953,22 @@ fn run_targeted(
         .as_ref()
         .map(|process| TmuxBackend::for_process(Some(process), ""))
         .transpose()?;
-    if force {
-        if let Some(backend) = &pinned_backend {
-            backend.terminate_session(worker_id.as_str())?;
-        }
-    }
+    let pinned_purge = if force {
+        pinned_process
+            .as_ref()
+            .and_then(|process| process.terminal.as_ref())
+            .map(cosmon_transport::terminal::purge_pinned_terminal)
+            .transpose()?
+    } else {
+        None
+    };
+    let terminal_cleanup = match pinned_purge {
+        Some(cosmon_transport::terminal::PinnedPurgeOutcome::ServerGone) =>
+            Some("recorded tmux server is gone; removed stale fleet record without killing a terminal"),
+        Some(cosmon_transport::terminal::PinnedPurgeOutcome::IncarnationUnavailable) =>
+            Some("recorded terminal incarnation changed or unavailable; removed stale fleet record without killing a replacement"),
+        _ => None,
+    };
 
     let previous_status = worker.status.to_string();
     // Purge reclaims only the worker. A Running molecule retains its state
@@ -970,7 +981,7 @@ fn run_targeted(
     // Force mode: try a quick graceful exit (triggers SessionEnd hooks,
     // memory flush), then terminate what survives.
     let tmux_killed = if pinned_backend.is_some() {
-        force
+        pinned_purge == Some(cosmon_transport::terminal::PinnedPurgeOutcome::Terminated)
     } else if force {
         let backend = TmuxBackend::new(super::tmux_socket_name(ctx));
         backend
@@ -1016,6 +1027,7 @@ fn run_targeted(
             "status": "stopped",
             "force": force,
             "tmux_killed": tmux_killed,
+            "terminal_cleanup": terminal_cleanup,
             "purged": 1,
             "workers": [worker_id.as_str()],
             "zombie_collapsed": serde_json::Value::Null,
@@ -1024,6 +1036,9 @@ fn run_targeted(
     } else {
         let verb = if force { "Force-purged" } else { "Purged" };
         println!("{verb} worker {worker_id} ({previous_status} -> removed)");
+        if let Some(message) = terminal_cleanup {
+            println!("  {message}");
+        }
     }
     Ok(())
 }

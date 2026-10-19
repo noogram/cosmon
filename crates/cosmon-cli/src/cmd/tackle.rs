@@ -1983,13 +1983,28 @@ fn run_with_transport(
                 cosmon_core::event_v2::HarnessLaunchStatus::LaunchFailed,
             );
             if pin_transport {
-                let rolled_back = mol.process.as_ref().is_some_and(|expected| {
-                    dispatch_ledger::rollback_dispatch_incarnation(
-                        &store,
-                        &pre_dispatch_snapshot,
-                        expected,
-                    )
-                });
+                let rollback = mol.process.as_ref().map_or(
+                    dispatch_ledger::DispatchRollbackResult::NotUndone,
+                    |expected| {
+                        dispatch_ledger::rollback_dispatch_incarnation(
+                            &store,
+                            &pre_dispatch_snapshot,
+                            expected,
+                        )
+                    },
+                );
+                let rolled_back = match rollback {
+                    dispatch_ledger::DispatchRollbackResult::NotUndone => false,
+                    dispatch_ledger::DispatchRollbackResult::Undone => true,
+                    dispatch_ledger::DispatchRollbackResult::MoleculeRestoredFleetCleanupFailed {
+                        error,
+                    } => {
+                        eprintln!(
+                            "Warning: molecule {mol_id} dispatch was restored, but fleet cleanup failed; worker {wid} may remain registered: {error}"
+                        );
+                        true
+                    }
+                };
                 if rolled_back {
                     emit_worker_spawn_rolled_back(
                         &state_dir,
