@@ -21,7 +21,7 @@ leaves worker processes, state, lifecycle and ordinary `cs` commands intact.
 There is no build step, dependency download, background service, startup hook,
 web server or framework. Runtime state is not stored in the plugin source.
 
-## Link, open, remove
+## Install, open, update, remove
 
 From the Cosmon checkout containing this directory:
 
@@ -35,6 +35,19 @@ Linking explicitly registers ordinary local code in Herdr's plugin registry.
 It is an operator action; Cosmon never registers it automatically. The package
 is not installed by a Cosmon upgrade. Keep a locally linked directory available
 for later invocations; use a stable checkout, not a disposable worker worktree.
+
+Alternatively, once a release containing this directory is published, install
+a GitHub copy. Replace `PUBLISHED_REF` with that published tag or commit:
+
+```sh
+herdr plugin install noogram/cosmon/tools/herdr-companion --ref PUBLISHED_REF
+herdr plugin list --json
+herdr plugin action list --plugin cosmon.client
+```
+
+Choose either a local link or a GitHub copy for `cosmon.client`. No particular
+published ref or successful GitHub installation is asserted here; the command
+syntax was checked with Herdr 0.9.5 `--help` only.
 
 Inside a Herdr terminal workspace whose cwd belongs to the selected galaxy:
 
@@ -73,6 +86,26 @@ freeze, complete or harvest the worker. The artifact viewer closes on Enter;
 closing a worktree shell affects that shell only. Do not start a worker in
 that shell and infer lifecycle integration.
 
+To update a local link, first inspect the stable checkout for local changes,
+then deliberately update it to the desired compatible Cosmon revision. Keep
+the directory at the same path and repeat `herdr plugin link` above to refresh
+the registration. Close existing selectors/views and reopen the action so new
+processes use the updated code; already running processes retain their old
+code. Closing a view leaves its worker running.
+
+For a GitHub-installed copy, request an update with:
+
+```sh
+herdr plugin update cosmon.client
+```
+
+Do not assume this advances a pinned tag/commit to a newer release. To select
+a different published ref explicitly, close selectors/views, run
+`herdr plugin uninstall cosmon.client`, then repeat the install command with
+the new ref. Reopen the action afterward. Plugin updates do not update the
+`cs` executable: update that separately to a compatible build providing the
+terminal capabilities used by the plugin.
+
 To stop offering the plugin and remove its registration:
 
 ```sh
@@ -83,7 +116,8 @@ herdr plugin unlink cosmon.client
 For a GitHub-installed copy, `herdr plugin uninstall cosmon.client` is the
 corresponding removal command. A local link needs only unlinking. Herdr does
 not delete plugin user config/state; this plugin writes neither. No GitHub
-installation/publication is performed or needed for the local path.
+installation is needed for the local path. Removing either registration leaves
+Cosmon workers running.
 
 ## Project and client context
 
