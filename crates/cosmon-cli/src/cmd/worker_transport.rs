@@ -8,7 +8,7 @@ use cosmon_core::transport_selection::{
 
 /// Read the existing project/global surfaces, preserving explicit absence.
 pub(super) fn resolve(ctx: &super::Context) -> anyhow::Result<TransportSelection> {
-    let project_path = ctx.config_path();
+    let project_path = super::resolve_config_from_context(ctx);
     let project = cosmon_filestore::load_project_config(&project_path)?;
     let global = if project.transport.backend.is_some() {
         TransportConfig::default()

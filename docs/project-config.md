@@ -72,7 +72,10 @@ expected incarnation and cannot project an old exit onto a new dispatch.
 New Exec pins refuse `resume`, `whisper`, `freeze`, `thaw`, resurrection, and
 forced re-tackle before their effects: Exec has no interactive continuation
 or checkpoint-resume contract, and the historical thaw path would launch
-Claude. In particular, freeze cannot promise its stop-and-resume roundtrip.
+Claude. Harvest conflict auto-propulsion also refuses this unsupported continuation. In particular, freeze cannot promise its stop-and-resume roundtrip.
+Resolution and dry runs honor the project addressed by `--config`. A real Exec
+dispatch must run inside that galaxy; a foreign CWD is refused before resource
+creation rather than silently applying Git effects to another project.
 New Exec dispatches require a fresh branch and worktree; existing resources
 require audit and explicit resolution. Use exact worker teardown and operator
 resolution before a new dispatch. Older processes without a transport pin retain historical routing;

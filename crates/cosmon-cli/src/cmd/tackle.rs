@@ -816,7 +816,7 @@ fn run_with_transport(
     let reviewed_start_point = resolve_reviewed_tree_pin(&mol)?;
 
     // 3. Load project config (.cosmon/config.toml).
-    let config_path = ctx.config_path();
+    let config_path = super::resolve_config_from_context(ctx);
     let project_config = cosmon_filestore::load_project_config(&config_path)?;
 
     // 3a. Resolve the Worker-Spawn Port Adapter (ADR-097 / C6).
@@ -933,6 +933,15 @@ fn run_with_transport(
             .and_then(|cfg| cfg.entry("codex"))
             .and_then(|entry| entry.mode.as_deref())
             .is_some_and(|mode| mode.eq_ignore_ascii_case("exec"));
+    if pin_transport && !args.dry_run {
+        let addressed_root = config_path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| anyhow::anyhow!("Codex Exec requires a project-local config"))?
+            .canonicalize()?;
+        anyhow::ensure!(find_repo_root()?.canonicalize()? == addressed_root,
+            "Codex Exec dispatch must run from the galaxy addressed by --config; refusing cross-project Git effects");
+    }
     anyhow::ensure!(
         !pin_transport || selected_backend.supports_command_sessions(),
         "transport lacks the command-session/creation-identity capability required by Codex Exec"

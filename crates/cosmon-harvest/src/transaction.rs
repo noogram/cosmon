@@ -674,12 +674,17 @@ fn compute_teardown_plan(
     let merge_needed = branch_present && !branch_merged;
 
     // Tmux session state.
-    let backend = TmuxBackend::new(socket);
+    let state_dir = ctx.config.clone().unwrap_or_else(default_state_dir);
+    let store = FileStore::new(&state_dir);
+    let process = match store.load_molecule(mol_id) {
+        Ok(molecule) => molecule.process,
+        Err(cosmon_core::error::CosmonError::MoleculeNotFound(_)) => None,
+        Err(error) => return Err(error.into()),
+    };
+    let backend = TmuxBackend::for_process(process.as_ref(), socket)?;
     let session_alive = backend.is_alive(&wid).unwrap_or(false);
 
     // Fleet worker state.
-    let state_dir = ctx.config.clone().unwrap_or_else(default_state_dir);
-    let store = FileStore::new(&state_dir);
     let worker_registered = store
         .load_fleet()
         .is_ok_and(|f| f.workers.contains_key(&wid));
@@ -4694,6 +4699,14 @@ fn try_merge_with_escalation(
             return Err(anyhow::anyhow!("teardown aborted: merge error: {msg}"));
         }
     }
+
+    let process = match store.load_molecule(mol_id) {
+        Ok(molecule) => molecule.process,
+        Err(cosmon_core::error::CosmonError::MoleculeNotFound(_)) => None,
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(process.as_ref().is_none_or(|p| p.transport.is_none()),
+        "Codex Exec has no interactive rebase/continuation contract; resolve the conflict explicitly");
 
     // Escalation loop — conflict detected, auto_propel enabled.
     let propel_msg = custom_message.unwrap_or(DEFAULT_PROPEL_MESSAGE);

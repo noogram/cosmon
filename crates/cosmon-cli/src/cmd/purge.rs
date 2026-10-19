@@ -944,6 +944,31 @@ fn run_targeted(
         .flatten()
         .and_then(|m| m.process)
         .filter(|p| p.transport.is_some());
+    if force && pinned_process.is_none() {
+        let history = match cosmon_state::event_log::read_all(state_dir.join("events.jsonl")) {
+            Ok(events) => events,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        let previously_pinned = history
+            .iter()
+            .rev()
+            .find_map(|envelope| {
+                if let cosmon_core::event_v2::EventV2::WorkerSpawned {
+                    worker_id: recorded,
+                    transport,
+                    ..
+                } = &envelope.event
+                {
+                    if recorded == &worker_id {
+                        return Some(transport.is_some());
+                    }
+                }
+                None
+            })
+            .unwrap_or(false);
+        anyhow::ensure!(!previously_pinned, "pinned worker creation identity is unavailable; refusing name-based teardown of a possible replacement");
+    }
     let pinned_backend = pinned_process
         .as_ref()
         .map(|process| TmuxBackend::for_process(Some(process), ""))

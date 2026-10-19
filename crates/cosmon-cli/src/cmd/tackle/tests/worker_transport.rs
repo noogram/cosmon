@@ -269,6 +269,50 @@ fn configured_dispatch_reaches_the_injected_command_backend() -> TestResult {
             .iter()
             .any(|call| matches!(call, cosmon_transport::mock::MockCall::Terminate { .. })));
         assert!(!cosmon_state::event_log::read_all(state.join("events.jsonl"))?.iter().any(|event| matches!(&event.event, cosmon_core::event_v2::EventV2::WorkerSpawnRolledBack { mol_id, .. } if mol_id.as_str() == id)));
+        // The identity guard addresses B while CWD belongs to foreign A.
+        let foreign = root.join("foreign");
+        std::fs::create_dir_all(foreign.join(".cosmon"))?;
+        std::fs::write(
+            foreign.join(".cosmon/config.toml"),
+            "[project]\nproject_id='foreign-0000'\n[transport]\nbackend='herdr'\n",
+        )?;
+        assert!(std::process::Command::new("git")
+            .current_dir(&foreign)
+            .args(["init", "-q"])
+            .status()?
+            .success());
+        std::env::set_current_dir(&foreign)?;
+        assert_eq!(
+            crate::cmd::worker_transport::resolve(&ctx)?.source,
+            cosmon_core::transport_selection::TransportSource::Project
+        );
+        let foreign_case = sample_molecule("witness-20261019-abd1", MoleculeStatus::Pending);
+        store.save_molecule(&foreign_case.id, &foreign_case)?;
+        let cli = crate::Cli::try_parse_from([
+            "cs",
+            "tackle",
+            foreign_case.id.as_str(),
+            "--adapter",
+            "codex",
+            "--dry-run",
+        ])?;
+        let crate::Command::Tackle(args) = cli.command else {
+            return Err("wrong command".into());
+        };
+        run_with_transport(&ctx, &args, Some(&backend))?;
+        let cli = crate::Cli::try_parse_from([
+            "cs",
+            "tackle",
+            foreign_case.id.as_str(),
+            "--adapter",
+            "codex",
+        ])?;
+        let crate::Command::Tackle(args) = cli.command else {
+            return Err("wrong command".into());
+        };
+        assert!(run_with_transport(&ctx, &args, Some(&backend)).is_err());
+        assert!(store.load_molecule(&foreign_case.id)?.process.is_none());
+        assert!(!foreign.join(".worktrees").exists());
         return Ok(());
     }
     // Process isolation avoids changing CWD, PATH or HOME for other Rust tests.

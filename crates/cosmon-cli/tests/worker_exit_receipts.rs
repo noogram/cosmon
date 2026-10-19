@@ -303,6 +303,23 @@ fn configured_exec_keeps_its_incarnation_after_configuration_and_namespace_chang
                     .capture_output(&process.worker_id, 20)?
                     .to_lowercase()
                     .contains("codex"));
+                // Losing a modern snapshot cannot turn the same worker label
+                // into a legacy handle routed through current configuration.
+                let mut lost = mol.clone();
+                lost.process = None;
+                ledger.save_molecule(&id, &lost)?;
+                let lost_bytes = fs::read(ledger.molecule_dir(&id).join("state.json"))?;
+                let refused = rig
+                    .command(env!("CARGO_BIN_EXE_cs"))
+                    .env("TMUX_TMPDIR", other.path())
+                    .args(["purge", &session, "--force", "--allow-unharvested"])
+                    .output()?;
+                assert!(!refused.status.success());
+                assert_eq!(
+                    fs::read(ledger.molecule_dir(&id).join("state.json"))?,
+                    lost_bytes
+                );
+                ledger.save_molecule(&id, &mol)?;
                 // The real control effect must kill A while same-name B survives.
                 let stopped = rig
                     .command(env!("CARGO_BIN_EXE_cs"))
