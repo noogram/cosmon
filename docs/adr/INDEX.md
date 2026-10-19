@@ -172,4 +172,5 @@
 | 185-turn-and-effect-evidence-is-durable-before-it-is-acted-on | [185-turn-and-effect-evidence-is-durable-before-it-is-acted-on.md](185-turn-and-effect-evidence-is-durable-before-it-is-acted-on.md) |
 | 186-linux-user-services | [186-linux-user-services.md](186-linux-user-services.md) |
 | 187-a-collapse-is-conditional-idempotent-and-receipted | [187-a-collapse-is-conditional-idempotent-and-receipted.md](187-a-collapse-is-conditional-idempotent-and-receipted.md) |
+| 188-a-worker-is-stopped-through-its-supervising-parent | [188-a-worker-is-stopped-through-its-supervising-parent.md](188-a-worker-is-stopped-through-its-supervising-parent.md) |
 
