@@ -653,6 +653,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let mut fleet = store.load_fleet()?;
     let molecules = store.list_molecules(&MoleculeFilter::default())?;
     let pinned_workers = super::worker_transport::pinned_workers(&state_dir)?;
+    let pinned_molecules = cosmon_state::transport_pin::pinned_molecules(&state_dir)?;
 
     // Use tmux backend for liveness cross-check unless --no-tmux.
     let backend = if args.no_tmux {
@@ -784,6 +785,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             &molecules,
             &fleet,
             &pinned_workers,
+            &pinned_molecules,
             backend.as_ref(),
             args.stale_after,
         )
@@ -2120,6 +2122,7 @@ pub(crate) fn propel_stale_molecules(
     molecules: &[MoleculeData],
     fleet: &Fleet,
     pinned_workers: &std::collections::HashSet<WorkerId>,
+    pinned_molecules: &std::collections::HashSet<MoleculeId>,
     backend: Option<&TmuxBackend>,
     stale_after: u64,
 ) -> PropelSweep {
@@ -2135,6 +2138,7 @@ pub(crate) fn propel_stale_molecules(
 
     for (wid, mid, age) in candidates {
         if pinned_workers.contains(&wid)
+            || pinned_molecules.contains(&mid)
             || molecules
                 .iter()
                 .find(|m| m.id == mid)
@@ -2517,6 +2521,9 @@ pub(crate) fn nudge_stalled_molecules(
     let Ok(pinned_workers) = super::worker_transport::pinned_workers(state_dir) else {
         return Vec::new();
     };
+    let Ok(pinned_molecules) = cosmon_state::transport_pin::pinned_molecules(state_dir) else {
+        return Vec::new();
+    };
     let formulas_dir = cosmon_filestore::resolve_formulas_dir_from(state_dir);
     let candidates = find_stalled_for_nudge(molecules, now, |fid| {
         let fp = formulas_dir.join(format!("{fid}.formula.toml"));
@@ -2526,6 +2533,7 @@ pub(crate) fn nudge_stalled_molecules(
     let mut nudged = Vec::new();
     for (wid, mol) in candidates {
         if pinned_workers.contains(&wid)
+            || pinned_molecules.contains(&mol.id)
             || mol.process.as_ref().is_some_and(|p| p.transport.is_some())
         {
             continue;
@@ -3466,12 +3474,14 @@ pub(crate) fn dialogue_scan_sweep(
     };
 
     let pinned_workers = super::worker_transport::pinned_workers(state_dir)?;
+    let pinned_molecules = cosmon_state::transport_pin::pinned_molecules(state_dir)?;
     let events_path = state_dir.join("events.jsonl");
     for mol in running {
         let Some(wid) = mol.assigned_worker.as_ref() else {
             continue;
         };
         if pinned_workers.contains(wid)
+            || pinned_molecules.contains(&mol.id)
             || mol.process.as_ref().is_some_and(|p| p.transport.is_some())
         {
             continue;
@@ -3607,6 +3617,9 @@ pub(crate) fn codex_update_sweep(
     let Ok(pinned_workers) = super::worker_transport::pinned_workers(state_dir) else {
         return;
     };
+    let Ok(pinned_molecules) = cosmon_state::transport_pin::pinned_molecules(state_dir) else {
+        return;
+    };
     for mol in molecules
         .iter()
         .filter(|m| m.status == MoleculeStatus::Running)
@@ -3618,6 +3631,7 @@ pub(crate) fn codex_update_sweep(
             continue;
         };
         if pinned_workers.contains(wid)
+            || pinned_molecules.contains(&mol.id)
             || mol.process.as_ref().is_some_and(|p| p.transport.is_some())
         {
             continue;
@@ -4913,7 +4927,15 @@ mod tests {
 
         // No transport: the sweep short-circuits before any send_input, which
         // is precisely what we assert — nothing is ever pushed at this worker.
-        let sweep = propel_stale_molecules(&store, &[mol], &fleet, &Default::default(), None, 300);
+        let sweep = propel_stale_molecules(
+            &store,
+            &[mol],
+            &fleet,
+            &Default::default(),
+            &Default::default(),
+            None,
+            300,
+        );
         assert!(sweep.propelled.is_empty(), "a gated worker was nudged");
     }
 

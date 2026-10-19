@@ -538,8 +538,8 @@ fn run_with_transport(
     let mut mol = resolve_molecule(&store, &args.molecule)?;
     let mol_id = mol.id.clone();
 
-    let pinned_workers = super::worker_transport::pinned_workers(&state_dir)?;
-    anyhow::ensure!(!mol.assigned_worker.as_ref().is_some_and(|worker| pinned_workers.contains(worker)),
+    let pinned_molecules = cosmon_state::transport_pin::pinned_molecules(&state_dir)?;
+    anyhow::ensure!(!pinned_molecules.contains(&mol.id),
         "recorded Codex Exec dispatch has no qualified continuation; missing process identity cannot authorize a replacement launch");
 
     anyhow::ensure!(mol.process.as_ref().is_none_or(|process| process.transport.is_none()),

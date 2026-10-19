@@ -212,6 +212,10 @@ pub(crate) fn propel_api_stalled_molecules(inputs: &SweepInputs<'_>) -> ApiStall
     let Ok(pinned_workers) = super::worker_transport::pinned_workers(inputs.state_dir) else {
         return out;
     };
+    let Ok(pinned_molecules) = cosmon_state::transport_pin::pinned_molecules(inputs.state_dir)
+    else {
+        return out;
+    };
     let store = inputs.store;
     let now = Utc::now();
     // Every running molecule with a live-desired worker: staleness is *not* a
@@ -228,6 +232,7 @@ pub(crate) fn propel_api_stalled_molecules(inputs: &SweepInputs<'_>) -> ApiStall
 
     for (wid, mid, age) in candidates {
         if pinned_workers.contains(&wid)
+            || pinned_molecules.contains(&mid)
             || inputs
                 .molecules
                 .iter()

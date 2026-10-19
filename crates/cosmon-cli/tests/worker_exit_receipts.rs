@@ -402,6 +402,57 @@ fn configured_exec_keeps_its_incarnation_after_configuration_and_namespace_chang
                     .args(["-L", "receipt-0000", "has-session", "-t", &session])
                     .status()?
                     .success());
+                // Reusing the worker label for a different legacy molecule must
+                // preserve the old molecule's positive hosting evidence.
+                let legacy_id = MoleculeId::new(format!("reused-20261019-{index:04x}"))?;
+                let mut legacy = lost.clone();
+                legacy.id = legacy_id.clone();
+                ledger.save_molecule(&legacy_id, &legacy)?;
+                event_log::emit_one(
+                    rig.state().join("events.jsonl"),
+                    cosmon_core::event_v2::EventV2::WorkerSpawned {
+                        transport: None,
+                        worker_id: process.worker_id.clone(),
+                        molecule: Some(legacy_id.clone()),
+                        session_name: session.clone(),
+                        role: "polecat".into(),
+                        adapter_name: "codex".into(),
+                        loop_ownership: Default::default(),
+                    },
+                    None,
+                )?;
+                let reuse_events = fs::read(rig.state().join("events.jsonl"))?;
+                let config = fs::read(&config_path)?;
+                let mut allowed = config.clone();
+                allowed.extend_from_slice(b"\n[whisper]\nallowed_commands=['sleep']\n");
+                fs::write(&config_path, allowed)?;
+                let old_refused = rig
+                    .command(env!("CARGO_BIN_EXE_cs"))
+                    .env("TMUX_TMPDIR", other.path())
+                    .args(["whisper", id.as_str(), "--message", "probe", "--dry-run"])
+                    .output()?;
+                assert!(!old_refused.status.success());
+                assert!(String::from_utf8_lossy(&old_refused.stderr).contains("identity"));
+                assert_eq!(fs::read(&state_path)?, lost_bytes);
+                assert_eq!(fs::read(rig.state().join("fleet.json"))?, fleet_bytes);
+                assert_eq!(fs::read(rig.state().join("events.jsonl"))?, reuse_events);
+                let legacy_allowed = rig
+                    .command(env!("CARGO_BIN_EXE_cs"))
+                    .env("TMUX_TMPDIR", other.path())
+                    .args([
+                        "whisper",
+                        legacy_id.as_str(),
+                        "--message",
+                        "probe",
+                        "--dry-run",
+                    ])
+                    .output()?;
+                fs::write(&config_path, config)?;
+                assert!(
+                    legacy_allowed.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&legacy_allowed.stderr)
+                );
                 ledger.save_molecule(&id, &mol)?;
                 // The real control effect must kill A while same-name B survives.
                 let stopped = rig

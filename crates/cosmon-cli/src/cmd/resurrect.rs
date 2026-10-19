@@ -66,13 +66,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     super::worker_transport::refuse_exec_control(&mol, "resurrect")?;
     // Frozen/recovered snapshots may have released the process. A historical
     // qualified Exec dispatch still cannot be resumed as an unpinned Claude worker.
-    let history = match cosmon_state::event_log::read_all(state_dir.join("events.jsonl")) {
-        Ok(events) => events,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error.into()),
-    };
-    anyhow::ensure!(!history.iter().any(|envelope| matches!(&envelope.event,
-        cosmon_core::event_v2::EventV2::WorkerSpawned { molecule: Some(id), transport: Some(_), .. } if id == &mol_id)),
+    anyhow::ensure!(!cosmon_state::transport_pin::pinned_molecules(&state_dir)?.contains(&mol_id),
         "resurrect: pinned Codex Exec has no qualified continuation contract; resolve explicitly before a new dispatch");
 
     // Pre-condition: state == Frozen (the wreck state produced by `cs recover`).

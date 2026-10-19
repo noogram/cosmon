@@ -495,3 +495,8 @@ Pinned Exec safety also survives a missing process snapshot: positive dispatch
 history refuses legacy freeze/thaw/resume, input and teardown; fleet probes
 report unknown without adopting a same-name terminal. Genuine legacy fleet-only
 records retain their established behavior.
+
+A legacy dispatch that reuses a worker name for a different molecule does not
+erase the old molecule's positive hosting history. Molecule-addressed controls
+and propulsion preserve that distinction; the new legacy molecule retains its
+existing path.

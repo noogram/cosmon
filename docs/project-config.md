@@ -63,7 +63,8 @@ records the selection in the event log. `cs --json observe ID` exposes it as
 The existing lossy event rebuild cannot recreate a terminal incarnation:
 keep the canonical process snapshot for control; never reconstruct it from
 labels, configuration, or a newly discovered terminal. Positive pinned dispatch
-history still forbids name-based control if the process snapshot is lost; fleet
+history by molecule still forbids name-based control if its process snapshot is
+lost, even if a different legacy molecule later reuses the worker name; fleet
 observation reports unknown in that case. Missing history on a genuinely legacy
 fleet record does not manufacture a modern pin.
 
