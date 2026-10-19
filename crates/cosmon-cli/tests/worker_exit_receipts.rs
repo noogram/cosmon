@@ -192,6 +192,23 @@ fn tackle_wait_receipts_and_harvest_preserve_os_results_without_completing_work(
         let directory = ledger.molecule_dir(&id);
         let receipts =
             FileWorkerExitStore::current(&directory)?.ok_or("missing prepared launch")?;
+        let process = ledger
+            .load_molecule(&id)?
+            .process
+            .ok_or("missing process")?;
+        let terminal = process.terminal.ok_or("missing exact terminal identity")?;
+        let birth: serde_json::Value =
+            serde_json::from_slice(&fs::read(receipts.directory().join("birth.json"))?)?;
+        let cosmon_core::terminal::TerminalIdentity::Tmux { pane_pid, .. } = &terminal;
+        assert_eq!(birth["supervisor_pid"].as_u64(), Some(u64::from(*pane_pid)));
+        let view: serde_json::Value =
+            serde_json::from_slice(&rig.cs(&["--json", "terminal", id.as_str()])?.stdout)?;
+        assert_eq!(view["availability"], "available");
+        assert_eq!(view["capability"], "read_only_ignore_size");
+        assert_eq!(view["identity"], serde_json::to_value(&terminal)?);
+        assert!(view["expected"]
+            .as_str()
+            .is_some_and(|v| v.starts_with("sha256:")));
         let identity = serde_json::to_string(&receipts.request().identity)?;
         fs::write(directory.join("control"), control)?;
         assert!(wait_for(|| receipts.read() == expected));
@@ -236,5 +253,90 @@ fn tackle_wait_receipts_and_harvest_preserve_os_results_without_completing_work(
         .args(["-L", "receipt-0000", "has-session", "-t", "=neighbor"])
         .output()?;
     assert!(neighbor.status.success());
+    Ok(())
+}
+
+#[test]
+#[ignore = "real tmux qualification: run explicitly with --ignored on a POSIX host"]
+fn interactive_receipt_opt_in_is_refused_before_dispatch_effects() -> TestResult {
+    let rig = Rig::new()?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&rig.cs(&["--json", "nucleate", "witness"])?.stdout)?;
+    let id = MoleculeId::new(value["id"].as_str().ok_or("missing molecule id")?)?;
+    let ledger = FileStore::new(rig.state());
+    let directory = ledger.molecule_dir(&id);
+    let state_before = fs::read(directory.join("state.json"))?;
+    let refs_before = rig.command("git").args(["show-ref"]).output()?;
+    let worktrees_before = rig
+        .command("git")
+        .args(["worktree", "list", "--porcelain"])
+        .output()?;
+    let panes_before = rig
+        .command("tmux")
+        .args([
+            "-L",
+            "receipt-0000",
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_id}:#{pane_id}:#{pane_pid}",
+        ])
+        .output()?;
+    assert!(
+        refs_before.status.success()
+            && worktrees_before.status.success()
+            && panes_before.status.success()
+    );
+    for mode in [Some("interactive"), None] {
+        let mode_line = mode
+            .map(|mode| format!("mode='{mode}'\n"))
+            .unwrap_or_default();
+        fs::write(rig.root.path().join(".cosmon/config.toml"), format!("[project]\nproject_id='receipt-0000'\n[adapters.codex]\n{mode_line}update='skip'\nworker_exit_receipts=true\n"))?;
+        let output = rig
+            .command(env!("CARGO_BIN_EXE_cs"))
+            .args(["tackle", id.as_str(), "--adapter", "codex"])
+            .output()?;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("requires mode = 'exec'"));
+        assert_eq!(fs::read(directory.join("state.json"))?, state_before);
+        assert!(ledger.load_molecule(&id)?.process.is_none());
+        for path in [
+            directory.join("worker-launch.json"),
+            directory.join("worker-launches"),
+            directory.join("argv"),
+            rig.root.path().join(".worktrees"),
+        ] {
+            assert!(
+                !path.exists(),
+                "refused dispatch created {}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            rig.command("git").args(["show-ref"]).output()?.stdout,
+            refs_before.stdout
+        );
+        assert_eq!(
+            rig.command("git")
+                .args(["worktree", "list", "--porcelain"])
+                .output()?
+                .stdout,
+            worktrees_before.stdout
+        );
+        assert_eq!(
+            rig.command("tmux")
+                .args([
+                    "-L",
+                    "receipt-0000",
+                    "list-panes",
+                    "-a",
+                    "-F",
+                    "#{session_id}:#{pane_id}:#{pane_pid}"
+                ])
+                .output()?
+                .stdout,
+            panes_before.stdout
+        );
+    }
     Ok(())
 }

@@ -76,6 +76,12 @@ pub(super) fn check_configuration(
         "worker_exit_receipts supports only POSIX Codex tmux launches"
     );
     if enabled {
+        anyhow::ensure!(
+            entry
+                .and_then(|entry| entry.mode.as_deref())
+                .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("exec")),
+            "worker_exit_receipts requires mode = 'exec'; Interactive uses legacy supervision"
+        );
         anyhow::ensure!(entry.and_then(|entry| entry.update).unwrap_or_default() != cosmon_core::config::CodexUpdatePolicy::Auto, "worker_exit_receipts requires update = 'skip' or 'operator'; automatic relaunch is not permitted");
     }
     #[cfg(unix)]
@@ -92,6 +98,15 @@ pub(super) fn check_configuration(
     Ok(enabled)
 }
 
+/// Creation evidence and the exact dispatch snapshot that may receive it.
+#[cfg(unix)]
+pub(super) struct SpawnWitness {
+    /// Terminal incarnation captured while creating this worker's pane.
+    pub terminal: Option<cosmon_core::terminal::TerminalIdentity>,
+    /// Prepared launch A, never a later process reloaded for the terminal CAS.
+    pub expected_process: cosmon_core::process::MoleculeProcess,
+}
+
 /// Prepare durable identity before creating the pane, then launch with the historic authority.
 #[cfg(unix)]
 pub(super) fn spawn_codex(
@@ -100,7 +115,7 @@ pub(super) fn spawn_codex(
     molecule: &cosmon_state::MoleculeData,
     worker: &cosmon_core::id::WorkerId,
     molecule_dir: &Path,
-) -> anyhow::Result<Option<cosmon_core::terminal::TerminalIdentity>> {
+) -> anyhow::Result<SpawnWitness> {
     use cosmon_core::worker_exit::{LaunchRequest, LaunchToken};
     use cosmon_state::{worker_exit::FileWorkerExitStore, StateStore};
     use cosmon_transport::codex;
@@ -122,21 +137,25 @@ pub(super) fn spawn_codex(
     )
     .map_err(anyhow::Error::msg)?;
     let ledger = cosmon_filestore::FileStore::new(state_dir);
-    let receipts = {
+    let (receipts, expected_process) = {
         let _guard = ledger.lock_fleet()?;
         let mut observed = ledger.load_molecule(&molecule.id)?;
         anyhow::ensure!(
-            observed
-                .process
-                .as_ref()
-                .is_some_and(|process| &process.worker_id == worker),
+            observed.process == molecule.process
+                && observed
+                    .process
+                    .as_ref()
+                    .is_some_and(|process| &process.worker_id == worker),
             "worker dispatch changed before supervisor preparation"
         );
         let receipts =
             FileWorkerExitStore::prepare(molecule_dir, request).map_err(anyhow::Error::msg)?;
-        if let Some(process) = observed.process.as_mut() {
-            process.worker_launch = Some(receipts.request().identity.clone());
-        }
+        let process = observed
+            .process
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("worker dispatch disappeared before preparation"))?;
+        process.worker_launch = Some(receipts.request().identity.clone());
+        let expected_process = process.clone();
         ledger.save_molecule(&molecule.id, &observed)?;
         cosmon_state::event_log::emit_one(
             state_dir.join("events.jsonl"),
@@ -146,7 +165,7 @@ pub(super) fn spawn_codex(
             },
             None,
         )?;
-        receipts
+        (receipts, expected_process)
     };
     let identity = serde_json::to_string(&receipts.request().identity)?;
     let mut command = vec!["exec".to_owned(), "env".to_owned()];
@@ -171,17 +190,64 @@ pub(super) fn spawn_codex(
         .into_iter()
         .filter_map(|(name, value)| value.map(|value| (name, value)))
         .collect();
-    Ok(
-        cosmon_transport::TmuxBackend::new(&config.socket).spawn_worker_with_env_witnessed(
+    let terminal = cosmon_transport::TmuxBackend::new(&config.socket)
+        .spawn_worker_with_env_witnessed(
             &config.session_name,
             &config.work_dir,
             &command.join(" "),
             &assignments,
-        )?,
-    )
+        )?;
+    Ok(SpawnWitness {
+        terminal,
+        expected_process,
+    })
 }
 
 #[cfg(unix)]
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::check_configuration;
+    use cosmon_core::config::{AdapterEntry, CodexUpdatePolicy};
+
+    #[test]
+    fn receipts_require_explicit_exec_and_leave_legacy_interactive_unchanged(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        assert!(!check_configuration("codex", None, directory.path())?);
+        for mode in [None, Some("interactive"), Some("typo"), Some("")] {
+            let mut entry = AdapterEntry {
+                worker_exit_receipts: Some(true),
+                mode: mode.map(str::to_owned),
+                update: Some(CodexUpdatePolicy::Skip),
+                ..AdapterEntry::default()
+            };
+            assert!(check_configuration("codex", Some(&entry), directory.path()).is_err());
+            assert_eq!(std::fs::read_dir(directory.path())?.count(), 0);
+            entry.worker_exit_receipts = Some(false);
+            assert!(!check_configuration(
+                "codex",
+                Some(&entry),
+                directory.path()
+            )?);
+        }
+        for mode in ["exec", " EXEC "] {
+            let entry = AdapterEntry {
+                worker_exit_receipts: Some(true),
+                mode: Some(mode.to_owned()),
+                update: Some(CodexUpdatePolicy::Skip),
+                ..AdapterEntry::default()
+            };
+            assert!(check_configuration(
+                "codex",
+                Some(&entry),
+                directory.path()
+            )?);
+        }
+        assert_eq!(std::fs::read_dir(directory.path())?.count(), 0);
+        Ok(())
+    }
 }

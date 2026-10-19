@@ -3,16 +3,21 @@
 # Supervision portable des workers
 
 Durable exit receipts are an opt-in qualification feature for the POSIX
-`cs tackle --adapter codex` tmux path. Enable them in the galaxy configuration:
+`cs tackle --adapter codex` tmux path in the existing non-interactive Exec mode.
+Enable them in the galaxy configuration:
 
 ```toml
 [adapters.codex]
+mode = "exec"
 worker_exit_receipts = true
 update = "skip" # or "operator"; automatic worker relaunch is refused
 ```
 
-The default retains historical pane-status supervision. Other adapters and
-non-POSIX platforms refuse the option. There is no Herdr worker backend,
+The default retains historical supervision and the steerable Interactive mode.
+Opt-in with Interactive (including an omitted or unrecognised mode) is refused
+before dispatch effects. It does not change the whisper signature guard or add
+a new whisper path; interactive workers continue through historical supervision.
+Other adapters and non-POSIX platforms refuse the option. There is no Herdr worker backend,
 global supervisor service, provider classification, or automatic retry.
 The internal `cs worker-supervise` command is transport plumbing; launch
 workers through `cs tackle` so dispatch and authority checks run first.
@@ -24,6 +29,9 @@ terminal dimensions and signal dispositions, and waits for that exact child.
 It adds no signal handler, process group, PTY proxy, PID-based kill authority,
 or adoption mechanism. The adapter preserves its existing credential stripping,
 explicit gateway environment, writable roots, model flags and git identity.
+The prepared process snapshot carries the exact launch into the existing
+terminal compare-and-swap, preserving the read-only terminal capability without
+allowing evidence from launch A to be stamped on a replacement B.
 The receipts contain a command binding and hashes of declared environment
 changes, never the argv, complete environment, or plaintext credentials.
 Ambient environment values are inherited as before, not certified by a receipt.

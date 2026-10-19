@@ -2041,8 +2041,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 
     if let Some(identity) = &spawn_outcome.terminal {
-        if !dispatch_ledger::stamp_terminal_witness(&store, &mol.id, mol.process.as_ref(), identity)
-        {
+        let expected = spawn_outcome
+            .terminal_expected_process
+            .as_ref()
+            .or(mol.process.as_ref());
+        if !dispatch_ledger::stamp_terminal_witness(&store, &mol.id, expected, identity) {
             eprintln!("cs tackle: terminal identity not recorded; read-only attachment will be unavailable");
         }
     }
@@ -4492,6 +4495,9 @@ pub(super) struct SpawnOutcome {
     pub detached_local: Option<DetachedLocalWitness>,
     /// Launch-bound terminal evidence; absent for unsupported or legacy spawns.
     pub terminal: Option<cosmon_core::terminal::TerminalIdentity>,
+    /// Exact process prepared during supervised spawn, including its launch pin.
+    /// Other spawns retain the caller's original dispatch snapshot for the CAS.
+    pub terminal_expected_process: Option<cosmon_core::process::MoleculeProcess>,
     /// The Claude configuration directory this dispatch's worker was actually
     /// launched under (`CLAUDE_CONFIG_DIR`), when the claude arm resolved one.
     ///
@@ -4710,6 +4716,7 @@ pub(super) fn spawn_and_prompt(
     // realized-model watcher needs and cannot recompute (see
     // [`SpawnOutcome::claude_config_dir`]).
     let mut terminal = None;
+    let mut terminal_expected_process = None;
     if adapter.as_str() == "claude" {
         let claude_config_dir = spawn_claude_and_prompt(
             backend,
@@ -4728,6 +4735,7 @@ pub(super) fn spawn_and_prompt(
         )?;
         return Ok(SpawnOutcome {
             terminal,
+            terminal_expected_process: None,
             codex_launch_dialogue: None,
             detached_local: None,
             claude_config_dir,
@@ -4764,6 +4772,7 @@ pub(super) fn spawn_and_prompt(
             preferred_model,
             &harness_argv(harness_args),
             &mut terminal,
+            &mut terminal_expected_process,
         )
         .map(|dialogue| SpawnOutcome {
             codex_launch_dialogue: dialogue,
@@ -4848,6 +4857,7 @@ pub(super) fn spawn_and_prompt(
         )),
     }?;
     outcome.terminal = terminal;
+    outcome.terminal_expected_process = terminal_expected_process;
     Ok(outcome)
 }
 
@@ -7007,6 +7017,7 @@ fn spawn_codex_and_prompt(
     // formula step pinned. Empty leaves the command byte-identical.
     harness_args: &[String],
     terminal: &mut Option<cosmon_core::terminal::TerminalIdentity>,
+    terminal_expected_process: &mut Option<cosmon_core::process::MoleculeProcess>,
 ) -> anyhow::Result<Option<cosmon_core::dialogue::DialogueScan>> {
     use cosmon_transport::codex;
     use cosmon_transport::readiness::LiveProbe as _;
@@ -7119,13 +7130,16 @@ fn spawn_codex_and_prompt(
         .unwrap_or(false);
     #[cfg(unix)]
     if supervised {
-        *terminal =
+        let spawned =
             super::worker_supervise::spawn_codex(&config, state_dir, mol, wid, mol_state_dir)?;
+        *terminal = spawned.terminal;
+        *terminal_expected_process = Some(spawned.expected_process);
     } else {
         *terminal = codex::spawn_codex_session_witnessed(&config)?;
     }
     #[cfg(not(unix))]
     {
+        let _ = terminal_expected_process;
         *terminal = codex::spawn_codex_session_witnessed(&config)?;
     }
 
@@ -8662,6 +8676,7 @@ fn spawn_detached_local_worker(
     // the PID is the durable fix.
     Ok(SpawnOutcome {
         terminal: None,
+        terminal_expected_process: None,
         codex_launch_dialogue: None,
         detached_local: Some(DetachedLocalWitness {
             pid: child.id(),

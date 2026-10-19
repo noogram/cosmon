@@ -22,7 +22,9 @@ this stage.
 ### Added
 
 - Supervision portable des workers: opt-in durable child exit receipts for
-  POSIX Codex workers launched through `cs tackle` in tmux. Normal exit codes,
+  POSIX Codex workers launched through `cs tackle` in tmux with explicit
+  `mode = "exec"`. Opt-in Interactive is refused before dispatch effects;
+  default legacy Interactive remains unchanged. Normal exit codes,
   signals, exec failures and unknown observations remain distinct; exit zero
   grants neither completion nor integration authority. Initial terminal
   qualification is macOS only. See the worker exit receipts guide.
