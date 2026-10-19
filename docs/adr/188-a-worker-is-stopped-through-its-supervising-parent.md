@@ -27,14 +27,15 @@ receipt. Until now nothing could stop that worker except the transport: tmux
 supervisor together with the worker, so a stop always degraded the receipt
 to `Unknown`.
 
-Cosmon is preparing a second host, Herdr. The spike showed that no Herdr
-identifier can carry kill authority:
+Cosmon is preparing a second host, Herdr. The spike and the herdr seat's
+source reading showed that no identifier exposed by Herdr's JSON API can
+carry kill authority for one launch:
 
 - `pane.close` takes a `pane_id` only. A restored pane keeps its `pane_id`
   after a server restart with a fresh shell, and a new workspace can reuse a
   closed `wN:p1` (spike probes 14, 15, 20, 21).
-- `terminal_id` is the only per-incarnation token. JSON `pane.close` does not
-  accept it (probe 16). The herdr seat read at tag v0.9.5 that it is
+- `terminal_id` is the only per-pane incarnation token. JSON `pane.close`
+  does not accept it (probe 16). The herdr seat read at tag v0.9.5 that it is
   allocated from wall-clock microseconds plus a process-local counter
   (`src/terminal/id.rs:16`), so it is not random, and that the direct wire
   `AttachTerminal` request accepts it (`src/protocol/wire.rs:509`) while
@@ -50,14 +51,20 @@ identifier can carry kill authority:
   (probe 12). A different process group in the same session is killed.
 - Herdr's waiter sees the child's `ExitStatus` but reduces it to a coarse
   exit reason, and the public `pane_exited` event carries no status.
-- The binary client-shell lane does carry a server-boot guard:
-  `ClientShellEndpointRequest` has a `boot_id` (`src/protocol/wire.rs:592`)
-  and the server refuses a stale boot before dispatch
-  (`src/server/headless/endpoint_requests.rs:28`). That guard covers a
-  server restart for that lane only; it is not a per-pane incarnation check
-  and JSON `pane.close` has no equivalent.
-- An argv pane's command is not replayed on restore; `resume_argv` of a
-  recognised agent is a separate replay path, which types the quoted argv
+- The binary client-shell lane is an exception for server restarts:
+  `ClientShellEndpointRequest` carries a `boot_id`
+  (`src/protocol/wire.rs:592`), minted from the server PID and epoch
+  nanoseconds (`src/server/headless.rs:369`); the server refuses a stale
+  boot before mutable dispatch
+  (`src/server/headless/endpoint_requests.rs:28`), and that lane permits
+  `pane.close` (`src/server/client_commands.rs:22`). It requires client-shell
+  mode and an active surface. It conditions a close on the server boot, not
+  on the pane's `terminal_id`, so it still cannot tell a reused `pane_id`
+  within one boot from the launch's own pane; JSON `pane.close` has no
+  condition at all.
+- An argv pane's command is not replayed on restore; `resume_argv`, held by the
+  reporting process (which need not be a recognised agent), is a separate
+  replay path, which types the quoted argv
   into a fresh shell (`src/app/agent_resume.rs:226-315`). A server may ignore unknown
   request keys, so an upstream conditional close needs capability
   negotiation, not only a new optional field.
@@ -118,10 +125,11 @@ Unix-socket client and listener live in
 - The supervisor spawns the worker into a new process group whose id is the
   child's PID (`Command::process_group(0)`). That group cannot be
   reallocated while the child is unreaped, and only the supervisor reaps it.
-- **Lock ownership.** The supervisor's identity is immutable for the life
-  of the listener and is compared before any lock is taken. The child
-  handle, its reaped status and both group signals sit behind one mutex,
-  owned by the `OwnedWorker`.
+- **Lock ownership.** The child handle, its reaped status, the identity
+  comparison and both group signals sit behind one mutex, owned by the
+  `OwnedWorker`. `terminate_group` takes an authorisation callback (the
+  identity comparison) and runs it under that mutex before checking the
+  exited flag, so admission and the exit check are one critical section.
 - **Reaping and the `exited` flag share one mutex.** The supervisor polls
   `try_wait` under the mutex and records the exit in the same critical
   section that reaps. The stop path takes the same mutex and refuses with
@@ -200,7 +208,8 @@ stays `Unknown`, and the launch needs operator resolution under the
 existing "unresolved launch" rule. Cosmon does not resolve it automatically.
 
 A Herdr-native conditional close (an upstream `expected_terminal_id` on
-`pane.close`, checked server-side, plus a per-start server instance id) is
+`pane.close`, checked server-side, combined with the server boot identity
+Herdr already has on its client-shell lane) is
 recorded as a possible future recovery path for that case only. It would be
 invoked explicitly by an operator, never as a fallback of a refused stop.
 
