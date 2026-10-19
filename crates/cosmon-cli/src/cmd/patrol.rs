@@ -1531,6 +1531,9 @@ fn fresh_orphan_verdict(
     mol: &MoleculeData,
     options: &OrphanSweepOptions<'_>,
 ) -> anyhow::Result<bool> {
+    if mol.process.as_ref().is_some_and(|p| p.transport.is_some()) {
+        return Ok(false);
+    }
     let now = Utc::now();
     if within_dead_worker_grace(mol, now, options.dead_worker_grace)
         || retackle_lease_active(&store.molecule_dir(&mol.id), now)
@@ -1610,9 +1613,13 @@ fn auto_freeze_orphans_with_grace(
         })
         .collect();
 
+    let pinned = cosmon_state::transport_pin::pinned_molecules(state_dir)?;
     let mut transitioned = Vec::new();
     let events_path = state_dir.join("events.jsonl");
     for mol_id in stranded {
+        if pinned.contains(&mol_id) {
+            continue;
+        }
         // Tackle holds this same lock while binding a new worker. Keep the
         // fresh state and transport probe adjacent to the transition.
         let _guard = store.lock_fleet()?;

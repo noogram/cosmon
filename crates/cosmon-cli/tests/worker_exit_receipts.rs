@@ -533,7 +533,9 @@ fn tackle_wait_receipts_and_harvest_preserve_os_results_without_completing_work(
         let terminal = process.terminal.ok_or("missing exact terminal identity")?;
         let birth: serde_json::Value =
             serde_json::from_slice(&fs::read(receipts.directory().join("birth.json"))?)?;
-        let cosmon_core::terminal::TerminalIdentity::Tmux { pane_pid, .. } = &terminal;
+        let cosmon_core::terminal::TerminalIdentity::Tmux { pane_pid, .. } = &terminal else {
+            panic!("expected tmux test fixture");
+        };
         assert_eq!(birth["supervisor_pid"].as_u64(), Some(u64::from(*pane_pid)));
         let view: serde_json::Value =
             serde_json::from_slice(&rig.cs(&["--json", "terminal", id.as_str()])?.stdout)?;
@@ -870,7 +872,10 @@ fn force_purge_stale_pin(restart_server: bool) -> TestResult {
         server_start,
         socket_path,
         ..
-    } = process.terminal.as_ref().ok_or("no terminal")?;
+    } = process.terminal.as_ref().ok_or("no terminal")?
+    else {
+        panic!("expected tmux test fixture");
+    };
     assert_eq!(
         cosmon_process_witness::process_start_time(*server_pid),
         Some(*server_start)
@@ -1000,7 +1005,10 @@ fn force_purge_pinned_transport_error_retains_entry_then_exact_purge_kills() -> 
         .process
         .as_mut()
         .and_then(|process| process.terminal.as_mut())
-        .ok_or("no terminal")?;
+        .ok_or("no terminal")?
+    else {
+        panic!("expected tmux test fixture");
+    };
     // The recorded server is still alive, but this socket cannot be contacted.
     *socket_path = rig
         .sockets
@@ -1163,7 +1171,10 @@ fn force_purge_pinned_relocated_pane_retains_live_worker() -> TestResult {
         .process
         .as_ref()
         .and_then(|process| process.terminal.as_ref())
-        .ok_or("no terminal")?;
+        .ok_or("no terminal")?
+    else {
+        panic!("expected tmux test fixture");
+    };
     let moved = rig
         .command("tmux")
         .args([

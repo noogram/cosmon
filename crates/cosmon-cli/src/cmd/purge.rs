@@ -456,7 +456,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 fn run_session_pass(ctx: &Context, store: &dyn StateStore, args: &Args) {
     let socket = super::tmux_socket_name(ctx);
     let execute = args.allow_unharvested && !args.dry_run;
-    let pass = super::session_reclaim::run_pass(&socket, store, execute);
+    let pass = super::session_reclaim::run_pass(&socket, store, &ctx.state_dir(), execute);
     if ctx.json {
         println!("{}", super::session_reclaim::to_json(&pass));
     } else {
@@ -963,7 +963,7 @@ fn run_targeted(
     }
     let pinned_backend = pinned_process
         .as_ref()
-        .map(|process| TmuxBackend::for_process(Some(process), ""))
+        .map(|process| cosmon_transport::worker_host::WorkerHost::for_process(Some(process), ""))
         .transpose()?;
     // ADR-188: a supervised worker is stopped only through its parent. Any
     // refusal kills nothing; the terminal teardown below runs only once the
@@ -982,6 +982,12 @@ fn run_targeted(
         pinned_process
             .as_ref()
             .and_then(|process| process.terminal.as_ref())
+            .filter(|identity| {
+                matches!(
+                    identity,
+                    cosmon_core::terminal::TerminalIdentity::Tmux { .. }
+                )
+            })
             .map(cosmon_transport::terminal::purge_pinned_terminal)
             .transpose()?
     } else {

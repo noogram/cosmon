@@ -1,0 +1,29 @@
+{
+  "protocol": 22,
+  "source": "https://github.com/herdrdev/herdr/blob/v0.9.5/docs/next/api/herdr-api.schema.json",
+  "description": "Cosmon's used method/field projection; protocol 22 is the method contract, not schema_version 1.",
+  "methods": {
+    "session.snapshot": {
+      "params": {},
+      "result": {"snapshot": {"version": "string", "protocol": "integer", "panes": "PaneInfo[]"}}
+    },
+    "workspace.create": {
+      "params": {"cwd": "string", "label": "string", "focus": "boolean"},
+      "result": {"workspace": {"workspace_id": "string"}}
+    },
+    "layout.apply": {
+      "params": {"workspace_id": "string", "focus": "boolean", "root": {"type": "pane", "command": "string[]", "cwd": "string", "env": "map<string,string>"}},
+      "result": {"layout": {"workspace_id": "string", "focused_pane_id": "string"}}
+    },
+    "pane.list": {
+      "params": {"workspace_id": "optional string"},
+      "result": {"panes": "PaneInfo[]"}
+    },
+    "pane.read": {
+      "params": {"pane_id": "string", "source": "visible", "format": "text", "lines": "integer", "strip_ansi": "boolean"},
+      "result": {"read": {"text": "string"}}
+    }
+  },
+  "PaneInfo": {"workspace_id": "string", "pane_id": "string", "terminal_id": "string"},
+  "forbidden": ["tab_id in layout.apply", "pane.close", "tab.close", "workspace.close", "server.stop", "resume_argv"]
+}

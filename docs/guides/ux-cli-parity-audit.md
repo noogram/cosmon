@@ -508,3 +508,16 @@ or historical tackle fleet record
 performs no transport or fleet teardown inferred from its id. Legacy fleet-only
 assignments still select their recorded worker name; unavailable history never
 grants a legacy control target.
+
+## Supervised Herdr worker hosting
+
+`cs tackle` accepts `[transport] backend = "herdr"` for Codex Exec with durable
+exit receipts, using an explicitly selected existing protocol-22 socket.
+Interactive and other adapter requests are refused. The host is saved on the
+process: changing configuration does not migrate existing tmux or Herdr workers.
+`cs observe`, fleet probes, forced purge and harvest follow that saved host.
+Herdr stops use the supervisor channel exclusively (ADR-188); terminal close
+operations remain unsupported. The UI inherits these CLI constraints rather
+than adding a separate launch or stop path. Terminal attachment remains a
+separate capability; this increment qualifies worker hosting, not a new Herdr
+read-only attachment client. See [configuration](../project-config.md).

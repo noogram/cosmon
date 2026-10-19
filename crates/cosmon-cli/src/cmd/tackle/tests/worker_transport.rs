@@ -102,7 +102,10 @@ impl TransportBackend for CommandBackend {
                     process.started_at += chrono::Duration::seconds(1);
                     let mut replacement = identity();
                     let cosmon_core::terminal::TerminalIdentity::Tmux { pane_id, .. } =
-                        &mut replacement;
+                        &mut replacement
+                    else {
+                        panic!("expected tmux test fixture");
+                    };
                     *pane_id = 99;
                     process.terminal = Some(replacement);
                 }

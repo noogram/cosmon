@@ -45,7 +45,10 @@ impl<'a> ProcessTransport<'a> {
         operation: impl FnOnce(&dyn TransportBackend) -> Result<T, TransportError>,
     ) -> Result<T, TransportError> {
         if let Some(process) = self.processes.iter().find(|p| &p.worker_id == worker) {
-            return operation(&crate::TmuxBackend::for_process(Some(process), "")?);
+            return operation(&crate::worker_host::WorkerHost::for_process(
+                Some(process),
+                "",
+            )?);
         }
         if self.protected.contains(worker) {
             return Err(TransportError::Io(
@@ -81,7 +84,9 @@ impl TransportBackend for ProcessTransport<'_> {
                 && !self.processes.iter().any(|p| p.worker_id == s.worker_id)
         });
         for process in &self.processes {
-            sessions.extend(crate::TmuxBackend::for_process(Some(process), "")?.list_sessions()?);
+            sessions.extend(
+                crate::worker_host::WorkerHost::for_process(Some(process), "")?.list_sessions()?,
+            );
         }
         Ok(sessions)
     }

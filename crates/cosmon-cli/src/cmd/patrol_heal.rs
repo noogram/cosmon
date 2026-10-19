@@ -293,6 +293,15 @@ fn apply_remedy(
     if dry_run {
         return ApplyResult::Skipped("dry-run".to_owned());
     }
+    if remedy != HealthRemedy::HarvestDone {
+        let pinned = cosmon_state::transport_pin::pinned_molecules(state_dir);
+        if mol.process.as_ref().is_some_and(|p| p.transport.is_some())
+            || pinned.is_err()
+            || pinned.is_ok_and(|ids| ids.contains(&mol.id))
+        {
+            return ApplyResult::Skipped("pinned Exec has no interactive healing contract".into());
+        }
+    }
     match remedy {
         // A4/A8 — orchestrator `cs done` harvest. Never a worker self-done.
         HealthRemedy::HarvestDone => {

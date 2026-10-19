@@ -549,7 +549,11 @@ impl TmuxBackend {
         let identity = process.terminal.as_ref().ok_or_else(|| {
             TransportError::Io("pinned transport has no creation-time terminal incarnation".into())
         })?;
-        let cosmon_core::terminal::TerminalIdentity::Tmux { socket_path, .. } = identity;
+        let cosmon_core::terminal::TerminalIdentity::Tmux { socket_path, .. } = identity else {
+            return Err(TransportError::Unsupported(
+                "Herdr pin cannot route through tmux".into(),
+            ));
+        };
         Ok(Self {
             socket: socket_path.clone(),
             identity: Some(identity.clone()),

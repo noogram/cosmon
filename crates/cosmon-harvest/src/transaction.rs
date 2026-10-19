@@ -731,7 +731,10 @@ fn compute_teardown_plan(
     let backend = target
         .as_ref()
         .map(|_| {
-            TmuxBackend::for_process(molecule.as_ref().and_then(|m| m.process.as_ref()), socket)
+            cosmon_transport::worker_host::WorkerHost::for_process(
+                molecule.as_ref().and_then(|m| m.process.as_ref()),
+                socket,
+            )
         })
         .transpose()?;
     let wid = target.as_ref().map(WorkerId::new).transpose()?;
@@ -2350,7 +2353,12 @@ fn run_with_remote_before_lock(
 
     let pinned_backend = transport_target
         .as_ref()
-        .map(|_| TmuxBackend::for_process(mol.process.as_ref(), &tmux_socket_name(ctx)))
+        .map(|_| {
+            cosmon_transport::worker_host::WorkerHost::for_process(
+                mol.process.as_ref(),
+                &tmux_socket_name(ctx),
+            )
+        })
         .transpose()?;
     let socket = pinned_backend.as_ref().map_or_else(
         || tmux_socket_name(ctx),
@@ -4019,7 +4027,17 @@ fn run_with_remote_before_lock(
     if let Some((backend, session_name)) = pinned_backend
         .as_ref()
         .zip(transport_target.as_deref())
-        .filter(|_| !args.no_kill && supervised_stopped)
+        .filter(|_| {
+            !args.no_kill
+                && supervised_stopped
+                && !matches!(
+                    mol.process
+                        .as_ref()
+                        .and_then(|p| p.transport)
+                        .map(|s| s.backend),
+                    Some(cosmon_core::transport_selection::TransportKind::Herdr)
+                )
+        })
     {
         if backend.session_exists(session_name).unwrap_or(false) {
             if backend.terminate_session(session_name).is_ok() {

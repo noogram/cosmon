@@ -422,7 +422,12 @@ pub(crate) fn withhold_reasons(obs: &SessionObservation) -> Vec<String> {
 ///
 /// `execute` is the operator's ask. Without it nothing is captured to disk and
 /// nothing is killed; the verdicts are identical either way.
-pub(crate) fn run_pass(socket: &str, store: &dyn StateStore, execute: bool) -> SessionPass {
+pub(crate) fn run_pass(
+    socket: &str,
+    store: &dyn StateStore,
+    state_dir: &std::path::Path,
+    execute: bool,
+) -> SessionPass {
     let mut pass = SessionPass {
         executed: execute,
         ..SessionPass::default()
@@ -446,9 +451,35 @@ pub(crate) fn run_pass(socket: &str, store: &dyn StateStore, execute: bool) -> S
         }
     };
 
+    let (pinned_molecules, pinned_workers) = match (
+        cosmon_state::transport_pin::pinned_molecules(state_dir),
+        cosmon_state::transport_pin::pinned_workers(state_dir),
+    ) {
+        (Ok(molecules), Ok(workers)) => (molecules, workers),
+        _ => {
+            pass.enumeration_errors.push(ObservationError::new(
+                "transport_pins",
+                "ledger",
+                "cannot prove legacy session ownership",
+            ));
+            return pass;
+        }
+    };
     let self_session = current_session(socket);
 
     for live in sessions {
+        let pin_by_owner = index
+            .as_ref()
+            .and_then(|owners| owners.get(&live.name))
+            .is_some_and(|owner| {
+                pinned_molecules
+                    .iter()
+                    .any(|id| id.as_str() == owner.molecule)
+            });
+        if pin_by_owner || pinned_workers.iter().any(|id| id.as_str() == live.name) {
+            pass.withheld.push(WithheldSession { name:live.name, reasons:vec!["pinned Exec launch: use incarnation-bound purge/done, never name-based session reclaim".into()] });
+            continue;
+        }
         if self_session.as_deref() == Some(live.name.as_str()) {
             pass.withheld.push(WithheldSession {
                 name: live.name,

@@ -72,7 +72,10 @@ impl TerminalBackend for TmuxBackend {
             socket_path,
             session_id,
             ..
-        } = identity;
+        } = identity
+        else {
+            return Err(TerminalUnavailable::BackendUnavailable);
+        };
         let output = probe(Command::new("tmux").args([
             "-S",
             socket_path,
@@ -99,12 +102,17 @@ impl TerminalBackend for TmuxBackend {
             socket_path,
             session_id,
             ..
-        } = identity;
+        } = identity
+        else {
+            return Err(TerminalUnavailable::BackendUnavailable);
+        };
         // All values interpolated into tmux's command language are typed numbers.
         // The format and attach execute on the SAME server queue. A reused name,
         // changed active pane, respawn or added window cannot redirect this client.
         let guard = identity_guard(identity);
-        let TerminalIdentity::Tmux { pane_id, .. } = identity;
+        let TerminalIdentity::Tmux { pane_id, .. } = identity else {
+            return Err(TerminalUnavailable::BackendUnavailable);
+        };
         let read = format!("if-shell -F -t ${session_id} '{guard}' 'capture-pane -p -e -t %{pane_id}' 'terminal-incarnation-refused'");
         let attach = format!("attach-session -E -r -f ignore-size -t ${session_id}");
         let status = Command::new("python3")
@@ -139,7 +147,10 @@ impl TerminalInteractionBackend for TmuxBackend {
             session_id,
             pane_id,
             ..
-        } = identity;
+        } = identity
+        else {
+            return Err(TerminalUnavailable::BackendUnavailable);
+        };
         let guard = identity_guard(identity);
         // Numeric targets and a fixed predicate only; keyboard bytes travel as hex.
         let attach = format!("attach-session -E -t ${session_id}");
@@ -189,7 +200,10 @@ fn identity_guard_for_scope(identity: &TerminalIdentity, live: bool, layout: boo
         pane_id,
         pane_pid,
         ..
-    } = identity;
+    } = identity
+    else {
+        return "0".into();
+    };
     let conditions = [
         format!("#{{==:#{{pid}},{server_pid}}}"),
         if layout {
@@ -251,7 +265,12 @@ pub fn purge_pinned_terminal(
         server_pid,
         server_start,
         ..
-    } = identity;
+    } = identity
+    else {
+        return Err(cosmon_core::transport::TransportError::Unsupported(
+            "Herdr terminal has no teardown authority".into(),
+        ));
+    };
     let observed = process_start_time(*server_pid);
     let absent = observed.is_some_and(|start| start != *server_start)
         || (observed.is_none() && server_process_absent(*server_pid));
@@ -330,7 +349,10 @@ fn checked_bound_command(
         pane_pid,
         pane_start,
         ..
-    } = identity;
+    } = identity
+    else {
+        return Err(error());
+    };
     if process_start_time(*server_pid) != Some(*server_start) {
         return Err(error());
     }

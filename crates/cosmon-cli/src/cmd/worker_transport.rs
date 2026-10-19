@@ -33,10 +33,28 @@ pub(super) fn resolve(ctx: &super::Context) -> anyhow::Result<TransportSelection
 }
 
 /// The typed choice commands composition, even while only one implementation is qualified.
-pub(super) fn compose(kind: TransportKind, socket: &str) -> cosmon_transport::TmuxBackend {
-    match kind {
-        TransportKind::Tmux => cosmon_transport::TmuxBackend::new(socket),
-    }
+pub(super) fn compose(
+    kind: TransportKind,
+    socket: &str,
+) -> anyhow::Result<cosmon_transport::worker_host::WorkerHost> {
+    let path;
+    let socket = if kind == TransportKind::Herdr {
+        path = std::env::var("HERDR_SOCKET_PATH").map_err(|_| {
+            anyhow::anyhow!(
+                "Herdr dispatch requires HERDR_SOCKET_PATH pointing at an already-running session"
+            )
+        })?;
+        anyhow::ensure!(
+            std::path::Path::new(&path).is_absolute(),
+            "HERDR_SOCKET_PATH must be absolute"
+        );
+        &path
+    } else {
+        socket
+    };
+    Ok(cosmon_transport::worker_host::WorkerHost::new(
+        kind, socket,
+    )?)
 }
 
 /// Positive dispatch history survives loss of a process snapshot. Only a later
