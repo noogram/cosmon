@@ -43,10 +43,9 @@ pub fn pins(state_dir: &std::path::Path) -> std::io::Result<TransportPins> {
         }
         // Match read_all's logical line-byte accounting, including a final row
         // without a newline. read_line propagates invalid UTF-8 before filtering.
-        let line = line
-            .strip_suffix('\n')
-            .map(|line| line.strip_suffix('\r').unwrap_or(line))
-            .unwrap_or(&line);
+        let line = line.strip_suffix('\n').map_or(line.as_str(), |line| {
+            line.strip_suffix('\r').unwrap_or(line)
+        });
         crate::event_log::note_journal_bytes_read(line.len() as u64 + 1);
         // JSON escapes can encode the discriminator itself. Such rows must use
         // the full parser even when the literal spelling is absent. False

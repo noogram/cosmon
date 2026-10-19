@@ -1068,6 +1068,46 @@ fn force_purge_pinned_transport_error_retains_entry_then_exact_purge_kills() -> 
     assert!(other_alive);
     assert_eq!(fs::read(rig.state().join("fleet.json"))?, fleet_before);
     ledger.save_molecule(&id, &original)?;
+    // Extra windows make exact teardown ambiguous but do not make the live
+    // original worker stale. A layout-only guard refusal must retain it.
+    assert!(rig
+        .command("tmux")
+        .args([
+            "-L",
+            "receipt-0000",
+            "new-window",
+            "-d",
+            "-t",
+            session,
+            "-n",
+            "extra",
+            "sleep 120",
+        ])
+        .output()?
+        .status
+        .success());
+    let refused = rig
+        .command(env!("CARGO_BIN_EXE_cs"))
+        .args(["--json", "purge", session, "--force", "--allow-unharvested"])
+        .output()?;
+    assert!(
+        !refused.status.success(),
+        "layout refusal cannot establish a stale incarnation"
+    );
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("layout changed"));
+    assert_eq!(fs::read(rig.state().join("fleet.json"))?, fleet_before);
+    assert!(rig
+        .command("tmux")
+        .args([
+            "-L",
+            "receipt-0000",
+            "kill-window",
+            "-t",
+            &format!("{session}:extra"),
+        ])
+        .output()?
+        .status
+        .success());
     // End the dummy executable cleanly; exact teardown must reclaim its retained pane.
     fs::write(ledger.molecule_dir(&id).join("control"), "exit 0\n")?;
     assert!(wait_for(|| !ledger

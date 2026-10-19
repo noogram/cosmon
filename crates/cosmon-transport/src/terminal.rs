@@ -178,6 +178,10 @@ fn identity_guard(identity: &TerminalIdentity) -> String {
 }
 
 fn identity_guard_for(identity: &TerminalIdentity, live: bool) -> String {
+    identity_guard_for_scope(identity, live, true)
+}
+
+fn identity_guard_for_scope(identity: &TerminalIdentity, live: bool, layout: bool) -> String {
     let TerminalIdentity::Tmux {
         server_pid,
         session_id,
@@ -197,8 +201,16 @@ fn identity_guard_for(identity: &TerminalIdentity, live: bool) -> String {
         } else {
             "1".into()
         },
-        "#{==:#{session_windows},1}".into(),
-        "#{==:#{window_panes},1}".into(),
+        if layout {
+            "#{==:#{session_windows},1}".into()
+        } else {
+            "1".into()
+        },
+        if layout {
+            "#{==:#{window_panes},1}".into()
+        } else {
+            "1".into()
+        },
     ];
     conditions
         .into_iter()
@@ -373,6 +385,12 @@ fn checked_bound_command(
         .collect::<Vec<_>>()
         .join(" ");
     let guard = identity_guard_for(identity, false);
+    // A layout-only refusal does not establish that the original worker is
+    // gone. Distinguish it from a changed binding on the same server queue.
+    let refusal = format!(
+        "if-shell -F -t %{pane_id} '{}' 'display-message -p cosmon-terminal-layout-refused' 'display-message -p cosmon-incarnation-refused'",
+        identity_guard_for_scope(identity, false, false),
+    );
     let output = pinned_probe(
         socket_path,
         *server_pid,
@@ -383,10 +401,20 @@ fn checked_bound_command(
             &format!("%{pane_id}"),
             &guard,
             &command,
-            "display-message -p cosmon-incarnation-refused",
+            &refusal,
         ],
     )?;
+    bound_output(output)
+}
+
+fn bound_output(output: std::process::Output) -> Result<String, BoundCommandFailure> {
+    use cosmon_core::transport::TransportError;
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    if text.trim() == "cosmon-terminal-layout-refused" {
+        return Err(BoundCommandFailure::Unavailable(TransportError::Io(
+            "pinned terminal layout changed while its worker incarnation is still present".into(),
+        )));
+    }
     if text.trim() == "cosmon-incarnation-refused" {
         return Err(BoundCommandFailure::IncarnationChanged);
     }
