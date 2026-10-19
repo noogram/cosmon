@@ -287,9 +287,29 @@ Claude Code 2.1.302 was probed with `--init-only`: a real `SessionStart` callbac
 exported `CLAUDE_CODE_SESSION_ID` matching its native payload, while
 `CLAUDE_SESSION_ID` was absent. The supported launcher supplied a fresh marked
 identity shared by that callback's presence row and its shell check. No Claude
-model was called. A Claude **tool subprocess** environment remains unverified;
-the callback export alone does not establish a native tool identity contract.
-Keep using `cs sessions launch claude` for the shared launch fallback.
+model was called in that earlier probe.
+
+The separate anonymous receipt in
+`crates/cosmon-core/tests/fixtures/claude-tool-witness-2026-10-19.json` records
+two concurrent Claude Code 2.1.303 processes on macOS, explicitly using
+`claude-sonnet-5-5` at low effort. Each emitted one actual Bash `tool_use`
+and a receipt from the requested subprocess. `CLAUDE_CODE_SESSION_ID` was
+present in both callback and tool and matched the callback's native payload;
+`CLAUDE_SESSION_ID` and Codex aliases were absent. Under the existing resolver,
+the fresh marked launch fallback remains the caller identity. Callback, tool,
+presence and takeover check agreed per process, with distinct launch identities
+and the previous holder's entire row unchanged. Both checks refused without a
+lease. No authority transfer or signature was attempted.
+
+Each process was limited to `--max-turns 1`, a CLI API-equivalent budget of
+USD 0.25 and 120 seconds, with retries disabled and no fallback. Both exited 1
+with `error_max_turns` after the tool result; the CLI reported `num_turns: 2`
+despite only one assistant event and one tool invocation per stream. Reported
+API-equivalent costs were USD 0.010318 and USD 0.010578; these are not subscription
+quota measurements. This qualifies the observed tool identity path, not normal
+conversation completion, other versions/platforms or signed takeover.
+Keep using `cs sessions launch claude` for the shared launch fallback. Replay
+uses synthetic identities and does not renew the live qualification.
 
 The presence snapshot exposed by `cs sessions list --json` carries the same
 `lifecycle_source`, optional `state`, and the last accepted

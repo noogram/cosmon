@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "provider_version": "2.1.303",
+  "source_revision": "7828ec3d59c27fec562381471f68647e91fc4915",
+  "requested_model": "claude-sonnet-5-5",
+  "effort": "low",
+  "limits": {
+    "sessions": 2,
+    "max_turns_per_session": 1,
+    "max_budget_usd_per_session": 0.25,
+    "wall_seconds_per_session": 120,
+    "retries": 0,
+    "fallback": false
+  },
+  "sessions": {
+    "A": {
+      "exit": 1,
+      "timed_out": false,
+      "duration_seconds": 2.875,
+      "events": [
+        {
+          "type": "system",
+          "subtype": "hook_started"
+        },
+        {
+          "type": "system",
+          "subtype": "hook_response"
+        },
+        {
+          "type": "system",
+          "subtype": "init"
+        },
+        {
+          "type": "assistant",
+          "subtype": null
+        },
+        {
+          "type": "rate_limit_event",
+          "subtype": null
+        },
+        {
+          "type": "user",
+          "subtype": null
+        },
+        {
+          "type": "result",
+          "subtype": "error_max_turns"
+        }
+      ],
+      "tool_use": [
+        {
+          "name": "Bash",
+          "exact_command": true
+        }
+      ],
+      "models": [
+        "claude-sonnet-5-5"
+      ],
+      "result": {
+        "subtype": "error_max_turns",
+        "is_error": true,
+        "num_turns": 2,
+        "total_cost_usd": 0.010318
+      },
+      "usage": {
+        "input_tokens": 2,
+        "cache_creation_input_tokens": 2376,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 81
+      },
+      "invalid_json_lines": 0,
+      "stderr_present": false,
+      "authentication_error": false,
+      "model_error": false,
+      "hook": {
+        "variables_present": {
+          "CLAUDE_SESSION_ID": false,
+          "CLAUDE_CODE_SESSION_ID": true,
+          "COSMON_SESSION_ID": true,
+          "COSMON_SESSION_LAUNCH_ID": true,
+          "CODEX_THREAD_ID": false,
+          "CODEX_SESSION_ID": false,
+          "COSMON_PARENT_MOL_ID": false,
+          "COSMON_WORKER_ID": false
+        },
+        "fresh_fallback": true,
+        "marker_matches": true,
+        "presence_matches_caller": true,
+        "check_names_same_caller": true,
+        "check_refused_without_lease": true,
+        "stale_parent_absent": true,
+        "hook_exit": 0
+      },
+      "tool": {
+        "variables_present": {
+          "CLAUDE_SESSION_ID": false,
+          "CLAUDE_CODE_SESSION_ID": true,
+          "COSMON_SESSION_ID": true,
+          "COSMON_SESSION_LAUNCH_ID": true,
+          "CODEX_THREAD_ID": false,
+          "CODEX_SESSION_ID": false,
+          "COSMON_PARENT_MOL_ID": false,
+          "COSMON_WORKER_ID": false
+        },
+        "fresh_fallback": true,
+        "marker_matches": true,
+        "presence_matches_caller": true,
+        "check_names_same_caller": true,
+        "check_refused_without_lease": true,
+        "stale_parent_absent": true
+      },
+      "barrier": {
+        "both_hooks_overlapped": true
+      },
+      "callback_native_matches_tool_if_present": true,
+      "callback_and_tool_launch_agree": true,
+      "presence_retains_callback_native": true
+    },
+    "B": {
+      "exit": 1,
+      "timed_out": false,
+      "duration_seconds": 2.676,
+      "events": [
+        {
+          "type": "system",
+          "subtype": "hook_started"
+        },
+        {
+          "type": "system",
+          "subtype": "hook_response"
+        },
+        {
+          "type": "system",
+          "subtype": "init"
+        },
+        {
+          "type": "assistant",
+          "subtype": null
+        },
+        {
+          "type": "rate_limit_event",
+          "subtype": null
+        },
+        {
+          "type": "user",
+          "subtype": null
+        },
+        {
+          "type": "result",
+          "subtype": "error_max_turns"
+        }
+      ],
+      "tool_use": [
+        {
+          "name": "Bash",
+          "exact_command": true
+        }
+      ],
+      "models": [
+        "claude-sonnet-5-5"
+      ],
+      "result": {
+        "subtype": "error_max_turns",
+        "is_error": true,
+        "num_turns": 2,
+        "total_cost_usd": 0.010578
+      },
+      "usage": {
+        "input_tokens": 2,
+        "cache_creation_input_tokens": 2376,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 107
+      },
+      "invalid_json_lines": 0,
+      "stderr_present": false,
+      "authentication_error": false,
+      "model_error": false,
+      "hook": {
+        "variables_present": {
+          "CLAUDE_SESSION_ID": false,
+          "CLAUDE_CODE_SESSION_ID": true,
+          "COSMON_SESSION_ID": true,
+          "COSMON_SESSION_LAUNCH_ID": true,
+          "CODEX_THREAD_ID": false,
+          "CODEX_SESSION_ID": false,
+          "COSMON_PARENT_MOL_ID": false,
+          "COSMON_WORKER_ID": false
+        },
+        "fresh_fallback": true,
+        "marker_matches": true,
+        "presence_matches_caller": true,
+        "check_names_same_caller": true,
+        "check_refused_without_lease": true,
+        "stale_parent_absent": true,
+        "hook_exit": 0
+      },
+      "tool": {
+        "variables_present": {
+          "CLAUDE_SESSION_ID": false,
+          "CLAUDE_CODE_SESSION_ID": true,
+          "COSMON_SESSION_ID": true,
+          "COSMON_SESSION_LAUNCH_ID": true,
+          "CODEX_THREAD_ID": false,
+          "CODEX_SESSION_ID": false,
+          "COSMON_PARENT_MOL_ID": false,
+          "COSMON_WORKER_ID": false
+        },
+        "fresh_fallback": true,
+        "marker_matches": true,
+        "presence_matches_caller": true,
+        "check_names_same_caller": true,
+        "check_refused_without_lease": true,
+        "stale_parent_absent": true
+      },
+      "barrier": {
+        "both_hooks_overlapped": true
+      },
+      "callback_native_matches_tool_if_present": true,
+      "callback_and_tool_launch_agree": true,
+      "presence_retains_callback_native": true
+    }
+  },
+  "distinct_launches": true,
+  "previous_holder_unchanged": true,
+  "presence_rows": 3,
+  "conversation_content_retained": false,
+  "raw_identifiers_retained": false,
+  "conclusive": true,
+  "scope": "Two disposable concurrent Claude processes on macOS; actual SessionStart and one model-invoked Bash subprocess each. Anonymous receipt replay is not a new live witness. No lease or authority transfer.",
+  "turn_counter_note": "Each stream contained one assistant event and one Bash tool_use. The CLI reported num_turns=2 and error_max_turns after the tool result under --max-turns 1; neither session completed normally.",
+  "observed_at": "2026-10-19"
+}
