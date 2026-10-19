@@ -5,9 +5,10 @@
 //!
 //! The Unix socket path is a rendezvous derived from the identity; it never
 //! authorises anything. Authority is the equality of the requested
-//! [`LaunchIdentity`] with the supervisor's own, checked under the child's
-//! stop lock, between two processes of the same effective UID. One
-//! connection carries one request line and one reply line.
+//! [`LaunchIdentity`](cosmon_core::worker_exit::LaunchIdentity) with the
+//! supervisor's own, checked under the child's stop lock, between two
+//! processes of the same effective UID. One connection carries one request
+//! line and one reply line.
 
 /// Outcome of a supervised stop, with any failure to write its audit evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
