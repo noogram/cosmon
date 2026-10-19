@@ -24,6 +24,12 @@ class CompanionTest(unittest.TestCase):
     """Keep dangerous near-matches and missing capabilities outside the open path."""
 
     def setUp(self):
+        # Host UI/client context is runtime input; each scenario supplies its own.
+        isolated = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("HERDR_", "COSMON_CLIENT_"))}
+        environment = patch.dict(os.environ, isolated, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
@@ -146,12 +152,40 @@ else:
         self.assertEqual(self.calls()[-1], ["herdr", ["--session", "fixture", "tab", "create",
                           "--workspace", "wTEST", "--cwd", str(self.checkout), "--no-focus"]])
 
-    def test_artifact_open_is_read_only_argv_and_requires_explicit_window(self):
-        self.invoke("open", self.detail["id"], "--artifact", "synthesis.md", expected=1)
-        self.assertEqual(len(self.calls()), 1)
+    def test_artifact_open_without_window_or_workspace_refuses_before_herdr(self):
+        result = self.invoke("open", self.detail["id"], "--artifact", "synthesis.md", expected=1)
+        self.assertIn("requires an existing workspace", result["reason"])
+        self.assertEqual(self.calls(), [["cs", ["--json", "observe", self.detail["id"]]]])
+
+    def test_artifact_open_in_code_window_uses_exact_read_only_argv(self):
         self.invoke("open", self.detail["id"], "--artifact", "synthesis.md", "--window", "42")
-        self.assertEqual(self.calls()[-1], ["herdr", ["code", "open",
-                          str(self.artifact_dir / "synthesis.md") + ":1", "--window", "42", "--json"]])
+        self.assertEqual(self.calls(), [["cs", ["--json", "observe", self.detail["id"]]],
+                         ["herdr", ["code", "open",
+                          str(self.artifact_dir / "synthesis.md") + ":1", "--window", "42", "--json"]]])
+
+    def test_artifact_open_in_workspace_creates_exact_read_only_viewer(self):
+        for workspace, context in [
+                ("wTEST", {}),
+                (None, {"HERDR_WORKSPACE_ID": "wTEST"}),
+                (None, {"HERDR_PLUGIN_CONTEXT_JSON": json.dumps({"workspace_id": "wTEST"})})]:
+            with self.subTest(workspace=workspace, context=context):
+                self.log.unlink(missing_ok=True)
+                self.fixture.write_text(json.dumps(self.detail))
+                args = SimpleNamespace(repo=self.repo, cs=str(self.cs), workspace=workspace,
+                                       command="open", id=self.detail["id"], terminal=False,
+                                       worktree=False, artifact="synthesis.md", window=None)
+                created = {"tab_id": "wTEST:t1", "pane_id": "wTEST:p1"}
+                with patch.dict(os.environ, {**self.env, **context}, clear=True), \
+                        patch.object(companion, "api", return_value=created) as api:
+                    companion.configure(args)
+                    self.assertEqual(companion.execute(args), created)
+                api.assert_called_once_with(args, "layout.apply", {
+                    "workspace_id": "wTEST", "tab_label": "Cosmon artifact (read-only)",
+                    "focus": True, "root": {"type": "pane", "cwd": str(self.repo),
+                        "command": [sys.executable, str(COMPANION.resolve()),
+                                    "--repo", str(self.repo), "--cs", str(self.cs),
+                                    "read-artifact", self.detail["id"], "synthesis.md"]}})
+                self.assertEqual(self.calls(), [["cs", ["--json", "observe", self.detail["id"]]]])
 
     def test_traversal_private_files_and_symlinks_cannot_be_opened(self):
         for name in ("../repo/.git/HEAD", "state.json", "result.md"):
