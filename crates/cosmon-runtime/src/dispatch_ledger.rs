@@ -521,6 +521,23 @@ pub fn rollback_dispatch(store: &FileStore, prior: &MoleculeData, worker: &Worke
     }
 }
 
+/// Persisted outcome of undoing a qualified dispatch.
+///
+/// Molecule restoration precedes fleet cleanup, so a cleanup error must not
+/// hide the successful molecule write from launch-failure recovery.
+#[derive(Debug)]
+pub enum DispatchRollbackResult {
+    /// The original dispatch was not restored, including an incarnation mismatch.
+    NotUndone,
+    /// The molecule was restored and the failed dispatch worker was removed.
+    Undone,
+    /// The molecule was restored, but its worker entry may remain in the fleet.
+    MoleculeRestoredFleetCleanupFailed {
+        /// The fleet read or save error that prevented confirmed cleanup.
+        error: CosmonError,
+    },
+}
+
 /// Undo a failed qualified launch only while its original dispatch incarnation is bound.
 /// Later terminal/receipt enrichment is allowed; a replacement process is never undone.
 #[must_use]
@@ -528,22 +545,33 @@ pub fn rollback_dispatch_incarnation(
     store: &FileStore,
     prior: &MoleculeData,
     expected: &cosmon_core::process::MoleculeProcess,
-) -> bool {
+) -> DispatchRollbackResult {
+    rollback_dispatch_incarnation_with_fleet_save(store, prior, expected, |fleet| {
+        store.save_fleet(fleet)
+    })
+}
+
+fn rollback_dispatch_incarnation_with_fleet_save(
+    store: &FileStore,
+    prior: &MoleculeData,
+    expected: &cosmon_core::process::MoleculeProcess,
+    save_fleet: impl FnOnce(&cosmon_state::Fleet) -> Result<(), CosmonError>,
+) -> DispatchRollbackResult {
     let Ok(_guard) = store.lock_fleet() else {
-        return false;
+        return DispatchRollbackResult::NotUndone;
     };
     let Ok(revision) = cosmon_state::ops::collapse::current_revision(store, &prior.id) else {
-        return false;
+        return DispatchRollbackResult::NotUndone;
     };
     let Ok(mut current) = store.load_molecule(&prior.id) else {
-        return false;
+        return DispatchRollbackResult::NotUndone;
     };
     if !current.process.as_ref().is_some_and(|p| {
         p.worker_id == expected.worker_id
             && p.started_at == expected.started_at
             && p.transport == expected.transport
     }) {
-        return false;
+        return DispatchRollbackResult::NotUndone;
     }
     if current.status == MoleculeStatus::Running {
         current.status = prior.status;
@@ -558,13 +586,16 @@ pub fn rollback_dispatch_incarnation(
         .save_molecule_if_revision(&prior.id, &current, &revision)
         .is_err()
     {
-        return false;
+        return DispatchRollbackResult::NotUndone;
     }
-    let Ok(mut fleet) = store.load_fleet() else {
-        return false;
-    };
-    fleet.workers.remove(&expected.worker_id);
-    store.save_fleet(&fleet).is_ok()
+    let cleanup = store.load_fleet().and_then(|mut fleet| {
+        fleet.workers.remove(&expected.worker_id);
+        save_fleet(&fleet)
+    });
+    match cleanup {
+        Ok(()) => DispatchRollbackResult::Undone,
+        Err(error) => DispatchRollbackResult::MoleculeRestoredFleetCleanupFailed { error },
+    }
 }
 
 /// The undo itself, with the fleet lock left to the caller.
@@ -809,9 +840,66 @@ mod tests {
             .ok_or("missing dispatch")?
             .started_at += chrono::Duration::seconds(1);
         store.save_molecule(&mol.id, &replacement)?;
-        assert!(!rollback_dispatch_incarnation(&store, &mol, expected));
+        assert!(matches!(
+            rollback_dispatch_incarnation(&store, &mol, expected),
+            DispatchRollbackResult::NotUndone
+        ));
         assert_eq!(store.load_molecule(&mol.id)?.process, replacement.process);
         assert!(store.load_fleet()?.workers.contains_key(&worker));
+        Ok(())
+    }
+
+    #[test]
+    fn failed_fleet_save_reports_restored_molecule_and_leftover_worker(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (dir, store, mol) = fixture();
+        let worker = WorkerId::new("rewrite-briefing-aaaa")?;
+        let adapter = adapter();
+        let (dispatched, _) =
+            commit_dispatch(&store, &mol, &record(&worker, &adapter, dir.path()))?;
+        let expected = dispatched.process.as_ref().ok_or("missing dispatch")?;
+        let result =
+            rollback_dispatch_incarnation_with_fleet_save(&store, &mol, expected, |fleet| {
+                assert!(!fleet.workers.contains_key(&worker));
+                Err(CosmonError::StateStore {
+                    reason: "fleet save refused".into(),
+                })
+            });
+        let DispatchRollbackResult::MoleculeRestoredFleetCleanupFailed { error } = result else {
+            return Err(format!("expected partial rollback, got {result:?}").into());
+        };
+        assert!(error.to_string().contains("fleet save refused"));
+        let restored = store.load_molecule(&mol.id)?;
+        assert_eq!(restored.status, mol.status);
+        assert_eq!(restored.process, mol.process);
+        assert_eq!(restored.assigned_worker, mol.assigned_worker);
+        assert_eq!(restored.session_name, mol.session_name);
+        assert_eq!(restored.tackled_by, mol.tackled_by);
+        assert_eq!(restored.tackled_at, mol.tackled_at);
+        assert!(store.load_fleet()?.workers.contains_key(&worker));
+        Ok(())
+    }
+
+    #[test]
+    fn failed_launch_undo_restores_molecule_and_removes_worker(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (dir, store, mol) = fixture();
+        let worker = WorkerId::new("rewrite-briefing-aaaa")?;
+        let adapter = adapter();
+        let (dispatched, _) =
+            commit_dispatch(&store, &mol, &record(&worker, &adapter, dir.path()))?;
+        let expected = dispatched.process.as_ref().ok_or("missing dispatch")?;
+        assert!(matches!(
+            rollback_dispatch_incarnation(&store, &mol, expected),
+            DispatchRollbackResult::Undone
+        ));
+        assert_eq!(store.load_molecule(&mol.id)?.process, mol.process);
+        assert!(!store.load_fleet()?.workers.contains_key(&worker));
+        // A retry cannot undo another incarnation or invent another rollback.
+        assert!(matches!(
+            rollback_dispatch_incarnation(&store, &mol, expected),
+            DispatchRollbackResult::NotUndone
+        ));
         Ok(())
     }
 

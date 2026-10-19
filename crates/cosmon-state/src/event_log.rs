@@ -739,8 +739,8 @@ thread_local! {
     static JOURNAL_BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// Bytes of an events log this thread has read through [`read_all`] or an
-/// [`EventLogTail`] since it started.
+/// Bytes of an events log this thread has read through [`read_all`],
+/// [`EventLogTail`], or [`crate::transport_pin::pins`] since it started.
 ///
 /// A probe, not a metric: it lets a test assert how much of the journal a
 /// long-lived loop re-reads per tick (issue #116) by measuring the reads
@@ -751,7 +751,7 @@ pub fn journal_bytes_read_by_this_thread() -> u64 {
     JOURNAL_BYTES_READ.with(std::cell::Cell::get)
 }
 
-fn note_journal_bytes_read(n: u64) {
+pub(crate) fn note_journal_bytes_read(n: u64) {
     JOURNAL_BYTES_READ.with(|c| c.set(c.get().saturating_add(n)));
 }
 

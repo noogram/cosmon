@@ -532,8 +532,10 @@ fn propel_pass(
     let molecules = store.list_molecules(&MoleculeFilter::default())?;
     let mut events = Vec::new();
     if let Some(be) = backend {
-        let pinned_workers = super::worker_transport::pinned_workers(store.state_root())?;
-        let pinned_molecules = cosmon_state::transport_pin::pinned_molecules(store.state_root())?;
+        let cosmon_state::transport_pin::TransportPins {
+            workers: pinned_workers,
+            molecules: pinned_molecules,
+        } = cosmon_state::transport_pin::pins(store.state_root())?;
         let sweep = propel_stale_molecules(
             store,
             &molecules,
