@@ -539,21 +539,55 @@ async fn explicit_scoped_policy_merges_with_harvest_scope_and_no_grant() {
 }
 
 #[tokio::test]
-async fn explicit_policy_refuses_configured_binary_before_it_runs() {
+async fn explicit_policy_refuses_configured_binary_before_it_runs(
+) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    let sentinel = b"#!/bin/sh\nprintf 'spawned\\n' > \"$0.marker\"\nexit 0\n";
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The same executable bytes must produce a witness when run directly,
+        // and leave none when configured behind the explicit-policy refusal.
+        let control_dir = tempfile::tempdir()?;
+        let control_binary = control_dir.path().join("cs-sentinel");
+        let control_marker = control_dir.path().join("cs-sentinel.marker");
+        std::fs::write(&control_binary, sentinel)?;
+        std::fs::set_permissions(&control_binary, std::fs::Permissions::from_mode(0o755))?;
+        assert!(!control_marker.exists());
+        let control = Command::new(&control_binary).output()?;
+        assert!(control.status.success(), "{control:?}");
+        assert_eq!(std::fs::read(&control_marker)?, b"spawned\n");
+    }
+
     let mut tenants = TenantWorkspaces::new();
     let tenant = tenants.add("a");
     arm_git_tenant(&tenant);
     std::fs::write(
         tenant.root.join(".cosmon/config.toml"),
         "[project]\nproject_id = \"library-harvest\"\n[harvest_authority]\nremote = \"scoped\"\n",
-    )
-    .unwrap();
+    )?;
     let id = "task-20260930-c002";
     plant_completed_with_work(&tenant, id);
-    let before = git(&tenant.root, &["rev-parse", "main"]);
+    let branch = format!("feat/{id}");
+    let before = git(&tenant.root, &["rev-parse", "main", &branch]);
+    assert!(before.status.success(), "{before:?}");
     let oidc = oidc_mock().await;
-    let security_dir = tempfile::tempdir().unwrap();
+    let security_dir = tempfile::tempdir()?;
     let mut state = stock_state(&oidc, &tenants, security_dir.path());
+    #[cfg(unix)]
+    let (binary, marker) = {
+        use std::os::unix::fs::PermissionsExt;
+
+        let binary = security_dir.path().join("cs-sentinel");
+        let marker = security_dir.path().join("cs-sentinel.marker");
+        std::fs::write(&binary, sentinel)?;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))?;
+        assert!(!marker.exists());
+        (binary, marker)
+    };
+    // Retain the original refusal test on hosts without the Unix sentinel.
+    #[cfg(not(unix))]
     let binary = security_dir.path().join("missing-cs");
     state.harvest_effect = cosmon_rpp_adapter::harvest_effect::from_config(Some(binary.clone()));
     let jwt = oidc.issue(&IssueJwt {
@@ -565,14 +599,29 @@ async fn explicit_policy_refuses_configured_binary_before_it_runs() {
     });
     let response = router(state)
         .oneshot(done_request(&jwt, id, "binary must refuse"))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(
-        before.stdout,
-        git(&tenant.root, &["rev-parse", "main"]).stdout
+        .await?;
+    let status = response.status();
+    let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), 8192).await?)?;
+    #[cfg(unix)]
+    assert!(
+        !marker.exists(),
+        "the configured executor ran despite the explicit-policy refusal: {body}"
     );
+    #[cfg(not(unix))]
     assert!(!binary.exists());
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert_eq!(body["error"], "harvest_effect_unavailable", "{body}");
+    assert_eq!(
+        body["harvest_authorization"]["reason"], "harvest_effect_unsupported",
+        "{body}"
+    );
+    let after = git(&tenant.root, &["rev-parse", "main", &branch]);
+    assert!(after.status.success(), "{after:?}");
+    assert_eq!(
+        before.stdout, after.stdout,
+        "the refusal must preserve both base and molecule branch SHAs"
+    );
+    Ok(())
 }
 
 #[tokio::test]
