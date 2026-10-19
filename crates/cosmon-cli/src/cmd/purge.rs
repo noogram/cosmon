@@ -931,7 +931,7 @@ fn run_targeted(
         anyhow::bail!("worker not found: {worker_id}");
     };
 
-    let pinned_process = worker
+    let pinned_molecule = worker
         .current_molecule
         .as_ref()
         .or(worker.frozen_molecule.as_ref())
@@ -941,7 +941,19 @@ fn run_targeted(
             Err(error) => Err(error),
         })
         .transpose()?
-        .flatten()
+        .flatten();
+    let pinned_molecule_id = pinned_molecule.as_ref().map(|m| m.id.clone());
+    // ADR-188: a supervised launch without its transport pin is malformed;
+    // it must never reach the name-addressed graceful exit below.
+    anyhow::ensure!(
+        !force
+            || pinned_molecule
+                .as_ref()
+                .and_then(|m| m.process.as_ref())
+                .is_none_or(|p| p.worker_launch.is_none() || p.transport.is_some()),
+        "supervised worker launch has no transport pin; refusing name-based teardown"
+    );
+    let pinned_process = pinned_molecule
         .and_then(|m| m.process)
         .filter(|p| p.transport.is_some());
     if force && pinned_process.is_none() {
@@ -953,7 +965,20 @@ fn run_targeted(
         .as_ref()
         .map(|process| TmuxBackend::for_process(Some(process), ""))
         .transpose()?;
-    let pinned_purge = if force {
+    // ADR-188: a supervised worker is stopped only through its parent. Any
+    // refusal kills nothing; the terminal teardown below runs only once the
+    // launch has a terminal receipt.
+    let supervised_stop = match (force, pinned_process.as_ref(), pinned_molecule_id.as_ref()) {
+        (true, Some(process), Some(molecule_id)) => process
+            .worker_launch
+            .as_ref()
+            .map(|identity| stop_supervised_worker(store, molecule_id, identity)),
+        _ => None,
+    };
+    let terminal_teardown_allowed = supervised_stop
+        .as_ref()
+        .is_none_or(cosmon_transport::worker_control::permits_teardown);
+    let pinned_purge = if force && terminal_teardown_allowed {
         pinned_process
             .as_ref()
             .and_then(|process| process.terminal.as_ref())
@@ -962,6 +987,9 @@ fn run_targeted(
     } else {
         None
     };
+    let supervised_message = supervised_stop
+        .as_ref()
+        .map(cosmon_transport::worker_control::describe);
     let terminal_cleanup = match pinned_purge {
         Some(cosmon_transport::terminal::PinnedPurgeOutcome::ServerGone) =>
             Some("recorded tmux server is gone; removed stale fleet record without killing a terminal"),
@@ -1028,6 +1056,7 @@ fn run_targeted(
             "force": force,
             "tmux_killed": tmux_killed,
             "terminal_cleanup": terminal_cleanup,
+            "supervised_stop": supervised_message,
             "purged": 1,
             "workers": [worker_id.as_str()],
             "zombie_collapsed": serde_json::Value::Null,
@@ -1039,8 +1068,23 @@ fn run_targeted(
         if let Some(message) = terminal_cleanup {
             println!("  {message}");
         }
+        if let Some(message) = &supervised_message {
+            println!("  {message}");
+        }
     }
     Ok(())
+}
+
+/// Ask the supervising parent of a pinned launch to stop it (ADR-188).
+fn stop_supervised_worker(
+    store: &dyn StateStore,
+    molecule_id: &cosmon_core::id::MoleculeId,
+    identity: &cosmon_core::worker_exit::LaunchIdentity,
+) -> Result<cosmon_transport::worker_control::StopReport, String> {
+    cosmon_transport::worker_control::stop_launch_from_env(
+        &store.molecule_dir(molecule_id),
+        identity,
+    )
 }
 
 #[cfg(test)]

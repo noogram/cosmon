@@ -3991,11 +3991,35 @@ fn run_with_remote_before_lock(
     // (trunk before fleet) deadlock-free per `smithy/docs/formal/MCStitch.tla`.
     drop(trunk_guard);
 
-    // 3. Kill tmux session (if alive).
+    // 3. Kill tmux session (if alive). ADR-188: a supervised launch is first
+    //    stopped through its parent; on any refusal nothing is killed and the
+    //    launch stays unresolved.
+    let supervised_launch = mol
+        .process
+        .as_ref()
+        .and_then(|process| process.worker_launch.as_ref())
+        .filter(|_| !args.no_kill);
+    let supervised_stopped = supervised_launch.is_none_or(|identity| {
+        let stop = cosmon_transport::worker_control::stop_launch_from_env(
+            &store.molecule_dir(&mol_id),
+            identity,
+        );
+        let line = cosmon_transport::worker_control::describe(&stop);
+        if cosmon_transport::worker_control::permits_teardown(&stop) {
+            actions.push("stopped_supervised_worker".to_owned());
+            if line.contains("warning:") {
+                warnings.push(line);
+            }
+            true
+        } else {
+            warnings.push(line);
+            false
+        }
+    });
     if let Some((backend, session_name)) = pinned_backend
         .as_ref()
         .zip(transport_target.as_deref())
-        .filter(|_| !args.no_kill)
+        .filter(|_| !args.no_kill && supervised_stopped)
     {
         if backend.session_exists(session_name).unwrap_or(false) {
             if backend.terminate_session(session_name).is_ok() {

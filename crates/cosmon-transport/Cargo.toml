@@ -30,7 +30,9 @@ cosmon-core = { workspace = true, features = ["test-harness"] }
 # path (`claude.rs`): Claude Code v2.x refuses a bypass permission mode under
 # euid 0 unless `IS_SANDBOX=1` is set (BUG #6.2). `user` is the feature that
 # exposes `unistd::Uid`; the workspace pin already enables it.
-nix.workspace = true
+# ADR-188: `process` + `term` for the worker's process group and terminal
+# foreground (`killpg`, `tcsetpgrp`); `socket` for the stop channel's peer UID.
+nix = { workspace = true, features = ["process", "term", "socket"] }
 cosmon-state.workspace = true
 cosmon-process-witness.workspace = true
 # `rand` mints the per-dispatch briefing-receipt nonce (`briefing_receipt`).

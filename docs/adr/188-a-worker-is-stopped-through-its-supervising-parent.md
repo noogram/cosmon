@@ -58,10 +58,11 @@ carry kill authority for one launch:
   boot before mutable dispatch
   (`src/server/headless/endpoint_requests.rs:28`), and that lane permits
   `pane.close` (`src/server/client_commands.rs:22`). It requires client-shell
-  mode and an active surface. It conditions a close on the server boot, not
-  on the pane's `terminal_id`, so it still cannot tell a reused `pane_id`
-  within one boot from the launch's own pane; JSON `pane.close` has no
-  condition at all.
+  mode and an active surface. It conditions a close on the server boot,
+  which closes the restart window on that lane, but it has no explicit
+  check of the pane's `terminal_id`; JSON `pane.close` has no condition at
+  all. The choice below does not rest on this lane's limits: it puts stop
+  authority in a process Cosmon owns, independent of the host.
 - An argv pane's command is not replayed on restore; `resume_argv`, held by the
   reporting process (which need not be a recognised agent), is a separate
   replay path, which types the quoted argv
@@ -168,34 +169,41 @@ Unix-socket client and listener live in
 
 | Kind | Meaning |
 |---|---|
-| `Unreachable` | No listener at the rendezvous path, a peer with another UID, a malformed or missing reply, or a timeout. Includes a supervisor that was killed. |
+| `Unreachable` | No listener at the rendezvous path, a peer with another UID, a malformed or missing reply, or a timeout. Includes a supervisor that was killed. After a lost reply it is ambiguous: the stop may have been delivered. |
 | `IdentityMismatch` | The supervisor at the path holds a different launch identity. |
 | `AlreadyExited` | The child's exit was recorded before the request; no signal was sent. |
 | `Unsupported` | Platform without Unix sockets, an unknown request version, or a signal error other than "no such group". |
 
-No refusal falls back to any name-, pane- or PID-addressed effect.
+No refusal falls back to any name-, pane- or PID-addressed effect. A refusal
+guarantees that the caller adds no effect; it does not guarantee that the
+supervisor did nothing, which is why callers decide on the receipt.
 `cs purge --force` and `cs done` step 3 call the stop channel for a
 supervised launch (one with `process.worker_launch`) and then:
 
-- if the launch's receipt is terminal (before the request, or after an
-  accepted stop or `AlreadyExited` within a bounded wait), they continue
-  with the existing incarnation-bound tmux teardown, which now removes a
-  dead pane;
-- otherwise they warn, kill nothing, and leave the launch unresolved.
+- if the launch's receipt is terminal before any request, no request is
+  sent (ADR-079 obligation 4) and they continue with the existing
+  incarnation-bound tmux teardown, which then removes a dead pane;
+- if the stop is accepted and a terminal receipt appears within a bounded
+  wait, they continue the same way;
+- on any refusal of this invocation, or an accepted stop whose receipt does
+  not appear in time, they warn, kill nothing, and leave the launch
+  unresolved, even if a receipt appears later. A later invocation
+  short-circuits on that receipt.
 
 `cs purge` still removes the fleet record in both cases, as it already did
 for a stale terminal. The unsupervised tmux path is unchanged.
 
 Each request is appended to `stop-requests.jsonl` in the launch directory
-(identity, outcome, time). The file is audit evidence only and is never
+(identity, outcome, time); a failed append is reported as a warning and
+does not change the outcome. The file is audit evidence only and is never
 consulted as authority or as a receipt.
 
 ### 5. Relation to ADR-079
 
 ADR-079 obligation 4 requires that terminate be idempotent. A second stop of
-the same launch is either `AlreadyExited` (supervisor still publishing) or
-`Unreachable` with a terminal receipt (supervisor gone), and both callers
-treat a terminal receipt as "already stopped". Neither repeats a signal.
+the same launch finds a terminal receipt and sends no request, or, in the
+window before the supervisor publishes, is refused as `AlreadyExited` and
+kills nothing. Neither repeats a signal.
 
 ### 6. Residual gap
 

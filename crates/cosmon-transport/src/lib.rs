@@ -50,6 +50,7 @@ pub mod registry;
 pub mod spawn;
 pub mod terminal;
 pub mod tmux;
+pub mod worker_control;
 #[cfg(unix)]
 pub mod worker_supervisor;
 
