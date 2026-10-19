@@ -158,16 +158,6 @@ fn configured_exec_keeps_its_incarnation_after_configuration_and_namespace_chang
     use cosmon_core::transport::TransportBackend as _;
     use cosmon_core::transport_selection::TransportSource;
     for receipts_enabled in [false, true] {
-        let rig = Rig::new()?;
-        let config_path = rig.root.path().join(".cosmon/config.toml");
-        let base = fs::read_to_string(&config_path)?.replace(
-            "worker_exit_receipts=true",
-            &format!("worker_exit_receipts={receipts_enabled}"),
-        );
-        fs::write(&config_path, &base)?;
-        let global = rig.root.path().join("config-home/cosmon");
-        fs::create_dir_all(&global)?;
-        let ledger = FileStore::new(rig.state());
         for (index, source) in [
             TransportSource::Default,
             TransportSource::Global,
@@ -176,6 +166,16 @@ fn configured_exec_keeps_its_incarnation_after_configuration_and_namespace_chang
         .into_iter()
         .enumerate()
         {
+            let rig = Rig::new()?;
+            let config_path = rig.root.path().join(".cosmon/config.toml");
+            let base = fs::read_to_string(&config_path)?.replace(
+                "worker_exit_receipts=true",
+                &format!("worker_exit_receipts={receipts_enabled}"),
+            );
+            fs::write(&config_path, &base)?;
+            let global = rig.root.path().join("config-home/cosmon");
+            fs::create_dir_all(&global)?;
+            let ledger = FileStore::new(rig.state());
             if index > 0 {
                 fs::write(global.join("config.toml"), "[transport]\nbackend='tmux'\n")?;
             }
@@ -672,5 +672,159 @@ fn interactive_receipt_opt_in_is_refused_before_dispatch_effects() -> TestResult
             panes_before.stdout
         );
     }
+    Ok(())
+}
+
+#[test]
+#[ignore = "real tmux qualification: run explicitly with --ignored on a POSIX host"]
+fn harvesting_an_unbound_molecule_never_adopts_a_same_name_neighbor() -> TestResult {
+    use cosmon_core::agent::AgentRole;
+    use cosmon_core::clearance::Clearance;
+    use cosmon_core::id::{AgentId, WorkerId};
+    use cosmon_core::worker::WorkerStatus;
+
+    let rig = Rig::new()?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&rig.cs(&["--json", "nucleate", "witness"])?.stdout)?;
+    let id = MoleculeId::new(value["id"].as_str().ok_or("no molecule")?)?;
+    rig.cs(&["collapse", id.as_str(), "--reason", "unbound qualification"])?;
+    let ledger = FileStore::new(rig.state());
+    let mut fleet = ledger.load_fleet()?;
+    let worker_id = WorkerId::new(id.as_str())?;
+    fleet.workers.insert(
+        worker_id.clone(),
+        cosmon_state::WorkerData::new(
+            worker_id.clone(),
+            AgentId::new("unrelated")?,
+            AgentRole::Implementation,
+            Clearance::Execute,
+            WorkerStatus::Active,
+        ),
+    );
+    ledger.save_fleet(&fleet)?;
+    let before = fs::read(rig.state().join("fleet.json"))?;
+    assert!(rig
+        .command("tmux")
+        .args([
+            "-L",
+            "receipt-0000",
+            "new-session",
+            "-d",
+            "-s",
+            id.as_str(),
+            "sleep 120"
+        ])
+        .status()?
+        .success());
+    fs::rename(
+        rig.state().join("events.jsonl"),
+        rig.state().join("events.saved"),
+    )?;
+    fs::create_dir(rig.state().join("events.jsonl"))?;
+    let result = rig
+        .command(env!("CARGO_BIN_EXE_cs"))
+        .args([
+            "done",
+            id.as_str(),
+            "--no-merge",
+            "--no-worktree-remove",
+            "--no-branch-delete",
+            "--no-auto-propel",
+        ])
+        .output()?;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read(rig.state().join("fleet.json"))?, before);
+    assert!(ledger.load_fleet()?.workers.contains_key(&worker_id));
+    assert!(rig
+        .command("tmux")
+        .args(["-L", "receipt-0000", "has-session", "-t", id.as_str()])
+        .status()?
+        .success());
+    // The older fleet-only representation remains usable without fabricating
+    // a molecule-id target. Its explicit worker label differs from the neighbor.
+    fs::remove_dir(rig.state().join("events.jsonl"))?;
+    fs::rename(
+        rig.state().join("events.saved"),
+        rig.state().join("events.jsonl"),
+    )?;
+    let legacy_id = WorkerId::new("legacy-seat")?;
+    let mut legacy = cosmon_state::WorkerData::new(
+        legacy_id.clone(),
+        AgentId::new("legacy")?,
+        AgentRole::Implementation,
+        Clearance::Execute,
+        WorkerStatus::Active,
+    );
+    legacy.current_molecule = Some(id.clone());
+    let mut fleet = ledger.load_fleet()?;
+    fleet.workers.insert(legacy_id.clone(), legacy);
+    ledger.save_fleet(&fleet)?;
+    assert!(rig
+        .command("tmux")
+        .args([
+            "-L",
+            "receipt-0000",
+            "new-session",
+            "-d",
+            "-s",
+            legacy_id.as_str(),
+            "sleep 120"
+        ])
+        .status()?
+        .success());
+    rig.cs(&[
+        "done",
+        id.as_str(),
+        "--no-merge",
+        "--no-worktree-remove",
+        "--no-branch-delete",
+        "--no-auto-propel",
+    ])?;
+    assert!(!rig
+        .command("tmux")
+        .args([
+            "-L",
+            "receipt-0000",
+            "has-session",
+            "-t",
+            legacy_id.as_str()
+        ])
+        .status()?
+        .success());
+    assert!(rig
+        .command("tmux")
+        .args(["-L", "receipt-0000", "has-session", "-t", id.as_str()])
+        .status()?
+        .success());
+    let fleet = ledger.load_fleet()?;
+    assert!(!fleet.workers.contains_key(&legacy_id));
+    assert!(fleet.workers.contains_key(&worker_id));
+    // Preserve the older, explicit tackle fleet convention too. This marker
+    // is established legacy state, distinct from an unrelated same-name seat.
+    let mut fleet = fleet;
+    fleet
+        .workers
+        .get_mut(&worker_id)
+        .ok_or("neighbor missing")?
+        .agent_id = AgentId::new("tackle")?;
+    ledger.save_fleet(&fleet)?;
+    rig.cs(&[
+        "done",
+        id.as_str(),
+        "--no-merge",
+        "--no-worktree-remove",
+        "--no-branch-delete",
+        "--no-auto-propel",
+    ])?;
+    assert!(!rig
+        .command("tmux")
+        .args(["-L", "receipt-0000", "has-session", "-t", id.as_str()])
+        .status()?
+        .success());
+    assert!(!ledger.load_fleet()?.workers.contains_key(&worker_id));
     Ok(())
 }

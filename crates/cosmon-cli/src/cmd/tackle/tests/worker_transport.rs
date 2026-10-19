@@ -77,8 +77,10 @@ impl TransportBackend for CommandBackend {
     fn is_alive(&self, w: &cosmon_core::id::WorkerId) -> Result<bool, TransportError> {
         self.inner.is_alive(w)
     }
-    fn send_input(&self, w: &cosmon_core::id::WorkerId, s: &str) -> Result<(), TransportError> {
-        self.inner.send_input(w, s)
+    fn send_input(&self, _: &cosmon_core::id::WorkerId, _: &str) -> Result<(), TransportError> {
+        Err(TransportError::Io(
+            "Exec command backend cannot accept interactive input".into(),
+        ))
     }
     fn capture_output(
         &self,

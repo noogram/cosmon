@@ -500,3 +500,9 @@ A legacy dispatch that reuses a worker name for a different molecule does not
 erase the old molecule's positive hosting history. Molecule-addressed controls
 and propulsion preserve that distinction; the new legacy molecule retains its
 existing path.
+
+Harvest of a molecule without any recorded worker/session/fleet assignment
+or historical tackle fleet record
+performs no transport or fleet teardown inferred from its id. Legacy fleet-only
+assignments still select their recorded worker name; unavailable history never
+grants a legacy control target.

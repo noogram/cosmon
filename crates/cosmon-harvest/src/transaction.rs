@@ -610,6 +610,51 @@ pub struct TeardownPlan {
     pub warnings: Vec<String>,
 }
 
+/// Resolve only a recorded worker/terminal binding. A molecule id is a label,
+/// never evidence that a same-name terminal or fleet seat belongs to this harvest.
+fn worker_teardown_target(
+    store: &dyn cosmon_state::StateStore,
+    molecule: &cosmon_state::MoleculeData,
+) -> Option<String> {
+    if let Some(session) = molecule.tmux_session() {
+        return Some(session.to_owned());
+    }
+    if let Some(worker) = molecule.worker() {
+        return Some(worker.to_string());
+    }
+    let fleet = match store.load_fleet() {
+        Ok(fleet) => fleet,
+        Err(error) => {
+            eprintln!("warning: fleet unavailable; worker teardown disabled: {error}");
+            return None;
+        }
+    };
+    let mut matches = fleet.workers.values().filter(|worker| {
+        worker.current_molecule.as_ref() == Some(&molecule.id)
+            || worker.frozen_molecule.as_ref() == Some(&molecule.id)
+    });
+    let target = matches.next().map(|worker| worker.id.to_string());
+    if matches.next().is_some() {
+        eprintln!("warning: ambiguous fleet assignment; worker teardown disabled");
+        return None;
+    }
+    target.or_else(|| {
+        // Pre-assignment legacy tackle records use agent_id=tackle and the
+        // molecule id as WorkerId (register_tackle_worker's established form).
+        // An arbitrary same-name fleet worker or terminal grants no authority.
+        fleet
+            .workers
+            .values()
+            .find(|worker| {
+                worker.id.as_str() == molecule.id.as_str()
+                    && worker.agent_id.as_str() == "tackle"
+                    && worker.current_molecule.is_none()
+                    && worker.frozen_molecule.is_none()
+            })
+            .map(|worker| worker.id.to_string())
+    })
+}
+
 /// Compute the teardown plan without executing anything.
 #[allow(clippy::too_many_arguments)]
 fn compute_teardown_plan(
@@ -623,7 +668,6 @@ fn compute_teardown_plan(
     persisted_base: Option<&str>,
 ) -> anyhow::Result<TeardownPlan> {
     let branch_name = format!("feat/{mol_id}");
-    let wid = WorkerId::new(session_name)?;
     let repo_root = find_repo_root(ctx)?;
     // The plan must judge ancestry against the same trunk the real teardown
     // would merge into — the molecule's own base when it has one, else the
@@ -676,18 +720,30 @@ fn compute_teardown_plan(
     // Tmux session state.
     let state_dir = ctx.config.clone().unwrap_or_else(default_state_dir);
     let store = FileStore::new(&state_dir);
-    let process = match store.load_molecule(mol_id) {
-        Ok(molecule) => molecule.process,
+    let molecule = match store.load_molecule(mol_id) {
+        Ok(molecule) => Some(molecule),
         Err(cosmon_core::error::CosmonError::MoleculeNotFound(_)) => None,
         Err(error) => return Err(error.into()),
     };
-    let backend = TmuxBackend::for_process(process.as_ref(), socket)?;
-    let session_alive = backend.is_alive(&wid).unwrap_or(false);
-
-    // Fleet worker state.
-    let worker_registered = store
-        .load_fleet()
-        .is_ok_and(|f| f.workers.contains_key(&wid));
+    let target = molecule
+        .as_ref()
+        .and_then(|mol| worker_teardown_target(&store, mol));
+    let backend = target
+        .as_ref()
+        .map(|_| {
+            TmuxBackend::for_process(molecule.as_ref().and_then(|m| m.process.as_ref()), socket)
+        })
+        .transpose()?;
+    let wid = target.as_ref().map(WorkerId::new).transpose()?;
+    let session_alive = backend
+        .as_ref()
+        .zip(wid.as_ref())
+        .is_some_and(|(backend, wid)| backend.is_alive(wid).unwrap_or(false));
+    let worker_registered = wid.as_ref().is_some_and(|wid| {
+        store
+            .load_fleet()
+            .is_ok_and(|f| f.workers.contains_key(wid))
+    });
 
     // Compute effective flags.
     let effective_no_branch_delete = if args.no_merge && !args.no_branch_delete && !args.force {
@@ -2131,12 +2187,21 @@ fn run_with_remote_before_lock(
     )?;
 
     let mol = store.load_molecule(&mol_id)?;
-    let pinned_molecules = cosmon_state::transport_pin::pinned_molecules(&state_dir)?;
-    anyhow::ensure!(
-        mol.process.as_ref().is_some_and(|p| p.transport.is_some())
-            || !pinned_molecules.contains(&mol.id),
-        "recorded worker transport identity unavailable; refusing name-based harvest teardown"
-    );
+    let transport_target = worker_teardown_target(&store, &mol);
+    match cosmon_state::transport_pin::pinned_molecules(&state_dir) {
+        Ok(pinned_molecules) => anyhow::ensure!(
+            mol.process.as_ref().is_some_and(|p| p.transport.is_some())
+                || !pinned_molecules.contains(&mol.id),
+            "recorded worker transport identity unavailable; refusing name-based harvest teardown"
+        ),
+        Err(error) if transport_target.is_none() => {
+            // No authority is reconstructed from this failure. All transport,
+            // propulsion and fleet effects stay disabled; the independent Git
+            // merge retains its existing nonfatal witness-write contract.
+            eprintln!("warning: hosting history unavailable; no worker binding, transport teardown disabled: {error}");
+        }
+        Err(error) => return Err(error.into()),
+    }
 
     require_security_review_verdict(&state_dir, &mol)?;
 
@@ -2283,13 +2348,20 @@ fn run_with_remote_before_lock(
         }
     }
 
-    let pinned_backend = TmuxBackend::for_process(mol.process.as_ref(), &tmux_socket_name(ctx))?;
-    let socket = pinned_backend.socket().to_owned();
+    let pinned_backend = transport_target
+        .as_ref()
+        .map(|_| TmuxBackend::for_process(mol.process.as_ref(), &tmux_socket_name(ctx)))
+        .transpose()?;
+    let socket = pinned_backend.as_ref().map_or_else(
+        || tmux_socket_name(ctx),
+        |backend| backend.socket().to_owned(),
+    );
 
-    // Resolve the tmux session name the worker was tackled with. Stored
-    // on the molecule at tackle time so renames stay in lockstep with
-    // teardown; falls back to the raw molecule ID for legacy molecules.
-    let session_name = mol.teardown_session();
+    // The fallback below is a reporting label only. Every transport/fleet
+    // effect requires transport_target, never a same-name molecule label.
+    let session_name = transport_target
+        .clone()
+        .unwrap_or_else(|| mol.id.to_string());
 
     // --dry-run: compute plan and display, no side effects.
     if args.dry_run {
@@ -2308,7 +2380,7 @@ fn run_with_remote_before_lock(
     }
 
     let branch_name = format!("feat/{mol_id}");
-    let wid = WorkerId::new(&session_name)?;
+    let wid = transport_target.as_ref().map(WorkerId::new).transpose()?;
     let repo_root = find_repo_root(ctx)?;
     let worktree_path = repo_root.join(".worktrees").join(mol_id.as_str());
 
@@ -2389,11 +2461,15 @@ fn run_with_remote_before_lock(
     // by proceeding, and forcing the operator to add `--force` (plus the
     // `--no-merge --no-worktree-remove --no-branch-delete` triad reported
     // in df4c) is unnecessary friction.
-    let backend_probe = pinned_backend.clone();
-    let session_alive = backend_probe.is_alive(&wid).unwrap_or(false);
-    let worker_registered = store
-        .load_fleet()
-        .is_ok_and(|f| f.workers.contains_key(&wid));
+    let session_alive = pinned_backend
+        .as_ref()
+        .zip(wid.as_ref())
+        .is_some_and(|(backend, wid)| backend.is_alive(wid).unwrap_or(false));
+    let worker_registered = wid.as_ref().is_some_and(|wid| {
+        store
+            .load_fleet()
+            .is_ok_and(|f| f.workers.contains_key(wid))
+    });
     let nothing_left = !branch_exists(&repo_root, &branch_name)
         && !worktree_path.exists()
         && !session_alive
@@ -3097,7 +3173,7 @@ fn run_with_remote_before_lock(
             args.strategy,
             &session_name,
             &socket,
-            !args.no_auto_propel,
+            !args.no_auto_propel && transport_target.is_some(),
             args.max_retries,
             args.propel_message.as_deref(),
             &merge_trailers,
@@ -3916,10 +3992,13 @@ fn run_with_remote_before_lock(
     drop(trunk_guard);
 
     // 3. Kill tmux session (if alive).
-    if !args.no_kill {
-        let backend = &pinned_backend;
-        if backend.session_exists(&session_name).unwrap_or(false) {
-            if backend.terminate_session(&session_name).is_ok() {
+    if let Some((backend, session_name)) = pinned_backend
+        .as_ref()
+        .zip(transport_target.as_deref())
+        .filter(|_| !args.no_kill)
+    {
+        if backend.session_exists(session_name).unwrap_or(false) {
+            if backend.terminate_session(session_name).is_ok() {
                 actions.push("killed_session".to_owned());
             } else {
                 warnings.push(format!("failed to kill tmux session {session_name}"));
@@ -3945,7 +4024,9 @@ fn run_with_remote_before_lock(
             Ok(f) => f,
             Err(e) => break 'purge Err(e),
         };
-        let removed = fleet.workers.remove(&wid).is_some();
+        let removed = wid
+            .as_ref()
+            .is_some_and(|wid| fleet.workers.remove(wid).is_some());
         if removed {
             if let Err(e) = store.save_fleet(&fleet) {
                 break 'purge Err(e);
@@ -4195,7 +4276,7 @@ fn run_with_remote_before_lock(
 ///
 /// Used on the `--if-completed` fast path when the molecule is already
 /// `Completed` + merged. Resolves the worker id from `session_name`
-/// (falling back to the molecule id, matching the regular teardown path),
+/// or another recorded worker binding (never inferred from the molecule id),
 /// then attempts a locked remove against `fleet.json`. Returns `true`
 /// only when an entry was actually removed.
 ///
@@ -4207,7 +4288,9 @@ fn run_with_remote_before_lock(
 fn purge_stale_worker_for(store: &FileStore, mol: &cosmon_state::MoleculeData) -> bool {
     // Prefer the inline live-process record over the legacy
     // `session_name` field (delib-20260426-1bcd #1 fold-in).
-    let session_name = mol.teardown_session();
+    let Some(session_name) = worker_teardown_target(store, mol) else {
+        return false;
+    };
     let Ok(wid) = WorkerId::new(&session_name) else {
         return false;
     };

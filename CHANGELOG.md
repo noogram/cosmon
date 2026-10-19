@@ -29,6 +29,8 @@ this stage.
   Positive dispatch history prevents name-based fallback even after loss of
   a modern process snapshot, including reuse of its worker name by a different
   legacy molecule; genuine legacy fleet records remain compatible.
+  Harvest without a recorded worker target performs no terminal or fleet
+  teardown inferred from a same-name molecule label.
   New Exec pins refuse interactive continuation and freeze/thaw rather than
   launching a different adapter. Legacy Interactive behavior is preserved.
 

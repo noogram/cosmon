@@ -83,7 +83,11 @@ creation rather than silently applying Git effects to another project.
 New Exec dispatches require a fresh branch and worktree; existing resources
 require audit and explicit resolution. Use exact worker teardown and operator
 resolution before a new dispatch. Older processes without a transport pin retain historical routing;
-their missing incarnation is never fabricated or silently upgraded.
+their missing incarnation is never fabricated or silently upgraded. A molecule
+without a recorded worker/session, explicit fleet assignment or historical
+`tackle` fleet record (agent id `tackle`, worker id equal to the molecule id) has no
+transport teardown target: harvest may merge its Git work, but cannot probe,
+kill, propel or purge a same-name terminal/worker inferred from its molecule id.
 
 ## `[worker].deny_rules` — enforced permission denials
 
