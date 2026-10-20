@@ -62,7 +62,8 @@ explicit owned workspace and applies literal argv/cwd/env to a new tab with
 `focus = false`; it never replaces an existing tab or registers resume argv.
 
 The read-only `session.snapshot` protocol must be 22 before creation. Required
-snapshot and pane/read fields are checked, and the used method/field projection
+snapshot and pane identity fields are checked before creation; pane-read fields
+are checked only when reading the exact bound worker, and the used method/field projection
 is vendored in `crates/cosmon-transport/src/herdr-protocol-22.json`. Herdr's JSON
 API does not advertise per-method capabilities: protocol 22 is the method
 contract, not a claim of independent method negotiation. A missing creation
@@ -78,7 +79,10 @@ pane/tab/workspace close or server stop is sent, even after a terminal receipt.
 Workspace creation also starts Herdr’s default shell tab; each worker therefore
 leaves that idle shell and workspace behind. Cleanup is an explicit operator action. A server restart changes
 the fingerprint/terminal id; the restored shell is never adopted, stopped or
-replayed. A lost supervisor leaves an Unknown receipt and unresolved launch.
+replayed. A lost supervisor leaves an Unknown receipt and unresolved launch. An argv pane
+that exits before readiness is observed may disappear before its terminal witness
+can be captured; the launch is reported unresolved while the supervisor receipt
+still records its actual wait status. Creation is never retried automatically.
 
 For new Exec dispatches, `process.transport` records the host and provenance
 (`project`, `global`, `default`) before spawn; `process.terminal` records the

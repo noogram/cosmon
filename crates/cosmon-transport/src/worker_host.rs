@@ -147,3 +147,60 @@ impl TransportBackend for WorkerHost {
         self.backend().graceful_exit(id, timeout)
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use cosmon_core::process::MoleculeProcess;
+    use cosmon_core::transport_selection::{TransportSelection, TransportSource};
+    use cosmon_core::worker_exit::{LaunchIdentity, LaunchToken};
+
+    #[test]
+    fn saved_pins_choose_their_own_host_and_refuse_mixed_witnesses(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let worker = WorkerId::new("same-name")?;
+        let mut process = MoleculeProcess::new(worker, "same-name");
+        process.transport = Some(TransportSelection {
+            backend: TransportKind::Herdr,
+            source: TransportSource::Project,
+        });
+        process.worker_launch = Some(LaunchIdentity {
+            schema: 1,
+            molecule_id: cosmon_core::id::MoleculeId::new("private-20261020-abcd")?,
+            launch_id: LaunchToken::from_bytes([1; 16]),
+            incarnation: LaunchToken::from_bytes([2; 16]),
+            request_hash: "fixture".into(),
+        });
+        process.terminal = Some(TerminalIdentity::Herdr {
+            socket_path: "/tmp/private-herdr.sock".into(),
+            server_pid: 42,
+            server_start: 10,
+            workspace_id: "w1".into(),
+            pane_id: "w1:p2".into(),
+            terminal_id: "original".into(),
+        });
+        assert!(matches!(
+            WorkerHost::for_process(Some(&process), "today-tmux")?,
+            WorkerHost::Herdr(_)
+        ));
+        assert!(crate::TmuxBackend::for_process(Some(&process), "today-tmux").is_err());
+        process.transport.as_mut().ok_or("missing pin")?.backend = TransportKind::Tmux;
+        assert!(WorkerHost::for_process(Some(&process), "today-herdr").is_err());
+        process.terminal = Some(TerminalIdentity::Tmux {
+            socket_path: "/tmp/original-tmux.sock".into(),
+            server_pid: 42,
+            server_start: 10,
+            session_id: 1,
+            session_created: 10,
+            pane_id: 2,
+            pane_pid: 43,
+            pane_start: 11,
+        });
+        let host = WorkerHost::for_process(Some(&process), "today-herdr")?;
+        assert!(matches!(host, WorkerHost::Tmux(_)));
+        assert_eq!(host.socket(), "/tmp/original-tmux.sock");
+        process.terminal = None;
+        assert!(WorkerHost::for_process(Some(&process), "today-herdr").is_err());
+        Ok(())
+    }
+}

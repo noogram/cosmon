@@ -175,10 +175,6 @@ impl<C: HerdrClient> HerdrBackend<C> {
         for pane in listed {
             Self::pane_fields(pane)?;
         }
-        if let Some(pane) = listed.first() {
-            let result = self.client.request("pane.read", json!({"pane_id":string(pane,"pane_id")?,"source":"visible","format":"text","lines":1,"strip_ansi":true}))?;
-            string(field(&result, "read")?, "text")?;
-        }
         Ok(())
     }
     fn pane_fields(pane: &Value) -> Result<(String, String, String), TransportError> {
@@ -211,14 +207,14 @@ impl<C: HerdrClient> HerdrBackend<C> {
         let panes = field(&result, "panes")?
             .as_array()
             .ok_or_else(|| io("Herdr panes must be an array"))?;
-        let mut found = false;
+        let mut found = 0;
         for pane in panes {
             let (workspace, id, terminal) = Self::pane_fields(pane)?;
             if workspace == *workspace_id && id == *pane_id && terminal == *terminal_id {
-                found = true;
+                found += 1;
             }
         }
-        if !found || self.client.fingerprint()? != (*server_pid, *server_start) {
+        if found != 1 || self.client.fingerprint()? != (*server_pid, *server_start) {
             return Err(io("Herdr terminal incarnation changed or worker exited"));
         }
         Ok(())
@@ -273,11 +269,18 @@ impl<C: HerdrClient> TransportBackend for HerdrBackend<C> {
             .as_array()
             .ok_or_else(|| io("Herdr panes must be an array"))?;
         let mut terminal_id = None;
+        let mut matches = 0;
         for pane in panes {
             let (workspace, id, terminal) = Self::pane_fields(pane)?;
             if workspace == workspace_id && id == pane_id {
                 terminal_id = Some(terminal);
+                matches += 1;
             }
+        }
+        if matches != 1 {
+            return Err(io(
+                "Herdr launch requires exactly one matching pane; unresolved launch",
+            ));
         }
         let terminal_id = terminal_id.ok_or_else(|| {
             io("Herdr launch pane unavailable; retain receipt and unresolved launch, never retry")
@@ -446,7 +449,11 @@ mod tests {
         let (_backend, _identity) = launch(fake.clone())?;
         for (method, _) in fake.calls.borrow().iter() {
             assert!(
-                schema["methods"].get(method).is_some(),
+                schema["schemas"]["request"]["oneOf"]
+                    .as_array()
+                    .ok_or("missing methods")?
+                    .iter()
+                    .any(|entry| entry["properties"]["method"]["const"] == *method),
                 "unvendored method: {method}"
             );
         }
@@ -476,6 +483,10 @@ mod tests {
             "stop must make zero Herdr calls"
         );
         assert_eq!(*fake.terminal.borrow(), before);
+        assert_eq!(
+            fake.request("pane.list", json!({}))?["panes"][0]["terminal_id"],
+            "B"
+        );
         assert!(backend.validate_terminal(&identity).is_err());
         for (method, params) in fake.calls.borrow().iter() {
             assert!(![

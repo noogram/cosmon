@@ -451,19 +451,16 @@ pub(crate) fn run_pass(
         }
     };
 
-    let (pinned_molecules, pinned_workers) = match (
+    let (Ok(pinned_molecules), Ok(pinned_workers)) = (
         cosmon_state::transport_pin::pinned_molecules(state_dir),
         cosmon_state::transport_pin::pinned_workers(state_dir),
-    ) {
-        (Ok(molecules), Ok(workers)) => (molecules, workers),
-        _ => {
-            pass.enumeration_errors.push(ObservationError::new(
-                "transport_pins",
-                "ledger",
-                "cannot prove legacy session ownership",
-            ));
-            return pass;
-        }
+    ) else {
+        pass.enumeration_errors.push(ObservationError::new(
+            "transport_pins",
+            "ledger",
+            "cannot prove legacy session ownership",
+        ));
+        return pass;
     };
     let self_session = current_session(socket);
 
