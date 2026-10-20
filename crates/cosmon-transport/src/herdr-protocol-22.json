@@ -3,7 +3,7 @@
   "title": "Cosmon used subset of Herdr API v0.9.5",
   "protocol": 22,
   "schema_version": 1,
-  "$comment": "Field projection of the upstream generated schema at herdrdev/herdr v0.9.5. Protocol 22 is the method contract; the JSON API has no per-method capability negotiation. Omitted optional fields are not used.",
+  "$comment": "Modified field projection of the upstream Apache-2.0 schema at herdrdev/herdr v0.9.5; see NOTICE and LICENSE-APACHE. Protocol 22 is the method contract; the JSON API has no per-method capability negotiation. Omitted optional fields are not used.",
   "schemas": {
     "request": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
