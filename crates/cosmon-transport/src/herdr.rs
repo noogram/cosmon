@@ -160,7 +160,11 @@ impl<C: HerdrClient> HerdrBackend<C> {
         if field(snapshot, "protocol")?.as_u64() != Some(PROTOCOL) {
             return Err(io("Herdr protocol mismatch: require protocol 22 (v0.9.5)"));
         }
-        string(snapshot, "version")?;
+        if string(snapshot, "version")? != "0.9.5" {
+            return Err(io(
+                "Herdr version mismatch: require qualified v0.9.5 with protocol 22",
+            ));
+        }
         let panes = field(snapshot, "panes")?
             .as_array()
             .ok_or_else(|| io("Herdr panes must be an array"))?;
@@ -375,6 +379,7 @@ mod tests {
     struct Fake {
         calls: Rc<RefCell<Vec<(String, Value)>>>,
         protocol: Rc<RefCell<u64>>,
+        version: Rc<RefCell<String>>,
         fingerprint: Rc<RefCell<(u32, u64)>>,
         terminal: Rc<RefCell<Option<String>>>,
         omit: Rc<RefCell<bool>>,
@@ -384,6 +389,7 @@ mod tests {
             Self {
                 calls: Default::default(),
                 protocol: Rc::new(RefCell::new(22)),
+                version: Rc::new(RefCell::new("0.9.5".into())),
                 fingerprint: Rc::new(RefCell::new((42, 100))),
                 terminal: Rc::new(RefCell::new(Some("A".into()))),
                 omit: Default::default(),
@@ -410,7 +416,7 @@ mod tests {
             self.calls.borrow_mut().push((method.into(), params));
             match method {
                 "session.snapshot" => Ok(
-                    json!({"snapshot":{"protocol":*self.protocol.borrow(),"version":"0.9.5","panes":self.panes()}}),
+                    json!({"snapshot":{"protocol":*self.protocol.borrow(),"version":*self.version.borrow(),"panes":self.panes()}}),
                 ),
                 "workspace.create" => Ok(json!({"workspace":{"workspace_id":"w1"}})),
                 "layout.apply" => {
@@ -517,6 +523,14 @@ mod tests {
             assert_eq!(fake.calls.borrow().len(), 1);
             assert_eq!(fake.calls.borrow()[0].0, "session.snapshot");
         }
+    }
+    #[test]
+    fn unqualified_version_refuses_before_creation_even_with_protocol_22() {
+        let fake = Fake::new();
+        *fake.version.borrow_mut() = "0.9.6".into();
+        assert!(launch(fake.clone()).is_err());
+        assert_eq!(fake.calls.borrow().len(), 1);
+        assert_eq!(fake.calls.borrow()[0].0, "session.snapshot");
     }
     #[test]
     fn literal_argv_and_environment_never_pass_through_a_shell(

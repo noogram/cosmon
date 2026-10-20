@@ -291,6 +291,44 @@ pub fn purge_pinned_terminal(
     }
 }
 
+/// Observe the exact tmux layout before asking a supervised worker to stop.
+/// A transport/layout error must refuse purge while the original worker is
+/// still alive; checking only after the stop would make that refusal destructive.
+/// A demonstrably stale incarnation remains eligible for stale-record cleanup.
+///
+/// # Errors
+/// Refuses an unobservable endpoint, a changed live layout, or a non-tmux witness.
+pub fn preflight_pinned_purge(
+    identity: &TerminalIdentity,
+) -> Result<(), cosmon_core::transport::TransportError> {
+    use cosmon_core::transport::TransportError;
+    let TerminalIdentity::Tmux {
+        server_pid,
+        server_start,
+        ..
+    } = identity
+    else {
+        return Err(TransportError::Unsupported(
+            "tmux purge preflight requires a tmux witness".into(),
+        ));
+    };
+    let observed = process_start_time(*server_pid);
+    if observed.is_some_and(|start| start != *server_start)
+        || (observed.is_none() && server_process_absent(*server_pid))
+    {
+        return Ok(());
+    }
+    if observed != Some(*server_start) {
+        return Err(TransportError::Io(
+            "pinned tmux server identity is unavailable; disappearance is unproven".into(),
+        ));
+    }
+    match checked_bound_command(identity, &["has-session"]) {
+        Ok(_) | Err(BoundCommandFailure::IncarnationChanged) => Ok(()),
+        Err(BoundCommandFailure::Unavailable(error)) => Err(error),
+    }
+}
+
 fn server_process_absent(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -370,21 +408,41 @@ fn checked_bound_command(
     } else {
         format!("${session_id}")
     };
+    // `display-message -t <missing-pane>` can evaluate in a default pane.
+    // Enumerate first: only the exact numeric pane may supply liveness data.
     let output = pinned_probe(
         socket_path,
         *server_pid,
         &[
-            "display-message",
-            "-p",
-            "-t",
-            &format!("%{pane_id}"),
-            "#{pane_dead}",
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}\t#{pane_pid}\t#{pane_dead}",
         ],
     )?;
     if !output.status.success() {
         return Err(classify_tmux_failure(&output));
     }
-    let dead = String::from_utf8_lossy(&output.stdout).trim() == "1";
+    let text = std::str::from_utf8(&output.stdout).map_err(|_| error())?;
+    let target_pane = format!("%{pane_id}");
+    let fields = text
+        .lines()
+        .find_map(|line| {
+            let fields: Vec<_> = line.split('\t').collect();
+            (fields.first().copied() == Some(target_pane.as_str())).then_some(fields)
+        })
+        .ok_or(BoundCommandFailure::IncarnationChanged)?;
+    if fields.len() != 3 {
+        return Err(error());
+    }
+    if fields[1].parse::<u32>().ok() != Some(*pane_pid) {
+        return Err(BoundCommandFailure::IncarnationChanged);
+    }
+    let dead = match fields[2] {
+        "0" => false,
+        "1" => true,
+        _ => return Err(error()),
+    };
     if !dead {
         match process_start_time(*pane_pid) {
             Some(start) if start == *pane_start => {}

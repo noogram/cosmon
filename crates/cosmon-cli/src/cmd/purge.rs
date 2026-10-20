@@ -965,6 +965,15 @@ fn run_targeted(
         .as_ref()
         .map(|process| cosmon_transport::worker_host::WorkerHost::for_process(Some(process), ""))
         .transpose()?;
+    if force {
+        if let Some(identity @ cosmon_core::terminal::TerminalIdentity::Tmux { .. }) =
+            pinned_process
+                .as_ref()
+                .and_then(|process| process.terminal.as_ref())
+        {
+            cosmon_transport::terminal::preflight_pinned_purge(identity)?;
+        }
+    }
     // ADR-188: a supervised worker is stopped only through its parent. Any
     // refusal kills nothing; the terminal teardown below runs only once the
     // launch has a terminal receipt.

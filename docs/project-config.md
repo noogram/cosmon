@@ -61,7 +61,8 @@ Herdr. Interactive and other adapters are refused. Every launch creates an
 explicit owned workspace and applies literal argv/cwd/env to a new tab with
 `focus = false`; it never replaces an existing tab or registers resume argv.
 
-The read-only `session.snapshot` protocol must be 22 before creation. Required
+The read-only `session.snapshot` must report version `0.9.5` and protocol 22
+before creation; other versions are refused even if their protocol is unchanged. Required
 snapshot and pane identity fields are checked before creation; pane-read fields
 are checked only when reading the exact bound worker, and the used method/field projection
 is vendored in `crates/cosmon-transport/src/herdr-protocol-22.json`. Herdr's JSON

@@ -38,6 +38,7 @@ stub=root/'bin/codex';stub.write_text('''#!/bin/sh
 if [ "$1" = --version ]; then echo 'codex 0.0.0'; exit 0; fi
 printf 'OpenAI Codex\\nready\\n'
 echo ready > "$COSMON_MOL_DIR/stub-ready"
+echo started >> "$COSMON_MOL_DIR/stub-starts"
 while [ ! -f "$COSMON_MOL_DIR/stub-go" ]; do sleep 0.1; done
 printf 'stub result\\n' > "stub-$COSMON_PARENT_MOL_ID.txt"
 cs evolve "$COSMON_PARENT_MOL_ID" --evidence 'stub wrote artifact' --formula .cosmon/formulas/witness.formula.toml
@@ -98,16 +99,18 @@ try:
  # A and B deliberately have the same worker name and workspace label.
  a,adir,ap=launch('shared-worker');b,bdir,bp=launch('shared-worker')
  before=req('pane.get',{'pane_id':bp['terminal']['pane_id']})['result']['pane']
+ b_birth=json.loads(next(bdir.rglob('birth.json')).read_text());os.kill(b_birth['child_pid'],0)
  run([CS,'complete',a,'--reason','private stop conformance'])
  run([CS,'done',a])
  after=req('pane.get',{'pane_id':bp['terminal']['pane_id']})['result']['pane']
  assert before['terminal_id']==after['terminal_id'];assert receipt(bdir) is None
  fleet=json.loads((root/'.cosmon/state/fleet.json').read_text());assert fleet['workers']['shared-worker']['current_molecule']==b
- assert receipt(adir) is not None
+ assert receipt(adir)['observation']=={'kind':'signaled','signal':15,'core_dumped':False}
+ os.kill(b_birth['child_pid'],0)
  emit('same-name-a-b',dict(a=a,b=b,a_receipt=receipt(adir),b_receipt=receipt(bdir),b_terminal=after['terminal_id']))
  (bdir/'stub-go').touch();run([CS,'wait',b,'--timeout','30']);run([CS,'done',b])
  assert 'shared-worker' not in json.loads((root/'.cosmon/state/fleet.json').read_text())['workers']
- r,rdir,rp=launch('restart-worker');old=rp['terminal'];stop();start()
+ r,rdir,rp=launch('restart-worker');old=rp['terminal'];starts=(rdir/'stub-starts').read_text();stop();start()
  restored=req('pane.get',{'pane_id':old['pane_id']})['result']['pane']
  assert restored['terminal_id']!=old['terminal_id']
  # A same-name tmux terminal must not be stopped by Herdr purge.
@@ -116,6 +119,7 @@ try:
  run(['tmux','-L','private-herdr-dada','has-session','-t','=restart-worker'])
  untouched=req('pane.get',{'pane_id':old['pane_id']})['result']['pane']
  assert restored['terminal_id']==untouched['terminal_id'];assert receipt(rdir) is None
+ time.sleep(.5);assert (rdir/'stub-starts').read_text()==starts
  assert (rdir/'worker-launch.json').exists()
  emit('restart-refusal',dict(molecule=r,old=old,restored_terminal=untouched['terminal_id'],receipt='Unknown',unresolved=True))
  run(['tmux','-L','private-herdr-dada','kill-session','-t','=restart-worker'])
