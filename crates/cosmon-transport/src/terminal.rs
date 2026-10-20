@@ -408,41 +408,7 @@ fn checked_bound_command(
     } else {
         format!("${session_id}")
     };
-    // `display-message -t <missing-pane>` can evaluate in a default pane.
-    // Enumerate first: only the exact numeric pane may supply liveness data.
-    let output = pinned_probe(
-        socket_path,
-        *server_pid,
-        &[
-            "list-panes",
-            "-a",
-            "-F",
-            "#{pane_id}\t#{pane_pid}\t#{pane_dead}",
-        ],
-    )?;
-    if !output.status.success() {
-        return Err(classify_tmux_failure(&output));
-    }
-    let text = std::str::from_utf8(&output.stdout).map_err(|_| error())?;
-    let target_pane = format!("%{pane_id}");
-    let fields = text
-        .lines()
-        .find_map(|line| {
-            let fields: Vec<_> = line.split('\t').collect();
-            (fields.first().copied() == Some(target_pane.as_str())).then_some(fields)
-        })
-        .ok_or(BoundCommandFailure::IncarnationChanged)?;
-    if fields.len() != 3 {
-        return Err(error());
-    }
-    if fields[1].parse::<u32>().ok() != Some(*pane_pid) {
-        return Err(BoundCommandFailure::IncarnationChanged);
-    }
-    let dead = match fields[2] {
-        "0" => false,
-        "1" => true,
-        _ => return Err(error()),
-    };
+    let dead = pinned_pane_dead(socket_path, *server_pid, *pane_id, *pane_pid)?;
     if !dead {
         match process_start_time(*pane_pid) {
             Some(start) if start == *pane_start => {}
@@ -494,6 +460,54 @@ fn checked_bound_command(
         ],
     )?;
     bound_output(&output)
+}
+
+/// Observe only the exact numeric pane; missing format targets must not fall
+/// back to another pane on this server.
+fn pinned_pane_dead(
+    socket_path: &str,
+    server_pid: u32,
+    pane_id: u32,
+    root_process_id: u32,
+) -> Result<bool, BoundCommandFailure> {
+    let error = || {
+        BoundCommandFailure::Unavailable(cosmon_core::transport::TransportError::Io(
+            "pinned terminal enumeration unavailable".into(),
+        ))
+    };
+    let output = pinned_probe(
+        socket_path,
+        server_pid,
+        &[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_id}\t#{pane_pid}\t#{pane_dead}",
+        ],
+    )?;
+    if !output.status.success() {
+        return Err(classify_tmux_failure(&output));
+    }
+    let text = std::str::from_utf8(&output.stdout).map_err(|_| error())?;
+    let target_pane = format!("%{pane_id}");
+    let fields = text
+        .lines()
+        .find_map(|line| {
+            let fields: Vec<_> = line.split('\t').collect();
+            (fields.first().copied() == Some(target_pane.as_str())).then_some(fields)
+        })
+        .ok_or(BoundCommandFailure::IncarnationChanged)?;
+    if fields.len() != 3 {
+        return Err(error());
+    }
+    if fields[1].parse::<u32>().ok() != Some(root_process_id) {
+        return Err(BoundCommandFailure::IncarnationChanged);
+    }
+    match fields[2] {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(error()),
+    }
 }
 
 fn bound_output(output: &std::process::Output) -> Result<String, BoundCommandFailure> {
