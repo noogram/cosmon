@@ -260,6 +260,11 @@ impl<'a> SessionSentinel<'a> {
         let Ok(mol) = store.load_molecule(mol_id) else {
             return false;
         };
+        // Pinned Exec liveness belongs to its host/receipt collector, never
+        // this legacy tmux name sentinel (even if a neighbour shares its name).
+        if mol.process.as_ref().is_some_and(|p| p.transport.is_some()) {
+            return false;
+        }
         // Only a molecule this watcher can speak for: it must still be live,
         // and it must actually own a session. A Direct-API dispatch (no tmux)
         // has nothing here to probe and is left entirely alone.
@@ -314,6 +319,9 @@ fn park_dead_dispatch(
     let Ok(mol) = store.load_molecule(mol_id) else {
         return false;
     };
+    if mol.process.as_ref().is_some_and(|p| p.transport.is_some()) {
+        return false;
+    }
     let Some(worker) = mol.worker().cloned() else {
         return false;
     };
@@ -785,6 +793,41 @@ mod tests {
             store.load_molecule(&mol).unwrap().status,
             MoleculeStatus::Running
         );
+    }
+
+    #[test]
+    fn the_sentinel_never_looks_up_a_pinned_worker_by_name(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use cosmon_core::transport_selection::{
+            TransportKind, TransportSelection, TransportSource,
+        };
+        for host in [TransportKind::Tmux, TransportKind::Herdr] {
+            let tmp = tempfile::tempdir()?;
+            let state_dir = tmp.path().join("state");
+            std::fs::create_dir_all(&state_dir)?;
+            let mol = MoleculeId::new("task-20261020-abcd")?;
+            let store = seed_running_molecule(&state_dir, &mol);
+            let mut data = store.load_molecule(&mol)?;
+            let mut process = cosmon_core::process::MoleculeProcess::new(
+                cosmon_core::id::WorkerId::new("same-name")?,
+                "same-name",
+            );
+            process.transport = Some(TransportSelection {
+                backend: host,
+                source: TransportSource::Project,
+            });
+            data.bind_process(process);
+            store.save_molecule(&mol, &data)?;
+            let backend = cosmon_transport::MockBackend::new();
+            let mut sentinel = SessionSentinel::new(&backend);
+            for _ in 0..5 {
+                assert!(!sentinel.tick(&store, &state_dir, &mol));
+            }
+            assert!(!park_dead_dispatch(&store, &state_dir, &mol, &backend));
+            assert!(backend.calls().is_empty());
+            assert_eq!(store.load_molecule(&mol)?.status, MoleculeStatus::Running);
+        }
+        Ok(())
     }
 
     /// Issue #116: a watcher's work per tick is bounded by what was
