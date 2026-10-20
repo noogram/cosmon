@@ -1531,7 +1531,11 @@ fn fresh_orphan_verdict(
     mol: &MoleculeData,
     options: &OrphanSweepOptions<'_>,
 ) -> anyhow::Result<bool> {
-    if mol.process.as_ref().is_some_and(|p| p.transport.is_some()) {
+    if mol
+        .process
+        .as_ref()
+        .is_some_and(super::worker_transport::is_herdr_process)
+    {
         return Ok(false);
     }
     let now = Utc::now();
@@ -1617,15 +1621,19 @@ fn auto_freeze_orphans_with_grace(
     let mut transitioned = Vec::new();
     let events_path = state_dir.join("events.jsonl");
     for mol_id in stranded {
-        if pinned.contains(&mol_id) {
-            continue;
-        }
         // Tackle holds this same lock while binding a new worker. Keep the
         // fresh state and transport probe adjacent to the transition.
         let _guard = store.lock_fleet()?;
         let Ok(mut mol) = store.load_molecule(&mol_id) else {
             continue;
         };
+        if pinned.contains(&mol_id)
+            && mol.process.as_ref().is_none_or(|p| {
+                p.transport.is_none() || super::worker_transport::is_herdr_process(p)
+            })
+        {
+            continue;
+        }
         if !matches!(mol.status, MoleculeStatus::Running | MoleculeStatus::Queued) {
             continue;
         }

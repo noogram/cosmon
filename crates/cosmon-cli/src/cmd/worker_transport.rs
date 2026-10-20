@@ -100,3 +100,11 @@ pub(super) fn refuse_exec_control(
     );
     Ok(())
 }
+
+/// A Herdr launch must never enter a legacy tmux-name observer or park path.
+/// Tmux retains its established observer independently of receipt opt-in.
+pub(super) fn is_herdr_process(process: &cosmon_core::process::MoleculeProcess) -> bool {
+    process
+        .transport
+        .is_some_and(|selection| selection.backend == TransportKind::Herdr)
+}
