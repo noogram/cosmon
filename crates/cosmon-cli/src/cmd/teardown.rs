@@ -59,6 +59,19 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 
     let mut fleet = store.load_fleet()?;
+    let pinned = super::worker_transport::pinned_workers(&state_dir)?;
+    for name in &fleet_agents {
+        if let Ok(id) = WorkerId::new(name) {
+            if let Some(worker) = fleet.workers.get(&id) {
+                super::worker_transport::refuse_interactive_control(
+                    &store,
+                    worker,
+                    &pinned,
+                    "teardown (use purge --force for supervised stop)",
+                )?;
+            }
+        }
+    }
     let backend = if args.no_tmux {
         None
     } else {

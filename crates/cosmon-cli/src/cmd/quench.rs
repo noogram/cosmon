@@ -69,6 +69,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .get_mut(&worker_id)
         .ok_or_else(|| anyhow::anyhow!("worker not found: {worker_id}"))?;
 
+    // A pinned Exec launch cannot enter the legacy name-addressed shutdown.
+    super::worker_transport::refuse_interactive_control(
+        &store,
+        worker,
+        &super::worker_transport::pinned_workers(&state_dir)?,
+        "quench (use purge --force for supervised stop)",
+    )?;
+
     // Validate: only Running or Paused workers can be quenched.
     match worker.desired {
         DesiredState::Running | DesiredState::Paused => {}

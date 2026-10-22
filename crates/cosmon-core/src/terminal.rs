@@ -35,6 +35,21 @@ pub enum TerminalIdentity {
         /// Opaque platform launch fingerprint of the pane root process.
         pane_start: u64,
     },
+    /// Herdr view/liveness witness; it never authorizes terminal destruction.
+    Herdr {
+        /// Exact JSON socket used for launch.
+        socket_path: String,
+        /// Kernel socket peer PID at launch.
+        server_pid: u32,
+        /// Kernel process birth fingerprint, rechecked after launch.
+        server_start: u64,
+        /// Workspace created solely for this worker.
+        workspace_id: String,
+        /// Pane returned by layout.apply, never reconstructed from labels.
+        pane_id: String,
+        /// Exact terminal incarnation observed after creation.
+        terminal_id: String,
+    },
 }
 
 /// Why a read-only terminal capability cannot be established.

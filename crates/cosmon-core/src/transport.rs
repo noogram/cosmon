@@ -107,6 +107,9 @@ pub struct SessionInfo {
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
+    /// The host cannot safely provide this operation.
+    #[error("unsupported transport operation: {0}")]
+    Unsupported(String),
     /// The transport backend failed to spawn a new worker session.
     #[error("spawn failed: {0}")]
     SpawnFailed(String),
@@ -151,6 +154,33 @@ pub trait TransportBackend {
         Err(TransportError::SpawnFailed(
             "command sessions unavailable".into(),
         ))
+    }
+
+    /// Launch literal argv, preserving argument boundaries on hosts without a shell.
+    /// The default encodes argv for the existing shell-command port.
+    ///
+    /// # Errors
+    /// Refuses an empty argv or a failed command launch.
+    fn spawn_argv(
+        &self,
+        session: &str,
+        directory: &str,
+        argv: &[String],
+        environment: &[(String, String)],
+    ) -> Result<Option<crate::terminal::TerminalIdentity>, TransportError> {
+        if argv.is_empty() {
+            return Err(TransportError::SpawnFailed("empty argv".into()));
+        }
+        let quoted: Vec<_> = argv
+            .iter()
+            .map(|arg| format!("'{}'", arg.replace('\'', "'\\''")))
+            .collect();
+        self.spawn_command(
+            session,
+            directory,
+            &format!("exec {}", quoted.join(" ")),
+            environment,
+        )
     }
 
     /// Install a termination notification. It triggers collection, not an OS exit verdict.

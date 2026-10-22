@@ -731,7 +731,10 @@ fn compute_teardown_plan(
     let backend = target
         .as_ref()
         .map(|_| {
-            TmuxBackend::for_process(molecule.as_ref().and_then(|m| m.process.as_ref()), socket)
+            cosmon_transport::worker_host::WorkerHost::for_process(
+                molecule.as_ref().and_then(|m| m.process.as_ref()),
+                socket,
+            )
         })
         .transpose()?;
     let wid = target.as_ref().map(WorkerId::new).transpose()?;
@@ -773,7 +776,19 @@ fn compute_teardown_plan(
         }
     }
     if !args.no_kill && session_alive {
-        planned_actions.push(format!("kill tmux session {session_name}"));
+        if matches!(
+            molecule
+                .as_ref()
+                .and_then(|m| m.process.as_ref())
+                .and_then(|p| p.transport)
+                .map(|s| s.backend),
+            Some(cosmon_core::transport_selection::TransportKind::Herdr)
+        ) {
+            planned_actions
+                .push("stop supervised worker through its parent; retain Herdr workspace".into());
+        } else {
+            planned_actions.push(format!("kill tmux session {session_name}"));
+        }
     }
     if worker_registered {
         planned_actions.push("purge worker from fleet".to_owned());
@@ -2350,7 +2365,12 @@ fn run_with_remote_before_lock(
 
     let pinned_backend = transport_target
         .as_ref()
-        .map(|_| TmuxBackend::for_process(mol.process.as_ref(), &tmux_socket_name(ctx)))
+        .map(|_| {
+            cosmon_transport::worker_host::WorkerHost::for_process(
+                mol.process.as_ref(),
+                &tmux_socket_name(ctx),
+            )
+        })
         .transpose()?;
     let socket = pinned_backend.as_ref().map_or_else(
         || tmux_socket_name(ctx),
@@ -4019,7 +4039,17 @@ fn run_with_remote_before_lock(
     if let Some((backend, session_name)) = pinned_backend
         .as_ref()
         .zip(transport_target.as_deref())
-        .filter(|_| !args.no_kill && supervised_stopped)
+        .filter(|_| {
+            !args.no_kill
+                && supervised_stopped
+                && !matches!(
+                    mol.process
+                        .as_ref()
+                        .and_then(|p| p.transport)
+                        .map(|s| s.backend),
+                    Some(cosmon_core::transport_selection::TransportKind::Herdr)
+                )
+        })
     {
         if backend.session_exists(session_name).unwrap_or(false) {
             if backend.terminate_session(session_name).is_ok() {
@@ -4048,9 +4078,26 @@ fn run_with_remote_before_lock(
             Ok(f) => f,
             Err(e) => break 'purge Err(e),
         };
-        let removed = wid
-            .as_ref()
-            .is_some_and(|wid| fleet.workers.remove(wid).is_some());
+        // A later launch may reuse the worker name while this molecule still
+        // awaits harvest. Its fleet binding belongs to that later molecule.
+        let removed = wid.as_ref().is_some_and(|wid| {
+            let belongs_here = fleet.workers.get(wid).is_some_and(|worker| {
+                worker
+                    .current_molecule
+                    .as_ref()
+                    .is_none_or(|id| id == &mol_id)
+                    && worker
+                        .frozen_molecule
+                        .as_ref()
+                        .is_none_or(|id| id == &mol_id)
+            });
+            let exact_owner = fleet.workers.get(wid).is_some_and(|worker| {
+                worker.current_molecule.as_ref() == Some(&mol_id)
+                    || worker.frozen_molecule.as_ref() == Some(&mol_id)
+            });
+            let pinned = mol.process.as_ref().is_some_and(|p| p.transport.is_some());
+            belongs_here && (!pinned || exact_owner) && fleet.workers.remove(wid).is_some()
+        });
         if removed {
             if let Err(e) = store.save_fleet(&fleet) {
                 break 'purge Err(e);

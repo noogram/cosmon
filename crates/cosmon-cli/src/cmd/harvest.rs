@@ -680,7 +680,9 @@ mod tests {
                 pane_start: 1,
             };
             let mut replacement = old.clone();
-            let TerminalIdentity::Tmux { pane_id, .. } = &mut replacement;
+            let TerminalIdentity::Tmux { pane_id, .. } = &mut replacement else {
+                panic!("expected tmux test fixture");
+            };
             *pane_id = 2;
             for supervised in [false, true] {
                 let mut molecule = store.load_molecule(&id)?;

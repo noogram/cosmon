@@ -38,6 +38,8 @@ pub mod codex;
 pub mod command_runner;
 pub mod demote_provisioning;
 pub mod dispatch;
+#[cfg(unix)]
+pub mod herdr;
 pub mod locale;
 pub mod machine_probe;
 #[cfg(any(test, feature = "test-support"))]
@@ -51,6 +53,7 @@ pub mod spawn;
 pub mod terminal;
 pub mod tmux;
 pub mod worker_control;
+pub mod worker_host;
 #[cfg(unix)]
 pub mod worker_supervisor;
 

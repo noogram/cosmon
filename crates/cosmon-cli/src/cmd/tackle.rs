@@ -928,8 +928,7 @@ fn run_with_transport(
         harness,
     } = selection;
     let socket = super::tmux_socket_name(ctx);
-    let backend = super::worker_transport::compose(transport_selection.backend, &socket);
-    let selected_backend: &dyn TransportBackend = injected.unwrap_or(&backend);
+    let backend = TmuxBackend::new(&socket);
     let pin_transport = adapter.as_str() == "codex"
         && project_config
             .adapters
@@ -937,6 +936,17 @@ fn run_with_transport(
             .and_then(|cfg| cfg.entry("codex"))
             .and_then(|entry| entry.mode.as_deref())
             .is_some_and(|mode| mode.eq_ignore_ascii_case("exec"));
+    if transport_selection.backend == cosmon_core::transport_selection::TransportKind::Herdr {
+        let receipts = project_config
+            .adapters
+            .as_ref()
+            .and_then(|cfg| cfg.entry("codex"))
+            .and_then(|entry| entry.worker_exit_receipts)
+            == Some(true);
+        anyhow::ensure!(pin_transport && receipts, "Herdr requires Codex Exec with worker_exit_receipts = true; Interactive and other adapters are unsupported");
+    }
+    let composed = super::worker_transport::compose(transport_selection.backend, &socket)?;
+    let selected_backend: &dyn TransportBackend = injected.unwrap_or(&composed);
     if pin_transport && !args.dry_run {
         let addressed_root = config_path
             .parent()

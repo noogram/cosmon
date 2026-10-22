@@ -53,6 +53,15 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
                node; cs run = N≥1 nodes (resident runtime).\n  \
              cs wait <id> &                  background wait, get notified on completion\n  \
              cs done <id>                    merge branch to its base + teardown (required!)\n\n\
+             WORKER HOST. [transport] backend defaults to tmux. Herdr protocol 22
+\
+             supports Codex Exec with worker_exit_receipts=true and an explicit
+\
+             HERDR_SOCKET_PATH. Stops go through the supervising parent; terminal
+\
+             ids never authorize close. Config changes do not migrate workers.
+
+\
              TASK BRIEFING. 'cs nucleate' writes the task topic and every bound \
              variable into the molecule's durable briefing.md. 'cs tackle' \
              points the worker there for the authoritative task and current \

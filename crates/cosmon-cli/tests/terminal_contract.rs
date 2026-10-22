@@ -332,7 +332,10 @@ fn wrong_project_and_multiple_panes_refuse_the_capability() {
         .unwrap()
         .terminal
         .as_ref()
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("expected tmux test fixture");
+    };
     assert!(Command::new("tmux")
         .args([
             "-L",

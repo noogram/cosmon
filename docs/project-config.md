@@ -39,8 +39,8 @@ backend = "tmux"
 `$COSMON_CONFIG_HOME/cosmon/config.toml` (default
 `~/.config/cosmon/config.toml`), then defaults to tmux. A project table with
 no `backend` key inherits the global value. Explicit empty or unknown values
-are errors; `herdr` and `zellij` are recognised but unimplemented and refused
-before dispatch resources are created. There is no environment-based UI
+are errors; `zellij` is recognised but unimplemented and refused
+before dispatch resources are created. `herdr` is implemented for supervised Codex Exec only. There is no environment-based UI
 detection, host installation, or silent fallback. Invalid configuration is an
 error; an explicit project choice does not require reading the global file.
 This setting chooses a worker host, independently of `[adapters]`, model
@@ -51,7 +51,39 @@ The first qualified path is **`cs tackle --adapter codex` with
 Its command, readiness, exit trigger, and rollback use the composed transport
 port. Both legacy pane exit observations and opt-in durable child exit
 receipts remain supported. Interactive launching keeps its historical path
-and optional terminal witness. No alternative worker backend is delivered.
+and optional terminal witness.
+
+For **Herdr v0.9.5 / protocol 22**, select `backend = "herdr"`, configure
+`[adapters.codex] mode = "exec"`, `worker_exit_receipts = true`, and
+`update = "skip"` or `"operator"`. Set `HERDR_SOCKET_PATH` to the absolute JSON
+socket path of an already-running session. Cosmon never installs or starts
+Herdr. Interactive and other adapters are refused. Every launch creates an
+explicit owned workspace and applies literal argv/cwd/env to a new tab with
+`focus = false`; it never replaces an existing tab or registers resume argv.
+
+The read-only `session.snapshot` must report version `0.9.5` and protocol 22
+before creation; other versions are refused even if their protocol is unchanged. Required
+snapshot and pane identity fields are checked before creation; pane-read fields
+are checked only when reading the exact bound worker, and the used method/field projection
+is vendored in `crates/cosmon-transport/src/herdr-protocol-22.json`. Herdr's JSON
+API does not advertise per-method capabilities: protocol 22 is the method
+contract, not a claim of independent method negotiation. A missing creation
+response field is an unresolved launch, never permission to retry creation.
+The layout response has no terminal id in this protocol: its returned pane id
+is bound to a subsequent exact pane listing with the same kernel socket peer
+PID and process birth fingerprint checked before and after creation.
+
+Herdr terminal evidence is solely for liveness/view validation. Forced purge
+and harvest stop only through the supervising parent's ADR-188 channel and
+read its durable receipt. Herdr terminate operations return Unsupported; no
+pane/tab/workspace close or server stop is sent, even after a terminal receipt.
+Workspace creation also starts Herdr’s default shell tab; each worker therefore
+leaves that idle shell and workspace behind. Cleanup is an explicit operator action. A server restart changes
+the fingerprint/terminal id; the restored shell is never adopted, stopped or
+replayed. A lost supervisor leaves an Unknown receipt and unresolved launch. An argv pane
+that exits before readiness is observed may disappear before its terminal witness
+can be captured; the launch is reported unresolved while the supervisor receipt
+still records its actual wait status. Creation is never retried automatically.
 
 For new Exec dispatches, `process.transport` records the host and provenance
 (`project`, `global`, `default`) before spawn; `process.terminal` records the

@@ -129,7 +129,12 @@ pub(super) fn spawn_codex(
     use cosmon_transport::codex;
     codex::prepare_codex_session(config)?;
     let args = codex::supervised_worker_args(config);
-    let environment = codex::supervised_worker_environment(config);
+    let mut environment = codex::supervised_worker_environment(config);
+    // The terminal server may have started with a different PATH. Preserve the
+    // dispatcher's executable resolution, including `cs` in the worktree.
+    if !environment.iter().any(|(name, _)| name == "PATH") {
+        environment.push(("PATH".into(), Some(std::env::var("PATH")?)));
+    }
     let program = config
         .binary
         .to_str()
@@ -176,43 +181,38 @@ pub(super) fn spawn_codex(
         (receipts, expected_process)
     };
     let identity = serde_json::to_string(&receipts.request().identity)?;
-    let mut command = vec!["exec".to_owned(), "env".to_owned()];
+    let mut command = vec!["/usr/bin/env".to_owned()];
     for (name, value) in &environment {
         if value.is_none() {
-            command.extend(["-u".to_owned(), quote(name)]);
+            command.extend(["-u".to_owned(), name.clone()]);
         }
     }
     command.extend([
-        quote(&std::env::current_exe()?.to_string_lossy()),
+        std::env::current_exe()?.to_string_lossy().into_owned(),
         "worker-supervise".to_owned(),
         "--molecule-dir".to_owned(),
-        quote(&molecule_dir.to_string_lossy()),
+        molecule_dir.to_string_lossy().into_owned(),
         "--identity".to_owned(),
-        quote(&identity),
+        identity,
         "--program".to_owned(),
-        quote(program),
+        program.to_owned(),
         "--".to_owned(),
     ]);
-    command.extend(args.iter().map(|arg| quote(arg)));
+    command.extend(args);
     let assignments: Vec<_> = environment
         .into_iter()
         .filter_map(|(name, value)| value.map(|value| (name, value)))
         .collect();
-    let terminal = backend.spawn_command(
+    let terminal = backend.spawn_argv(
         &config.session_name,
         &config.work_dir,
-        &command.join(" "),
+        &command,
         &assignments,
     )?;
     Ok(SpawnWitness {
         terminal,
         expected_process,
     })
-}
-
-#[cfg(unix)]
-fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(all(test, unix))]

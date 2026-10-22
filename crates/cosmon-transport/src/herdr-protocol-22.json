@@ -1,0 +1,446 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cosmon used subset of Herdr API v0.9.5",
+  "protocol": 22,
+  "schema_version": 1,
+  "$comment": "Modified field projection of the upstream Apache-2.0 schema at herdrdev/herdr v0.9.5; see NOTICE and LICENSE-APACHE. Protocol 22 is the method contract; the JSON API has no per-method capability negotiation. Omitted optional fields are not used.",
+  "schemas": {
+    "request": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "properties": {
+            "method": {
+              "const": "session.snapshot",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.create",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "layout.apply",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/LayoutApplyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneListParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.read",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReadParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "Request",
+      "type": "object",
+      "$defs": {
+        "PaneReadParams": {
+          "properties": {
+            "format": {
+              "$ref": "#/schemas/request/$defs/ReadFormat",
+              "default": "text"
+            },
+            "lines": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/schemas/request/$defs/ReadSource"
+            },
+            "strip_ansi": {
+              "default": true,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pane_id",
+            "source"
+          ],
+          "type": "object"
+        },
+        "ReadSource": {
+          "enum": [
+            "visible",
+            "recent",
+            "recent_unwrapped",
+            "detection"
+          ],
+          "type": "string"
+        },
+        "ReadFormat": {
+          "enum": [
+            "text",
+            "ansi"
+          ],
+          "type": "string"
+        },
+        "PaneListParams": {
+          "properties": {
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object",
+          "required": []
+        },
+        "LayoutApplyParams": {
+          "properties": {
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "root": {
+              "$ref": "#/schemas/request/$defs/LayoutNode"
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "root"
+          ],
+          "type": "object"
+        },
+        "LayoutNode": {
+          "oneOf": [
+            {
+              "properties": {
+                "command": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
+                },
+                "cwd": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "env": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pane_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "pane",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "WorkspaceCreateParams": {
+          "properties": {
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object",
+          "required": []
+        },
+        "EmptyParams": {
+          "type": "object"
+        }
+      }
+    },
+    "success_response": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "result": {
+          "$ref": "#/schemas/success_response/$defs/ResponseResult"
+        }
+      },
+      "required": [
+        "id",
+        "result"
+      ],
+      "title": "SuccessResponse",
+      "type": "object",
+      "$defs": {
+        "ResponseResult": {
+          "oneOf": [
+            {
+              "properties": {
+                "snapshot": {
+                  "$ref": "#/schemas/success_response/$defs/SessionSnapshot"
+                },
+                "type": {
+                  "const": "session_snapshot",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "snapshot"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "type": {
+                  "const": "workspace_created",
+                  "type": "string"
+                },
+                "workspace": {
+                  "$ref": "#/schemas/success_response/$defs/WorkspaceInfo"
+                }
+              },
+              "required": [
+                "type",
+                "workspace"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "panes": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/PaneInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "pane_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "panes"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "layout": {
+                  "$ref": "#/schemas/success_response/$defs/LayoutDescription"
+                },
+                "type": {
+                  "const": "layout_apply",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "layout"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "read": {
+                  "$ref": "#/schemas/success_response/$defs/PaneReadResult"
+                },
+                "type": {
+                  "const": "pane_read",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "read"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "PaneReadResult": {
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "LayoutDescription": {
+          "properties": {
+            "focused_pane_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id",
+            "focused_pane_id"
+          ],
+          "type": "object"
+        },
+        "PaneInfo": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "terminal_id",
+            "workspace_id"
+          ],
+          "type": "object"
+        },
+        "WorkspaceInfo": {
+          "properties": {
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "workspace_id"
+          ],
+          "type": "object"
+        },
+        "SessionSnapshot": {
+          "properties": {
+            "panes": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/PaneInfo"
+              },
+              "type": "array"
+            },
+            "protocol": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "version",
+            "protocol",
+            "panes"
+          ],
+          "type": "object"
+        }
+      }
+    }
+  }
+}

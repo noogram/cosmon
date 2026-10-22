@@ -35,7 +35,6 @@ use cosmon_core::patrol::{
     scan, HealthFinding, HealthReport, HealthThresholds, MoleculeHealthView,
 };
 use cosmon_core::run_state::Liveness;
-use cosmon_core::transport::TransportBackend;
 use cosmon_state::{MoleculeData, MoleculeFilter};
 use cosmon_transport::TmuxBackend;
 
@@ -171,7 +170,17 @@ pub(crate) fn fold_view(
 ) -> MoleculeHealthView {
     // Transport liveness — a control-plane probe (`tmux has-session`), never
     // pane content. `Unknown` when no backend (foreign galaxy / --no-tmux).
-    let session = match (backend, m.assigned_worker.as_ref()) {
+    let bound = m
+        .process
+        .as_ref()
+        .filter(|p| p.transport.is_some())
+        .map(|p| cosmon_transport::worker_host::WorkerHost::for_process(Some(p), ""));
+    let observed_backend: Option<&dyn cosmon_core::transport::TransportBackend> = match &bound {
+        Some(Ok(host)) => Some(host),
+        Some(Err(_)) => None,
+        None => backend.map(|b| b as &dyn cosmon_core::transport::TransportBackend),
+    };
+    let session = match (observed_backend, m.assigned_worker.as_ref()) {
         (Some(be), Some(wid)) => match be.is_alive(wid) {
             Ok(true) => Liveness::Alive,
             Ok(false) => Liveness::Dead,

@@ -17,6 +17,8 @@ pub struct TransportConfig {
 pub enum TransportKind {
     /// The existing local tmux worker host.
     Tmux,
+    /// Herdr protocol 22, restricted to supervised Codex Exec workers.
+    Herdr,
 }
 
 /// Which configuration supplied the choice; explicit tmux must remain distinguishable from default.
@@ -44,10 +46,12 @@ pub struct TransportSelection {
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TransportSelectionError {
     /// A recognised future host has no qualified implementation.
-    #[error("transport backend `{0}` is not implemented; only `tmux` is available")]
+    #[error(
+        "transport backend `{0}` is not implemented; `tmux` and supervised `herdr` are available"
+    )]
     Unavailable(String),
     /// An unrecognised name is usually a typo and must be surfaced.
-    #[error("unknown transport backend `{0}`; only `tmux` is available")]
+    #[error("unknown transport backend `{0}`; `tmux` and supervised `herdr` are available")]
     Unknown(String),
 }
 
@@ -68,7 +72,8 @@ pub fn resolve_transport(
     };
     let backend = match name {
         "tmux" => TransportKind::Tmux,
-        "herdr" | "zellij" => return Err(TransportSelectionError::Unavailable(name.into())),
+        "herdr" => TransportKind::Herdr,
+        "zellij" => return Err(TransportSelectionError::Unavailable(name.into())),
         _ => return Err(TransportSelectionError::Unknown(name.into())),
     };
     Ok(TransportSelection { backend, source })
@@ -104,7 +109,7 @@ mod tests {
 
     #[test]
     fn explicit_refusals_never_fall_through() {
-        for name in ["herdr", "zellij", "typo", "", "TMUX"] {
+        for name in ["zellij", "typo", "", "TMUX"] {
             assert!(resolve_transport(&config(name), &config("tmux")).is_err());
             assert!(resolve_transport(&TransportConfig::default(), &config(name)).is_err());
         }

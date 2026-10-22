@@ -47,6 +47,14 @@ longer part of any build. Their attributions were removed with them.)
    libraries consumed by the AGPL product (Apache→consumed-by-AGPL is a
    legal direction).
 
+2. Herdr API schema field projection (Apache-2.0):
+     - crates/cosmon-transport/src/herdr-protocol-22.json
+   Derived from the generated schema in herdrdev/herdr v0.9.5, retaining only
+   the methods, response fields and referenced definitions used by Cosmon.
+   The projection is modified; its upstream license is preserved. See
+   LICENSE-APACHE for the license text and the upstream source at
+   https://github.com/herdrdev/herdr/blob/v0.9.5/docs/next/api/herdr-api.schema.json.
+
 Third-party crates pulled from crates.io retain their own licenses; the
 permissive set admitted into the dependency closure is enumerated and
 enforced in deny.toml (`[licenses].allow`) and checked in CI by

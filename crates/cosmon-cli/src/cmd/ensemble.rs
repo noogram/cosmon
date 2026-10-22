@@ -533,7 +533,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 .and_then(|m| m.process.as_ref())
                 .filter(|p| p.transport.is_some());
             let (probed_transport, raw_session_str) = if let Some(process) = pinned {
-                match cosmon_transport::TmuxBackend::for_process(Some(process), "") {
+                match cosmon_transport::worker_host::WorkerHost::for_process(Some(process), "") {
                     Ok(backend) => observe_transport(&[backend], &w.id),
                     Err(_) => (TransportState::Unknown, None),
                 }
@@ -1377,7 +1377,7 @@ fn project_inprocess_transport(
 ///
 /// Returns `(TransportState, Option<session_display_string>)`.
 fn observe_transport(
-    backends: &[cosmon_transport::TmuxBackend],
+    backends: &[impl TransportBackend],
     worker_id: &cosmon_core::id::WorkerId,
 ) -> (TransportState, Option<String>) {
     let mut probe_failed = false;
@@ -1456,7 +1456,7 @@ pub(super) fn is_dead_ghost(ghost: Option<cosmon_core::run_state::GhostKind>) ->
 
 /// Probe `worker_id` across the fleet's tmux backends.
 pub(super) fn probe_transport(
-    backends: &[cosmon_transport::TmuxBackend],
+    backends: &[impl TransportBackend],
     worker_id: &cosmon_core::id::WorkerId,
     tackled_at: Option<DateTime<Utc>>,
 ) -> TransportState {
