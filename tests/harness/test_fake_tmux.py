@@ -78,6 +78,18 @@ class WitnessedLaunch(unittest.TestCase):
         self.assertIn("env=TOKEN=one two\n", meta)
         self.assertIn("env=OTHER=value\n", meta)
 
+    def test_exact_and_numeric_targets_observe_and_remove_the_named_session(self):
+        self.assertEqual(self.launch().returncode, 0)
+        self.assertEqual(self.tmux("new-session", "-d", "-s", "other", "true").returncode, 0)
+        self.assertEqual(self.tmux("has-session", "-t", "=matrix-row-healthy").returncode, 0)
+        self.assertNotEqual(self.tmux("has-session", "-t", "=matrix-row").returncode, 0)
+        self.assertEqual(self.tmux("has-session", "-t", "$0").returncode, 0)
+        self.assertEqual(self.tmux("kill-session", "-t", "=matrix-row-healthy").returncode, 0)
+        self.assertNotEqual(self.tmux("has-session", "-t", "$0").returncode, 0)
+        self.assertEqual(self.tmux("has-session", "-t", "=other").returncode, 0)
+        self.assertEqual(self.tmux("kill-session", "-t", "$1").returncode, 0)
+        self.assertNotEqual(self.tmux("has-session", "-t", "=other").returncode, 0)
+
     def test_fault_injection_still_refuses_launch(self):
         self.env["FAKE_TMUX_NEW_SESSION_EXIT"] = "42"
         result = self.launch()

@@ -74,12 +74,14 @@ mkdir -p "$SOCK_DIR/buffers"
 # Resolve the pane IDs returned by list-panes back to their session. The
 # postcondition probe captures that pane, rather than a session name.
 _session_for_target() {
-    local target="${1#=}" candidate
+    local target="${1#=}" candidate field
     case "$target" in
-        %*)
+        %*|\$*)
+            field=pane_id
+            case "$target" in \$*) field=session_id ;; esac
             for candidate in "$SOCK_DIR"/*.meta; do
                 [ -f "$candidate" ] || continue
-                if [ "$(sed -n 's/^pane_id=//p' "$candidate")" = "$target" ]; then
+                if [ "$(sed -n "s/^$field=//p" "$candidate")" = "$target" ]; then
                     basename "$candidate" .meta
                     return 0
                 fi
@@ -177,6 +179,7 @@ case "$CMD" in
             echo "cmd=$run_cmd"
             echo "created_at=$created_at"
             echo "pane_id=$pane_id"
+            echo "session_id=\$$pane_number"
             for assignment in "${environment[@]}"; do
                 echo "env=$assignment"
             done
@@ -314,6 +317,7 @@ case "$CMD" in
             exit 0
         fi
 
+        session="$(_session_for_target "$session")" || exit 1
         meta="$SOCK_DIR/$session.meta"
         if [ ! -f "$meta" ]; then
             echo "can't find session: $session" >&2
@@ -331,6 +335,7 @@ case "$CMD" in
                 *) shift ;;
             esac
         done
+        session="$(_session_for_target "$session")" || exit 1
         meta="$SOCK_DIR/$session.meta"
         if [ ! -f "$meta" ]; then
             echo "can't find session: $session" >&2
@@ -371,6 +376,7 @@ case "$CMD" in
                 *) shift ;;
             esac
         done
+        session="$(_session_for_target "$session")" || exit 1
         if [ -f "$SOCK_DIR/$session.meta" ]; then
             exit 0
         fi
@@ -405,6 +411,7 @@ case "$CMD" in
             esac
         done
         # Append remaining argv to session.out for debugging / capture.
+        session="$(_session_for_target "$session")" || exit 1
         meta="$SOCK_DIR/$session.meta"
         if [ ! -f "$meta" ]; then
             echo "can't find session: $session" >&2

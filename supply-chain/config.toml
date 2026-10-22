@@ -995,8 +995,9 @@ version = "0.11.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.quinn-proto]]
-version = "0.11.16"
+version = "0.11.18"
 criteria = "safe-to-deploy"
+notes = "Unaudited security update from previously exempted 0.11.16; independent review pending. This exemption is not an audit."
 
 [[exemptions.quinn-udp]]
 version = "0.5.14"
@@ -1135,16 +1136,18 @@ version = "1.1.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls]]
-version = "0.23.45"
+version = "0.23.46"
 criteria = "safe-to-deploy"
+notes = "Unaudited security update from previously exempted 0.23.45; independent review pending. This exemption is not an audit."
 
 [[exemptions.rustls-pki-types]]
 version = "1.14.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-webpki]]
-version = "0.103.15"
+version = "0.103.16"
 criteria = "safe-to-deploy"
+notes = "Unaudited security update from previously exempted 0.103.15; independent review pending. This exemption is not an audit."
 
 [[exemptions.rustversion]]
 version = "1.0.22"
@@ -1655,8 +1658,9 @@ version = "1.1.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.webpki-roots]]
-version = "1.0.6"
+version = "1.0.10"
 criteria = "safe-to-deploy"
+notes = "Unaudited security update from previously exempted 1.0.6; independent review pending. This exemption is not an audit."
 
 [[exemptions.winapi]]
 version = "0.3.9"
