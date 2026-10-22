@@ -462,6 +462,11 @@ class ComposeStack:
             ("user.email", "e2e-operator@example.invalid"),
             ("user.name", "Cosmon E2E Operator"),
             ("commit.gpgsign", "false"),
+            # The base commit must not leave a detached Git writer racing
+            # the permission walk below (or the next reinit's rmtree).
+            # Keep this repository-local; never change the host's policy.
+            ("maintenance.auto", "false"),
+            ("gc.auto", "0"),
         ):
             cfgset = _run(["git", "-C", str(cfg.galaxy), "config", key, value])
             if cfgset.returncode != 0:

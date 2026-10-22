@@ -11,6 +11,13 @@
 
 [advisories]
 ignore = [
+    # keyring 3 -> secret-service 4 -> zbus 4 uses these standalone crates.
+    # RustSec lists no patched versions: their replacements live in zbus 6.
+    # Remove each exception when keyring/secret-service can migrate to zbus 6.
+    # These are maintenance exceptions, not corrected vulnerabilities.
+    "RUSTSEC-2026-0370", # zvariant
+    "RUSTSEC-2026-0371", # zbus_names
+    "RUSTSEC-2026-0372", # zvariant_derive
     # bincode 1.x via tui-markdown→syntect — awaiting syntect bump.
     "RUSTSEC-2025-0141",
     # yaml-rust via tui-markdown→syntect — upstream migrating to yaml-rust2.
