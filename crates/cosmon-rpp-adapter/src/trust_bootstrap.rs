@@ -91,6 +91,39 @@ pub const DEFAULT_BINDING_SCOPES: &[&str] = &[
     scopes::EVENTS_SUBSCRIBE,
 ];
 
+/// Scopes of the observer preset (issue #189, ADR-080 §6.8): a read-only,
+/// non-interactive API consumer such as a dashboard daemon. It never holds
+/// `world:observe`, a write scope, or a spawn scope. Because the rendered
+/// binding declares `[scopes]`, this list is the ceiling: a token for the
+/// same principal that carries `molecule:write` or `worker:spawn` gains
+/// nothing from it.
+pub const OBSERVER_BINDING_SCOPES: &[&str] = &[
+    scopes::MOLECULE_READ,
+    scopes::ARTIFACT_READ,
+    scopes::WORKER_READ,
+    scopes::EVENTS_SUBSCRIBE,
+];
+
+/// Named scope set a handoff binding may select with `preset = "..."`
+/// instead of listing `scopes`. A typed enum so that an unknown preset name
+/// is a parse failure of the handoff (fail-closed), not a silent default.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BindingPreset {
+    /// [`OBSERVER_BINDING_SCOPES`] — read-only service principal (#189).
+    Observer,
+}
+
+impl BindingPreset {
+    /// The complete scope grant this preset renders into `[scopes]`.
+    #[must_use]
+    pub fn scopes(self) -> &'static [&'static str] {
+        match self {
+            Self::Observer => OBSERVER_BINDING_SCOPES,
+        }
+    }
+}
+
 /// `[trust_bootstrap]` section of `rpp.toml` (global-config surface,
 /// LEAN.md working agreement — per-deployment trust is *declared*, the
 /// server converges to it).
@@ -147,6 +180,11 @@ pub struct HandoffBinding {
     /// warning; explicitly empty → `[scopes] allowed = []` (grants nothing).
     #[serde(default)]
     pub scopes: Option<Vec<String>>,
+    /// Named scope set, exclusive with [`Self::scopes`]. `preset =
+    /// "observer"` renders [`OBSERVER_BINDING_SCOPES`] as the binding's
+    /// `[scopes]` ceiling. Declaring both is refused.
+    #[serde(default)]
+    pub preset: Option<BindingPreset>,
     /// Cognitive-substrate label (ADR-063). Omitted → `Biological`.
     #[serde(default)]
     pub phase: Option<String>,
@@ -643,14 +681,19 @@ fn converge_binding(
     report: &mut ConvergeReport,
 ) -> Result<(), TrustBootstrapError> {
     let audience = effective_audience(doc, binding, path)?;
-    let spec = HabilitationBindingSpec {
-        noyau: binding.noyau.clone(),
-        sub: binding.sub.clone(),
-        issuer: doc.issuer.iss.clone(),
-        audience,
-        nucleon_id: binding.nucleon_id.clone(),
-        phase: binding.phase.clone(),
-        scopes: binding.scopes.clone().unwrap_or_else(|| {
+    let scopes = match (&binding.preset, &binding.scopes) {
+        (Some(_), Some(_)) => {
+            return Err(TrustBootstrapError::InvalidHandoff {
+                path: path.to_path_buf(),
+                reason: format!(
+                    "binding {} declares both `preset` and `scopes`; keep one",
+                    effective_nucleon_id(binding)
+                ),
+            });
+        }
+        (Some(preset), None) => preset.scopes().iter().map(|s| (*s).to_owned()).collect(),
+        (None, Some(scopes)) => scopes.clone(),
+        (None, None) => {
             tracing::warn!(
                 event = "boot.trust_bootstrap.default_binding_scopes",
                 binding = %effective_nucleon_id(binding),
@@ -661,7 +704,16 @@ fn converge_binding(
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect()
-        }),
+        }
+    };
+    let spec = HabilitationBindingSpec {
+        noyau: binding.noyau.clone(),
+        sub: binding.sub.clone(),
+        issuer: doc.issuer.iss.clone(),
+        audience,
+        nucleon_id: binding.nucleon_id.clone(),
+        phase: binding.phase.clone(),
+        scopes,
         sealed_at: None,
     };
     let nucleon_id = spec
@@ -1842,5 +1894,109 @@ nucleon_id = "binding-under-test"
         let report =
             converge_with(&state, &section_with_handoff(&handoff_dir), None, false).unwrap();
         assert_eq!(report.bindings_written.len(), 2);
+    }
+
+    fn observer_handoff(binding_extra: &str) -> String {
+        format!(
+            r#"schema = "cosmon-issuer-handoff/v1"
+[issuer]
+iss = "http://idp/"
+audiences = ["aud"]
+[binding]
+noyau = "tenant"
+sub = "svc-dashboard"
+nucleon_id = "svc-dashboard"
+{binding_extra}
+"#
+        )
+    }
+
+    /// `preset = "observer"` renders exactly the four read scopes as the
+    /// binding's `[scopes]` ceiling, and nothing that writes or spawns.
+    #[test]
+    fn observer_preset_renders_exactly_the_read_scopes() {
+        let td = TempDir::new().unwrap();
+        let doc: HandoffDoc = toml::from_str(&observer_handoff(r#"preset = "observer""#)).unwrap();
+        let mut report = ConvergeReport::default();
+        converge_doc_bindings(td.path(), Path::new("handoff.toml"), &doc, &mut report).unwrap();
+        assert_eq!(report.bindings_written, ["svc-dashboard"]);
+
+        let text =
+            std::fs::read_to_string(td.path().join("nucleons/svc-dashboard/oidc-identity.toml"))
+                .unwrap();
+        let binding: toml::Value = toml::from_str(&text).unwrap();
+        let allowed: Vec<&str> = binding["scopes"]["allowed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            allowed,
+            [
+                scopes::MOLECULE_READ,
+                scopes::ARTIFACT_READ,
+                scopes::WORKER_READ,
+                scopes::EVENTS_SUBSCRIBE,
+            ]
+        );
+        for forbidden in [
+            scopes::WORLD_OBSERVE,
+            scopes::MOLECULE_WRITE,
+            scopes::MOLECULE_HARVEST,
+            scopes::WORKER_SPAWN,
+            scopes::WORKER_TERMINATE,
+            scopes::ARTIFACT_WRITE,
+            scopes::LOGS_SUBSCRIBE,
+            scopes::PILOTE_CONVERSE,
+            scopes::WORK_WRITE,
+            scopes::SESSIONS_WRITE,
+        ] {
+            assert!(
+                !allowed.contains(&forbidden),
+                "observer must not hold {forbidden}"
+            );
+        }
+    }
+
+    /// A binding naming both a preset and a scope list is ambiguous about
+    /// its ceiling, so the handoff is refused rather than merged.
+    #[test]
+    fn preset_and_scopes_together_are_refused() {
+        let td = TempDir::new().unwrap();
+        let doc: HandoffDoc = toml::from_str(&observer_handoff(
+            "preset = \"observer\"\nscopes = [\"cosmon:molecule:write\"]",
+        ))
+        .unwrap();
+        let mut report = ConvergeReport::default();
+        let err = converge_doc_bindings(td.path(), Path::new("handoff.toml"), &doc, &mut report)
+            .unwrap_err();
+        assert!(
+            matches!(err, TrustBootstrapError::InvalidHandoff { .. }),
+            "{err}"
+        );
+        assert!(!td.path().join("nucleons/svc-dashboard").exists());
+    }
+
+    /// An unknown preset name fails the handoff parse; boot refuses it
+    /// instead of falling back to the default (write-capable) scopes.
+    #[test]
+    fn unknown_preset_refuses_the_handoff() {
+        let td = TempDir::new().unwrap();
+        let state = td.path().join("state");
+        let handoff_dir = td.path().join("handoff");
+        std::fs::create_dir_all(&handoff_dir).unwrap();
+        std::fs::write(
+            handoff_dir.join("issuer.toml"),
+            observer_handoff(r#"preset = "operator""#),
+        )
+        .unwrap();
+        let err =
+            converge_with(&state, &section_with_handoff(&handoff_dir), None, false).unwrap_err();
+        assert!(
+            matches!(err, TrustBootstrapError::InvalidHandoff { .. }),
+            "{err}"
+        );
+        assert!(!state.join("nucleons/svc-dashboard").exists());
     }
 }

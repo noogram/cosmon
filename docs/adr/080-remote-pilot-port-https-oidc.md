@@ -1037,3 +1037,85 @@ It adds four scopes to the grid of §6.6, `cosmon:work:read`,
 requiring an exact operator-provisioned binding and none implying lifecycle,
 spawn, harvest or lease authority. The routes are proposed there and mounted,
 with their canon and OpenAPI entries, only by the units that name them.
+
+## 6.8 Read-only service principal *(amended 2026-10-23, issue #189)*
+
+A read-only dashboard daemon reads cosmon only through `/v1`. Before this
+amendment its only credential was a human login: an access token of about
+15 minutes, renewed by `cosmon-remote token` through the human's refresh
+token. The daemon therefore held whatever the human's binding granted and
+stopped working whenever the human's session ended.
+
+**Decision (A).** The consumer gets a dedicated service principal: its own
+subject at the trusted issuer (a bot account), bound on the host by an
+observer-preset binding in the existing trust model. No new trust model,
+token type or route is added.
+
+- The bearer is minted by the trusted issuer for the bot account: one
+  `cosmon-remote login` on a profile of its own, then `cosmon-remote token`
+  for each fresh access token.
+- The binding is a handoff binding with `preset = "observer"`
+  (`trust_bootstrap::BindingPreset::Observer`). It renders a `[scopes]`
+  section whose `allowed` list is exactly `cosmon:molecule:read`,
+  `cosmon:artifact:read`, `cosmon:worker:read` and `cosmon:events:subscribe`
+  (`OBSERVER_BINDING_SCOPES`). It never contains `cosmon:world:observe`, a
+  write scope or a spawn scope. A binding that names both `preset` and
+  `scopes` is refused, and so is an unknown preset name.
+- Because the binding declares `[scopes]`, it is the ceiling of §6.6 (the
+  #208 rule): a token for this subject that carries `cosmon:molecule:write`,
+  `cosmon:worker:spawn` or any other scope gains nothing from it.
+- Revocation is on the host: remove the binding and reload, or add a
+  `[[deny.sub]]` entry scoped to the issuer and the bot's subject (§7.2).
+  Neither touches a human's binding.
+- Audit is on the host: authz events record the principal as
+  `jwt:<hash_principal(iss, sub)>`, and inbox records carry the claim digest,
+  so the daemon's reads are distinguishable from the human's.
+
+Executable statement: `crates/cosmon-rpp-adapter/tests/v1_service_principal.rs`.
+
+**Rejected (B), a long-lived refresh token scoped to the preset.** A refresh
+token is revoked and logged at the IdP, not on the host. The authoritative
+host would lose both revocation and audit for the one credential that is
+never watched by a human.
+
+**Rejected (C), the daemon keeps riding a human's refresh token.** The
+consumer inherits the human's write and spawn scopes, and revoking the
+consumer revokes the human.
+
+**Threat closed.** Theft of the consumer's credential no longer yields write
+or spawn authority, whatever scopes the issuer puts in the token.
+
+**Threat opened.** A standing read credential sits on the consumer host. It
+reads molecules, artifacts, workers and the event stream until it is
+revoked, and no interactive login exists to notice misuse. Mitigations are
+operational: a separate bot account per consumer, revocation by binding
+removal or a scoped deny entry, and review of the authz events for that
+principal.
+
+## 6.9 What rate, quota, deny and audit are keyed on *(amended 2026-10-23, issue #209)*
+
+The operator ratified the existing keys; this section records them. No
+behaviour changed.
+
+- **Rate limit and quota** are keyed on `hash_principal(iss, sub)`
+  (`crates/cosmon-rpp-adapter/src/rate_limit.rs`), not on the audience. One
+  identity therefore shares **one rate capacity across every audience** it
+  holds a binding for: a burst through the MCP connector audience consumes
+  the same bucket as the CLI audience. `GET /v1/quota` reports that shared
+  bucket.
+- **Deny entries** match the subject, not the audience. A scoped
+  `[[deny.sub]]` entry matches `(issuer, BLAKE3(sub))`; a legacy entry
+  without `issuer` matches `BLAKE3(sub)` under every trusted issuer (§7.2).
+  Revoking a subject revokes it for every audience.
+- **The authz principal** recorded in authz events is
+  `jwt:<hash_principal(iss, sub)>`, again without the audience.
+- **The ledger subscription slot** (one open `GET /v1/ledger` stream per
+  principal, keyed on `hash_principal(iss, sub)`) is **process-local**: it
+  lives in the adapter's memory, is not persisted, and is not shared between
+  adapter processes. A restart frees every slot, and two adapter processes
+  serving the same state directory each admit one stream for the same
+  principal.
+
+For a single-tenant host this is the intended behaviour: an identity is the
+unit of capacity and of revocation. A deployment that needs separate capacity
+per audience uses separate subjects, as §6.8 does for a service consumer.

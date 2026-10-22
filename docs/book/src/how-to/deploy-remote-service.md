@@ -464,6 +464,64 @@ Existing galaxies with no `remote` setting retain their prior behavior:
 write-plus-seal path. `harvest status` reports `provenance: legacy`. No restart,
 upgrade or binding reload chooses scoped or changes an existing binding.
 
+### Provision a read-only service principal
+
+A dashboard or another non-interactive consumer that only reads should not
+ride a human's login: it would inherit the human's write and spawn scopes,
+and revoking it would revoke the human. Give it its own subject instead
+(ADR-080 §6.8).
+
+1. Create a bot account for the consumer at the trusted issuer. Its `sub` is
+   the subject the host binds.
+2. Bind that subject with the observer preset. In a handoff file, select the
+   preset instead of listing scopes:
+
+   ```toml
+   [[bindings]]
+   noyau = "demo"
+   sub = "<bot account sub>"
+   nucleon_id = "svc-dashboard"
+   preset = "observer"
+   ```
+
+   The rendered binding declares `[scopes] allowed` = `cosmon:molecule:read`,
+   `cosmon:artifact:read`, `cosmon:worker:read`, `cosmon:events:subscribe`.
+   That list is the ceiling: a token for the bot that carries
+   `cosmon:molecule:write` or `cosmon:worker:spawn` is still refused on every
+   write route. A binding that names both `preset` and `scopes`, or an
+   unknown preset, refuses the boot. Without a handoff, render the same
+   binding with `cosmon-rpp-adapter nucleon render` and the four `--scope`
+   flags, then send `SIGHUP`.
+3. On the consumer host, sign the bot in once on a profile of its own and
+   let the daemon read fresh access tokens from it:
+
+   ```sh
+   cosmon-remote --profile dashboard login
+   cosmon-remote --profile dashboard token --confirm
+   ```
+
+To revoke the consumer, remove `nucleons/svc-dashboard/` and send `SIGHUP`,
+or add a deny entry scoped to the issuer and the bot's subject to
+`security/oidc-policy.toml`:
+
+```toml
+[[deny.sub]]
+issuer = "<iss>"
+sub_hash = "<BLAKE3 hex of the bot's sub>"
+reason = "dashboard host decommissioned"
+```
+
+Either takes effect on the host without touching a human's binding. Authz
+events record the bot as `jwt:<hash of (iss, sub)>`, separate from the human.
+The credential on the consumer host stays readable until it is revoked and
+no interactive login will notice its misuse, so give each consumer its own
+bot account.
+
+Rate limit, quota, deny entries and the authz principal are keyed on the
+issuer and subject, not on the audience: one identity shares one rate
+capacity across every audience it is bound for, and the one-stream limit on
+`GET /v1/ledger` is held in the adapter process's memory (ADR-080 §6.9).
+
 ### Signing in from inside a container
 
 `cosmon-remote login` runs the browser half of the OAuth flow: it opens a
