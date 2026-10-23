@@ -1,5 +1,5 @@
 ===== routes-v1 =====
-**50 routes `/v1/` gelées** — recomptées depuis le canon à chaque génération (`crates/cosmon-rpp-adapter/data/surface_events.txt`, cosmon). La colonne *Effet* est dérivée du scope requis (godel C5 : un scope distinct par effet coûteux ou irréversible, ADR-080 §6.5) — jamais éditée à la main.
+**55 routes `/v1/` gelées** — recomptées depuis le canon à chaque génération (`crates/cosmon-rpp-adapter/data/surface_events.txt`, cosmon). La colonne *Effet* est dérivée du scope requis (godel C5 : un scope distinct par effet coûteux ou irréversible, ADR-080 §6.5) — jamais éditée à la main.
 
 | # | Famille | Méthode | Path | Scope requis | §8p | Effet |
 |---|---|---|---|---|---|---|
@@ -53,8 +53,13 @@
 | 48 | admin | DELETE | `/v1/admin/federations/{id}` | — | adapter-only |  |
 | 49 | admin | DELETE | `/v1/admin/federations/{id}/galaxies/{galaxy}` | — | adapter-only |  |
 | 50 | admin | PUT | `/v1/admin/noyaux/{noyau}/harvest-authority` | — | adapter-only |  |
+| 51 | work | GET | `/v1/work/{owner}` | `cosmon:work:read` | adapter-only |  |
+| 52 | work | POST | `/v1/work/{owner}/messages` | `cosmon:work:write` | adapter-only |  |
+| 53 | work | GET | `/v1/work/{owner}/inbox` | `cosmon:work:read` | adapter-only |  |
+| 54 | work | POST | `/v1/work/{owner}/inbox` | `cosmon:work:read` | adapter-only |  |
+| 55 | work | POST | `/v1/work/{owner}/messages/{key}/ack` | `cosmon:work:write` | adapter-only |  |
 
-Découpage : **15** molecule + **3** artifact + **3** harvest + **5** auth-claude + **8** observ. + **2** avatar-canal + **5** avatar-life + **9** admin = **50**.
+Découpage : **15** molecule + **3** artifact + **3** harvest + **5** auth-claude + **8** observ. + **2** avatar-canal + **5** avatar-life + **9** admin + **5** work = **55**.
 
 ===== bijection-8p =====
 | Route | Statut bijection (§8p) |
@@ -109,6 +114,11 @@ Découpage : **15** molecule + **3** artifact + **3** harvest + **5** auth-claud
 | `DELETE /v1/admin/federations/{id}` | ⊘ exempte (adapter-only) |
 | `DELETE /v1/admin/federations/{id}/galaxies/{galaxy}` | ⊘ exempte (adapter-only) |
 | `PUT /v1/admin/noyaux/{noyau}/harvest-authority` | ⊘ exempte (adapter-only) |
+| `GET /v1/work/{owner}` | ⊘ exempte (adapter-only) |
+| `POST /v1/work/{owner}/messages` | ⊘ exempte (adapter-only) |
+| `GET /v1/work/{owner}/inbox` | ⊘ exempte (adapter-only) |
+| `POST /v1/work/{owner}/inbox` | ⊘ exempte (adapter-only) |
+| `POST /v1/work/{owner}/messages/{key}/ack` | ⊘ exempte (adapter-only) |
 
-Bijection liée : **19** (13 molecule + 1 avatar-canal + 5 avatar-life). Exemptes : **31**. Total : **50** — recompté depuis le canon (colonne `exposure`) à chaque génération.
+Bijection liée : **19** (13 molecule + 1 avatar-canal + 5 avatar-life). Exemptes : **36**. Total : **55** — recompté depuis le canon (colonne `exposure`) à chaque génération.
 
