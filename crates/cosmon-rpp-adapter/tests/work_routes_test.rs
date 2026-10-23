@@ -1079,3 +1079,79 @@ async fn a_payload_whose_encoding_exceeds_one_response_is_reported_not_blocking(
     assert_eq!(body["undeliverable"][0]["envelope"]["key"], "escaped");
     assert_eq!(body["undeliverable"][0]["reason"], "payload_too_large");
 }
+
+/// A revocation that lands after the request was admitted, but before its
+/// effect, must still refuse the effect: W-ACK rechecks the binding inside
+/// the commit, under the binding lock. Holding that lock pins the request
+/// between admission and commit, so the order is deterministic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revocation_between_admission_and_commit_refuses_the_ack() {
+    let fx = fixture(&["cto", "mado"], 10).await;
+    let (status, body) = fx
+        .request(
+            "mado",
+            "POST",
+            "/messages",
+            Some(fx.send("finding", "cto", "finding")),
+            true,
+        )
+        .await;
+    assert!(status.is_success(), "{status} {body}");
+    let (status, pulled) = fx
+        .request("cto", "POST", "/inbox", Some(fx.pull()), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pulled}");
+    let ack = json!({"scope_revision": fx.scope.revision().unwrap(),
+        "payload_digest": pulled["messages"][0]["envelope"]["payload_digest"],
+        "disposition": "considered"});
+    let collaboration = fx.tenant_state.join("collaboration");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(collaboration.join("bindings.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let fx = Arc::new(fx);
+    let pending = {
+        let fx = Arc::clone(&fx);
+        tokio::spawn(async move {
+            fx.request("cto", "POST", "/messages/finding/ack", Some(ack), true)
+                .await
+        })
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    let consumed = |fx: &Fixture| {
+        FileWorkMessageStore::new(fx.owner_dir.clone())
+            .load_all()
+            .unwrap()
+            .receipts
+            .iter()
+            .filter(|r| matches!(r.stage, Stage::Consumed { .. }))
+            .count()
+    };
+    assert_eq!(
+        consumed(&fx),
+        0,
+        "the ack effect must wait for the binding lock"
+    );
+    // Revoke while the request waits at its commit; the store writer would
+    // need this same lock, so write its record directly.
+    let binding = &fx.clients["cto"].binding;
+    let mut bytes = serde_json::to_vec_pretty(&binding.revoked(Utc::now())).unwrap();
+    bytes.push(b'\n');
+    std::fs::write(
+        collaboration
+            .join("bindings")
+            .join(format!("{}.json", binding.id)),
+        bytes,
+    )
+    .unwrap();
+    lock.unlock().unwrap();
+    let (status, body) = pending.await.unwrap();
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(
+        consumed(&fx),
+        0,
+        "a revoked binding records no acknowledgment"
+    );
+}
