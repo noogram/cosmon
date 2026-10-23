@@ -557,3 +557,9 @@ operations remain unsupported. The UI inherits these CLI constraints rather
 than adding a separate launch or stop path. Terminal attachment remains a
 separate capability; this increment qualifies worker hosting, not a new Herdr
 read-only attachment client. See [configuration](../project-config.md).
+
+## Single-pass peek (2026-10-23)
+
+| User intent | CLI | UI | Remote |
+|---|---|---|---|
+| Print one fleet baseline without a terminal | `cs peek --once` selects the non-TUI path; `--no-tui` alone still follows by default | TUI remains the interactive default | No matching change audited |

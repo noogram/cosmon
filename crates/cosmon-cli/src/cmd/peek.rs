@@ -627,7 +627,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     if args.snapshot {
         return run_canonical_snapshot(ctx, args);
     }
-    if !args.no_tui {
+    if !args.no_tui && !args.once {
         super::require_project_identity(ctx)?;
         return super::peek_tui::run(
             ctx,
