@@ -371,7 +371,14 @@ fn inbox(door: &Door, body: PullBody) -> Result<Json<Value>, ApiError> {
         now,
     )
     .map_err(|_| api(StatusCode::INTERNAL_SERVER_ERROR, "corrupt_evidence"))?;
-    if !projection.findings.is_empty() {
+    if projection.findings.iter().any(|finding| {
+        matches!(
+            finding,
+            cosmon_core::work_message::ProjectionFinding::OrphanReceipt { .. }
+                | cosmon_core::work_message::ProjectionFinding::ReceiptDigestMismatch { .. }
+                | cosmon_core::work_message::ProjectionFinding::ConsumptionByNonRecipient { .. }
+        )
+    }) {
         return Err(api(StatusCode::INTERNAL_SERVER_ERROR, "corrupt_evidence"));
     }
     let mut output = response(&scope, now)?;

@@ -356,7 +356,14 @@ impl WorkOperations {
             &records.receipts,
             now,
         )?;
-        if !projection.findings.is_empty() {
+        if projection.findings.iter().any(|finding| {
+            matches!(
+                finding,
+                cosmon_core::work_message::ProjectionFinding::OrphanReceipt { .. }
+                    | cosmon_core::work_message::ProjectionFinding::ReceiptDigestMismatch { .. }
+                    | cosmon_core::work_message::ProjectionFinding::ConsumptionByNonRecipient { .. }
+            )
+        }) {
             return Err(WorkStoreError::CorruptEvidence);
         }
         Ok(projection)
