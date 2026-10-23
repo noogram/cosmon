@@ -153,7 +153,10 @@ authority transfer (the host-local lease ledger, reached by no route here).
   `context_observation`, and `peek`. Content is returned only on an explicit
   pull; the server records submitted/unknown and keeps the existing retry
   budget and backoff. A dropped response may cost an attempt; it cannot
-  consume the message.
+  consume the message. A deliverable envelope the wire cannot carry (payload
+  not UTF-8, or larger than one response) is listed under `undeliverable` with
+  its metadata and records no attempt; it never blocks the envelopes behind
+  it. Outgoing receipts in a pull are the caller's most recent 100.
 - **Ack** carries `scope_revision`, `payload_digest`, `disposition`
   (`considered`, `deferred` or `rejected`), an optional `reply` key and an
   optional note. It is bound to the recipient seat, the key and the digest, and

@@ -59,7 +59,8 @@ fn make_state(
         };
     }
 
-    let rate_limiter = IngressRateLimiter::new(security_dir.join("oidc-rate-limit"), 64.0, 0.0);
+    // Large enough for a test that crosses one 100-entry page per seat.
+    let rate_limiter = IngressRateLimiter::new(security_dir.join("oidc-rate-limit"), 512.0, 0.0);
     let deny_list = DenyList::new(security_dir.to_path_buf()).with_ttl(Duration::from_secs(0));
 
     AppState {
@@ -892,4 +893,189 @@ async fn expired_remote_ack_is_refused_without_consuming_the_envelope() {
         .receipts
         .iter()
         .any(|r| matches!(r.stage, Stage::Consumed { .. })));
+}
+
+#[tokio::test]
+async fn sender_sees_the_most_recent_acknowledgments_beyond_one_page() {
+    let mut fx = fixture(&["cto", "mado"], 200).await;
+    fx.scope.budget.max_delivery_attempts = 5;
+    FileWorkMessageStore::new(fx.owner_dir.clone())
+        .declare(&fx.scope)
+        .unwrap();
+    for i in 0..101 {
+        let (status, body) = fx
+            .request(
+                "mado",
+                "POST",
+                "/messages",
+                Some(fx.send(&format!("m-{i:03}"), "cto", "x")),
+                true,
+            )
+            .await;
+        assert!(status.is_success(), "{status} {body}");
+    }
+    // Keyed by message: a later page may also carry redeliveries.
+    let mut pulled = BTreeMap::new();
+    for _ in 0..4 {
+        if pulled.len() == 101 {
+            break;
+        }
+        let (status, body) = fx
+            .request("cto", "POST", "/inbox", Some(fx.pull()), true)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for message in body["messages"].as_array().unwrap() {
+            let key = message["envelope"]["key"].as_str().unwrap().to_owned();
+            pulled.insert(key, message.clone());
+        }
+    }
+    assert_eq!(pulled.len(), 101, "every message is eventually delivered");
+    for message in pulled.values() {
+        let key = message["envelope"]["key"].as_str().unwrap();
+        let ack = json!({"scope_revision": fx.scope.revision().unwrap(),
+            "payload_digest": message["envelope"]["payload_digest"],
+            "disposition": "considered"});
+        let (status, body) = fx
+            .request(
+                "cto",
+                "POST",
+                &format!("/messages/{key}/ack"),
+                Some(ack),
+                true,
+            )
+            .await;
+        assert!(status.is_success(), "{status} {body}");
+    }
+    let (status, body) = fx
+        .request("mado", "POST", "/inbox", Some(fx.pull()), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let keys: Vec<&str> = body["receipts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys.len(), 100, "receipts stay bounded to one page");
+    assert!(
+        keys.contains(&"m-100"),
+        "the 101st acknowledgment must reach its sender: {keys:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unrepresentable_payload_does_not_block_the_remote_inbox() {
+    use cosmon_core::work_message::{AdmittedWorkCaller, Confidentiality, SenderEvidence};
+    use cosmon_state::work_ops::{SendRequest, WorkOperations};
+    let fx = fixture(&["cto", "mado"], 10).await;
+    // A local sender may admit arbitrary bytes; this wire carries UTF-8 text.
+    let local = AdmittedWorkCaller::new(
+        fx.scope.owner.clone(),
+        seat("mado"),
+        SenderEvidence::CallerEnvSameUid,
+    );
+    WorkOperations::new(fx.owner_dir.clone())
+        .send(
+            &local,
+            SendRequest {
+                scope_revision: fx.scope.revision().unwrap(),
+                recipient: seat("cto"),
+                key: Some(cosmon_core::work_message::MessageKey::new("binary").unwrap()),
+                sender_time: Utc::now(),
+                reply_to: None,
+                phase: None,
+                confidentiality: Confidentiality::Internal,
+                ttl_secs: None,
+            },
+            &[0xff, 0xfe, 0x00],
+            Utc::now(),
+        )
+        .unwrap();
+    let (status, body) = fx
+        .request(
+            "mado",
+            "POST",
+            "/messages",
+            Some(fx.send("text", "cto", "readable")),
+            true,
+        )
+        .await;
+    assert!(status.is_success(), "{status} {body}");
+    let peek = format!(
+        "/inbox?scope_revision={}&adapter=pull",
+        fx.scope.revision().unwrap()
+    );
+    for (method, path, body) in [
+        ("GET", peek.as_str(), None),
+        ("POST", "/inbox", Some(fx.pull())),
+    ] {
+        let (status, body) = fx.request("cto", method, path, body, true).await;
+        assert_eq!(status, StatusCode::OK, "{method}: {body}");
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1, "{method}: {body}");
+        assert_eq!(messages[0]["envelope"]["key"], "text");
+        assert_eq!(body["undeliverable"][0]["envelope"]["key"], "binary");
+        assert_eq!(body["undeliverable"][0]["reason"], "payload_not_utf8");
+    }
+    let attempts: Vec<String> = FileWorkMessageStore::new(fx.owner_dir)
+        .load_all()
+        .unwrap()
+        .receipts
+        .iter()
+        .filter(|r| matches!(r.stage, Stage::DeliveryAttempted { .. }))
+        .map(|r| r.key.to_string())
+        .collect();
+    assert_eq!(attempts, ["text"], "the skipped envelope costs no attempt");
+}
+
+#[tokio::test]
+async fn a_payload_whose_encoding_exceeds_one_response_is_reported_not_blocking() {
+    let mut fx = fixture(&["cto", "mado"], 10).await;
+    fx.scope.budget.max_payload_bytes = 600_000;
+    fx.scope.budget.max_bytes_per_seat = 2_000_000;
+    FileWorkMessageStore::new(fx.owner_dir.clone())
+        .declare(&fx.scope)
+        .unwrap();
+    // A local sender admits 200000 control bytes; each encodes as six JSON
+    // bytes, so no single response can carry the message.
+    let local = cosmon_core::work_message::AdmittedWorkCaller::new(
+        fx.scope.owner.clone(),
+        seat("mado"),
+        cosmon_core::work_message::SenderEvidence::CallerEnvSameUid,
+    );
+    cosmon_state::work_ops::WorkOperations::new(fx.owner_dir.clone())
+        .send(
+            &local,
+            cosmon_state::work_ops::SendRequest {
+                scope_revision: fx.scope.revision().unwrap(),
+                recipient: seat("cto"),
+                key: Some(cosmon_core::work_message::MessageKey::new("escaped").unwrap()),
+                sender_time: Utc::now(),
+                reply_to: None,
+                phase: None,
+                confidentiality: cosmon_core::work_message::Confidentiality::Internal,
+                ttl_secs: None,
+            },
+            "\u{1}".repeat(200_000).as_bytes(),
+            Utc::now(),
+        )
+        .unwrap();
+    let (status, body) = fx
+        .request(
+            "mado",
+            "POST",
+            "/messages",
+            Some(fx.send("text", "cto", "ok")),
+            true,
+        )
+        .await;
+    assert!(status.is_success(), "{status} {body}");
+    let (status, body) = fx
+        .request("cto", "POST", "/inbox", Some(fx.pull()), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{status}");
+    assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(body["messages"][0]["envelope"]["key"], "text");
+    assert_eq!(body["undeliverable"][0]["envelope"]["key"], "escaped");
+    assert_eq!(body["undeliverable"][0]["reason"], "payload_too_large");
 }

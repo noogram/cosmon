@@ -3399,8 +3399,19 @@ components:
               payload: {type: string}
         receipts:
           type: array
-          description: Observations relevant to the caller's outgoing messages; distinct from inbox payloads.
+          maxItems: 100
+          description: The most recent consumption reports for the caller's outgoing messages; distinct from inbox payloads.
           items: {type: object}
+        undeliverable:
+          type: array
+          maxItems: 100
+          description: Deliverable envelopes this wire cannot carry (payload not UTF-8, or larger than one response). Metadata only; no delivery attempt is recorded, and later envelopes are still delivered.
+          items:
+            type: object
+            required: [envelope, reason]
+            properties:
+              envelope: {$ref: "#/components/schemas/WorkEnvelope"}
+              reason: {type: string, enum: [payload_not_utf8, payload_too_large]}
         next_offset: {type: [integer, "null"], minimum: 0}
     WorkAckResponse:
       type: object

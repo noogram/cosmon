@@ -57,6 +57,31 @@ pub struct PullRequest {
     pub context_observation: Option<ContextObservation>,
 }
 
+/// What a bounded pull does with one candidate envelope.
+///
+/// A transport with a response limit or a payload encoding needs a third
+/// answer besides "take it" and "page full": an envelope it can never carry
+/// must not hold back every envelope queued behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageDecision {
+    /// Return the envelope and record its delivery attempt (unless peeking).
+    Include,
+    /// The page is full; leave this and later envelopes for the next pull.
+    Stop,
+    /// The transport can never carry this envelope; report it, record no
+    /// attempt, and continue with the next one.
+    Skip,
+}
+
+/// One page selected by [`WorkOperations::pull_bounded`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedPull {
+    /// Envelopes returned to the caller, each with a recorded attempt.
+    pub messages: Vec<PulledMessage>,
+    /// Deliverable envelopes the transport cannot carry; no attempt recorded.
+    pub undeliverable: Vec<Envelope>,
+}
+
 /// One envelope and verified payload returned by [`WorkOperations::pull`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PulledMessage {
@@ -151,14 +176,20 @@ impl WorkOperations {
         request: &PullRequest,
         now: DateTime<Utc>,
     ) -> Result<Vec<PulledMessage>, WorkStoreError> {
-        self.pull_bounded(caller, request, now, usize::MAX, u64::MAX, |_| Ok(true))
+        self.pull_bounded(caller, request, now, usize::MAX, u64::MAX, |_| {
+            Ok(PageDecision::Include)
+        })
+        .map(|page| page.messages)
     }
 
     /// Select a bounded delivery page before appending any observations.
     ///
-    /// `include` may measure a transport representation and stop the page;
-    /// excluded envelopes consume no delivery attempt. The payload bound is
-    /// checked against envelope metadata before reading its bytes.
+    /// `include` may measure a transport representation and stop the page, or
+    /// skip an envelope the transport can never represent. Stopped and skipped
+    /// envelopes consume no delivery attempt; skipped ones are returned in
+    /// [`BoundedPull::undeliverable`] so one of them cannot block the envelopes
+    /// behind it. An envelope over `max_payload_bytes` is skipped from its
+    /// metadata, before its bytes are read.
     ///
     /// # Errors
     /// Returns the same custody and admission errors as [`Self::pull`], or a
@@ -170,31 +201,30 @@ impl WorkOperations {
         now: DateTime<Utc>,
         max_messages: usize,
         max_payload_bytes: u64,
-        mut include: impl FnMut(&PulledMessage) -> Result<bool, WorkStoreError>,
-    ) -> Result<Vec<PulledMessage>, WorkStoreError> {
+        mut include: impl FnMut(&PulledMessage) -> Result<PageDecision, WorkStoreError>,
+    ) -> Result<BoundedPull, WorkStoreError> {
         self.with_lock(|| {
             let projection = self.current_projection(caller, request.scope_revision, now)?;
             let envelopes = deliverable(&projection, caller.seat(), request.adapter, now);
             let mut messages = Vec::new();
-            for envelope in envelopes.into_iter().take(max_messages) {
-                if envelope.payload_bytes > max_payload_bytes {
-                    if messages.is_empty() {
-                        return Err(WorkMessageError::PayloadTooLarge {
-                            bytes: envelope.payload_bytes,
-                            max: max_payload_bytes,
-                        }
-                        .into());
-                    }
+            let mut undeliverable = Vec::new();
+            for envelope in envelopes {
+                if messages.len() >= max_messages || undeliverable.len() >= max_messages {
                     break;
+                }
+                if envelope.payload_bytes > max_payload_bytes {
+                    undeliverable.push(envelope.clone());
+                    continue;
                 }
                 let message = PulledMessage {
                     envelope: envelope.clone(),
                     payload: self.store.read_payload(envelope)?,
                 };
-                if !include(&message)? {
-                    break;
+                match include(&message)? {
+                    PageDecision::Include => messages.push(message),
+                    PageDecision::Skip => undeliverable.push(message.envelope),
+                    PageDecision::Stop => break,
                 }
-                messages.push(message);
             }
             if !request.peek {
                 for message in &messages {
@@ -225,7 +255,10 @@ impl WorkOperations {
                     }
                 }
             }
-            Ok(messages)
+            Ok(BoundedPull {
+                messages,
+                undeliverable,
+            })
         })
     }
 

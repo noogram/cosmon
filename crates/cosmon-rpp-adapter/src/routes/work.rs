@@ -22,7 +22,7 @@ use cosmon_hash::Hash;
 use cosmon_state::collaboration::{CollaborationBindingReader, CommitError};
 use cosmon_state::work_message::{FileWorkMessageStore, WorkStoreError};
 use cosmon_state::work_ops::{
-    AcknowledgeOutcome, AcknowledgeRequest, PullRequest, SendRequest, WorkOperations,
+    AcknowledgeOutcome, AcknowledgeRequest, PageDecision, PullRequest, SendRequest, WorkOperations,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -366,6 +366,44 @@ fn require_sound_projection(
     Ok(())
 }
 
+/// Consumption reports for messages sent by `sender`, newest page last.
+///
+/// Reports are observations, never new inbox envelopes; they are bounded
+/// independently and keep their wire type. The page holds the most recent
+/// reports: the oldest ones, which the sender has already seen, must not
+/// crowd out every later one.
+fn recent_receipts(
+    records: &cosmon_core::work_message::WorkRecords,
+    sender: &AdvisorySeatId,
+    remaining: &mut usize,
+) -> Result<Value, ApiError> {
+    let reports = records
+        .receipts
+        .iter()
+        .filter(|r| {
+            matches!(r.stage, Stage::Consumed { .. })
+                && records
+                    .envelopes
+                    .iter()
+                    .any(|e| e.key == r.key && e.sender == *sender)
+        })
+        .collect::<Vec<_>>();
+    let mut receipts = Vec::new();
+    for receipt in reports.into_iter().rev().take(PAGE) {
+        let size = serde_json::to_vec(receipt)
+            .map_err(|_| ApiError::internal("corrupt_evidence"))?
+            .len()
+            + 1;
+        if size > *remaining {
+            break;
+        }
+        *remaining -= size;
+        receipts.push(receipt);
+    }
+    receipts.reverse();
+    Ok(json!(receipts))
+}
+
 fn inbox(door: &Door, body: PullBody) -> Result<Json<Value>, ApiError> {
     if let Some(observation) = &body.context_observation {
         observation.validate()?;
@@ -391,39 +429,18 @@ fn inbox(door: &Door, body: PullBody) -> Result<Json<Value>, ApiError> {
     let mut output = response(&scope, now)?;
     output["messages"] = json!([]);
     output["receipts"] = json!([]);
-    let mut remaining = RESPONSE_BYTES.saturating_sub(
+    output["undeliverable"] = json!([]);
+    // Largest message entry an otherwise empty page could carry.
+    let capacity = RESPONSE_BYTES.saturating_sub(
         serde_json::to_vec(&output)
             .map_err(|_| ApiError::internal("corrupt_evidence"))?
             .len(),
     );
-    // Reports for messages sent by this seat are observations, never new
-    // inbox envelopes. Bound them independently and keep their wire type.
-    let mut receipts = Vec::new();
-    for receipt in records
-        .receipts
-        .iter()
-        .filter(|r| {
-            matches!(r.stage, Stage::Consumed { .. })
-                && records
-                    .envelopes
-                    .iter()
-                    .any(|e| e.key == r.key && e.sender == *caller.seat())
-        })
-        .take(PAGE)
-    {
-        let size = serde_json::to_vec(receipt)
-            .map_err(|_| ApiError::internal("corrupt_evidence"))?
-            .len()
-            + 1;
-        if size > remaining {
-            break;
-        }
-        remaining -= size;
-        receipts.push(receipt);
-    }
-    output["receipts"] = json!(receipts);
+    let mut remaining = capacity;
+    output["receipts"] = recent_receipts(&records, caller.seat(), &mut remaining)?;
     let mut messages = Vec::new();
-    WorkOperations::new(door.dir.clone())
+    let mut skipped = Vec::new();
+    let page = WorkOperations::new(door.dir.clone())
         .pull_bounded(
             &caller,
             &PullRequest {
@@ -442,27 +459,47 @@ fn inbox(door: &Door, body: PullBody) -> Result<Json<Value>, ApiError> {
             PAGE,
             RESPONSE_BYTES as u64,
             |message| {
-                let text = std::str::from_utf8(&message.payload)
-                    .map_err(|_| WorkStoreError::ExistingPayloadMismatch)?;
+                // This wire carries UTF-8 text; a local sender may have
+                // admitted other bytes. Report such a message instead of
+                // failing, and so blocking, the whole inbox.
+                let Ok(text) = std::str::from_utf8(&message.payload) else {
+                    skipped.push((message.envelope.key.clone(), "payload_not_utf8"));
+                    return Ok(PageDecision::Skip);
+                };
                 let value = json!({"envelope": message.envelope, "payload": text});
                 let size = serde_json::to_vec(&value)?.len() + 1;
+                if size > capacity {
+                    skipped.push((message.envelope.key.clone(), "payload_too_large"));
+                    return Ok(PageDecision::Skip);
+                }
                 if size > remaining {
-                    if messages.is_empty() {
-                        return Err(WorkMessageError::PayloadTooLarge {
-                            bytes: size as u64,
-                            max: remaining as u64,
-                        }
-                        .into());
-                    }
-                    return Ok(false);
+                    return Ok(PageDecision::Stop);
                 }
                 remaining -= size;
                 messages.push(value);
-                Ok(true)
+                Ok(PageDecision::Include)
             },
         )
         .map_err(work_error)?;
+    let mut undeliverable = Vec::new();
+    for envelope in page.undeliverable {
+        let reason = skipped
+            .iter()
+            .find(|(key, _)| *key == envelope.key)
+            .map_or("payload_too_large", |(_, reason)| *reason);
+        let value = json!({"envelope": envelope, "reason": reason});
+        let size = serde_json::to_vec(&value)
+            .map_err(|_| ApiError::internal("corrupt_evidence"))?
+            .len()
+            + 1;
+        if size > remaining {
+            break;
+        }
+        remaining -= size;
+        undeliverable.push(value);
+    }
     output["messages"] = json!(messages);
+    output["undeliverable"] = json!(undeliverable);
     Ok(Json(output))
 }
 
