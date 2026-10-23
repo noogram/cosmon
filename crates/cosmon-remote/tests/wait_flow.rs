@@ -40,6 +40,7 @@ fn profile_for(server: &MockServer) -> Profile {
         issuer: None,
         client_id: None,
         noyau: Some("default".into()),
+        attachment: None,
         scopes: vec!["cosmon:molecule:read".into()],
         artifacts_dir: None,
         timeout_secs: 5,

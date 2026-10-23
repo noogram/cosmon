@@ -12,10 +12,12 @@ and [ADR-182](../adr/182-declared-advisory-work-under-a-provider-neutral-contrac
 **Machine check:** `scripts/check-collaboration-contract.py` validates the tables
 below; `scripts/check-collaboration-contract.test.sh` holds its fixtures.
 
-Nothing here changes a shipped verb, route, record or output byte. Every route
-in §4 is **proposed**: it is absent from
-`crates/cosmon-rpp-adapter/data/surface_events.txt` until the unit named in its
-Phase column mounts it together with its canon, OpenAPI and help changes.
+The semantic contract remains frozen. W4 now mounts the five work routes
+W-LIST through W-ACK together with their remote client, canon, OpenAPI and
+help changes. Session routes in §4 remain **proposed** and absent from
+`crates/cosmon-rpp-adapter/data/surface_events.txt` until W7. The contract
+checker requires the shipped W4 routes and continues to refuse other mounted
+collaboration routes.
 
 ## 1. Decisions
 

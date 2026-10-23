@@ -425,6 +425,16 @@ pub fn router(state: AppState) -> Router {
     use axum::routing::{delete, post};
     let shared = Arc::new(state);
     Router::new()
+        .route("/v1/work/{owner}", get(routes::work::list))
+        .route("/v1/work/{owner}/messages", post(routes::work::send))
+        .route(
+            "/v1/work/{owner}/inbox",
+            get(routes::work::peek).post(routes::work::pull),
+        )
+        .route(
+            "/v1/work/{owner}/messages/{key}/ack",
+            post(routes::work::acknowledge),
+        )
         .route("/v1/molecules", get(routes::molecules::list_molecules))
         .route("/v1/vitals", get(routes::vitals::get_vitals))
         .route("/v1/molecules/{id}", get(routes::molecules::get_molecule))

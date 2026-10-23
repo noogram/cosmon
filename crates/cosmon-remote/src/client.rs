@@ -1075,6 +1075,111 @@ impl Client {
         Ok(self.http.execute(retry).await?)
     }
 
+    /// Read the bound work roster, with an explicit bounded seat page.
+    pub async fn work_list(
+        &self,
+        owner: &str,
+        attachment: &cosmon_core::collaboration::AttachmentId,
+        proof: &cosmon_core::collaboration::AttachmentProof,
+        offset: usize,
+        limit: usize,
+    ) -> Result<serde_json::Value> {
+        let rb = self
+            .work_req(canon::GET_V1_WORK_OWNER, &[owner], attachment, proof)?
+            .query(&[("offset", offset), ("limit", limit)]);
+        decode_json(self.send(rb).await?).await
+    }
+
+    /// Admit an advisory message; sender attribution belongs to the host binding.
+    pub async fn work_send(
+        &self,
+        owner: &str,
+        attachment: &cosmon_core::collaboration::AttachmentId,
+        proof: &cosmon_core::collaboration::AttachmentProof,
+        body: &crate::work::SendRequest,
+    ) -> Result<serde_json::Value> {
+        let rb = self
+            .work_req(
+                canon::POST_V1_WORK_OWNER_MESSAGES,
+                &[owner],
+                attachment,
+                proof,
+            )?
+            .json(body);
+        decode_json(self.send(rb).await?).await
+    }
+
+    /// Explicitly pull at a safe point, or inspect without recording delivery.
+    pub async fn work_inbox(
+        &self,
+        owner: &str,
+        attachment: &cosmon_core::collaboration::AttachmentId,
+        proof: &cosmon_core::collaboration::AttachmentProof,
+        body: &crate::work::PullRequest,
+    ) -> Result<serde_json::Value> {
+        let rb = if body.peek {
+            self.work_req(canon::GET_V1_WORK_OWNER_INBOX, &[owner], attachment, proof)?
+                .query(&[
+                    ("scope_revision", body.scope_revision.as_str()),
+                    (
+                        "adapter",
+                        match body.adapter {
+                            cosmon_core::work_message::DeliveryAdapter::Pull => "pull",
+                            cosmon_core::work_message::DeliveryAdapter::ClaudePostToolUse => {
+                                "claude_post_tool_use"
+                            }
+                            cosmon_core::work_message::DeliveryAdapter::CodexPostToolUse => {
+                                "codex_post_tool_use"
+                            }
+                            cosmon_core::work_message::DeliveryAdapter::HarnessTurn => {
+                                "harness_turn"
+                            }
+                        },
+                    ),
+                ])
+        } else {
+            self.work_req(canon::POST_V1_WORK_OWNER_INBOX, &[owner], attachment, proof)?
+                .json(body)
+        };
+        decode_json(self.send(rb).await?).await
+    }
+
+    /// Persist an acknowledgment, separately from any result message.
+    pub async fn work_ack(
+        &self,
+        owner: &str,
+        key: &str,
+        attachment: &cosmon_core::collaboration::AttachmentId,
+        proof: &cosmon_core::collaboration::AttachmentProof,
+        body: &crate::work::AckRequest,
+    ) -> Result<serde_json::Value> {
+        let rb = self
+            .work_req(
+                canon::POST_V1_WORK_OWNER_MESSAGES_KEY_ACK,
+                &[owner, key],
+                attachment,
+                proof,
+            )?
+            .json(body);
+        decode_json(self.send(rb).await?).await
+    }
+
+    fn work_req(
+        &self,
+        route: &CanonRoute,
+        args: &[&str],
+        attachment: &cosmon_core::collaboration::AttachmentId,
+        proof: &cosmon_core::collaboration::AttachmentProof,
+    ) -> Result<reqwest::RequestBuilder> {
+        let mut secret = header::HeaderValue::from_str(proof.expose_secret())
+            .map_err(|_| Error::Config("attachment proof is not a valid header value".into()))?;
+        secret.set_sensitive(true);
+        Ok(self
+            .req_canon(route, args)
+            .header("cosmon-attachment", attachment.as_str())
+            .header("cosmon-attachment-proof", secret))
+    }
+
     // ── /healthz ───────────────────────────────────────────────────────
 
     /// `GET /healthz` — unauthenticated probe. Returns the raw JSON body.
@@ -1971,6 +2076,7 @@ mod tests {
             issuer: None,
             client_id: None,
             noyau: None,
+            attachment: None,
             scopes: vec!["cosmon:molecule:read".into()],
             artifacts_dir: None,
             timeout_secs: 5,

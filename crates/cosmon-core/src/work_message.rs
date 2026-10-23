@@ -888,11 +888,39 @@ pub enum Admission {
     Duplicate(Envelope),
 }
 
+// The boundary's non-local identity must participate in request idempotency.
+// Local callers keep their legacy digest-only behavior.
+fn retry_matches(envelope: &Envelope, submission: &Submission, default_ttl_secs: u64) -> bool {
+    if envelope.payload_digest != submission.payload_digest {
+        return false;
+    }
+    if submission.sender_evidence != SenderEvidence::AdmittedNonLocal {
+        return true;
+    }
+    let ttl = submission.ttl_secs.unwrap_or(default_ttl_secs);
+    let same_ttl = i64::try_from(ttl).is_ok_and(|seconds| {
+        envelope
+            .expires_at
+            .signed_duration_since(envelope.admitted_at)
+            .num_seconds()
+            == seconds
+    });
+    envelope.scope_revision == submission.scope_revision
+        && envelope.sender == submission.sender
+        && envelope.recipient == submission.recipient
+        && envelope.reply_to == submission.reply_to
+        && envelope.phase == submission.phase
+        && envelope.confidentiality == submission.confidentiality
+        && same_ttl
+}
+
 /// Decide whether `submission` may enter the work.
 ///
 /// Checks, in order: scope validity, revision, sender and recipient
 /// membership, payload size, key idempotency, `reply_to` existence, the
-/// sender's budget, and the lifetime.
+/// sender's budget, and the lifetime. Admitted non-local retries compare the
+/// full request tuple (client time is advisory); local retries retain their
+/// historical key-and-digest behavior.
 ///
 /// # Errors
 /// Returns the first refusal; see [`WorkMessageError`].
@@ -942,7 +970,7 @@ pub fn admit(
         )
     });
     if let Some(view) = existing.envelopes.get(&key) {
-        return if view.envelope.payload_digest == submission.payload_digest {
+        return if retry_matches(&view.envelope, &submission, budget.default_ttl_secs) {
             Ok(Admission::Duplicate(view.envelope.clone()))
         } else {
             Err(WorkMessageError::KeyCollision { key })
@@ -1427,6 +1455,9 @@ pub enum WorkMessageError {
     /// Lifetime was zero or overflowed the clock.
     #[error("invalid message lifetime of {0} seconds")]
     InvalidTtl(u64),
+    /// Non-local acknowledgment arrived after the envelope lifetime ended.
+    #[error("envelope {0} has expired")]
+    EnvelopeExpired(MessageKey),
     /// No envelope has this key.
     #[error("no envelope with key {0}")]
     UnknownEnvelope(MessageKey),

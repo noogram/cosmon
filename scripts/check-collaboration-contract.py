@@ -34,6 +34,15 @@ CUSTODY_COLUMNS = ["Writer", "Record class", "Location"]
 EFFECTS = {"read-only", "observation-write", "advisory-write"}
 RETRIES = {"idempotent-key", "idempotent-ack", "safe-repeat", "bounded-redelivery"}
 PHASES = {"W4", "W7"}
+# W4 is shipped. Session routes stay proposed until their separately
+# authorized W7 increment updates this exact exposure set.
+SHIPPED_WORK_ROUTES = {
+    "GET /v1/work/{owner}",
+    "POST /v1/work/{owner}/messages",
+    "GET /v1/work/{owner}/inbox",
+    "POST /v1/work/{owner}/inbox",
+    "POST /v1/work/{owner}/messages/{key}/ack",
+}
 DECISION_STATUS = {"adopted-default", "operator-confirmed"}
 REQUIRED_DECISIONS = {f"O{n}" for n in range(1, 9)}
 # Operations the contract must name as refused, matched by keyword.
@@ -134,9 +143,12 @@ def check(spec_text, surface_path):
             if rec["Route"] in seen_routes:
                 findings.append(f"route {rid}: duplicate route {rec['Route']}")
             seen_routes.add(rec["Route"])
-            if rec["Route"] in mounted:
+            shipped = rec["Route"] in SHIPPED_WORK_ROUTES and rec["Phase"] == "W4"
+            if rec["Route"] in mounted and not shipped:
                 findings.append(f"route {rid}: {rec['Route']} is already mounted; "
-                                "this contract proposes new routes only")
+                                "only the five W4 work routes are shipped")
+            if shipped and rec["Route"] not in mounted:
+                findings.append(f"route {rid}: shipped W4 route is missing from the surface")
         if not empty(rec["Scope"]) and rec["Scope"] not in scopes:
             findings.append(f"route {rid}: scope {rec['Scope']} is not in the scope table")
         if not empty(rec["Writer"]) and rec["Writer"] not in writers:

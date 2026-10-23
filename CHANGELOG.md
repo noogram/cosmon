@@ -21,6 +21,13 @@ this stage.
 
 ### Added
 
+- Cross-machine advisory work exchange: `cosmon-remote work list/send/inbox/ack`
+  uses an operator-bound seat and attachment proof, with bounded explicit pull,
+  idempotent send and durable acknowledgments separate from result messages.
+  Host-local declaration and binding management remain local. Help and man
+  pages are regenerated for this intentional additive command surface; the
+  root and configuration help now expose work commands and attachment setup.
+
 - Worker host configuration: `[transport] backend = "tmux"` resolves project,
   global, then default with recorded provenance. The first qualified path is
   Codex Exec on tmux: launch-bound terminal identity keeps observation,

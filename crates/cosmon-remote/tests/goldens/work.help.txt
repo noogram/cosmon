@@ -1,0 +1,17 @@
+Explicit advisory work messages; no lifecycle authority
+
+Usage: cosmon-remote work [OPTIONS] <COMMAND>
+
+Commands:
+  list         Read the bound roster (`GET /v1/work/{owner}`)
+  send         Admit advisory evidence (`POST /v1/work/{owner}/messages`)
+  inbox        Pull at an explicit safe point (`POST /v1/work/{owner}/inbox`); --peek uses `GET /v1/work/{owner}/inbox`
+  ack          Record consideration, separately from a result (`POST /v1/work/{owner}/messages/{key}/ack`)
+  store-proof  Store the host-issued proof from stdin privately; never pass it in argv
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+      --profile <PROFILE>  Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --json               Render machine-readable JSON instead of human text where applicable
+      --token <TOKEN>      Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+  -h, --help               Print help

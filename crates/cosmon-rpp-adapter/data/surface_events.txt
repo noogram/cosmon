@@ -114,3 +114,10 @@ GET /v1/ledger | task-20261006-04ac | 2026-10-06 | tenant | cosmon:events:subscr
 # ADR-187 issue #207 B2: separate keyed routes fail closed on older servers.
 PUT /v1/molecules/{id}/collapse-receipts/{key} | task-20261017-c213 | 2026-10-17 | tenant | cosmon:molecule:write | tenant-verb | Collapse conditionally with a durable receipt
 GET /v1/molecules/{id}/collapse-receipts/{key} | task-20261017-c213 | 2026-10-17 | tenant | cosmon:molecule:read | tenant-verb | Look up a durable collapse receipt
+
+# Issue #147 W4: explicit advisory work exchange, bound attachment only.
+GET /v1/work/{owner} | task-20261023-9e78 | 2026-10-23 | tenant | cosmon:work:read | adapter-only | List the bound work roster and scope revision
+POST /v1/work/{owner}/messages | task-20261023-9e78 | 2026-10-23 | tenant | cosmon:work:write | adapter-only | Admit advisory evidence from the binding-derived seat
+GET /v1/work/{owner}/inbox | task-20261023-9e78 | 2026-10-23 | tenant | cosmon:work:read | adapter-only | Peek at the bound seat inbox without recording delivery
+POST /v1/work/{owner}/inbox | task-20261023-9e78 | 2026-10-23 | tenant | cosmon:work:read | adapter-only | Pull bounded evidence at an explicit safe point
+POST /v1/work/{owner}/messages/{key}/ack | task-20261023-9e78 | 2026-10-23 | tenant | cosmon:work:write | adapter-only | Record the bound recipient treatment of one message

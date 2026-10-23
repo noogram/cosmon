@@ -31,6 +31,7 @@ fn real_oidc_profile(server: &MockServer) -> Profile {
         issuer: Some(server.uri()),
         client_id: Some("cosmon-rpp-tenant".into()),
         noyau: Some("default".into()),
+        attachment: None,
         scopes: vec![
             "cosmon:molecule:read".into(),
             "cosmon:molecule:write".into(),

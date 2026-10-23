@@ -49,6 +49,11 @@ addressed to it (`inbox`), and reports how it treated a message
 (`ack`). `list` rebuilds every message's stage — admitted, delivered,
 consumed — from canonical evidence, for any member or for the owner.
 
+Remote exchange uses `cosmon-remote work list/send/inbox/ack` against the
+host RPP with an operator-provisioned seat binding and attachment proof.
+The host derives the sender; work scopes grant no lifecycle, worker or
+lease authority. Declaration and binding management stay host-local.
+
 For two live sessions on ONE mission instead, where a human signature
 moves the controls between them, see `cs sessions`.";
 

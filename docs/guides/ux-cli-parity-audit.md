@@ -2,6 +2,42 @@
 
 # CLI and UI parity audit
 
+## Cross-machine work exchange (issue #147 W4)
+
+| Capability | Local CLI | Remote CLI / API |
+|---|---|---|
+| Inspect roster and revision | `cs work list` | `cosmon-remote work list`; `GET /v1/work/{owner}` |
+| Send bounded evidence | `cs work send` | `cosmon-remote work send`; `POST /v1/work/{owner}/messages` |
+| Peek without delivery observations | `cs work inbox --peek` | `cosmon-remote work inbox --peek`; `GET /v1/work/{owner}/inbox` |
+| Pull at an explicit safe point | `cs work inbox` | `cosmon-remote work inbox`; `POST /v1/work/{owner}/inbox` |
+| Report considered, deferred or rejected | `cs work ack` | `cosmon-remote work ack`; `POST /v1/work/{owner}/messages/{key}/ack` |
+
+The host derives the seat from the operator-provisioned binding and checks
+its attachment proof; the request never selects a sender. Unknown request
+fields are refused. Every response names its schema version, server receipt
+time and scope revision. Inbox messages and outgoing acknowledgment receipts
+remain separate; a result is a new message linked by reply, never an ack.
+Writes recheck binding revision and revocation at commit. Declaration and
+binding management stay host-local. No collaboration route starts a command,
+molecule or worker, changes a lifecycle, or acquires a lease. W4 provides no
+session routes, background outbox or wake-up channel.
+
+The client profile pins the existing deployment URL, issuer and client ID,
+plus the host-issued public attachment ID (`config set attachment ID`).
+`cosmon-remote work store-proof` reads the host-issued secret proof from stdin
+and stores it in the private credential backend for that profile; the proof
+never belongs in argv. A profile's issuer and client ID identify that private
+credential slot even when using a static bearer. Every work request sends
+`cosmon-attachment` and `cosmon-attachment-proof` alongside the bearer. The
+scope revision comes from `work list` and is explicit on send, inbox and ack.
+A retry keeps the same message key and request bytes; there is no local or
+background fallback when the server lacks the route.
+
+The transport canon
+classifies these typed adapter routes as `adapter-only`: the local work
+commands are outside the thin CLI's `#[verb]` registry. See the
+[frozen contract](../specs/cross-machine-collaboration.md).
+
 ## Worker host selection
 
 | Capability | CLI / configuration | Native UI / remote API |
