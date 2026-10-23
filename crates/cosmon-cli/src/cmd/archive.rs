@@ -250,6 +250,16 @@ fn resolve_entry(root: &Path, needle: &str) -> anyhow::Result<Entry> {
     }
 }
 
+/// Best-effort identity lookup for an archived-only `observe` diagnostic.
+///
+/// Uses the same exact/unique-prefix rules as `archive show`. Missing,
+/// ambiguous, or unreadable archives leave the original live-state error intact.
+pub(super) fn archived_molecule_id(root: &Path, needle: &str) -> Option<String> {
+    resolve_entry(root, needle)
+        .ok()
+        .map(|entry| entry.molecule_id)
+}
+
 // ---------------------------------------------------------------------------
 // list
 // ---------------------------------------------------------------------------
