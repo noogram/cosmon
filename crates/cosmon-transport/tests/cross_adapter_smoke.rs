@@ -17,20 +17,60 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
-use cosmon_core::event_v2::{Envelope, EventV2};
+use cosmon_core::event_v2::{
+    AdapterHandleState, AdapterProbeResult, Envelope, EventV2, PerturbationChannel,
+};
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_transport::aider::{self, AiderPermissionFlags, AiderSessionConfig};
 use cosmon_transport::claude::{self, ClaudeSessionConfig, PermissionMode};
+use cosmon_transport::registry::{default_registry, pane_current_command};
 use cosmon_transport::spawn::AdapterTelemetry;
 use tempfile::tempdir;
 
-const TEST_SOCKET: &str = "cosmon-cross-adapter-tier2";
+// Both ignored tests run concurrently in nightly. A process-local counter also
+// separates repeated tests in one binary; Drop cleans only this test's socket,
+// including when an assertion panics.
+static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
 
-fn cleanup() {
-    let _ = Command::new("tmux")
-        .args(["-L", TEST_SOCKET, "kill-server"])
-        .output();
+struct TestSocket(String);
+
+impl TestSocket {
+    fn new() -> Self {
+        Self(format!(
+            "cosmon-cross-{}-{}",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+}
+
+impl Drop for TestSocket {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux")
+            .args(["-L", &self.0, "kill-server"])
+            .output();
+    }
+}
+
+/// Wait for CLI startup before making the single audited signature check.
+/// A session existing alone does not prove that its foreground CLI is ready.
+fn check_signature(socket: &str, session: &str, adapter: &str, t: &AdapterTelemetry) {
+    let registry = default_registry();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if pane_current_command(socket, session).is_some_and(|cmd| registry.matches(adapter, &cmd))
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        registry.check_pane_signature(socket, session, adapter, t, PerturbationChannel::Propulsion),
+        "{adapter}: foreground pane must match its registered signature"
+    );
 }
 
 /// The flag each required binary answers a version query with.
@@ -101,51 +141,76 @@ fn same_briefing_both_adapters_produce_structurally_equivalent_artefacts() {
 /// exactly those two events for both Adapters and silently passed.
 /// The tightened check pins the
 /// full FSM-prescribed superset: WS-1, WS-2, WS-3, WS-4, WS-5 must
-/// all be present, in FSM order. The early-kill skeleton-run case
-/// lives in [`cross_adapter_event_lineage_early_kill_emits_terminal`]
+/// all be present, in FSM order. The driver explicitly invokes the live
+/// liveness/signature probes and the adapters' sealed-file reader; spawn and
+/// kill alone cannot produce WS-2..WS-4. WS-4 witnesses the adapter-side read,
+/// not model comprehension or generated output. Sessions start without a
+/// prompt so the headless `noop` cannot exit before the probes run. The
+/// early-kill skeleton-run case
+/// lives in [`cross_adapter_event_lineage_early_kill_emits_terminal_without_consume`]
 /// below.
 #[test]
 #[ignore = "requires real claude+aider binaries + tmux"]
-fn cross_adapter_event_lineage_equivalence_modulo_adapter_name() {
+fn cross_adapter_event_lineage_equivalence_modulo_adapter_name(
+) -> Result<(), Box<dyn std::error::Error>> {
     require_binary("tmux");
     require_binary("claude");
     require_binary("aider");
 
-    cleanup();
-    let dir = tempdir().unwrap();
+    let dir = tempdir()?;
+    let socket = TestSocket::new();
     let state = dir.path();
     let workdir = dir.path().to_string_lossy().into_owned();
     let mol_id = MoleculeId::new("task-20260517-4f15").unwrap();
 
     let wc = WorkerId::new("smoke-claude").unwrap();
     let tc = AdapterTelemetry::new(mol_id.clone(), wc.clone(), state.to_owned(), "uuid-c");
-    let _ = claude::spawn_claude_session(&ClaudeSessionConfig {
-        socket: TEST_SOCKET.into(),
+    claude::spawn_claude_session(&ClaudeSessionConfig {
+        socket: socket.0.clone(),
         session_name: wc.as_str().into(),
         work_dir: workdir.clone(),
         permission_mode: PermissionMode::Plan,
-        prompt: Some("noop".into()),
+        prompt: None,
         telemetry: Some(tc.clone()),
         pre_existing_worker: None,
         writable_roots: vec![],
-    });
-    let _ = claude::kill_session(TEST_SOCKET, wc.as_str(), Some(&tc));
+    })?;
+    assert!(
+        claude::check_alive(&socket.0, wc.as_str(), Some(&tc))?,
+        "claude: spawned session must be alive"
+    );
+    check_signature(&socket.0, wc.as_str(), "claude", &tc);
+    let briefing = fs::read(fixture_path())?;
+    let seal = blake3::hash(&briefing).to_hex().to_string();
+    assert_eq!(
+        claude::consume_briefing(&fixture_path(), &seal, Some(&tc))?,
+        briefing
+    );
+    claude::kill_session(&socket.0, wc.as_str(), Some(&tc))?;
 
     let wa = WorkerId::new("smoke-aider").unwrap();
     let ta = AdapterTelemetry::new(mol_id, wa.clone(), state.to_owned(), "uuid-a");
-    let _ = aider::spawn_aider_session(&AiderSessionConfig {
-        socket: TEST_SOCKET.into(),
+    aider::spawn_aider_session(&AiderSessionConfig {
+        socket: socket.0.clone(),
         session_name: wa.as_str().into(),
         work_dir: workdir,
         permission_flags: AiderPermissionFlags::Plan,
         model: "kimi-k2.6".into(),
-        prompt: Some("noop".into()),
+        prompt: None,
         extra_args: Vec::new(),
         telemetry: Some(ta.clone()),
         pre_existing_worker: None,
-    });
-    let _ = aider::kill_session(TEST_SOCKET, wa.as_str(), Some(&ta));
-    cleanup();
+    })?;
+    assert!(
+        aider::check_alive(&socket.0, wa.as_str(), Some(&ta))?,
+        "aider: spawned session must be alive"
+    );
+    check_signature(&socket.0, wa.as_str(), "aider", &ta);
+    assert_eq!(
+        aider::consume_briefing(&fixture_path(), &seal, Some(&ta))?,
+        briefing
+    );
+    aider::kill_session(&socket.0, wa.as_str(), Some(&ta))?;
 
     let events = envelopes(state);
     let kinds_for = |adapter: &str| -> Vec<&'static str> {
@@ -211,6 +276,31 @@ fn cross_adapter_event_lineage_equivalence_modulo_adapter_name() {
         );
     }
     assert_eq!(kinds_for("claude"), kinds_for("aider"));
+    // Event presence alone would accept failed probes, signature mismatches,
+    // stale seals, or an orphan release as a happy path. Pin the verdicts too.
+    for envelope in &events {
+        match &envelope.event {
+            EventV2::AdapterLivenessProbed { probe_result, .. } => {
+                assert!(matches!(probe_result, AdapterProbeResult::Alive { .. }))
+            }
+            EventV2::AdapterPaneSignatureChecked { matched, .. } => assert!(*matched),
+            EventV2::AdapterBriefingConsumed {
+                briefing_seal_observed,
+                briefing_seal_recorded,
+                bytes_read,
+                ..
+            } => {
+                assert_eq!(briefing_seal_observed, &seal);
+                assert_eq!(briefing_seal_recorded, &seal);
+                assert_eq!(*bytes_read, briefing.len() as u64);
+            }
+            EventV2::AdapterHandleReconciled { handle_state, .. } => {
+                assert_eq!(*handle_state, AdapterHandleState::ReleasedClean)
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// **Skeleton-run shape.**
@@ -224,31 +314,31 @@ fn cross_adapter_event_lineage_equivalence_modulo_adapter_name() {
 /// races the consume-briefing path stays diagnosable.
 #[test]
 #[ignore = "requires real claude+aider binaries + tmux"]
-fn cross_adapter_event_lineage_early_kill_emits_terminal_without_consume() {
+fn cross_adapter_event_lineage_early_kill_emits_terminal_without_consume(
+) -> Result<(), Box<dyn std::error::Error>> {
     require_binary("tmux");
     require_binary("claude");
 
-    cleanup();
-    let dir = tempdir().unwrap();
+    let dir = tempdir()?;
+    let socket = TestSocket::new();
     let state = dir.path();
     let workdir = dir.path().to_string_lossy().into_owned();
     let mol_id = MoleculeId::new("task-20260517-4f15").unwrap();
 
     let w = WorkerId::new("smoke-early-kill").unwrap();
     let t = AdapterTelemetry::new(mol_id, w.clone(), state.to_owned(), "uuid-early");
-    let _ = claude::spawn_claude_session(&ClaudeSessionConfig {
-        socket: TEST_SOCKET.into(),
+    claude::spawn_claude_session(&ClaudeSessionConfig {
+        socket: socket.0.clone(),
         session_name: w.as_str().into(),
         work_dir: workdir,
         permission_mode: PermissionMode::Plan,
-        prompt: Some("noop".into()),
+        prompt: None,
         telemetry: Some(t.clone()),
         pre_existing_worker: None,
         writable_roots: vec![],
-    });
+    })?;
     // Immediate kill — no probe, no consume_briefing.
-    let _ = claude::kill_session(TEST_SOCKET, w.as_str(), Some(&t));
-    cleanup();
+    claude::kill_session(&socket.0, w.as_str(), Some(&t))?;
 
     let events = envelopes(state);
     let has = |pred: fn(&EventV2) -> bool| -> bool { events.iter().any(|e| pred(&e.event)) };
@@ -266,4 +356,5 @@ fn cross_adapter_event_lineage_early_kill_emits_terminal_without_consume() {
          consumed briefing.md before the kill, which the test never \
          triggered"
     );
+    Ok(())
 }

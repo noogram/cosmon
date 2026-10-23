@@ -34,10 +34,10 @@ use cosmon_core::worker::{
     reconcile, CognitiveState, DesiredState, EffectiveStatus, ObservedState, ReconcileAction,
     TransportState, WorkerRole, WorkerStatus,
 };
-use cosmon_state::events::worker_spawn::emit_adapter_pane_signature_checked;
 use cosmon_state::{event_log, Fleet, MoleculeData, MoleculeFilter, StateStore};
 use cosmon_transport::claude::ADAPTER_NAME as CLAUDE_ADAPTER;
-use cosmon_transport::registry::{default_registry, pane_current_command, pane_idle_seconds};
+use cosmon_transport::registry::{default_registry, pane_idle_seconds};
+use cosmon_transport::spawn::AdapterTelemetry;
 use cosmon_transport::TmuxBackend;
 
 use super::Context;
@@ -2180,17 +2180,11 @@ pub(crate) fn propel_stale_molecules(
             .find(|m| m.id == mid)
             .and_then(|m| m.session_name.clone())
             .unwrap_or_else(|| wid.to_string());
-        let observed = pane_current_command(be.socket(), &session_name).unwrap_or_default();
-        let matched = registry.matches(adapter_name, &observed);
-        let mol_dir = store.molecule_dir(&mid);
-        emit_adapter_pane_signature_checked(
-            &mol_dir,
-            &mid,
-            &wid,
+        let matched = registry.check_pane_signature(
+            be.socket(),
+            &session_name,
             adapter_name,
-            registry.signatures_of(adapter_name),
-            &observed,
-            matched,
+            &AdapterTelemetry::new(mid.clone(), wid.clone(), store.molecule_dir(&mid), ""),
             PerturbationChannel::Propulsion,
         );
         if !matched {
