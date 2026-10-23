@@ -163,7 +163,7 @@ fn run_detail(
     id_or_prefix: &str,
     notes_limit: usize,
 ) -> anyhow::Result<()> {
-    let mol = resolve_molecule(store, id_or_prefix)?;
+    let mol = resolve_molecule(store, id_or_prefix, &state_dir.join("archive"))?;
 
     // Library-first promotion (T2 — task-20260503-bbea, delib-20260502-6522
     // Form 5): both `cs observe` and cs-api's `GET /molecules/{id}` go
@@ -425,7 +425,11 @@ fn run_detail(
 /// If the input parses as a valid `MoleculeId`, attempts an exact load first.
 /// Otherwise, lists all molecules and finds those whose ID starts with the input.
 /// Returns an error if zero or more than one match.
-fn resolve_molecule(store: &dyn StateStore, id_or_prefix: &str) -> anyhow::Result<MoleculeData> {
+fn resolve_molecule(
+    store: &dyn StateStore,
+    id_or_prefix: &str,
+    archive_root: &Path,
+) -> anyhow::Result<MoleculeData> {
     // Try exact match first
     if let Ok(exact_id) = MoleculeId::new(id_or_prefix) {
         if let Ok(mol) = store.load_molecule(&exact_id) {
@@ -442,7 +446,12 @@ fn resolve_molecule(store: &dyn StateStore, id_or_prefix: &str) -> anyhow::Resul
         .collect();
 
     match matches.len() {
-        0 => Err(anyhow::anyhow!("no molecule matching \"{id_or_prefix}\"")),
+        0 => {
+            if let Some(id) = super::archive::archived_molecule_id(archive_root, id_or_prefix) {
+                anyhow::bail!("molecule \"{id}\" is archived; use `cs archive show {id}`");
+            }
+            Err(anyhow::anyhow!("no molecule matching \"{id_or_prefix}\""))
+        }
         1 => Ok(matches.into_iter().next().unwrap()),
         n => {
             let ids: Vec<_> = matches.iter().map(|m| m.id.as_str()).collect();
@@ -777,18 +786,18 @@ mod tests {
         store.save_molecule(&m3.id, &m3).unwrap();
 
         // Unique prefix match
-        let mol = resolve_molecule(&store, "cs-20260401-z");
+        let mol = resolve_molecule(&store, "cs-20260401-z", &_tmp.path().join("archive"));
         assert!(mol.is_ok());
         assert_eq!(mol.unwrap().id.as_str(), "cs-20260401-zzzz");
 
         // Ambiguous prefix
-        let mol = resolve_molecule(&store, "cs-20260401-ab");
+        let mol = resolve_molecule(&store, "cs-20260401-ab", &_tmp.path().join("archive"));
         assert!(mol.is_err());
         let err = mol.unwrap_err();
         assert!(err.to_string().contains("ambiguous"));
 
         // No match
-        let mol = resolve_molecule(&store, "xx-20260401-nope");
+        let mol = resolve_molecule(&store, "xx-20260401-nope", &_tmp.path().join("archive"));
         assert!(mol.is_err());
         let err = mol.unwrap_err();
         assert!(err.to_string().contains("no molecule"));

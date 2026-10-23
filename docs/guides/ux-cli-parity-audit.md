@@ -563,3 +563,9 @@ read-only attachment client. See [configuration](../project-config.md).
 | User intent | CLI | UI | Remote |
 |---|---|---|---|
 | Print one fleet baseline without a terminal | `cs peek --once` selects the non-TUI path; `--no-tui` alone still follows by default | TUI remains the interactive default | No matching change audited |
+
+## Archived-only observe (2026-10-23)
+
+| User intent | CLI | UI | Remote |
+|---|---|---|---|
+| Find a molecule absent from live state | `cs observe <id>` identifies an exact or unique-prefix archive match and names `cs archive show <full-id>`; exit status remains 1 | No matching change audited | No matching change audited |
