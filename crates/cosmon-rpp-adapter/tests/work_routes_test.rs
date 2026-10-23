@@ -124,6 +124,25 @@ fn seat(name: &str) -> AdvisorySeatId {
 }
 
 async fn fixture(names: &[&str], max_messages: u32) -> Fixture {
+    fixture_scoped(names, max_messages, &[]).await
+}
+
+const WORK_WRITE: &str = "cosmon:work:write";
+
+/// Like [`fixture`], but a seat listed in `granted` holds exactly those token
+/// scopes instead of `cosmon:work:write`. Its binding keeps `WorkWrite`, so
+/// the token scope is the only thing a route can refuse on.
+async fn fixture_scoped(
+    names: &[&str],
+    max_messages: u32,
+    granted: &[(&str, &'static [&'static str])],
+) -> Fixture {
+    let scopes_of = |name: &str| -> &'static [&'static str] {
+        granted
+            .iter()
+            .find(|(seat, _)| *seat == name)
+            .map_or(&[WORK_WRITE][..], |(_, scopes)| *scopes)
+    };
     let mut tenants = TenantWorkspaces::new();
     let tenant = tenants.add("a");
     tenant
@@ -138,15 +157,7 @@ async fn fixture(names: &[&str], max_messages: u32) -> Fixture {
     let backend = cosmon_transport::MockBackend::new();
     let bindings = names
         .iter()
-        .map(|name| {
-            (
-                *name,
-                *name,
-                "a",
-                "cosmon-rpp-a",
-                Some(&["cosmon:work:write"][..]),
-            )
-        })
+        .map(|name| (*name, *name, "a", "cosmon-rpp-a", Some(scopes_of(name))))
         .collect();
     let state = make_state(&oidc, &tenants, bindings, security.path(), backend.clone());
     let owner_dir = tenant
@@ -212,7 +223,7 @@ async fn fixture(names: &[&str], max_messages: u32) -> Fixture {
             let token = oidc.issue(&IssueJwt {
                 subject: name,
                 audience: Some("cosmon-rpp-a"),
-                scopes: &["cosmon:work:write"],
+                scopes: scopes_of(name),
                 lifetime_secs: Some(3600),
                 jti: Some(name),
             });
@@ -1154,4 +1165,142 @@ async fn revocation_between_admission_and_commit_refuses_the_ack() {
         0,
         "a revoked binding records no acknowledgment"
     );
+}
+
+const READ_ONLY: &[&str] = &["cosmon:work:read"];
+const UNRELATED: &[&str] = &["cosmon:sessions:read"];
+
+/// Everything a refused request must leave untouched: admissions, delivery
+/// attempts and consumption receipts all live in the work store.
+fn work_records(fx: &Fixture) -> (usize, usize) {
+    let all = FileWorkMessageStore::new(fx.owner_dir.clone())
+        .load_all()
+        .unwrap();
+    (all.envelopes.len(), all.receipts.len())
+}
+
+/// The five W4 routes, each as `(method, suffix, body)` for a caller whose
+/// request would otherwise be valid.
+fn routes(fx: &Fixture, key: &str) -> [(&'static str, String, Option<Value>); 5] {
+    let ack = json!({"scope_revision": fx.scope.revision().unwrap(),
+        "payload_digest": "unused", "disposition": "considered"});
+    let peek = format!(
+        "/inbox?scope_revision={}&adapter=pull",
+        fx.scope.revision().unwrap()
+    );
+    [
+        ("GET", String::new(), None),
+        (
+            "POST",
+            "/messages".to_owned(),
+            Some(fx.send("probe", "cto", "probe")),
+        ),
+        ("GET", peek, None),
+        ("POST", "/inbox".to_owned(), Some(fx.pull())),
+        ("POST", format!("/messages/{key}/ack"), Some(ack)),
+    ]
+}
+
+#[tokio::test]
+async fn a_read_only_token_is_refused_on_the_write_routes_and_leaves_no_record() {
+    let fx = fixture_scoped(&["cto", "mado"], 10, &[("mado", READ_ONLY)]).await;
+    let (status, sent) = fx
+        .request(
+            "cto",
+            "POST",
+            "/messages",
+            Some(fx.send("finding", "mado", "finding")),
+            true,
+        )
+        .await;
+    assert!(status.is_success(), "{status} {sent}");
+    let before = work_records(&fx);
+    let [_, send, _, _, ack] = routes(&fx, "finding");
+    for (name, (method, suffix, body)) in [("W-SEND", send), ("W-ACK", ack)] {
+        let (status, body) = fx.request("mado", method, &suffix, body, true).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{name}: {body}");
+        assert_eq!(body["error"], "scope_missing", "{name}: {body}");
+    }
+    assert_eq!(work_records(&fx), before, "a refusal records nothing");
+}
+
+#[tokio::test]
+async fn a_token_without_any_work_scope_is_refused_on_all_five_routes() {
+    let fx = fixture_scoped(&["cto", "mado"], 10, &[("mado", UNRELATED)]).await;
+    let (status, sent) = fx
+        .request(
+            "cto",
+            "POST",
+            "/messages",
+            Some(fx.send("finding", "mado", "finding")),
+            true,
+        )
+        .await;
+    assert!(status.is_success(), "{status} {sent}");
+    let before = work_records(&fx);
+    let names = ["W-LIST", "W-SEND", "W-PEEK", "W-PULL", "W-ACK"];
+    for (name, (method, suffix, body)) in names.into_iter().zip(routes(&fx, "finding")) {
+        let (status, body) = fx.request("mado", method, &suffix, body, true).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{name}: {body}");
+        assert_eq!(body["error"], "scope_missing", "{name}: {body}");
+    }
+    assert_eq!(work_records(&fx), before, "a refusal records nothing");
+}
+
+#[tokio::test]
+async fn a_read_only_token_succeeds_on_the_read_routes() {
+    let fx = fixture_scoped(&["cto", "mado"], 10, &[("mado", READ_ONLY)]).await;
+    let (status, sent) = fx
+        .request(
+            "cto",
+            "POST",
+            "/messages",
+            Some(fx.send("finding", "mado", "finding")),
+            true,
+        )
+        .await;
+    assert!(status.is_success(), "{status} {sent}");
+    let [list, _, peek, pull, _] = routes(&fx, "finding");
+    for (name, (method, suffix, body)) in [("W-LIST", list), ("W-PEEK", peek), ("W-PULL", pull)] {
+        let (status, body) = fx.request("mado", method, &suffix, body, true).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn a_write_only_token_succeeds_on_the_write_routes_and_implies_read() {
+    // Spec section 3: `cosmon:work:write` implies `cosmon:work:read`, so the
+    // default seat token (write only) is admitted on all five routes.
+    let fx = fixture(&["cto", "mado"], 10).await;
+    let (status, sent) = fx
+        .request(
+            "cto",
+            "POST",
+            "/messages",
+            Some(fx.send("finding", "mado", "finding")),
+            true,
+        )
+        .await;
+    assert!(status.is_success(), "{status} {sent}");
+    let ack = json!({"scope_revision": fx.scope.revision().unwrap(),
+        "payload_digest": sent["envelope"]["payload_digest"], "disposition": "considered"});
+    let (status, body) = fx
+        .request("mado", "POST", "/messages/finding/ack", Some(ack), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "W-ACK: {body}");
+    let [list, _, peek, pull, _] = routes(&fx, "finding");
+    for (name, (method, suffix, body)) in [("W-LIST", list), ("W-PEEK", peek), ("W-PULL", pull)] {
+        let (status, body) = fx.request("mado", method, &suffix, body, true).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+    }
+    let (status, body) = fx
+        .request(
+            "mado",
+            "POST",
+            "/messages",
+            Some(fx.send("reply", "cto", "reply")),
+            true,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "W-SEND: {body}");
 }
