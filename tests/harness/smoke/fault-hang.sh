@@ -60,7 +60,7 @@ fi
 _smoke_pass "nucleate: $MOL"
 
 # Tackle should succeed in the happy-looking tmux state.
-if (cd "$SCRATCH" && "$CS_BIN" tackle "$MOL" > "$OUTDIR/tackle.stdout" 2> "$OUTDIR/tackle.stderr"); then
+if (cd "$SCRATCH" && env CLAUDE_CODE_OAUTH_TOKEN=smoke-harness-fake-token "$CS_BIN" tackle "$MOL" --adapter claude > "$OUTDIR/tackle.stdout" 2> "$OUTDIR/tackle.stderr"); then
     tackle_exit=0
 else
     tackle_exit=$?

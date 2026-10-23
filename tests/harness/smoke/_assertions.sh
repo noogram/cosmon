@@ -220,6 +220,11 @@ assert_within() {
     return 1
 }
 
+# The tackle calls pin --adapter claude and a non-secret fake credential.
+# Without the adapter pin, the built-in local backend bypasses our fakes;
+# without the token, CI refuses the interactive spawn before reaching tmux.
+# fake-tmux does not fork a provider, so no credential is validated or sent.
+
 # ── Scratch project scaffolding ───────────────────────────────────────────
 # Create an isolated cosmon project inside the caller-provided scratch dir.
 # Installs the fakes on PATH, unsets inherited COSMON_* env, drops the

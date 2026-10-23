@@ -244,6 +244,33 @@ impl PaneSignatureRegistry {
     pub fn signatures_of(&self, adapter_name: &str) -> &[String] {
         self.entries.get(adapter_name).map_or(&[], Vec::as_slice)
     }
+
+    /// Read the live pane, check its registered adapter signature, and record
+    /// the verdict. Shared by propulsion and the cross-adapter smoke driver so
+    /// the smoke exercises the production WS-3 seam, including failed reads.
+    #[must_use]
+    pub fn check_pane_signature(
+        &self,
+        socket: &str,
+        session: &str,
+        adapter_name: &str,
+        telemetry: &crate::spawn::AdapterTelemetry,
+        channel: cosmon_core::event_v2::PerturbationChannel,
+    ) -> bool {
+        let observed = pane_current_command(socket, session).unwrap_or_default();
+        let matched = self.matches(adapter_name, &observed);
+        cosmon_state::events::worker_spawn::emit_adapter_pane_signature_checked(
+            &telemetry.state_dir,
+            &telemetry.mol_id,
+            &telemetry.worker_id,
+            adapter_name,
+            self.signatures_of(adapter_name),
+            &observed,
+            matched,
+            channel,
+        );
+        matched
+    }
 }
 
 /// How an Adapter's worker is supervised post-spawn.

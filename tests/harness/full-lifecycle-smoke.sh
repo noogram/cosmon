@@ -103,7 +103,7 @@ assert_status "$MOL" "pending" "$CS_BIN" "$SCRATCH"
 
 # ── 3. Tackle: spawn worktree + tmux + fake-claude ────────────────────────
 tackle_log="$OUTDIR/tackle"
-if (cd "$SCRATCH" && "$CS_BIN" tackle "$MOL" > "$tackle_log.stdout" 2> "$tackle_log.stderr"); then
+if (cd "$SCRATCH" && env CLAUDE_CODE_OAUTH_TOKEN=smoke-harness-fake-token "$CS_BIN" tackle "$MOL" --adapter claude > "$tackle_log.stdout" 2> "$tackle_log.stderr"); then
     tackle_exit=0
 else
     tackle_exit=$?

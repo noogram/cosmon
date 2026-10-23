@@ -38,7 +38,8 @@ for script in "${SCRIPTS[@]}"; do
     total=$((total + 1))
     echo
     echo "──── $(basename "$script") ────"
-    if bash "$script"; then
+    # Preserve each scenario's evidence instead of overwriting tackle.stderr.
+    if SMOKE_OUTDIR="${SMOKE_OUTDIR:-$REPO/target/smoke-$$}/$(basename "$script" .sh)" bash "$script"; then
         :
     else
         rc=$?
