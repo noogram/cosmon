@@ -179,6 +179,13 @@ async fn fixture(names: &[&str], max_messages: u32) -> Fixture {
         },
         declared_at: Utc::now(),
     };
+    // Every seat has its own persistent molecule; a seat is not an
+    // unattached label and no message creates its lifecycle owner.
+    for declaration in scope.seats.values() {
+        tenant
+            .insert_molecule(declaration.molecule.as_str(), &json!({"status":"running"}))
+            .unwrap();
+    }
     FileWorkMessageStore::new(owner_dir.clone())
         .declare(&scope)
         .unwrap();
