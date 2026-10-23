@@ -38,6 +38,142 @@ security:
   - bearerAuth: []
 
 paths:
+  /v1/work/{owner}:
+    get:
+      operationId: listWork
+      summary: List the bound work roster and scope revision.
+      tags: [work]
+      description: Requires cosmon:work:read (or write), an exact owner binding and attachment proof. Read-only; no lifecycle or lease effect.
+      parameters:
+        - {name: cosmon-attachment, in: header, required: true, schema: {type: string}, description: Host-issued attachment identifier.}
+        - {name: cosmon-attachment-proof, in: header, required: true, schema: {type: string, writeOnly: true}, description: Secret attachment proof from the private credential store; never record in logs.}
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: offset, in: query, schema: {type: integer, minimum: 0}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 100}}
+      responses:
+        "200":
+          description: Bounded roster with current scope metadata.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WorkListResponse"}
+        "401": {description: unauthenticated}
+        "403": {description: scope_missing, binding_missing or binding_revoked}
+        "404": {description: unknown_work}
+        "500": {description: corrupt_evidence}
+        "503": {description: custody_unavailable; outcome unknown}
+  /v1/work/{owner}/messages:
+    post:
+      operationId: sendWorkMessage
+      summary: Admit advisory evidence from the binding-derived seat.
+      tags: [work]
+      description: Requires cosmon:work:write and attachment proof. Sender is derived only from the binding. Same key and content returns the original admission; changed content is key_collision. No command, worker, molecule or lease is started.
+      parameters:
+        - {name: cosmon-attachment, in: header, required: true, schema: {type: string}, description: Host-issued attachment identifier.}
+        - {name: cosmon-attachment-proof, in: header, required: true, schema: {type: string, writeOnly: true}, description: Secret attachment proof from the private credential store; never record in logs.}
+        - {name: owner, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/WorkSendRequest"}
+      responses:
+        "200":
+          description: Durable admitted envelope, including duplicate replay indicator.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WorkSendResponse"}
+        "400": {description: Invalid or unknown request field}
+        "401": {description: unauthenticated}
+        "403": {description: scope_missing, binding_missing, binding_revoked or not_a_member}
+        "404": {description: unknown_work or unknown_envelope}
+        "409": {description: stale_scope_revision or key_collision}
+        "413": {description: payload_too_large}
+        "429": {description: budget_exhausted}
+        "500": {description: corrupt_evidence}
+        "503": {description: custody_unavailable; outcome unknown}
+  /v1/work/{owner}/inbox:
+    get:
+      operationId: peekWorkInbox
+      summary: Peek without recording a delivery attempt.
+      tags: [work]
+      description: Requires cosmon:work:read (or write) and attachment proof. At most 100 envelopes and 1048576 response bytes. Read-only explicit peek; no delivery observation is recorded.
+      parameters:
+        - {name: cosmon-attachment, in: header, required: true, schema: {type: string}, description: Host-issued attachment identifier.}
+        - {name: cosmon-attachment-proof, in: header, required: true, schema: {type: string, writeOnly: true}, description: Secret attachment proof from the private credential store; never record in logs.}
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: scope_revision, in: query, required: true, schema: {type: string}}
+        - {name: adapter, in: query, schema: {type: string, enum: [pull, claude_post_tool_use, codex_post_tool_use, harness_turn], default: pull}}
+      responses:
+        "200":
+          description: Bound seat inbox and outgoing receipts.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WorkInboxResponse"}
+        "401": {description: unauthenticated}
+        "403": {description: scope_missing, binding_missing or binding_revoked}
+        "404": {description: unknown_work}
+        "500": {description: corrupt_evidence}
+        "503": {description: custody_unavailable}
+    post:
+      operationId: pullWorkInbox
+      summary: Pull evidence at an explicit safe point with bounded redelivery.
+      tags: [work]
+      description: Requires cosmon:work:read (or write) and attachment proof. Records submitted and context observation, never proof of model consideration. Bounded by max_delivery_attempts and redeliver_after_secs. A lost response may cost an attempt without consuming the message.
+      parameters:
+        - {name: cosmon-attachment, in: header, required: true, schema: {type: string}, description: Host-issued attachment identifier.}
+        - {name: cosmon-attachment-proof, in: header, required: true, schema: {type: string, writeOnly: true}, description: Secret attachment proof from the private credential store; never record in logs.}
+        - {name: owner, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/WorkPullRequest"}
+      responses:
+        "200":
+          description: Explicitly pulled payloads and separate outgoing receipts.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WorkInboxResponse"}
+        "400": {description: Invalid or unknown request field}
+        "401": {description: unauthenticated}
+        "403": {description: scope_missing, binding_missing or binding_revoked}
+        "404": {description: unknown_work}
+        "409": {description: stale_scope_revision}
+        "429": {description: budget_exhausted}
+        "500": {description: corrupt_evidence}
+        "503": {description: custody_unavailable; outcome unknown}
+  /v1/work/{owner}/messages/{key}/ack:
+    post:
+      operationId: acknowledgeWorkMessage
+      summary: Record how the bound recipient treated one message.
+      tags: [work]
+      description: Requires cosmon:work:write and attachment proof. Digest-bound durable acknowledgment; duplicate consumption changes nothing. A result is a separate message linked by reply_to.
+      parameters:
+        - {name: cosmon-attachment, in: header, required: true, schema: {type: string}, description: Host-issued attachment identifier.}
+        - {name: cosmon-attachment-proof, in: header, required: true, schema: {type: string, writeOnly: true}, description: Secret attachment proof from the private credential store; never record in logs.}
+        - {name: owner, in: path, required: true, schema: {type: string}}
+        - {name: key, in: path, required: true, schema: {type: string, maxLength: 80}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/WorkAckRequest"}
+      responses:
+        "200":
+          description: Durable acknowledgment result.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/WorkAckResponse"}
+        "400": {description: Invalid or unknown request field}
+        "401": {description: unauthenticated}
+        "403": {description: scope_missing, binding_missing, binding_revoked or not_a_member}
+        "404": {description: unknown_work or unknown_envelope}
+        "409": {description: stale_scope_revision}
+        "410": {description: envelope_expired}
+        "413": {description: payload_too_large; note exceeds 4096 UTF-8 bytes}
+        "422": {description: digest_mismatch or evidence_unreadable}
+        "500": {description: corrupt_evidence}
+        "503": {description: custody_unavailable; outcome unknown}
   /v1/harvest/status:
     get:
       operationId: getHarvestStatus
@@ -3190,6 +3326,144 @@ components:
         `RS384`, `RS512` are rejected at parse time.
 
   schemas:
+    WorkSendRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_revision, recipient, idempotency_key, sender_time, confidentiality, payload]
+      properties:
+        scope_revision: {type: string}
+        recipient: {type: string}
+        idempotency_key: {type: string, maxLength: 80}
+        sender_time: {type: string, format: date-time}
+        reply_to: {type: [string, "null"]}
+        phase: {type: [string, "null"]}
+        confidentiality: {type: string, enum: [internal, confidential]}
+        ttl_secs: {type: [integer, "null"], minimum: 1}
+        payload: {type: string, description: UTF-8 bytes; bounded by the work budget before allocation.}
+    WorkPullRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_revision]
+      properties:
+        scope_revision: {type: string}
+        adapter: {type: string, enum: [pull, claude_post_tool_use, codex_post_tool_use, harness_turn], default: pull}
+        context_observation:
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [status, evidence]
+              properties:
+                status: {const: observed}
+                evidence: {type: string}
+            - type: object
+              additionalProperties: false
+              required: [status, reason]
+              properties:
+                status: {const: unknown}
+                reason: {type: string}
+        peek: {type: boolean, default: false}
+    WorkAckRequest:
+      type: object
+      additionalProperties: false
+      required: [scope_revision, payload_digest, disposition]
+      properties:
+        scope_revision: {type: string}
+        payload_digest: {type: string}
+        disposition: {type: string, enum: [considered, deferred, rejected]}
+        reply: {type: [string, "null"]}
+        note: {type: [string, "null"], description: At most 4096 UTF-8 bytes.}
+    WorkSendResponse:
+      type: object
+      required: [schema_version, received_at, scope_revision, envelope, duplicate]
+      properties:
+        schema_version: {type: integer, const: 1}
+        received_at: {type: string, format: date-time}
+        scope_revision: {type: string}
+        envelope: {$ref: "#/components/schemas/WorkEnvelope"}
+        duplicate: {type: boolean}
+    WorkInboxResponse:
+      type: object
+      required: [schema_version, received_at, scope_revision, messages, receipts]
+      properties:
+        schema_version: {type: integer, const: 1}
+        received_at: {type: string, format: date-time}
+        scope_revision: {type: string}
+        messages:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [envelope, payload]
+            properties:
+              envelope: {$ref: "#/components/schemas/WorkEnvelope"}
+              payload: {type: string}
+        receipts:
+          type: array
+          maxItems: 100
+          description: The most recent consumption reports for the caller's outgoing messages; distinct from inbox payloads.
+          items: {type: object}
+        undeliverable:
+          type: array
+          maxItems: 100
+          description: Deliverable envelopes this wire cannot carry (payload not UTF-8, or larger than one response). Metadata only; no delivery attempt is recorded, and later envelopes are still delivered.
+          items:
+            type: object
+            required: [envelope, reason]
+            properties:
+              envelope: {$ref: "#/components/schemas/WorkEnvelope"}
+              reason: {type: string, enum: [payload_not_utf8, payload_too_large]}
+        next_offset: {type: [integer, "null"], minimum: 0}
+    WorkAckResponse:
+      type: object
+      required: [schema_version, received_at, scope_revision, duplicate]
+      properties:
+        schema_version: {type: integer, const: 1}
+        received_at: {type: string, format: date-time}
+        scope_revision: {type: string}
+        duplicate: {type: boolean}
+        receipt: {type: object, description: Present only when this acknowledgment was newly recorded.}
+    WorkListResponse:
+      type: object
+      required: [schema_version, received_at, scope_revision, seats]
+      properties:
+        schema_version: {type: integer, const: 1}
+        received_at: {type: string, format: date-time}
+        scope_revision: {type: string}
+        owner: {type: string}
+        budget: {type: object}
+        declared_at: {type: string, format: date-time}
+        seats:
+          type: object
+          maxProperties: 100
+          additionalProperties:
+            type: object
+            required: [molecule, required]
+            properties:
+              molecule: {type: string}
+              required: {type: boolean}
+              provider_requirement: {type: string}
+        next_offset: {type: [integer, "null"], minimum: 0}
+    WorkEnvelope:
+      type: object
+      required: [schema_version, scope_owner, scope_revision, sender, recipient, key, payload_digest, payload_bytes, sender_time, admitted_at, confidentiality, expires_at, max_delivery_attempts, sender_evidence]
+      properties:
+        schema_version: {type: integer}
+        scope_owner: {type: string}
+        scope_revision: {type: string}
+        sender: {type: string, description: Derived from the admitted binding, never a request field.}
+        recipient: {type: string}
+        key: {type: string}
+        payload_digest: {type: string}
+        payload_bytes: {type: integer, minimum: 0}
+        payload_ref: {type: string, description: Canonical owner-relative content address; never a client path.}
+        sender_time: {type: string, format: date-time}
+        admitted_at: {type: string, format: date-time}
+        reply_to: {type: string}
+        phase: {type: string}
+        confidentiality: {type: string, enum: [internal, confidential]}
+        expires_at: {type: string, format: date-time}
+        max_delivery_attempts: {type: integer, minimum: 1}
+        sender_evidence: {type: string, enum: [caller_env_same_uid, admitted_non_local]}
     StatusEnvelope:
       type: "object"
       additionalProperties: true
@@ -4598,6 +4872,8 @@ components:
             `tmux -L <socket> attach -t <session>` would target.
 
 tags:
+  - name: work
+    description: Bound advisory work exchange; no lifecycle, worker or lease effects.
   - name: harvest
     description: Tenant-scoped status and independently sealed grant transport.
   - name: molecules

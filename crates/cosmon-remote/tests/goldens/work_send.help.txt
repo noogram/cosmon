@@ -1,0 +1,34 @@
+Admit advisory evidence (`POST /v1/work/{owner}/messages`)
+
+Usage: cosmon-remote work send [OPTIONS] --scope-revision <SCOPE_REVISION> --to <TO> --key <KEY> <OWNER>
+
+Arguments:
+  <OWNER>  
+
+Options:
+      --profile <PROFILE>
+          Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --scope-revision <SCOPE_REVISION>
+          
+      --json
+          Render machine-readable JSON instead of human text where applicable
+      --to <TO>
+          
+      --key <KEY>
+          Keep this key unchanged when retrying a lost response
+      --token <TOKEN>
+          Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+      --text <TEXT>
+          
+      --file <FILE>
+          
+      --reply <REPLY>
+          
+      --phase <PHASE>
+          
+      --ttl <TTL>
+          
+      --confidentiality <CONFIDENTIALITY>
+          [default: internal] [possible values: internal, confidential]
+  -h, --help
+          Print help

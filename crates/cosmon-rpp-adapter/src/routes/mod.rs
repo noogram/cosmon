@@ -36,6 +36,7 @@ pub mod session;
 pub mod status;
 mod stream_guard;
 pub mod vitals;
+pub mod work;
 pub mod workers;
 
 pub use observability::{diagnostics_handler, metrics_handler};

@@ -65,3 +65,6 @@ pub use error::{CredentialStoreError, Error, Result};
 pub use oidc::{
     LoginOutcome, OidcEndpoints, OidcError, RefreshConfig, RefreshRotation, TokenState,
 };
+
+/// Versioned advisory work request DTOs.
+pub mod work;

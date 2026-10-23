@@ -14,7 +14,7 @@
 //! | `tackle`                                      | [`MOLECULE_WRITE`] **+** [`WORKER_SPAWN`] (AND) | $$$ Anthropic | **nouveau v1.0.0-rc** |
 //! | `cancel` / `kill` (futur)                     | [`WORKER_TERMINATE`]                            | irréversible   | **réservé** (additif v2) |
 //! | `observe`, `ensemble`, `vitals`               | [`MOLECULE_READ`] (ou `:write` qui implique)    | gratuit        | **existe**          |
-//! | collaboration work / sessions (no route yet)  | [`WORK_READ`] … [`SESSIONS_WRITE`] **+** exact collaboration binding | gratuit | **déclaré (W2)** |
+//! | collaboration work routes (W4); sessions reserved | [`WORK_READ`] … [`SESSIONS_WRITE`] **+** exact collaboration binding | gratuit | **work shipped; sessions declared** |
 //!
 //! # Invariant
 //!

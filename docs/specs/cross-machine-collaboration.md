@@ -12,10 +12,12 @@ and [ADR-182](../adr/182-declared-advisory-work-under-a-provider-neutral-contrac
 **Machine check:** `scripts/check-collaboration-contract.py` validates the tables
 below; `scripts/check-collaboration-contract.test.sh` holds its fixtures.
 
-Nothing here changes a shipped verb, route, record or output byte. Every route
-in §4 is **proposed**: it is absent from
-`crates/cosmon-rpp-adapter/data/surface_events.txt` until the unit named in its
-Phase column mounts it together with its canon, OpenAPI and help changes.
+The semantic contract remains frozen. W4 now mounts the five work routes
+W-LIST through W-ACK together with their remote client, canon, OpenAPI and
+help changes. Session routes in §4 remain **proposed** and absent from
+`crates/cosmon-rpp-adapter/data/surface_events.txt` until W7. The contract
+checker requires the shipped W4 routes and continues to refuse other mounted
+collaboration routes.
 
 ## 1. Decisions
 
@@ -151,7 +153,10 @@ authority transfer (the host-local lease ledger, reached by no route here).
   `context_observation`, and `peek`. Content is returned only on an explicit
   pull; the server records submitted/unknown and keeps the existing retry
   budget and backoff. A dropped response may cost an attempt; it cannot
-  consume the message.
+  consume the message. A deliverable envelope the wire cannot carry (payload
+  not UTF-8, or larger than one response) is listed under `undeliverable` with
+  its metadata and records no attempt; it never blocks the envelopes behind
+  it. Outgoing receipts in a pull are the caller's most recent 100.
 - **Ack** carries `scope_revision`, `payload_digest`, `disposition`
   (`considered`, `deferred` or `rejected`), an optional `reply` key and an
   optional note. It is bound to the recipient seat, the key and the digest, and

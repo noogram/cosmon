@@ -19,6 +19,8 @@ bad() { echo "FAIL: $*" >&2; fail=$((fail+1)); }
 
 SURFACE="$WORK/surface.txt"
 echo 'GET /v1/workers | task-x | 2026-01-01 | tenant | cosmon:worker:read | adapter-only | x' > "$SURFACE"
+printf '%s\n' 'GET /v1/work/{owner} | task-x | 2026-01-01 | tenant | cosmon:work:read | adapter-only | x' 'POST /v1/work/{owner}/messages | task-x | 2026-01-01 | tenant | cosmon:work:write | adapter-only | x' >> "$SURFACE"
+
 
 cat > "$WORK/valid.md" <<'MD'
 | Scope | Grants | Implies |
@@ -102,6 +104,15 @@ grep -v -E '^\| (R1|R2) |^\| ID \| Verb' "$WORK/valid.md" > "$WORK/noroutes.md"
 out="$(run "$WORK/noroutes.md")"; rc=$?
 if [ $rc -ne 0 ] && grep -qF "missing table: route table" <<<"$out"; then ok "missing route table"
 else bad "missing route table (rc=$rc): $out"; fi
+
+# A shipped route cannot disappear, and its declaration cannot grant W7.
+cp "$SURFACE" "$WORK/surface.saved"
+sed '/^GET \/v1\/work\/{owner} /d' "$WORK/surface.saved" > "$SURFACE"
+out="$(run "$WORK/valid.md")"; rc=$?
+if [ $rc -ne 0 ] && grep -qF 'shipped W4 route is missing' <<<"$out"; then ok "shipped route must stay mounted"
+else bad "missing shipped route (rc=$rc): $out"; fi
+cp "$WORK/surface.saved" "$SURFACE"
+expect_fail "W7 remains unmounted" 's#\| advisory-write \| W4#| advisory-write | W7#' "only the five W4 work routes are shipped"
 
 # The real contract.
 if out="$(python3 "$CHECK" 2>&1)"; then ok "real contract passes"; else bad "real contract: $out"; fi

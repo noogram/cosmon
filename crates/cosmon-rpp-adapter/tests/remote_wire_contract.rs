@@ -190,6 +190,7 @@ impl Deployment {
             oidc_url: self.oidc.issuer().to_owned(),
             issuer: None,
             client_id: None,
+            attachment: None,
             noyau: Some(NOYAU.to_owned()),
             scopes: vec![
                 "cosmon:molecule:read".to_owned(),

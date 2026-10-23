@@ -122,6 +122,12 @@ include!(concat!(env!("OUT_DIR"), "/canon_surface_generated.rs"));
 /// (consts vanish when canon lines do); the wiring is covered by the
 /// wiremock contract tests per family.
 pub static ROUTES_USED: &[&CanonRoute] = &[
+    // Explicit advisory collaboration, without lifecycle authority.
+    GET_V1_WORK_OWNER,
+    POST_V1_WORK_OWNER_MESSAGES,
+    GET_V1_WORK_OWNER_INBOX,
+    POST_V1_WORK_OWNER_INBOX,
+    POST_V1_WORK_OWNER_MESSAGES_KEY_ACK,
     // Molecule lifecycle (tenant verbs).
     GET_V1_MOLECULES,
     GET_V1_MOLECULES_ID,
