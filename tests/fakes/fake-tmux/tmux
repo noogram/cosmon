@@ -7,7 +7,7 @@
 # cosmon's production code.
 #
 # ── Commands implemented ───────────────────────────────────────────────────
-#   new-session -d -s <name> [-c <workdir>] <cmd>
+#   new-session -d [-P -F <fmt>] -s <name> [-c <workdir>] [-e <env>] <cmd>
 #   list-sessions [-F <fmt>]              # supports #{session_name}
 #   list-panes -t <session> [-F <fmt>]    # supports #{pane_dead},
 #                                         #         #{pane_pid},
@@ -71,6 +71,27 @@ done
 SOCK_DIR="$FAKE_TMUX_DIR/$SOCKET"
 mkdir -p "$SOCK_DIR/buffers"
 
+# Resolve the pane IDs returned by list-panes back to their session. The
+# postcondition probe captures that pane, rather than a session name.
+_session_for_target() {
+    local target="${1#=}" candidate field
+    case "$target" in
+        %*|\$*)
+            field=pane_id
+            case "$target" in \$*) field=session_id ;; esac
+            for candidate in "$SOCK_DIR"/*.meta; do
+                [ -f "$candidate" ] || continue
+                if [ "$(sed -n "s/^$field=//p" "$candidate")" = "$target" ]; then
+                    basename "$candidate" .meta
+                    return 0
+                fi
+            done
+            return 1
+            ;;
+        *) printf '%s\n' "$target" ;;
+    esac
+}
+
 if [ $# -eq 0 ]; then
     exit 0
 fi
@@ -82,11 +103,17 @@ case "$CMD" in
     new-session)
         # Parse: new-session -d -s <name> [-c <workdir>] [cmd...]
         detached=0
+        print_info=0
+        launch_fmt='#{session_name}:'
+        environment=()
         session=""
         workdir=""
         while [ $# -gt 0 ]; do
             case "$1" in
                 -d) detached=1; shift ;;
+                -P) print_info=1; shift ;;
+                -F) launch_fmt="$2"; shift 2 ;;
+                -e) environment+=("$2"); shift 2 ;;
                 -s) session="$2"; shift 2 ;;
                 -c) workdir="$2"; shift 2 ;;
                 -x|-y) shift 2 ;;
@@ -123,7 +150,7 @@ case "$CMD" in
             (
                 cd "${workdir:-$PWD}" || exit 1
                 # shellcheck disable=SC2086
-                bash -c "$run_cmd" > "$out" 2>&1
+                env "${environment[@]}" bash -c "$run_cmd" > "$out" 2>&1
             ) &
             pid="$!"
         else
@@ -139,14 +166,48 @@ case "$CMD" in
             fi
         fi
 
+        created_at="$(date +%s)"
+        pane_number=0
+        if [ -f "$SOCK_DIR/next-pane" ]; then
+            pane_number="$(cat "$SOCK_DIR/next-pane")"
+        fi
+        echo "$((pane_number + 1))" > "$SOCK_DIR/next-pane"
+        pane_id="%$pane_number"
         {
             echo "pid=$pid"
             echo "cwd=${workdir:-$PWD}"
             echo "cmd=$run_cmd"
-            echo "created_at=$(date +%s)"
+            echo "created_at=$created_at"
+            echo "pane_id=$pane_id"
+            echo "session_id=\$$pane_number"
+            for assignment in "${environment[@]}"; do
+                echo "env=$assignment"
+            done
         } > "$meta"
 
         _trace "new-session s=$session pid=$pid cmd=$run_cmd"
+        if [ "$print_info" = "1" ]; then
+            # Render the witnessed-launch format without inventing kernel
+            # witnesses. This fake has no server process, so pid=0; the real
+            # identity guard must continue to reject that observation.
+            line="$launch_fmt"
+            line="${line//#\{session_name\}/$session}"
+            line="${line//#\{socket_path\}/$SOCK_DIR/socket}"
+            line="${line//#\{pid\}/0}"
+            line="${line//#\{session_id\}/\$$pane_number}"
+            line="${line//#\{session_created\}/$created_at}"
+            line="${line//#\{pane_id\}/$pane_id}"
+            line="${line//#\{pane_pid\}/$pid}"
+            pane_dead=0
+            if [ -n "${FAKE_TMUX_PANE_DEAD:-}" ] || [ -n "${FAKE_TMUX_SESSION_EXITED:-}" ]; then
+                pane_dead=1
+            fi
+            line="${line//#\{pane_dead\}/$pane_dead}"
+            line="${line//#\{session_windows\}/1}"
+            line="${line//#\{window_panes\}/1}"
+            line="${line//#\{version\}/3.4}"
+            printf '%s\n' "$line"
+        fi
         exit 0
         ;;
 
@@ -219,7 +280,10 @@ case "$CMD" in
                 pane_pid="$(grep '^pid=' "$meta" | cut -d= -f2)"
             fi
             local line="$fmt"
+            local pane_id
+            pane_id="$(sed -n 's/^pane_id=//p' "$meta")"
             line="${line//#\{session_name\}/$session_name}"
+            line="${line//#\{pane_id\}/$pane_id}"
             line="${line//#\{pane_dead\}/$pane_dead}"
             line="${line//#\{pane_pid\}/$pane_pid}"
             line="${line//#\{pane_current_command\}/$pane_current_command}"
@@ -253,6 +317,7 @@ case "$CMD" in
             exit 0
         fi
 
+        session="$(_session_for_target "$session")" || exit 1
         meta="$SOCK_DIR/$session.meta"
         if [ ! -f "$meta" ]; then
             echo "can't find session: $session" >&2
@@ -270,6 +335,7 @@ case "$CMD" in
                 *) shift ;;
             esac
         done
+        session="$(_session_for_target "$session")" || exit 1
         meta="$SOCK_DIR/$session.meta"
         if [ ! -f "$meta" ]; then
             echo "can't find session: $session" >&2
@@ -310,6 +376,7 @@ case "$CMD" in
                 *) shift ;;
             esac
         done
+        session="$(_session_for_target "$session")" || exit 1
         if [ -f "$SOCK_DIR/$session.meta" ]; then
             exit 0
         fi
@@ -326,6 +393,7 @@ case "$CMD" in
                 *) shift ;;
             esac
         done
+        session="$(_session_for_target "$session")" || exit 1
         out="$SOCK_DIR/$session.out"
         if [ -f "$out" ]; then
             cat "$out"
@@ -343,6 +411,7 @@ case "$CMD" in
             esac
         done
         # Append remaining argv to session.out for debugging / capture.
+        session="$(_session_for_target "$session")" || exit 1
         meta="$SOCK_DIR/$session.meta"
         if [ ! -f "$meta" ]; then
             echo "can't find session: $session" >&2
