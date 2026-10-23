@@ -91,6 +91,9 @@ pub struct Profile {
     /// the operator and may be echoed back in display.
     #[serde(default)]
     pub noyau: Option<String>,
+    /// Host-issued collaboration attachment ID; its proof stays in the credential store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<String>,
     /// Default scopes the operator mints. Per-call scopes can override.
     #[serde(default = "default_scopes")]
     pub scopes: Vec<String>,
@@ -149,6 +152,7 @@ impl Profile {
             issuer: None,
             client_id: None,
             noyau: None,
+            attachment: None,
             scopes: default_scopes(),
             artifacts_dir: None,
             timeout_secs: default_timeout(),
@@ -237,6 +241,7 @@ impl Profile {
             "client-id" | "client_id" => {
                 self.client_id = if value.is_empty() { None } else { Some(value) };
             }
+            "attachment" => self.attachment = if value.is_empty() { None } else { Some(value) },
             "noyau" => self.noyau = if value.is_empty() { None } else { Some(value) },
             "timeout" | "timeout-secs" | "timeout_secs" => {
                 self.timeout_secs = value
@@ -263,7 +268,7 @@ impl Profile {
             }
             other => {
                 return Err(Error::Config(format!(
-                    "unknown config key {other:?}; accepted: host, sub, aud, oidc-url, issuer, client-id, noyau, timeout, artifacts-dir, phone-home"
+                    "unknown config key {other:?}; accepted: host, sub, aud, oidc-url, issuer, client-id, noyau, attachment, timeout, artifacts-dir, phone-home"
                 )));
             }
         }

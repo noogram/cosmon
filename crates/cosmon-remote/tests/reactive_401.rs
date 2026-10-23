@@ -36,6 +36,7 @@ fn profile(host: &str, oidc_url: &str) -> Profile {
         issuer: Some("https://forge.example".into()),
         client_id: Some("client-A".into()),
         noyau: None,
+        attachment: None,
         scopes: vec!["cosmon:molecule:read".into()],
         artifacts_dir: None,
         timeout_secs: 5,

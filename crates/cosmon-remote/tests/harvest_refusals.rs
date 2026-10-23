@@ -20,6 +20,7 @@ fn profile(server: &MockServer) -> Profile {
         issuer: None,
         client_id: None,
         noyau: Some("default".into()),
+        attachment: None,
         scopes: vec!["cosmon:molecule:harvest".into()],
         artifacts_dir: None,
         timeout_secs: 5,

@@ -1,0 +1,31 @@
+Record consideration, separately from a result (`POST /v1/work/{owner}/messages/{key}/ack`)
+
+Usage: cosmon-remote work ack [OPTIONS] --scope-revision <SCOPE_REVISION> --payload-digest <PAYLOAD_DIGEST> <OWNER> <KEY>
+
+Arguments:
+  <OWNER>  
+  <KEY>    
+
+Options:
+      --profile <PROFILE>
+          Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --scope-revision <SCOPE_REVISION>
+          
+      --json
+          Render machine-readable JSON instead of human text where applicable
+      --payload-digest <PAYLOAD_DIGEST>
+          
+      --considered
+          
+      --token <TOKEN>
+          Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+      --deferred
+          
+      --rejected
+          
+      --reply <REPLY>
+          
+      --note <NOTE>
+          
+  -h, --help
+          Print help

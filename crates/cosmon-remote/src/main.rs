@@ -35,6 +35,7 @@ use tracing_subscriber::EnvFilter;
 
 mod harvest;
 mod root_help;
+mod work_cli;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -173,6 +174,11 @@ enum Cmd {
     Avatar {
         #[command(subcommand)]
         sub: AvatarCmd,
+    },
+    /// Explicit advisory work messages; no lifecycle authority.
+    Work {
+        #[command(subcommand)]
+        sub: work_cli::WorkCmd,
     },
     /// Artifact endpoints.
     #[command(display_order = 2)]
@@ -1166,6 +1172,10 @@ async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
         Cmd::Avatar { sub } => {
             let (_, profile) = store.resolve(cli.profile.as_deref())?;
             run_avatar(&profile, sub, cli.token, cli.json).await
+        }
+        Cmd::Work { sub } => {
+            let (_, profile) = store.resolve(cli.profile.as_deref())?;
+            work_cli::run(&profile, sub, cli.token, cli.json).await
         }
         Cmd::Artifact { sub } => {
             let (_, profile) = store.resolve(cli.profile.as_deref())?;
@@ -2390,6 +2400,9 @@ fn render_profile(name: &str, p: &Profile) {
     println!("aud:          {}", p.aud);
     println!("oidc_url:     {}", p.oidc_url);
     println!("noyau:        {}", p.noyau.as_deref().unwrap_or("-"));
+    if let Some(attachment) = &p.attachment {
+        println!("attachment:   {attachment}");
+    }
     println!("timeout_secs: {}", p.timeout_secs);
     println!("scopes:");
     for s in &p.scopes {

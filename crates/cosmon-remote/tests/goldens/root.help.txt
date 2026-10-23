@@ -16,6 +16,7 @@ Commands:
   config    Profile and deployment config
   harvest   Operator-side harvest authority, signed root rotation and grants
   avatar    D-AVATAR instance lifecycle (drained from cs-thin by the fusion)
+  work      Explicit advisory work messages; no lifecycle authority
   doctor    Onboarding checks, named and falsifiable: réseau, oidc-url, badge tenant, lunettes du worker. Vert/rouge par check, la commande de réparation sur chaque ligne rouge. Run by install.sh and whenever something breaks
   healthz   Adapter liveness probe (diagnostic)
   quota     `GET /v1/quota` — read the current rate-limit snapshot. Table by default, JSON with `--json`. (diagnostic)

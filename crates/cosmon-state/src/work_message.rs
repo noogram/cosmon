@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -75,6 +75,9 @@ pub enum WorkStoreError {
     /// The pure contract refused the operation.
     #[error(transparent)]
     Domain(#[from] WorkMessageError),
+    /// Stored envelope or receipt records fail the canonical fold.
+    #[error("work evidence failed validation")]
+    CorruptEvidence,
     /// A submission has no declared scope.
     #[error("work scope is not declared")]
     NoScope,
@@ -204,6 +207,9 @@ impl FileWorkMessageStore {
                 &records.receipts,
                 now,
             )?;
+            if !projection.findings.is_empty() {
+                return Err(WorkStoreError::CorruptEvidence);
+            }
             let decision = admit(&scope, &projection, submission, now)?;
             match &decision {
                 Admission::Admit(envelope) => {
@@ -260,7 +266,13 @@ impl FileWorkMessageStore {
         if !meta.file_type().is_file() {
             return Err(WorkStoreError::ExistingPayloadMismatch);
         }
-        let bytes = fs::read(path)?;
+        if meta.len() != envelope.payload_bytes {
+            return Err(WorkStoreError::ExistingPayloadMismatch);
+        }
+        let mut bytes = Vec::new();
+        File::open(path)?
+            .take(envelope.payload_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
         if Hash::of_bytes(&bytes) != envelope.payload_digest
             || bytes.len() as u64 != envelope.payload_bytes
         {
