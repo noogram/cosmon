@@ -72,6 +72,9 @@ pub fn family(path: &str) -> Result<&'static str, String> {
     if path.starts_with("/v1/molecules") {
         return Ok("molecule");
     }
+    if path.starts_with("/v1/work/") {
+        return Ok("work");
+    }
     if path.starts_with("/v1/harvest/") {
         return Ok("harvest");
     }
@@ -94,6 +97,7 @@ const FAMILY_ORDER: &[&str] = &[
     "avatar-canal",
     "avatar-life",
     "admin",
+    "work",
 ];
 
 fn method_path(ev: &CanonEvent) -> (&str, &str) {
@@ -370,6 +374,8 @@ mod tests {
             family("/v1/avatar/{instance_id}/status").unwrap(),
             "avatar-life"
         );
+        assert_eq!(family("/v1/work/{owner}").unwrap(), "work");
+        assert_eq!(family("/v1/work/{owner}/inbox").unwrap(), "work");
         assert!(family("/v2/surprise").is_err());
     }
 
