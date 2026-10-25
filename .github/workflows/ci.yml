@@ -203,6 +203,8 @@ jobs:
     # Local cold baseline: 350s build + 79s test. With that baseline the
     # phase-limit estimate is 134 min, leaving 16 min inside the 150-min
     # process budget and 46 min inside the job budget (setup excluded).
+    # Step allowances: 20m setup, 1m run metadata, 150m mutation + 30s
+    # kill grace, 4m reporting/probes: 175.5m total, below the 180m job cap.
     # The process deadline returns a normal advisory failure with partial
     # reports; it must fire BEFORE the job deadline can cancel the workflow.
     if: github.event_name == 'schedule'
@@ -216,32 +218,45 @@ jobs:
         slot: [0, 1, 2, 3, 4, 5, 6, 7]
     permissions:
       contents: read
+      actions: read  # immutable workflow creation time, shared by all slots/reruns
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - timeout-minutes: 2
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Install system libdbus (Linux keyring backend)
+        timeout-minutes: 3
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - timeout-minutes: 5
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - timeout-minutes: 3
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - name: Install cargo-mutants
+        timeout-minutes: 5
         # Pin generation and shard semantics for the duration of a rotation.
         run: cargo install cargo-mutants --version 27.0.0 --locked
       - name: Falsifier preflight (cargo-mutants available)
+        timeout-minutes: 1
         run: ./scripts/mutation-falsifier.sh --check
       - name: Resource baseline (attribute the runner death — disk or memory)
+        timeout-minutes: 1
         run: df -h / /home/runner && free -m
       - name: Mutate cosmon-core (advisory — surviving mutants are reported holes)
         env:
           SHARD_SLOT: ${{ matrix.slot }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          day=$(( $(date -u +%s) / 86400 ))
+          created_at=$(timeout 60s gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .created_at)
+          day=$(( $(date -u -d "$created_at" +%s) / 86400 ))
           shard=$(( (day % 32) * 8 + SHARD_SLOT ))
-          echo "UTC epoch day $day: shard $shard/256 (32-night rotation)"
+          mkdir -p mutation-report
+          printf 'Run created %s; UTC epoch day %s; shard %s/256; source %s\n' \
+            "$created_at" "$day" "$shard" "$GITHUB_SHA" | tee mutation-report/rotation.txt
           timeout --signal=TERM --kill-after=30s 150m \
             ./scripts/mutation-falsifier.sh --whole-tree --package cosmon-core \
               --shard "$shard/256" --timeout 180 --build-timeout 180 \
               --output mutation-report -- --jobs 1 --no-shuffle --sharding round-robin
       - name: Retain mutation reports (including incomplete runs)
+        timeout-minutes: 3
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
@@ -250,6 +265,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 45
       - name: Resource after mutation run
+        timeout-minutes: 1
         if: always()
         run: df -h / /home/runner && free -m
 

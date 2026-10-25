@@ -46,7 +46,7 @@
 #   --output <dir>  retain cargo-mutants reports and timings under dir/mutants.out
 #
 # Exit: 0 all mutants caught / none in scope · 1 mutant(s) survived (test hole)
-#       · 2 cargo-mutants unavailable or invocation error.
+#       · 2 tool unavailable, execution failure, or timed-out audit.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -201,7 +201,7 @@ fi
 
 # Keep progress and timings visible even if the runner is interrupted. A failed
 # baseline/invocation must remain an incomplete audit, never a clean result.
-echo "mutation-falsifier: cargo ${ARGS[*]} ${EXTRA[*]}"
+echo "mutation-falsifier: cargo ${ARGS[*]} ${EXTRA[*]}" | tee "$OUT_DIR/command.txt"
 cargo "${ARGS[@]}" "${EXTRA[@]}" 2>&1 | tee "$OUT_DIR/cargo-mutants.log"
 rc=${PIPESTATUS[0]}
 RESULT_DIR="$OUT_DIR/mutants.out"
@@ -216,7 +216,7 @@ fi
 survivors="$(grep -c . "$MISSED" 2>/dev/null || true)"
 survivors="${survivors:-0}"
 if [ "$rc" -ne 0 ] && [ "$survivors" -eq 0 ]; then
-  echo "mutation-falsifier: cargo-mutants exit $rc; audit incomplete (see report)" >&2
+  echo "mutation-falsifier: cargo-mutants exit $rc; timeouts or incomplete audit (see report)" >&2
   exit 2
 fi
 if [ "$survivors" -eq 0 ]; then
