@@ -169,6 +169,7 @@ this stage.
 
 ### Fixed
 
+- Failed worker startup now removes retained dead or unlisted tmux sessions during rollback, without affecting similarly named sessions, while preserving the explicit debug keep-session option.
 - `cs spore validate` fails, naming the node and file, when a node's formula
   file is missing; before, the error surfaced at dispatch. (#173)
 - `cs observe` points to `cs archive` when the molecule is archived, and
@@ -182,6 +183,8 @@ this stage.
 
 ### Security
 
+- Updated `tokio` from 1.50.0 to 1.51.6 to fix RUSTSEC-2026-0386: `AsyncFd`
+  constructors violated I/O safety.
 - Dependency advisories fixed by updating locked versions: `quinn-proto`
   0.11.16 to 0.11.18 (RUSTSEC-2026-0338, -0339, -0340, -0341, -0342), `rustls`
   0.23.45 to 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349), `rustls-webpki`
