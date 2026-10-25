@@ -153,3 +153,22 @@ paths = [
   '''scripts/publish\.test\.sh$''',
 ]
 regexes = ['''-----BEGIN [A-Z ]*PRIVATE KEY-----''']
+
+# The redaction test in presence.rs feeds the redactor a made-up AWS key id so
+# it can assert the value is masked. Gate 1 scans full history and the literal
+# sits in commits already inside a release tag, so it cannot be rewritten away.
+# `regexTarget = "match"` compares the whole matched text (the dedicated rule's
+# `secret` is only its `AKIA` prefix group), and `condition = "AND"` requires
+# the path as well. Residual width: exactly the 20-character literal
+# AKIAABCDEFGHIJKLMNOP in crates/cosmon-core/src/presence.rs, for these two
+# rules, in any commit. A different AKIA/ASIA value in that file, this value
+# in any other file, or a one-character variant of it, still reds.
+[[allowlists]]
+description = "presence.rs redaction test: synthetic AWS key id fixture, not a credential."
+condition = "AND"
+targetRules = ["aws-access-token", "cosmon-aws-access-key-id"]
+regexTarget = "match"
+regexes = ['''^AKIAABCDEFGHIJKLMNOP$''']
+paths = [
+  '''crates/cosmon-core/src/presence\.rs$''',
+]
