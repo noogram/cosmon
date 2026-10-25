@@ -158,7 +158,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // `cs complete`. Best-effort and idempotent; `cs peek` stays a reader.
     let backends =
         crate::energy_probe::discover_fleet_backends(&state_dir, &super::tmux_socket_name(ctx));
-    let on_poll = || crate::energy_probe::capture_realized_runtime(&state_dir, &mol_id, &backends);
+    // Held across polls: the journal fold, the session-log offset and the
+    // worker's cwd are read once, so a poll costs what changed since the last.
+    let mut capture = crate::energy_probe::RuntimeCapture::new(&state_dir, &mol_id, backends);
+    let on_poll = || capture.poll();
 
     match wait_for_status_with_metrics_probed(
         &store,
