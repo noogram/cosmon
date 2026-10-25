@@ -1122,7 +1122,8 @@ impl RuntimeCapture {
             return;
         };
         if self.resolved_for.as_ref() != Some(&worker) {
-            if self.polls_since_cwd_attempt > 0 && self.polls_since_cwd_attempt < CWD_RETRY_EVERY_POLLS
+            if self.polls_since_cwd_attempt > 0
+                && self.polls_since_cwd_attempt < CWD_RETRY_EVERY_POLLS
             {
                 self.polls_since_cwd_attempt += 1;
                 return;
