@@ -1069,6 +1069,79 @@ pub fn capture_realized_runtime(
     capture_realized_from_cwd(state_dir, mol_id, &cwd);
 }
 
+/// The runtime capture of a **long-lived poller** (`cs wait`), kept across
+/// polls.
+///
+/// [`capture_realized_runtime`] is stateless: each call parses the whole of
+/// `events.jsonl` to find the worker ([`last_worker_for`]), builds a fresh
+/// [`RealizedCapture`] (which folds the journal again), spawns `tmux` for the
+/// pane path and loads the fleet. Called every few seconds by a `cs wait`
+/// against a journal of ~185 MB, that is what made one poll cost seconds of
+/// CPU (plan 0023). This holds the journal fold and the session-log offset
+/// between polls, so a poll costs what was appended since the last one, and
+/// resolves the worker's cwd once per worker instead of once per poll.
+///
+/// The emitted observations are the ones [`capture_realized_runtime`] emits:
+/// same worker scoping, same cwd resolution order (live pane, then the cwd
+/// recorded at dispatch), same dedup.
+pub struct RuntimeCapture {
+    capture: RealizedCapture,
+    backends: Vec<cosmon_transport::TmuxBackend>,
+    resolved_for: Option<WorkerId>,
+    polls_since_cwd_attempt: u32,
+}
+
+/// Polls to wait before re-trying a cwd resolution that found nothing (no live
+/// pane and no recorded repo). A resolved cwd is never re-resolved for the
+/// same worker.
+const CWD_RETRY_EVERY_POLLS: u32 = 3;
+
+impl RuntimeCapture {
+    /// A capture for `mol_id`, probing `backends` for the worker's pane.
+    #[must_use]
+    pub fn new(
+        state_dir: &Path,
+        mol_id: &MoleculeId,
+        backends: Vec<cosmon_transport::TmuxBackend>,
+    ) -> Self {
+        Self {
+            capture: RealizedCapture::new(state_dir, mol_id, Path::new(""), None),
+            backends,
+            resolved_for: None,
+            polls_since_cwd_attempt: 0,
+        }
+    }
+
+    /// One poll: fold what the journal gained, resolve the worker's cwd if it
+    /// is not resolved yet, and capture what its session log gained.
+    ///
+    /// Best-effort, like [`capture_realized_runtime`]: no resolvable worker or
+    /// cwd means no emission.
+    pub fn poll(&mut self) {
+        let Some(worker) = self.capture.last_worker() else {
+            return;
+        };
+        if self.resolved_for.as_ref() != Some(&worker) {
+            if self.polls_since_cwd_attempt > 0
+                && self.polls_since_cwd_attempt < CWD_RETRY_EVERY_POLLS
+            {
+                self.polls_since_cwd_attempt += 1;
+                return;
+            }
+            self.polls_since_cwd_attempt = 1;
+            let cwd = resolve_tmux_pane_cwd(&self.backends, &worker)
+                .or_else(|| resolve_recorded_worker_cwd(&self.capture.state_dir, &worker));
+            let Some(cwd) = cwd else {
+                return;
+            };
+            self.capture.set_cwd(&cwd);
+            self.resolved_for = Some(worker);
+            self.polls_since_cwd_attempt = 0;
+        }
+        self.capture.tick();
+    }
+}
+
 /// The working directory `cs tackle` recorded for `worker_id` on the fleet
 /// (`WorkerData::repo`, relative to the project root) — the pane-independent
 /// join key back to the worker's session log. `None` when the worker is not
@@ -1249,6 +1322,16 @@ impl RealizedCapture {
             session: None,
             session_worker: None,
             ticks_since_resolve: 0,
+        }
+    }
+
+    /// Point the capture at a new working directory, dropping the session-log
+    /// position when it actually moved (the log is resolved from the cwd).
+    pub fn set_cwd(&mut self, cwd: &Path) {
+        if self.cwd != cwd {
+            self.cwd = cwd.to_path_buf();
+            self.session = None;
+            self.ticks_since_resolve = 0;
         }
     }
 
@@ -3556,6 +3639,65 @@ mod tests {
                 "claude-opus-4-8".to_string()
             ]),
             "a crash before the first tick must not lose the durable turn"
+        );
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// A long-lived `cs wait` polls every few seconds. Once the journal is
+    /// folded, a poll that finds nothing new must not read the journal again
+    /// (plan 0023): the stateless `capture_realized_runtime` re-parses all of
+    /// it on every call, which is what made one poll cost seconds of CPU.
+    #[test]
+    fn runtime_capture_poll_does_not_reread_the_journal() {
+        let _guard = test_support::home_guard();
+        let home = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let mol = MoleculeId::new("task-20261025-3c01").unwrap();
+        let state_dir = root.path().join(".cosmon").join("state");
+        write_galaxy_config(root.path());
+        let wt = root.path().join(".worktrees").join(mol.as_str());
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        let proj = claude_projects_dir().join(sanitize_path(&wt.to_string_lossy()));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+        )
+        .unwrap();
+        seed_running_molecule(&state_dir, &mol);
+        seed_dispatch(&state_dir, &mol, "claude", "worker-1");
+        register_fleet_worker(
+            &state_dir,
+            &mol,
+            "worker-1",
+            &format!(".worktrees/{}", mol.as_str()),
+        );
+
+        let mut capture = RuntimeCapture::new(&state_dir, &mol, Vec::new());
+        capture.poll(); // folds the journal, emits the observation
+        capture.poll(); // folds the lines the first poll appended
+        let before = cosmon_state::event_log::journal_bytes_read_by_this_thread();
+        for _ in 0..5 {
+            capture.poll();
+        }
+        let read = cosmon_state::event_log::journal_bytes_read_by_this_thread() - before;
+        assert_eq!(read, 0, "idle polls re-read {read} journal bytes");
+
+        // The observation still reached the journal.
+        let att = fold_from_log(&state_dir, &mol);
+        assert_eq!(
+            att.realized,
+            cosmon_core::adapter_attribution::Realized::Observed(vec![
+                "claude-opus-4-8".to_string()
+            ]),
         );
 
         match prev_home {
