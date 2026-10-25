@@ -52,6 +52,10 @@ echo "matrix: using cs=$CS_BIN"
 # CI passed the relative `matrix-artifacts`, which is why the nightly
 # scored an identical 2/21 every night while local runs (absolute
 # default) scored 11/21.
+if [ -d "$OUTDIR" ] && [ -n "$(ls -A "$OUTDIR")" ]; then
+    echo "matrix: refusing to append to non-empty receipt directory: $OUTDIR" >&2
+    exit 2
+fi
 mkdir -p "$OUTDIR" || exit 2
 OUTDIR="$(cd "$OUTDIR" && pwd)" || exit 2
 echo "matrix: artifacts → $OUTDIR"
@@ -66,7 +70,10 @@ export PATH="$FAKES_DIR/fake-tmux:$FAKES_DIR/fake-claude:$PATH"
 # try to auto-link children to the parent molecule and fail because the
 # scratch project doesn't know about it. Strip those so nucleation is
 # self-contained.
-unset COSMON_MOL_DIR COSMON_PARENT_MOL_ID COSMON_RUNTIME_ACTIVE
+unset COSMON_MOL_DIR COSMON_PARENT_MOL_ID COSMON_RUNTIME_ACTIVE COSMON_STATE_DIR
+# These rows model tmux state; no provider process is forked. Do not let an
+# ambient debugging option turn them into a different experiment.
+unset FAKE_TMUX_FORK COSMON_SPAWN_NO_TEARDOWN
 
 # ── Matrix ────────────────────────────────────────────────────────────────
 # Format: "row_name|tmux_env|claude_env|expected_tuple"
@@ -79,19 +86,17 @@ MATRIX=(
     # Expected tuple bits: S=session P=pane_alive B=branch W=worktree F=fleet_entry
     # "?" means don't-care. Expected exit: "0" | "!0" | "?".
     #
-    # Note on F (fleet_entry): cosmon creates a fleet worker entry ONLY
-    # when the tmux spawn succeeds. FAKE_TMUX_NEW_SESSION_EXIT!=0 or
-    # FAKE_TMUX_NO_SERVER=1 short-circuit before the fleet write, so F=0
-    # on those rows. PANE_DEAD / SESSION_EXITED only affect liveness
-    # reporting, not whether the fleet entry was committed.
+    # Failed dispatches roll back S/B/W/F. Dead and hidden panes must be
+    # refused by the positive-liveness gate, then reclaimed through exact
+    # session teardown. See spawn-matrix-contract.md for the source contract
+    # and falsifiers; these expectations do not certify provider behavior.
 
     # Healthy baseline — all surfaces should agree.
     "healthy                    |                                     |FAKE_CLAUDE_MODE=exit-0         |11111|expected=0"
 
-    # Claude CLI-level failures (process-boundary). The spawn surface
-    # commits regardless of claude's eventual exit code, so the 5-tuple
-    # still reads as healthy — which is precisely the "residual lie" the
-    # harness was built to quantify.
+    # Provider labels are not executed: fake tmux does not fork. These
+    # rows test the transport-state surface with unchanged provider labels,
+    # not provider exit/authentication handling.
     "claude-exit-42             |                                     |FAKE_CLAUDE_MODE=exit-42        |11111|expected=0"
     "claude-exit-delayed        |                                     |FAKE_CLAUDE_MODE=exit-delayed   |11111|expected=0"
     "claude-hang                |                                     |FAKE_CLAUDE_MODE=hang           |11111|expected=0"
@@ -100,22 +105,22 @@ MATRIX=(
     "claude-partial             |                                     |FAKE_CLAUDE_MODE=partial-output |11111|expected=0"
 
     # Tmux-level failures (oracle boundary).
-    "tmux-new-fail              |FAKE_TMUX_NEW_SESSION_EXIT=2          |FAKE_CLAUDE_MODE=exit-0         |00110|expected=!0"
+    "tmux-new-fail              |FAKE_TMUX_NEW_SESSION_EXIT=2          |FAKE_CLAUDE_MODE=exit-0         |00000|expected=!0"
     "tmux-no-server             |FAKE_TMUX_NO_SERVER=1                 |FAKE_CLAUDE_MODE=exit-0         |?????|expected=?"
-    "tmux-pane-dead             |FAKE_TMUX_PANE_DEAD=1                 |FAKE_CLAUDE_MODE=exit-0         |10111|expected=0"
-    "tmux-session-exited        |FAKE_TMUX_SESSION_EXITED=1            |FAKE_CLAUDE_MODE=exit-0         |10111|expected=0"
-    "tmux-list-empty            |FAKE_TMUX_LIST_EMPTY=1                |FAKE_CLAUDE_MODE=exit-0         |11110|expected=!0"
+    "tmux-pane-dead             |FAKE_TMUX_PANE_DEAD=1                 |FAKE_CLAUDE_MODE=exit-0         |00000|expected=!0"
+    "tmux-session-exited        |FAKE_TMUX_SESSION_EXITED=1            |FAKE_CLAUDE_MODE=exit-0         |00000|expected=!0"
+    "tmux-list-empty            |FAKE_TMUX_LIST_EMPTY=1                |FAKE_CLAUDE_MODE=exit-0         |00000|expected=!0"
     "tmux-has-miss              |FAKE_TMUX_HAS_SESSION_MISS=1          |FAKE_CLAUDE_MODE=exit-0         |11111|expected=0"
 
     # Cartesian strategic combinations.
-    "pane-dead+hang             |FAKE_TMUX_PANE_DEAD=1                 |FAKE_CLAUDE_MODE=hang           |10111|expected=0"
-    "new-fail+auth              |FAKE_TMUX_NEW_SESSION_EXIT=1          |FAKE_CLAUDE_MODE=auth-prompt    |00110|expected=!0"
-    "list-empty+segfault        |FAKE_TMUX_LIST_EMPTY=1                |FAKE_CLAUDE_MODE=segfault       |11110|expected=!0"
+    "pane-dead+hang             |FAKE_TMUX_PANE_DEAD=1                 |FAKE_CLAUDE_MODE=hang           |00000|expected=!0"
+    "new-fail+auth              |FAKE_TMUX_NEW_SESSION_EXIT=1          |FAKE_CLAUDE_MODE=auth-prompt    |00000|expected=!0"
+    "list-empty+segfault        |FAKE_TMUX_LIST_EMPTY=1                |FAKE_CLAUDE_MODE=segfault       |00000|expected=!0"
     "no-server+exit-42          |FAKE_TMUX_NO_SERVER=1                 |FAKE_CLAUDE_MODE=exit-42        |?????|expected=?"
-    "session-exited+partial     |FAKE_TMUX_SESSION_EXITED=1            |FAKE_CLAUDE_MODE=partial-output |10111|expected=0"
-    "pane-dead+exit-delayed     |FAKE_TMUX_PANE_DEAD=1                 |FAKE_CLAUDE_MODE=exit-delayed   |10111|expected=0"
+    "session-exited+partial     |FAKE_TMUX_SESSION_EXITED=1            |FAKE_CLAUDE_MODE=partial-output |00000|expected=!0"
+    "pane-dead+exit-delayed     |FAKE_TMUX_PANE_DEAD=1                 |FAKE_CLAUDE_MODE=exit-delayed   |00000|expected=!0"
     "has-miss+hang              |FAKE_TMUX_HAS_SESSION_MISS=1          |FAKE_CLAUDE_MODE=hang           |11111|expected=0"
-    "pane-dead+auth             |FAKE_TMUX_PANE_DEAD=1                 |FAKE_CLAUDE_MODE=auth-prompt    |10111|expected=0"
+    "pane-dead+auth             |FAKE_TMUX_PANE_DEAD=1                 |FAKE_CLAUDE_MODE=auth-prompt    |00000|expected=!0"
 )
 
 # ── Utilities ──────────────────────────────────────────────────────────────
@@ -176,15 +181,24 @@ run_row() {
     local scratch
     scratch="$(mktemp -d "${TMPDIR:-/tmp}/cosmon-matrix-${row_name}-XXXXXX")/project"
     mkdir -p "$scratch"
+    scratch="$(cd "$scratch" && pwd -P)"
+    printf '%s\n' "$scratch" > "$row_dir/scratch_path"
+    mkdir -p "$scratch/bin" "$scratch/claude-config"
+    # No account-balancer rotation or keychain access in a fake-provider run.
+    printf '#!/bin/sh\nexit 1\n' > "$scratch/bin/cb"
+    cp "$scratch/bin/cb" "$scratch/bin/security"
+    chmod +x "$scratch/bin/cb" "$scratch/bin/security"
     (
         cd "$scratch" || exit 1
         git init -q
         git config user.email test@example.com
         git config user.name test
+        git config maintenance.auto false
+        git config gc.auto 0
         echo "# scratch" > README.md
         git add README.md
         git -c commit.gpgsign=false commit -q -m "seed"
-    ) || return 1
+    ) || return 2
 
     # Isolated fake-tmux state directory per row.
     local fake_state="$row_dir/fake-tmux-state"
@@ -194,7 +208,7 @@ run_row() {
     (
         cd "$scratch" || exit 1
         "$CS_BIN" init . >/dev/null 2>&1
-    ) || return 1
+    ) || return 2
 
     # Nucleate a leaf task-work molecule. The exact formula doesn't matter —
     # we're testing the spawn surface, not formula semantics.
@@ -202,7 +216,7 @@ run_row() {
     mol_id="$(cd "$scratch" && "$CS_BIN" nucleate task-work --var topic="matrix row $row_name" --json 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)"
     if [ -z "$mol_id" ]; then
         echo "  [!] could not nucleate molecule in $scratch"
-        return 1
+        return 2
     fi
     echo "$mol_id" > "$row_dir/molecule_id"
 
@@ -235,7 +249,9 @@ run_row() {
         # token is read for presence only (never validated against a real
         # backend) by fake-claude, so any non-empty value satisfies it.
         env FAKE_TMUX_DIR="$fake_state" \
+            PATH="$scratch/bin:$PATH" \
             FAKE_TMUX_TRACE="$row_dir/fake-tmux.log" \
+            CLAUDE_CONFIG_DIR="$scratch/claude-config" \
             COSMON_READINESS_TIMEOUT_SECS=5 \
             CLAUDE_CODE_OAUTH_TOKEN=matrix-harness-fake-token \
             $tmux_env \
@@ -254,7 +270,7 @@ run_row() {
     # scenario verdict.
     if [ ! -f "$row_dir/tackle.stdout" ]; then
         echo "  [!] harness fault: $row_dir/tackle.stdout absent — row unobserved, not scored"
-        return 1
+        return 2
     fi
 
     echo "$tackle_exit" > "$row_dir/tackle.exit"
@@ -318,6 +334,7 @@ run_row() {
         echo "row=$row_name"
         echo "tmux_env=$tmux_env"
         echo "claude_env=$claude_env"
+        echo "provider_execution=not-forked"
         echo "tackle_exit=$tackle_exit"
         echo "expected_tuple=$expected_tuple"
         echo "actual_tuple=$actual_tuple"
@@ -338,17 +355,38 @@ run_row() {
     fi
 
     local verdict="PASS"
-    if [ "$tuple_ok" = "0" ] || [ "$exit_ok" = "0" ]; then
+    if [ "$expected_tuple" = "?????" ] && [ "$expected_exit_spec" = "?" ]; then
+        verdict="UNSCORED"
+    elif [ "$tuple_ok" = "0" ] || [ "$exit_ok" = "0" ]; then
         verdict="FAIL"
     fi
     printf '  %-28s tuple=%s expected=%s exit=%s expect=%s → %s\n' \
         "$row_name" "$actual_tuple" "$expected_tuple" "$tackle_exit" "$expected_exit_spec" "$verdict"
 
-    # Cleanup worktrees + branches from the scratch repo so the next row
-    # starts clean (not strictly needed since scratch is row-local, but
-    # saves disk).
-    rm -rf "$scratch/.worktrees" 2>/dev/null || true
+    # Measurements precede cleanup. Stop only this dispatch's detached
+    # observer, then remove only its fake sessions (FORK is disabled above).
+    # Otherwise realized-watch keeps appending to the supposedly sealed log.
+    cp -R "$fake_state" "$row_dir/observed-tmux-state"
+    cp -R "$scratch/.cosmon/state" "$row_dir/observed-state"
+    git -C "$scratch" branch --list > "$row_dir/branches.txt"
+    git -C "$scratch" worktree list --porcelain > "$row_dir/worktrees.txt"
+    if ! python3 "$HERE/matrix_cleanup.py" "$CS_BIN" "$mol_id" "$scratch" \
+        > "$row_dir/cleanup.log" 2>&1; then
+        cat "$row_dir/cleanup.log" >&2
+        return 2
+    fi
+    printf '[matrix-cleanup] begin owned fake-session teardown\n' >> "$row_dir/fake-tmux.log"
+    for meta_file in "$fake_state"/*/*.meta; do
+        [ -f "$meta_file" ] || continue
+        env FAKE_TMUX_DIR="$fake_state" FAKE_TMUX_TRACE="$row_dir/fake-tmux.log" \
+            "$FAKES_DIR/fake-tmux/tmux" -L "$(basename "$(dirname "$meta_file")")" \
+            kill-session -t "=$(basename "$meta_file" .meta)" || return 2
+    done
+    rm -rf "$(dirname "$scratch")"
 
+    if [ "$verdict" = "UNSCORED" ]; then
+        return 3
+    fi
     if [ "$verdict" = "PASS" ]; then
         return 0
     fi
@@ -358,6 +396,10 @@ run_row() {
 # ── Main ──────────────────────────────────────────────────────────────────
 
 total=0
+scored=0
+passed=0
+unscored=0
+harness_faults=0
 fail=0
 start_epoch="$(date +%s)"
 
@@ -371,6 +413,9 @@ $entry
 EOF
     # Trim leading/trailing whitespace from each field.
     row_name="$(echo "$row_name" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [ -n "${MATRIX_ROW:-}" ] && [ "$MATRIX_ROW" != "$row_name" ]; then
+        continue
+    fi
     tmux_env="$(echo "$tmux_env" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     claude_env="$(echo "$claude_env" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     expected_tuple="$(echo "$expected_tuple" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
@@ -378,18 +423,30 @@ EOF
     expected_exit="$(echo "$expected_exit" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
     total=$((total + 1))
-    if ! run_row "$row_name" "$tmux_env" "$claude_env" "$expected_tuple" "$expected_exit"; then
-        fail=$((fail + 1))
-    fi
+    run_row "$row_name" "$tmux_env" "$claude_env" "$expected_tuple" "$expected_exit"
+    row_exit=$?
+    case "$row_exit" in
+        0) scored=$((scored + 1)); passed=$((passed + 1)) ;;
+        1) scored=$((scored + 1)); fail=$((fail + 1)) ;;
+        3) unscored=$((unscored + 1)) ;;
+        *) harness_faults=$((harness_faults + 1)) ;;
+    esac
 done
 
 end_epoch="$(date +%s)"
+if [ "$total" = "0" ]; then
+    echo "matrix: no row matched MATRIX_ROW=${MATRIX_ROW:-}" >&2
+    exit 2
+fi
 elapsed=$((end_epoch - start_epoch))
 
 echo "───────────────────────────────────────────────────────────────────────"
-printf 'matrix: %d/%d passed  (%ds)  artifacts=%s\n' \
-    "$((total - fail))" "$total" "$elapsed" "$OUTDIR"
+printf 'matrix: %d/%d scored passed; %d unscored; %d harness faults (%d rows, %ds) artifacts=%s\n' \
+    "$passed" "$scored" "$unscored" "$harness_faults" "$total" "$elapsed" "$OUTDIR"
 
+if [ "$harness_faults" -gt 0 ]; then
+    exit 2
+fi
 if [ "$fail" -gt 0 ]; then
     exit 1
 fi

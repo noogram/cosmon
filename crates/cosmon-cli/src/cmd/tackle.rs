@@ -10487,7 +10487,11 @@ fn cleanup_partial_tackle(
     branch_name: &str,
     no_worktree: bool,
 ) {
-    let _ = backend.terminate(wid);
+    // Failure cleanup must also reach dead or unlisted sessions. Keep the
+    // backend's exact-name / bound-identity teardown authority intact.
+    if !spawn_no_teardown(|k| std::env::var(k).ok()) {
+        let _ = backend.terminate_session(wid.as_str());
+    }
     cleanup_partial_worktree(repo_root, worktree_path, branch_name, no_worktree);
 }
 
@@ -10583,7 +10587,7 @@ fn maybe_terminate(backend: &TmuxBackend, wid: &cosmon_core::id::WorkerId) {
     if spawn_no_teardown(|k| std::env::var(k).ok()) {
         return;
     }
-    let _ = backend.terminate(wid);
+    let _ = backend.terminate_session(wid.as_str());
 }
 
 /// Poll the newly-spawned session at 200ms cadence within the proof-of-life
@@ -16720,6 +16724,169 @@ prompt = "Custom fleet prompt."
 
     // -- Spawn proof-of-life window + no-teardown affordance --
     // (task-20260602-ef26: cold-container 503 root cause)
+
+    /// Owns a private real tmux server, including on assertion failure.
+    struct FailedSpawnTmux {
+        _directory: tempfile::TempDir,
+        socket: String,
+        backend: TmuxBackend,
+        worker: WorkerId,
+    }
+
+    impl FailedSpawnTmux {
+        fn dead_pane() -> anyhow::Result<Self> {
+            let directory = tempfile::tempdir()?;
+            let socket = directory
+                .path()
+                .join("tmux.sock")
+                .to_string_lossy()
+                .into_owned();
+            let fixture = Self {
+                backend: TmuxBackend::new(&socket),
+                socket,
+                _directory: directory,
+                worker: WorkerId::new("failed-spawn")?,
+            };
+            fixture.tmux(&[
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-s",
+                "failed-spawn-neighbor",
+                "sleep 60",
+            ])?;
+            fixture.tmux(&["set-option", "-g", "remain-on-exit", "on"])?;
+            fixture
+                .backend
+                .spawn_worker(fixture.worker.as_str(), ".", "exit 0")?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while fixture
+                .tmux(&["list-panes", "-t", "=failed-spawn", "-F", "#{pane_dead}"])?
+                .trim()
+                != "1"
+            {
+                anyhow::ensure!(std::time::Instant::now() < deadline, "pane never exited");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(!fixture.backend.is_alive(&fixture.worker)?);
+            assert!(fixture.backend.session_exists(fixture.worker.as_str())?);
+            eprintln!("real tmux seam: pane_dead=1, is_alive=false, session_exists=true");
+            Ok(fixture)
+        }
+
+        fn tmux(&self, args: &[&str]) -> anyhow::Result<String> {
+            let output = ProcessCommand::new("tmux")
+                .args(["-S", &self.socket])
+                .args(args)
+                .output()?;
+            anyhow::ensure!(
+                output.status.success(),
+                "tmux failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Ok(String::from_utf8(output.stdout)?)
+        }
+    }
+
+    impl Drop for FailedSpawnTmux {
+        fn drop(&mut self) {
+            let _ = ProcessCommand::new("tmux")
+                .args(["-S", &self.socket, "kill-server"])
+                .status();
+        }
+    }
+
+    #[test]
+    fn failed_spawn_cleanup_reclaims_a_real_dead_pane() -> anyhow::Result<()> {
+        let fixture = FailedSpawnTmux::dead_pane()?;
+        maybe_terminate(&fixture.backend, &fixture.worker);
+        assert!(
+            !fixture.backend.session_exists(fixture.worker.as_str())?,
+            "startup cleanup left the dead session behind"
+        );
+        // With the exact target absent, a prefix lookup would hit this neighbor.
+        maybe_terminate(&fixture.backend, &fixture.worker);
+        assert!(fixture.backend.session_exists("failed-spawn-neighbor")?);
+        eprintln!("startup cleanup: target absent after two calls, prefixed neighbor preserved");
+        Ok(())
+    }
+
+    #[test]
+    fn partial_tackle_cleanup_reclaims_a_real_dead_pane() -> anyhow::Result<()> {
+        let fixture = FailedSpawnTmux::dead_pane()?;
+        cleanup_partial_tackle(
+            &fixture.backend,
+            &fixture.worker,
+            Path::new("."),
+            Path::new("."),
+            "unused",
+            true,
+        );
+        assert!(
+            !fixture.backend.session_exists(fixture.worker.as_str())?,
+            "transaction rollback left the dead session behind"
+        );
+        cleanup_partial_tackle(
+            &fixture.backend,
+            &fixture.worker,
+            Path::new("."),
+            Path::new("."),
+            "unused",
+            true,
+        );
+        assert!(fixture.backend.session_exists("failed-spawn-neighbor")?);
+        eprintln!(
+            "transaction cleanup: target absent after two calls, prefixed neighbor preserved"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_spawn_debug_opt_out_keeps_a_real_dead_pane() -> anyhow::Result<()> {
+        // Isolate the environment override in a child, never in the parallel
+        // test runner. Both cleanup seams must honor the same debug contract.
+        if std::env::var("COSMON_SPAWN_NO_TEARDOWN").as_deref() == Ok("1") {
+            let fixture = FailedSpawnTmux::dead_pane()?;
+            maybe_terminate(&fixture.backend, &fixture.worker);
+            assert!(fixture.backend.session_exists(fixture.worker.as_str())?);
+            cleanup_partial_tackle(
+                &fixture.backend,
+                &fixture.worker,
+                Path::new("."),
+                Path::new("."),
+                "unused",
+                true,
+            );
+            assert!(
+                fixture.backend.session_exists(fixture.worker.as_str())?,
+                "rollback ignored the debug opt-out"
+            );
+            assert!(fixture.backend.session_exists("failed-spawn-neighbor")?);
+            eprintln!("debug opt-out: both cleanup seams retain the dead pane");
+            return Ok(());
+        }
+        let output = ProcessCommand::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "cmd::tackle::tests::failed_spawn_debug_opt_out_keeps_a_real_dead_pane",
+                "--nocapture",
+            ])
+            .env("COSMON_SPAWN_NO_TEARDOWN", "1")
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "debug opt-out child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        eprintln!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
 
     #[test]
     fn spawn_window_defaults_to_twelve_seconds() {
