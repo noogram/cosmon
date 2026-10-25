@@ -1402,12 +1402,14 @@ version = "1.11.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tokio]]
-version = "1.50.0"
+version = "1.51.6"
 criteria = "safe-to-deploy"
+notes = "Unaudited security update from previously exempted 1.50.0; independent review pending. This exemption is not an audit."
 
 [[exemptions.tokio-macros]]
-version = "2.6.1"
+version = "2.7.0"
 criteria = "safe-to-deploy"
+notes = "Unaudited security update from previously exempted 2.6.1; independent review pending. This exemption is not an audit."
 
 [[exemptions.tokio-rustls]]
 version = "0.26.4"
