@@ -49,6 +49,11 @@ state. Cleanup calls are marked in the complete tmux trace.
   and survival of a session whose name extends the target. Revert each cleanup
   call from `terminate_session(wid.as_str())` to `terminate(wid)`: its absence
   assertion must fail. The live-list filter stays unchanged.
+- `failed_spawn_debug_opt_out_keeps_a_real_dead_pane` runs its environment
+  override in a child test process and verifies that both cleanup seams retain
+  the dead pane when `COSMON_SPAWN_NO_TEARDOWN=1`. Removing the rollback seam's
+  opt-out check must fail that test. The normal matrix clears this override so
+  its failed-spawn postcondition remains `00000`.
 - With those two calls reverted, run `MATRIX_ROW=tmux-pane-dead` and
   `MATRIX_ROW=tmux-list-empty`. The retained session must fail `00000`, even
   though the liveness gate still returns nonzero and rolls back B/W/F.

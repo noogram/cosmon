@@ -10489,7 +10489,9 @@ fn cleanup_partial_tackle(
 ) {
     // Failure cleanup must also reach dead or unlisted sessions. Keep the
     // backend's exact-name / bound-identity teardown authority intact.
-    let _ = backend.terminate_session(wid.as_str());
+    if !spawn_no_teardown(|k| std::env::var(k).ok()) {
+        let _ = backend.terminate_session(wid.as_str());
+    }
     cleanup_partial_worktree(repo_root, worktree_path, branch_name, no_worktree);
 }
 
@@ -16836,6 +16838,52 @@ prompt = "Custom fleet prompt."
         assert!(fixture.backend.session_exists("failed-spawn-neighbor")?);
         eprintln!(
             "transaction cleanup: target absent after two calls, prefixed neighbor preserved"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_spawn_debug_opt_out_keeps_a_real_dead_pane() -> anyhow::Result<()> {
+        // Isolate the environment override in a child, never in the parallel
+        // test runner. Both cleanup seams must honor the same debug contract.
+        if std::env::var("COSMON_SPAWN_NO_TEARDOWN").as_deref() == Ok("1") {
+            let fixture = FailedSpawnTmux::dead_pane()?;
+            maybe_terminate(&fixture.backend, &fixture.worker);
+            assert!(fixture.backend.session_exists(fixture.worker.as_str())?);
+            cleanup_partial_tackle(
+                &fixture.backend,
+                &fixture.worker,
+                Path::new("."),
+                Path::new("."),
+                "unused",
+                true,
+            );
+            assert!(
+                fixture.backend.session_exists(fixture.worker.as_str())?,
+                "rollback ignored the debug opt-out"
+            );
+            assert!(fixture.backend.session_exists("failed-spawn-neighbor")?);
+            eprintln!("debug opt-out: both cleanup seams retain the dead pane");
+            return Ok(());
+        }
+        let output = ProcessCommand::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "cmd::tackle::tests::failed_spawn_debug_opt_out_keeps_a_real_dead_pane",
+                "--nocapture",
+            ])
+            .env("COSMON_SPAWN_NO_TEARDOWN", "1")
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "debug opt-out child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        eprintln!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
         Ok(())
     }
