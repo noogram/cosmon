@@ -19,78 +19,6 @@ this stage.
 
 ## [Unreleased]
 
-### Added
-
-- Cross-machine advisory work exchange: `cosmon-remote work list/send/inbox/ack`
-  uses an operator-bound seat and attachment proof, with bounded explicit pull,
-  idempotent send and durable acknowledgments separate from result messages.
-  Host-local declaration and binding management remain local. Help and man
-  pages are regenerated for this intentional additive command surface; the
-  root and configuration help now expose work commands and attachment setup.
-
-- Worker host configuration: `[transport] backend = "tmux"` resolves project,
-  global, then default with recorded provenance. The first qualified path is
-  Codex Exec on tmux: launch-bound terminal identity keeps observation,
-  teardown and harvest independent of later configuration changes. Unsupported
-  hosts fail before dispatch resources; Herdr and Zellij are not available.
-  Positive dispatch history prevents name-based fallback even after loss of
-  a modern process snapshot, including reuse of its worker name by a different
-  legacy molecule; genuine legacy fleet records remain compatible.
-  Harvest without a recorded worker target performs no terminal or fleet
-  teardown inferred from a same-name molecule label.
-  New Exec pins refuse interactive continuation and freeze/thaw rather than
-  launching a different adapter. Legacy Interactive behavior is preserved.
-
-- Supervision portable des workers: opt-in durable child exit receipts for
-  POSIX Codex workers launched through `cs tackle` in tmux with explicit
-  `mode = "exec"`. Opt-in Interactive is refused before dispatch effects;
-  default legacy Interactive remains unchanged. Normal exit codes,
-  signals, exec failures and unknown observations remain distinct; exit zero
-  grants neither completion nor integration authority. Initial terminal
-  qualification is macOS only. See the worker exit receipts guide.
-
-- Local `cs terminal --mode interactive` adds explicit guarded human input/output
-  with participating dimensions, preserving read-only v1 defaults. The optional
-  Herdr plugin registers native Cosmon views with honest unknown semantic state,
-  an Interagir action, and read-only reconnects to the exact existing worker.
-
-- Client integrations: `cs --json terminal EXACT_ID` exposes a versioned local
-  terminal capability with explicit unknown/unavailable states. Read-only
-  attachment requires its fresh incarnation token and preserves worker size
-  and session environment. Legacy launches without a creation-time witness
-  remain unknown. (#210)
-- Optional Herdr plugin with a numbered molecule selector, read-only worker
-  terminal, existing worktree shell and canonical artifact viewer. Cosmon
-  remains usable independently; the package has no startup hooks or worker
-  lifecycle controls. See `tools/herdr-companion` for prerequisites and explicit
-  local link/unlink instructions. (#211)
-- Optional independent cmux tooling consumes the same public v1 contract:
-  active-first numbered selection, read-only worker output, existing worktree
-  shells and canonical Markdown views in fresh workspaces. Disposable socket/PTY
-  acceptance passed on cmux 0.65.1; visual UI, remote use and native worker
-  backends are not qualified. No global installation is automatic. See `tools/cmux-companion` for explicit use and removal. (#210)
-
-- Optional native Pi package independently consumes the readonly v1 contract:
-  explicit project/molecule selection, details, sampled output, Markdown artifacts
-  and verified worktree paths. Disposable Pi 1.1.0 TUI/dummy-worker acceptance
-  passed without a model or provider credentials; closing the view preserves the
-  worker. No worker backend or interactive input is added. See
-  `tools/pi-companion` for loading, packaging and removal. (#210)
-
-- Conditional remote collapse: `cosmon-remote molecule collapse --key
-  --expect-status --expect-revision` uses the new PUT receipt route, and
-  `molecule collapse-receipt` recovers its durable result. Molecule GET now
-  returns the computed revision and strong ETag. Both HTTP collapse routes
-  enforce the tenant lease guard. The shared operation samples approval and
-  receipt time after acquiring the keyed dispatch lock, so a wait crossing
-  `not_after` is refused. (#207, ADR-187)
-- Remote help and man output intentionally gain the keyed flags and receipt
-  command; generated references are refreshed for this additive CLI change.
-
-- `cs done` warns when a spore molecule has files in its `output_dir` but no
-  commits beyond its base, so the deliverable's location is visible during
-  harvest. The warning does not prevent teardown. (#205)
-
 ### Breaking changes and operator actions on upgrade
 
 - RPP adapter: a binding that declares `[scopes]` is the scope ceiling; token
@@ -98,22 +26,184 @@ this stage.
   scope, and `allowed = []` grants nothing. A binding without a `[scopes]`
   section keeps admission on the token's scopes, as before. Before upgrading,
   check that every binding with a `[scopes]` section lists each scope its
-  holder uses. (task-20261014-ae1c)
+  holder uses.
+- RPP handoff bootstrap preserves an explicit `scopes = []` as `[scopes]
+  allowed = []`, so a token cannot supply write authority. Omitted handoff
+  scopes keep the defaults and now log a warning naming the binding and the
+  scopes it grants. Existing bindings remain operator-owned: bootstrap reports
+  drift without rewriting them. Review bindings created from empty handoffs
+  and set `[scopes] allowed = []` explicitly where no grants were intended.
+  (#209)
+- A collapsed molecule is now terminal for lifecycle writes: `cs stuck` and
+  `cs evolve` refuse a molecule in a terminal status before changing energy or
+  events, where they could previously move it out of that status. Completed to
+  Frozen (freeze on last step) is still permitted. Scripts that relied on
+  reviving a collapsed molecule with either command must nucleate a new one.
+- `POST /v1/molecules` no longer returns the adapter's local `molecule_dir`
+  path in its response. Clients that read that field must stop depending on it.
+
+### Added
+
+- Cross-machine advisory work exchange: `cosmon-remote work list/send/inbox/ack`
+  and five binding-admitted RPP routes (list, send, peek, pull, acknowledge)
+  use an operator-bound seat and attachment proof, with bounded explicit pull,
+  idempotent send and durable acknowledgments separate from result messages.
+  An envelope the wire cannot carry is reported as undeliverable instead of
+  blocking the inbox, and a sender sees the 100 most recent acknowledgments.
+  Host-local declaration and binding management remain local.
+
+- Worker host configuration: `[transport] backend = "tmux"` or `"herdr"`
+  resolves project, global, then default with recorded provenance. Supervised
+  Herdr hosting stops a worker through its parent process over an
+  identity-bound local channel; purge and harvest stop a supervised launch
+  before teardown and refuse rather than fall back when that stop is refused.
+  Zellij is not available. The first qualified path is Codex Exec: launch-bound
+  terminal identity keeps observation, teardown and harvest independent of
+  later configuration changes. Unsupported hosts fail before dispatch
+  resources. Positive dispatch history prevents name-based fallback even after
+  loss of a process snapshot, including reuse of a worker name by a different
+  legacy molecule; genuine legacy fleet records remain compatible. Harvest
+  without a recorded worker target performs no terminal or fleet teardown
+  inferred from a same-name molecule label. New Exec pins refuse interactive
+  continuation and freeze/thaw rather than launching a different adapter.
+  Legacy Interactive behavior is preserved.
+
+- Portable supervision of workers: opt-in durable child exit receipts for
+  POSIX Codex workers launched through `cs tackle` in tmux with explicit
+  `mode = "exec"`. Opt-in Interactive is refused before dispatch effects;
+  default legacy Interactive remains unchanged. Normal exit codes, signals,
+  exec failures and unknown observations remain distinct; exit zero grants
+  neither completion nor integration authority. Initial terminal qualification
+  is macOS only. See the worker exit receipts guide.
+
+- `cs terminal` and client integrations: `cs --json terminal EXACT_ID` exposes
+  a versioned local terminal capability with explicit unknown/unavailable
+  states. Read-only attachment requires its fresh incarnation token and
+  preserves worker size and session environment; legacy launches without a
+  creation-time witness remain unknown. `cs terminal --mode interactive` adds
+  explicit guarded human input with participating dimensions, keeping the
+  read-only default. Optional, independent client packages consume this
+  contract: a Herdr plugin (numbered molecule selector, read-only worker
+  terminal, worktree shell, canonical artifact viewer; native views with honest
+  unknown semantic state), cmux tooling and a Pi package. None installs itself
+  or adds startup hooks or lifecycle controls. See `tools/herdr-companion`,
+  `tools/cmux-companion` and `tools/pi-companion`. (#210, #211)
+
+- Conditional, idempotent collapse. `cs collapse --key --expect-status
+  --expect-revision [--approval-digest] [--not-after]` runs under the
+  molecule's dispatch lock and records a durable receipt; `cs collapse-receipt
+  <ID> <KEY>` reads it back. `cosmon-remote molecule collapse` with the same
+  flags uses the new PUT receipt route, and `molecule collapse-receipt`
+  recovers its result. Molecule GET returns the computed `revision` and a
+  strong ETag, and `cs observe --json` includes the revision. Both HTTP
+  collapse routes enforce the tenant lease guard. Approval time is sampled
+  after the lock is acquired, so a wait crossing `not_after` is refused.
+  `POST /v1/molecules/{id}/collapse` now passes `reason_kind` through.
+  (#207, ADR-187)
+
+- RPP read surface: `GET /v1/ledger` replays and then follows the tenant ledger
+  as server-sent events with an opaque resume cursor and a `ledger.reset`
+  frame when the log was replaced or the cursor cannot be honoured (requires
+  `events:subscribe` and `molecule:read`; one stream per principal).
+  `GET /v1/molecules` pages on request (`limit` up to 200, `cursor`), carries a
+  weak `ETag` with `If-None-Match` support and a `ledger_cursor` watermark,
+  and its rows gain phase, timestamps, kind, fleet, typed links and
+  integration facts. Molecule reads expose branch facts. Read responses are
+  validated against the OpenAPI schemas, `/v1/auth/me` reports the surface and
+  contract versions, and 429 responses carry a retry delay that
+  `cosmon-remote` surfaces. (#184, #185, #186, #187, #190)
+
+- Handoff bindings accept `preset = "observer"`, a read-only service principal
+  scoped to `molecule:read`, `artifact:read`, `worker:read` and
+  `events:subscribe`; naming both a preset and `scopes`, or an unknown preset,
+  refuses the handoff. `cosmon-remote token` can export a refreshed token.
+  (#188, #189)
+
+- `cs sessions`: `launch` starts Claude or Codex with a fresh identity shared
+  by hooks and tools; `seats` prints ledger-derived pilot authority as
+  versioned JSON (with the galaxy root under `--all-galaxies`); `lifecycle`
+  records content-free lifecycle events from a connected client, and Codex
+  lifecycle events are ingested; `checkpoint stage` writes versioned drafts
+  that the hook publishes at the next transition; `hook install` can be
+  installed at user level, chains behind Codex Computer Use's `notify` and
+  records the Codex provider correctly; takeover challenges can be batch-signed
+  (see the batch-sign how-to). The Claude hook distinguishes a pilot waiting on
+  a question (`asking`, held past the question notification) from a permission
+  prompt, and a new session attaches as copilot of the galaxy's sole mission,
+  never as primary. Codex presence is keyed by thread identity, native caller
+  identity is preferred when verified, and worker callbacks keep their fallback
+  without a dispatch id. (#179, #180, #192, #193, #195, #196, #197, #200,
+  #201, #202)
+
+- `COSMON_MODEL_PROBE_TIMEOUT_SECS` sets the availability probe budget that
+  `cs tackle` applies to Claude (60 seconds by default). The probe no longer
+  starts MCP servers. (#182, #191)
+
+- `cs done` warns when a spore molecule has files in its `output_dir` but no
+  commits beyond its base, so the deliverable's location is visible during
+  harvest. The warning does not prevent teardown. (#205)
+
+- WSL2: `verify-wsl2-host` can verify a served release installation. (#143)
+
+### Changed
+
+- `cs ensemble` and `cs status` report a worker as suspect rather than dead
+  when a probe failed to answer or `cs tackle` has bound the worker before its
+  tmux session exists, and no longer print the dead banner or `cs purge`
+  advice for it. A probe answering "no pane" on every backend, past the
+  post-tackle grace, is still dead. (#204)
+- `cs status` no longer lists merged work under Harvest, and keeps merged work
+  listed only while it still holds a worktree, live session or roster entry,
+  with `cs done <id> --no-merge` as the advised command. `cs peek --phase
+  harvestable` uses the same predicate. (#174)
+- `cs status` names a molecule whose `state.json` cannot be parsed and exits 3
+  instead of aborting the listing; the frontier keeps its dependents blocked.
+  (#178)
+- `cs tail --all-galaxies --json` adds the source galaxy to every row, and
+  follow mode keeps following. (#183)
+- Forced `cs purge` can reclaim a proven-dead server or a confirmed stale
+  terminal without killing a same-name replacement, and reports whether any
+  terminal was killed. A rollback whose fleet cleanup failed is reported as
+  such, with the possible leftover worker.
+- Pilot grant ledgers that cannot be verified now fail closed. (#194)
 
 ### Fixed
 
-- RPP handoff bootstrap preserves explicit `scopes = []` as `[scopes]`
-  `allowed = []`, so a token cannot supply write authority. Omitted handoff
-  scopes retain the defaults and warning; federated empty bindings retain
-  token-scope admission. Existing bindings remain operator-owned: bootstrap
-  reports drift without rewriting them. Review bindings created from empty
-  handoffs before upgrading and explicitly set `[scopes] allowed = []` where
-  no grants were intended. (#209)
+- `cs spore validate` fails, naming the node and file, when a node's formula
+  file is missing; before, the error surfaced at dispatch. (#173)
+- `cs observe` points to `cs archive` when the molecule is archived, and
+  `cs peek --once` works without a terminal.
+- Session discovery honours configured session roots. (#181)
+- `cs collapse --ops-dir` reads the pilot lease from the directory it mutates,
+  and atomic writes use a unique temporary file in the target directory.
+  (#207)
+- RPP harvest effects refuse an issuer removed from the live trust store, and
+  log and ledger streams close after issuer removal. (#209)
 
-- RPP bootstrap warns when a handoff binding omits `scopes`, naming the
-  binding and the default scopes it grants. Harvest effects now refuse an
-  issuer removed from the live trust store. Logs and ledger stream tests
-  verify closure after issuer removal. (#209)
+### Security
+
+- Dependency advisories fixed by updating locked versions: `quinn-proto`
+  0.11.16 to 0.11.18 (RUSTSEC-2026-0338, -0339, -0340, -0341, -0342), `rustls`
+  0.23.45 to 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349), `rustls-webpki`
+  0.103.15 to 0.103.16 (RUSTSEC-2026-0382) and `webpki-roots` 1.0.6 to 1.0.10
+  (RUSTSEC-2026-0381).
+- Advisories accepted as temporary exceptions, each with its reason in
+  `deny.toml` and `.cargo/audit.toml`:
+  - RUSTSEC-2026-0370, -0371, -0372 (`zvariant`, `zbus_names`,
+    `zvariant_derive`): reached through `keyring` 3, `secret-service` 4 and
+    `zbus` 4 on the Linux credential backend. RustSec lists no patched
+    standalone versions; the fixes live in `zbus` 6. These are maintenance
+    exceptions, not corrected vulnerabilities, and lapse when the backend
+    migrates to `zbus` 6.
+  - RUSTSEC-2026-0002 and -0253 (`lru`, through `ratatui`): not reachable from
+    cosmon code, which never iterates the cache mutably and whose only cache
+    key is a numeric `(Rect, Layout)` pair with no `Drop`. The fix needs a
+    `ratatui` upgrade that was deferred pending supply-chain review.
+  - RUSTSEC-2025-0141 (`bincode` 1.x) and RUSTSEC-2024-0320 (`yaml-rust`)
+    through `syntect`, RUSTSEC-2024-0436 (`paste`) through `ratatui`, and
+    RUSTSEC-2026-0097 (`rand` 0.9, custom-logger unsoundness, test-only
+    `proptest` path): unmaintained or unreachable, awaiting upstream.
+- `POST /v1/molecules` no longer discloses the adapter's local path.
 
 ## [0.7.3] — 2026-10-06
 
