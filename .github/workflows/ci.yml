@@ -195,34 +195,25 @@ jobs:
       - run: ./scripts/check-fixture-independence.test.sh
 
   mutation-falsifier:
-    name: Mutation falsifier (nightly, advisory)
-    # DoD gate b — the "reverting the fix must redden the test" gate
-    # (delib-20260710-95a7 §Q6). Mutation testing is SLOW (ADR-010:177): it
-    # rebuilds the workspace once per mutant. It therefore runs ONLY on the
-    # nightly cron, NEVER on the PR fast lane, and NEVER as a hard-abort
-    # (feynman) — `continue-on-error` makes a surviving mutant a reported test
-    # hole, not a red merge gate. Scoped to cosmon-core (the 90%-coverage,
-    # invariant-heavy crate) to stay bounded; widen via --package / --whole-tree
-    # as CI capacity allows.
-    #
-    # The advisory contract above was declared but not implemented:
-    # `continue-on-error` sat on the mutate STEP, and a step-level flag
-    # cannot absorb a job that dies. On four consecutive nightlies
-    # (2026-07-30 → 08-02) the job ran 4h34m–5h31m and then ended with
-    # "The hosted runner lost communication with the server" — the step
-    # never reported, so the flag never applied and the advisory job
-    # reddened the nightly. Two changes make the declared contract real:
-    # `continue-on-error` moves to the JOB, and `timeout-minutes` bounds
-    # a run that was previously unbounded.
-    #
-    # The starvation itself is not yet attributed: the runner takes its
-    # logs with it, so disk versus memory is still open. The resource
-    # probe below prints both before and after, so the next nightly says
-    # which one — until then, no fix should claim to have addressed it.
+    name: Mutation falsifier (nightly, advisory, slot ${{ matrix.slot }})
+    # 5,162 core mutants (cargo-mutants 27.0.0). Eight runners audit eight
+    # of 256 deterministic shards nightly: complete rotation in 32 UTC days
+    # for an unchanged inventory. No diff filter: every mutant has a shard.
+    # At most 21 mutants/shard: 21 * (180s build + 180s test) = 126 min.
+    # Local cold baseline: 350s build + 79s test. With that baseline the
+    # phase-limit estimate is 134 min, leaving 16 min inside the 150-min
+    # process budget and 46 min inside the job budget (setup excluded).
+    # The process deadline returns a normal advisory failure with partial
+    # reports; it must fire BEFORE the job deadline can cancel the workflow.
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        slot: [0, 1, 2, 3, 4, 5, 6, 7]
     permissions:
       contents: read
     steps:
@@ -233,13 +224,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - name: Install cargo-mutants
-        run: cargo install cargo-mutants --locked
+        # Pin generation and shard semantics for the duration of a rotation.
+        run: cargo install cargo-mutants --version 27.0.0 --locked
       - name: Falsifier preflight (cargo-mutants available)
         run: ./scripts/mutation-falsifier.sh --check
       - name: Resource baseline (attribute the runner death — disk or memory)
         run: df -h / /home/runner && free -m
       - name: Mutate cosmon-core (advisory — surviving mutants are reported holes)
-        run: ./scripts/mutation-falsifier.sh --whole-tree --package cosmon-core --timeout 180
+        env:
+          SHARD_SLOT: ${{ matrix.slot }}
+        run: |
+          day=$(( $(date -u +%s) / 86400 ))
+          shard=$(( (day % 32) * 8 + SHARD_SLOT ))
+          echo "UTC epoch day $day: shard $shard/256 (32-night rotation)"
+          timeout --signal=TERM --kill-after=30s 150m \
+            ./scripts/mutation-falsifier.sh --whole-tree --package cosmon-core \
+              --shard "$shard/256" --timeout 180 --build-timeout 180 \
+              --output mutation-report -- --jobs 1 --no-shuffle --sharding round-robin
+      - name: Retain mutation reports (including incomplete runs)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: mutation-falsifier-slot-${{ matrix.slot }}
+          path: mutation-report/
+          if-no-files-found: warn
+          retention-days: 45
       - name: Resource after mutation run
         if: always()
         run: df -h / /home/runner && free -m
