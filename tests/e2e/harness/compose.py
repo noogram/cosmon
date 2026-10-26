@@ -394,7 +394,34 @@ class ComposeStack:
         """
         cfg = self.cfg
         if cfg.galaxies_root.exists():
-            shutil.rmtree(cfg.galaxies_root)
+            try:
+                shutil.rmtree(cfg.galaxies_root)
+            except PermissionError:
+                # New state/fleets/default directories belong to the adapter's
+                # uid 10000, not the host runner. Staging-time chmod cannot
+                # cover entries created later. After down(), clear only this
+                # disposable bind mount as root in the already-built image.
+                image = "cs-rpp-adapter:e2e" if cfg.e2e_stage else "cs-rpp-adapter:v0"
+                try:
+                    clear = _run([
+                        "docker", "run", "--rm", "--network", "none",
+                        "--user", "0:0", "--entrypoint", "/bin/sh",
+                        "--mount", f"type=bind,src={cfg.galaxies_root},dst=/tenant",
+                        image, "-c", "find /tenant -mindepth 1 -delete",
+                    ], timeout=60)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise AssertionError(
+                        f"tenant bind-mount cleanup could not run: {exc}; "
+                        f"stderr: {getattr(exc, 'stderr', None) or ''}"
+                    ) from exc
+                if clear.returncode != 0:
+                    raise AssertionError(
+                        f"tenant bind-mount cleanup failed (exit {clear.returncode}): "
+                        f"{clear.stderr}"
+                    )
+                # Never trust a successful helper exit with stale state left
+                # behind: the ordinary removal must now succeed as well.
+                shutil.rmtree(cfg.galaxies_root)
         (cfg.galaxy / ".cosmon" / "state").mkdir(parents=True, exist_ok=True)
         (cfg.galaxy / ".cosmon" / "formulas").mkdir(parents=True, exist_ok=True)
         shutil.copy(
