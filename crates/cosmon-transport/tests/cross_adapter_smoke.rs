@@ -102,6 +102,67 @@ fn require_binary(name: &str) {
     assert!(ok, "Tier-2 smoke requires `{name}` on PATH");
 }
 
+/// Set in the re-executed child so it runs the test body instead of re-executing.
+const ISOLATED_MARK: &str = "COSMON_XADAPTER_ISOLATED";
+
+/// Re-run the calling test in a child process that holds a placeholder Claude
+/// credential, and return its verdict. Returns `None` inside that child, which
+/// then runs the test body.
+///
+/// An interactive spawn (`prompt: None`) is refused unless the process
+/// environment holds a Claude credential, and the preflight reads that
+/// environment from the process itself. A nightly runner provisions none, and a
+/// developer machine holds a real one in its keychain, so the same test would
+/// pass locally and fail in CI. Setting the variables in this process with
+/// `std::env::set_var` would race the sibling test, so the child gets them
+/// through `Command::env` instead.
+///
+/// Measured on `claude` 2.1.311: a placeholder `CLAUDE_CODE_OAUTH_TOKEN` keeps
+/// the TUI in the foreground (it waits at its first-run screen), which is all
+/// WS-2..WS-4 observe. The placeholder authenticates nothing, `HOME` and
+/// `CLAUDE_CONFIG_DIR` point at a temporary directory so the real `~/.claude`
+/// and keychain item are never read or written, and the API-key variables are
+/// removed. The production preflight is unchanged.
+fn rerun_with_placeholder_credential(test: &str) -> Option<Result<(), Box<dyn std::error::Error>>> {
+    if std::env::var_os(ISOLATED_MARK).is_some() {
+        return None;
+    }
+    Some((|| {
+        let home = tempdir()?;
+        let config = home.path().join("claude-config");
+        fs::create_dir_all(&config)?;
+        let out = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                test,
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(ISOLATED_MARK, "1")
+            .env("HOME", home.path())
+            .env("CLAUDE_CONFIG_DIR", &config)
+            .env(
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "cosmon-smoke-placeholder-not-a-credential",
+            )
+            .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+            .env_remove("ANTHROPIC_API_KEY")
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            .output()?;
+        if out.status.success() {
+            return Ok(());
+        }
+        Err(format!(
+            "{test} failed in its placeholder-credential child ({})\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        )
+        .into())
+    })())
+}
+
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/trivial_briefing.md")
 }
@@ -153,6 +214,11 @@ fn same_briefing_both_adapters_produce_structurally_equivalent_artefacts() {
 #[ignore = "requires real claude+aider binaries + tmux"]
 fn cross_adapter_event_lineage_equivalence_modulo_adapter_name(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(verdict) = rerun_with_placeholder_credential(
+        "cross_adapter_event_lineage_equivalence_modulo_adapter_name",
+    ) {
+        return verdict;
+    }
     require_binary("tmux");
     require_binary("claude");
     require_binary("aider");
@@ -316,6 +382,11 @@ fn cross_adapter_event_lineage_equivalence_modulo_adapter_name(
 #[ignore = "requires real claude+aider binaries + tmux"]
 fn cross_adapter_event_lineage_early_kill_emits_terminal_without_consume(
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(verdict) = rerun_with_placeholder_credential(
+        "cross_adapter_event_lineage_early_kill_emits_terminal_without_consume",
+    ) {
+        return verdict;
+    }
     require_binary("tmux");
     require_binary("claude");
 
