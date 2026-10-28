@@ -207,6 +207,7 @@ scripts/release/render-brew-formula.test.sh
 scripts/release/render-tap-from-artifacts.test.sh
 scripts/release/check-install-drift.test.sh
 scripts/release/docs-deploy.test.sh
+tests/harness/test_rpp_compose_cleanup.py              # ~1.8 s including no-pilot-env wrapper
 scripts/run-gates-bg.test.sh                       # ~2.5 s — spawns/kills real processes (#112)
 ```
 
