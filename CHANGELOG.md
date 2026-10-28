@@ -44,6 +44,28 @@ this stage.
 
 ### Added
 
+- RPP and `cosmon-remote`: `evolve` — `POST /v1/molecules/{id}/evolve`,
+  `cosmon-remote molecule evolve <id> --evidence …`. It calls the operation
+  `cs evolve` calls, so a remote advance leaves the molecule's state, log,
+  briefing, events and briefing seal as a local one does. The formula is the
+  one the tenant's project holds; a step that declares a shell verification
+  command is refused `501 evolve_unsupported_step`. Scope
+  `cosmon:molecule:write`. `evolve` leaves the ADR-080 §5.1 operator-only list
+  (§5.6); `complete` stays on it.
+- RPP and `cosmon-remote`: `resurrect` — `POST /v1/molecules/{id}/resurrect`,
+  `cosmon-remote molecule resurrect <id> [--dry-run]`. The preconditions, lock,
+  prompt, breadcrumb and events are shared with `cs resurrect`
+  (`cosmon_runtime::resurrect`); the worker is spawned through the library
+  executor `tackle` uses. Scopes `cosmon:molecule:write` and
+  `cosmon:worker:spawn`; counts against the per-noyau live-worker ceiling
+  (`429 tackle_ceiling`).
+- RPP and `cosmon-remote`: `deps` — `GET /v1/molecules/{id}/deps[?transitive=true]`,
+  `cosmon-remote molecule deps <id> [--transitive]`. Cross-galaxy links are
+  listed, not resolved. Scope `cosmon:molecule:read`.
+- RPP and `cosmon-remote`: `prime` — `GET /v1/molecules/{id}/prime`,
+  `cosmon-remote molecule prime <id>`. A read returning the step context
+  `cs prime` prints; a terminal molecule answers `terminal: true`. Scope
+  `cosmon:molecule:read`.
 - Cross-machine advisory work exchange: `cosmon-remote work list/send/inbox/ack`
   and five binding-admitted RPP routes (list, send, peek, pull, acknowledge)
   use an operator-bound seat and attachment proof, with bounded explicit pull,
@@ -169,6 +191,10 @@ this stage.
 
 ### Fixed
 
+- `cs prime` help described a config self-check ("load .cosmon/config.toml and
+  self-check gates") that the command never performed. It re-injects the
+  current step context of a running molecule, and its help, man page and book
+  reference now say so.
 - Failed worker startup now removes retained dead or unlisted tmux sessions during rollback, without affecting similarly named sessions, while preserving the explicit debug keep-session option.
 - `cs spore validate` fails, naming the node and file, when a node's formula
   file is missing; before, the error surfaced at dispatch. (#173)

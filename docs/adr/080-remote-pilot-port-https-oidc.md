@@ -498,7 +498,6 @@ The RPP MUST refuse to expose the following verbs even by accidental routing. Th
 
 | Verb | Why operator-only | Source |
 |------|-------------------|--------|
-| `cs evolve` | Worker-internal advance. Workers run in their own worktrees with their own `cs` binary; the RPP must not reach into a worker's process. | CLAUDE.md *Command perimeters* |
 | `cs complete` | Worker-internal terminal transition (Active → Completed). Same reasoning as `cs evolve`. | CLAUDE.md *Command perimeters* |
 | `cs security activate` | Switches the cosmon-wide security posture from `prepared` to `active` (ADR-076). Affects every subsequent operation across all tenants. Operator-only. | ADR-076 |
 | `cs kill` | Force-terminates a worker process tree. Side effects on disk and tmux. Operator gesture. | CLAUDE.md *Anti-patterns* (implicit) |
@@ -637,6 +636,27 @@ and the loop's every exit is NAMED (I4). The `delegate_for` claim
 model of §5.2 is intentionally NOT used — the tenant drains *its own*
 molecules under *its own* budget; there is no operator authority to
 delegate.
+
+### 5.6 The `cs evolve` exit path — advancing a step is a molecule operation (amended 2026-10-28)
+
+`cs evolve` **left the closed list** on 2026-10-28, via the successor path of
+§5.2, under the pilot's decision for plan 0001 lot E1 (Leanear asked for it
+by name). The row said the RPP "must not reach into a worker's process".
+The route does not: `POST /v1/molecules/{id}/evolve` calls
+`cosmon_state::ops::evolve`, an operation over the **molecule** (its state,
+log, briefing and events), and touches no worker process and no worktree.
+
+The route carries what is a property of the molecule and none of what is a
+property of a worker's machine. A step that declares a shell verification
+command is refused `501 evolve_unsupported_step`; the per-step auto-commit,
+the inline gate step and the bootstrap seal are not run. Scope is
+`cosmon:molecule:write`; which molecules a requester may advance is the
+per-tenant binding check every `/v1/molecules/{id}/…` route applies.
+
+`cs complete` stays on the list; this amendment does not reason about it.
+The `delegate_for` claim model of §5.2 is intentionally NOT used, for the
+reason §5.4 and §5.5 gave: the requester advances *its own* molecule in *its
+own* galaxy.
 
 ---
 

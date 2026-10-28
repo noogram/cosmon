@@ -2,19 +2,28 @@
 
 //! `cs evolve` — advance a molecule to its next lifecycle state.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::SystemTime;
-
 use chrono::Utc;
-use cosmon_core::event::{Envelope, Event};
+use cosmon_core::event::Envelope;
 use cosmon_core::event_v2::EventV2;
 use cosmon_core::evolve::{self, EvolveRequest, NewState};
 use cosmon_core::formula::Formula;
 use cosmon_core::id::MoleculeId;
 use cosmon_filestore::FileStore;
+use cosmon_state::ops::evolve::{
+    evolve as evolve_op, EvolveEffects, EvolveError, EvolveOpRequest, StepRefusal,
+};
 use cosmon_state::{event_log, BriefingSeal, StateStore};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+// The acceptance-artifact guard lives in the shared operation; `cs tackle`'s
+// finalize guard and this module's tests keep their old spelling.
+pub(super) use cosmon_state::ops::evolve::deliver_committee_posture_reference;
+#[allow(unused_imports)]
+pub(crate) use cosmon_state::ops::evolve::{
+    missing_expected_artifacts, try_seal_briefing, unsatisfied_expected_artifacts,
+};
 
 use super::Context;
 
@@ -58,10 +67,6 @@ const AUTO_COMMIT_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The evidence text as an event field: `None` when the worker recorded none,
 /// so the event omits the key rather than carrying an empty string.
-fn non_empty(text: &str) -> Option<String> {
-    (!text.trim().is_empty()).then(|| text.to_owned())
-}
-
 /// Find generated-artifact roots identified by the standard `CACHEDIR.TAG`
 /// marker.
 ///
@@ -553,6 +558,12 @@ pub struct Args {
 }
 
 /// Execute the `evolve` command.
+///
+/// The transition is [`cosmon_state::ops::evolve::evolve`], the same operation
+/// `POST /v1/molecules/:id/evolve` calls. This module supplies what only a
+/// local worker's machine can do, as [`CliEffects`]: the shell verification
+/// a step may declare, artifact repatriation from the worktree, the per-step
+/// auto-commit, the inline gate step, and the bootstrap seal.
 #[allow(clippy::unnecessary_wraps, clippy::too_many_lines)]
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let mol_id = MoleculeId::new(&args.molecule)?;
@@ -575,9 +586,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // `.cosmon/state/` (worktree state-host pattern); deriving the project
     // root from it would point at the **main worktree** and let `git add -A`
     // (and `cargo` invocations) leak across worker boundaries. We resolve
-    // from cwd via `git rev-parse --show-toplevel` instead. Computed once
-    // and reused at each call site below. Falls back to the ops_dir-based
-    // path when cwd is not in a git repo (legacy / test environments).
+    // from cwd via `git rev-parse --show-toplevel` instead. Falls back to the
+    // ops_dir-based path when cwd is not in a git repo (legacy / test
+    // environments).
     let main_root_buf = ops_dir
         .parent()
         .and_then(|p| p.parent())
@@ -589,714 +600,29 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to read formula {}: {e}", args.formula.display()))?;
     let formula = Formula::parse(&formula_text)?;
 
-    // Canonical molecule directory — resolved once and reused both inside the
-    // lock (artifact-presence guard) and after it (log.md / briefing.md /
-    // seals). This is the path `cs done` tears down, so it is the only place
-    // a step's acceptance artifacts can durably live.
-    let mol_dir = store.molecule_dir(&mol_id);
-
-    // Hold the fleet lock for the load → evolve → save cycle (ADR-131
-    // Decision 2: RAII guard — `_g` releases the flock at end of block).
-    // This prevents concurrent evolves from clobbering each other's state.
-    let updated = 'lock: {
-        let _g = store.lock_fleet()?;
-        // Load molecule state.
-        let mol_data = store.load_molecule(&mol_id)?;
-
-        // Terminal calls must refuse before the energy breaker can park them.
-        if matches!(
-            mol_data.status,
-            cosmon_core::molecule::MoleculeStatus::Completed
-                | cosmon_core::molecule::MoleculeStatus::Collapsed
-        ) {
-            return Err(cosmon_core::evolve::EvolveError::NotRunnable {
-                status: mol_data.status,
-            }
-            .into());
-        }
-
-        // Energy circuit breaker (THESIS Part XI). When the per-molecule
-        // [`StepBudget`] is exhausted, refuse the step and park the
-        // molecule in `Frozen` with reason `"energy-exhausted"` so a
-        // human can decide whether to bump the cap, collapse, or split
-        // the work. Decrementing happens once we know the step will
-        // proceed (i.e. after `evolve::evolve` validates state) so a
-        // budget slot is never burnt on a no-op call.
-        if let Some(budget) = mol_data.energy_budget {
-            if budget.is_exhausted() {
-                let reason = format!("energy-exhausted (cap={}, remaining=0)", budget.cap);
-                let mut stuck_mol = mol_data;
-                stuck_mol.status = cosmon_core::molecule::MoleculeStatus::Frozen;
-                stuck_mol.updated_at = Utc::now();
-                store.save_molecule(&stuck_mol.id.clone(), &stuck_mol)?;
-
-                let events_path = ops_dir.join("events.jsonl");
-                let _ = event_log::emit_one(
-                    &events_path,
-                    EventV2::MoleculeStuck {
-                        molecule_id: mol_id.clone(),
-                        reason: cosmon_core::event_v2::StuckReason::EnergyExhausted,
-                    },
-                    None,
-                );
-
-                if ctx.json {
-                    let json_out = serde_json::json!({
-                        "molecule": stuck_mol.id.as_str(),
-                        "stuck": true,
-                        "reason": reason,
-                        "energy_exhausted": true,
-                        "energy_cap": stuck_mol
-                            .energy_budget
-                            .map_or(0, |b| b.cap),
-                    });
-                    println!("{}", serde_json::to_string(&json_out).unwrap());
-                } else {
-                    eprintln!("error: {reason}");
-                    println!("❄️  {mol_id} stuck: {reason}");
-                }
-                anyhow::bail!("{reason}");
-            }
-        }
-
-        // Run the evolve logic.
-        let request = EvolveRequest {
-            evidence: args.evidence.clone(),
-            timestamp: Utc::now(),
-        };
-        let outcome = evolve::evolve(
-            mol_data.status,
-            mol_data.current_step,
-            &mol_data.completed_steps,
-            &formula,
-            &request,
-        )?;
-
-        // Print warnings.
-        for warning in &outcome.warnings {
-            eprintln!("warning: {warning}");
-        }
-
-        // Run verification gate if the completed step has a VerificationSpec.
-        let completed_step_spec = &formula.steps[outcome.completed_step.index];
-        if let Some(ref verification) = completed_step_spec.verification {
-            if !verification.criteria.is_empty() {
-                // Trust gate (B5, RCE-by-clone): `verification.criteria` is a
-                // repo-supplied shell string. Refuse to run it unless the
-                // operator has vouched for this repository (`cs trust`). This
-                // runs BEFORE any state mutation, so a refusal leaves the
-                // molecule untouched.
-                cosmon_cli::trust::ensure_trusted(&project_root_buf)?;
-
-                // Run in the worker's own worktree (see `worker_worktree_root`),
-                // not the main-repo path derived from `ops_dir` — otherwise
-                // verification would shell out against the main worktree's
-                // tree state instead of the worker's WIP code.
-                let output = Command::new("sh")
-                    .arg("-c")
-                    .arg(&verification.criteria)
-                    .current_dir(&project_root_buf)
-                    .output()
-                    .map_err(|e| anyhow::anyhow!("failed to run verification command: {e}"))?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let combined = if stderr.is_empty() {
-                        stdout.to_string()
-                    } else {
-                        format!("{stdout}{stderr}")
-                    };
-                    let combined = combined.trim().to_owned();
-
-                    if verification.max_retries > 0 {
-                        eprintln!(
-                            "warning: verification failed for step \"{}\": {}, {} retries remaining",
-                            outcome.completed_step.id, combined, verification.max_retries
-                        );
-                        // Do NOT persist the step advancement — the agent can fix and retry.
-                        if ctx.json {
-                            let json_out = serde_json::json!({
-                                "molecule": mol_data.id.as_str(),
-                                "verification_failed": true,
-                                "step": outcome.completed_step.id,
-                                "output": combined,
-                                "retries_remaining": verification.max_retries,
-                            });
-                            println!("{}", serde_json::to_string(&json_out).unwrap());
-                        }
-                        break 'lock None;
-                    }
-                    // Retries exhausted — mark molecule as stuck.
-                    let reason = format!(
-                        "verification failed after {} retries: {}",
-                        verification.max_retries, combined
-                    );
-                    let mut stuck_mol = mol_data;
-                    stuck_mol.status = cosmon_core::molecule::MoleculeStatus::Frozen;
-                    stuck_mol.updated_at = Utc::now();
-                    store.save_molecule(&stuck_mol.id.clone(), &stuck_mol)?;
-
-                    let events_path = ops_dir.join("events.jsonl");
-                    let _ = event_log::emit_one(
-                        &events_path,
-                        EventV2::MoleculeStuck {
-                            molecule_id: mol_id.clone(),
-                            reason: cosmon_core::event_v2::StuckReason::from(reason.clone()),
-                        },
-                        None,
-                    );
-
-                    if ctx.json {
-                        let json_out = serde_json::json!({
-                            "molecule": stuck_mol.id.as_str(),
-                            "verification_failed": true,
-                            "stuck": true,
-                            "reason": reason,
-                        });
-                        println!("{}", serde_json::to_string(&json_out).unwrap());
-                    } else {
-                        eprintln!("error: {reason}");
-                        println!("❄️ {mol_id} stuck: {reason}");
-                    }
-                    break 'lock None;
-                }
-            }
-        }
-
-        // ── Artifact-presence guard (HARD gate, Lever B) ───────────────────
-        // After the worker claims the step done, but BEFORE any committed
-        // state mutation, verify every artifact the step declared via
-        // `acceptance_artifacts` actually landed under the canonical
-        // `mol_dir`. A missing acceptance artifact is a *contemporaneous,
-        // irreversible* data-loss-before-`cs done`-teardown: the worktree is
-        // about to be destroyed and any misplaced copy vanishes with it.
-        //
-        // This is the gate-step family (FAIL on missing — like `Step::command`
-        // / `Step::native` failing on non-zero exit), NOT the defensive
-        // briefing-seal family. The seal model (CLAUDE.md §8b) deliberately
-        // *proposes* verification: a seal failure is logged and swallowed and
-        // never blocks the hot path, because seals guard against *retrospective
-        // tampering* a later audit can still catch. This guard blocks instead,
-        // because blocking the advance *is* the recovery window — the molecule
-        // stays on its current step (no state mutation below), so the worker
-        // can move the misplaced file and re-run `cs evolve`. A reviewer
-        // should read this as a gate step, not a §8b breach.
-        // Lever C (task-20260504-33f6): before the gate fails, try to
-        // auto-repatriate any declared artifact the worker wrote to the
-        // worktree root instead of the canonical `mol_dir`. This is the
-        // recurring deep-think failure (worker writes synthesis.md/frame.md/
-        // responses/ to $WORKTREE_ROOT). Recovery is silent on the happy
-        // path; the read-only gate is then re-evaluated so anything that
-        // could NOT be recovered still fails the advance loudly (Lever B).
-        let mut missing =
-            missing_expected_artifacts(&mol_dir, &completed_step_spec.expected_artifacts);
-        if !missing.is_empty() {
-            let repatriated = repatriate_misplaced_artifacts(&mol_dir, &project_root_buf, &missing);
-            if !repatriated.is_empty() {
-                eprintln!(
-                    "warning: auto-repatriated misplaced acceptance artifact(s) into the molecule directory: {}\n  \
-the worker wrote them to the worktree root ({}) instead of the canonical molecule_dir ({}); \
-they would have been destroyed at `cs done` teardown.",
-                    repatriated.join(", "),
-                    project_root_buf.display(),
-                    mol_dir.display(),
-                );
-                // Re-evaluate the gate now that the files have been moved.
-                missing =
-                    missing_expected_artifacts(&mol_dir, &completed_step_spec.expected_artifacts);
-            }
-        }
-        if !missing.is_empty() {
-            let reason = format!(
-                "step \"{}\" declares acceptance_artifacts that are missing from the molecule directory.\n  \
-canonical molecule_dir: {}\n  missing: {}\n\n\
-Move the misplaced artifact(s) into the canonical directory above, then re-run `cs evolve`. \
-The molecule has NOT advanced — its state is unchanged, so this is recoverable until `cs done` tears down the worktree.",
-                outcome.completed_step.id,
-                mol_dir.display(),
-                missing.join(", "),
-            );
-            if ctx.json {
-                let json_out = serde_json::json!({
-                    "molecule": mol_id.as_str(),
-                    "artifact_guard_failed": true,
-                    "advanced": false,
-                    "step": outcome.completed_step.id,
-                    "molecule_dir": mol_dir.display().to_string(),
-                    "missing_artifacts": missing,
-                });
-                println!("{}", serde_json::to_string(&json_out).unwrap());
-            } else {
-                eprintln!("error: {reason}");
-            }
-            anyhow::bail!("{reason}");
-        }
-
-        // Update molecule data.
-        let step_id = cosmon_core::id::StepId::new(&outcome.completed_step.id)?;
-        let mut updated = mol_data;
-        updated.completed_steps.push(step_id);
-        // Decrement the step-budget circuit breaker (THESIS Part XI). The
-        // exhaustion check above guaranteed `remaining > 0`, so `consume`
-        // succeeds. Persisted via `save_molecule` below — a crash between
-        // here and that write replays through the same `is_exhausted`
-        // gate, so a slot is never silently lost.
-        if let Some(mut b) = updated.energy_budget {
-            b.consume();
-            updated.energy_budget = Some(b);
-        }
-        let now = Utc::now();
-        updated.updated_at = now;
-        // Step completion is observable forward motion — stamp the
-        // inference-stall signal so `cs peek` can derive a `Stalled`
-        // health state without introspecting tmux.
-        updated.last_progress_at = Some(now);
-        // A completed step is a durable work product (artifacts and/or its
-        // commit have landed). Heartbeats deliberately never touch this clock.
-        updated.last_output_at = Some(now);
-        match &outcome.new_state {
-            NewState::Active { current_step, .. } => {
-                updated.current_step = *current_step;
-                // Promote Queued → Running on first evolve.
-                updated.status = cosmon_core::molecule::MoleculeStatus::Running;
-            }
-            NewState::Completed => {
-                // Respect freeze_on_last_step: if the molecule was nucleated with
-                // this flag (from the formula), freeze instead of completing.
-                if updated.freeze_on_last_step {
-                    updated.status = cosmon_core::molecule::MoleculeStatus::Frozen;
-                } else {
-                    updated.status = cosmon_core::molecule::MoleculeStatus::Completed;
-                }
-                // Set current_step = total_steps so observers report "N/N"
-                // instead of "N-1/N". Symmetric with cs complete (4bcbcff).
-                updated.current_step = updated.total_steps;
-            }
-            _ => {}
-        }
-
-        // Intent record (godel's intent+receipt pattern, ADR-036): before
-        // advancing committed state, stamp a `pending_step` intent. If the
-        // process crashes after this save but before the receipt clear
-        // below, a future replay can inspect `pending_step` and know that
-        // artifact writes may not have landed.
-        updated.pending_step = Some(cosmon_state::PendingStep {
-            target_step: updated.current_step,
-            started_at: Utc::now(),
-            commit_sha: None,
-        });
-
-        if updated.status == cosmon_core::molecule::MoleculeStatus::Completed {
-            crate::energy_probe::capture_realized_at_completion(&ops_dir, &mol_id);
-        }
-        // Save updated molecule (intent + state advance, atomic rename).
-        store.save_molecule(&updated.id.clone(), &updated)?;
-
-        Some((updated, outcome))
+    let effects = CliEffects {
+        ctx,
+        store: &store,
+        ops_dir: &ops_dir,
+        mol_id: &mol_id,
+        formula: &formula,
+        main_root: &main_root_buf,
+        project_root: &project_root_buf,
     };
-
-    // Early return if verification failed or molecule was stuck (no state to advance).
-    let Some((mut updated, outcome)) = updated else {
-        return Ok(());
-    };
-
-    // Worktree guard (idea-20260531-1e1b). The auto-commit below must land in
-    // the worktree `cs tackle` assigned to this molecule, never in an
-    // unrelated repo the worker happens to be cwd'd in (the genericize
-    // ghost-committer). Resolved from the bound worker's recorded repo;
-    // `None` for legacy / test molecules, which then behave as today.
-    let recorded_worktree = recorded_worktree_for(&store, &updated, &main_root_buf);
-
-    // Per-step auto-commit — give each step its own restore anchor.
-    // See `auto_commit_step` for the Carnot rationale.
-    // `project_root_buf` is the worker's worktree (resolved at the top of
-    // `run` via `worker_worktree_root`), NOT the main repo path — see the
-    // helper docs for the cross-contamination regression this prevents.
-    {
-        let completed_spec = &formula.steps[outcome.completed_step.index];
-        let step_name = if completed_spec.title.is_empty() {
-            completed_spec.id.clone()
-        } else {
-            completed_spec.title.clone()
-        };
-        guarded_auto_commit(
-            ctx,
-            recorded_worktree.as_deref(),
-            &project_root_buf,
-            mol_id.as_str(),
-            outcome.completed_step.index + 1,
-            formula.steps.len(),
-            &step_name,
-            "step",
-        );
-    }
-
-    // Auto-execute gate step: if the new current step is a shell gate, run it
-    // inline so the worker doesn't have to call `cs tackle` again.  This makes
-    // mixed agent→gate sequences seamless (e.g. verify → auto-freeze).
-    if let NewState::Active { current_step, .. } = &outcome.new_state {
-        if let Some(next_step) = formula.steps.get(*current_step) {
-            if next_step.is_gate() {
-                let gate_cmd = next_step.command.as_deref().unwrap_or("");
-                let timeout_secs = next_step.gate_timeout_secs();
-
-                if !ctx.json {
-                    eprintln!("⚙️  Auto-executing gate step \"{}\" …", next_step.id);
-                }
-
-                // Trust gate (B5, RCE-by-clone): the gate step's `command` is
-                // a repo-supplied shell string. Refuse unless this repository
-                // is trusted (`cs trust`).
-                cosmon_cli::trust::ensure_trusted(&project_root_buf)?;
-
-                // Run the gate command outside the lock (shell execution),
-                // in the worker's own worktree — gates such as `cargo test`
-                // must observe the worker's WIP code, not the main repo.
-                let gate_result = Command::new("sh")
-                    .arg("-c")
-                    .arg(gate_cmd)
-                    .current_dir(&project_root_buf)
-                    .output();
-
-                // Lock only for the state mutation after gate execution.
-                match gate_result {
-                    Ok(output) if output.status.success() => {
-                        // Gate succeeded — advance past it under lock.
-                        {
-                            let _g = store.lock_fleet()?;
-                            let gate_step_id = cosmon_core::id::StepId::new(&next_step.id)?;
-                            let gate_request = EvolveRequest {
-                                evidence: format!(
-                                    "gate step \"{}\" auto-executed (exit 0)",
-                                    next_step.id
-                                ),
-                                timestamp: Utc::now(),
-                            };
-                            let gate_outcome = evolve::evolve(
-                                updated.status,
-                                updated.current_step,
-                                &updated.completed_steps,
-                                &formula,
-                                &gate_request,
-                            )?;
-                            updated.completed_steps.push(gate_step_id);
-                            let gate_now = Utc::now();
-                            updated.updated_at = gate_now;
-                            updated.last_progress_at = Some(gate_now);
-                            updated.last_output_at = Some(gate_now);
-                            match &gate_outcome.new_state {
-                                NewState::Active { current_step, .. } => {
-                                    updated.current_step = *current_step;
-                                }
-                                NewState::Completed => {
-                                    if updated.freeze_on_last_step {
-                                        updated.status =
-                                            cosmon_core::molecule::MoleculeStatus::Frozen;
-                                    } else {
-                                        updated.status =
-                                            cosmon_core::molecule::MoleculeStatus::Completed;
-                                    }
-                                    updated.current_step = updated.total_steps;
-                                }
-                                _ => {}
-                            }
-                            if updated.status == cosmon_core::molecule::MoleculeStatus::Completed {
-                                crate::energy_probe::capture_realized_at_completion(
-                                    &ops_dir, &mol_id,
-                                );
-                            }
-                            store.save_molecule(&updated.id.clone(), &updated)?;
-
-                            // Emit gate step-completed event.
-                            let gate_events_path = ops_dir.join("events.jsonl");
-                            let _ = event_log::emit_one(
-                                &gate_events_path,
-                                EventV2::MoleculeStepCompleted {
-                                    molecule_id: mol_id.clone(),
-                                    step: gate_outcome.completed_step.index,
-                                    total: formula.steps.len(),
-                                    duration_ms: None,
-                                    step_hash: None,
-                                    evidence: Some(gate_request.evidence.clone()),
-                                },
-                                None,
-                            );
-
-                            if matches!(gate_outcome.new_state, NewState::Completed) {
-                                let _ = event_log::emit_one(
-                                    &gate_events_path,
-                                    EventV2::MoleculeCompleted {
-                                        molecule_id: mol_id.clone(),
-                                        duration_ms: None,
-                                        reason: format!(
-                                            "gate step \"{}\" auto-executed, all steps done",
-                                            next_step.id
-                                        ),
-                                        summary: Some(gate_request.evidence.clone()),
-                                    },
-                                    None,
-                                );
-                            }
-                        }
-
-                        if !ctx.json {
-                            eprintln!("  ✅ gate \"{}\" passed", next_step.id);
-                        }
-
-                        // Per-step auto-commit for the gate step (gates often
-                        // touch files — e.g. fmt fixes — and deserve their own
-                        // restore anchor).
-                        let gate_name = if next_step.title.is_empty() {
-                            next_step.id.clone()
-                        } else {
-                            next_step.title.clone()
-                        };
-                        let gate_step_one_based =
-                            updated.completed_steps.len().min(formula.steps.len());
-                        guarded_auto_commit(
-                            ctx,
-                            recorded_worktree.as_deref(),
-                            &project_root_buf,
-                            mol_id.as_str(),
-                            gate_step_one_based,
-                            formula.steps.len(),
-                            &gate_name,
-                            "gate",
-                        );
-                    }
-                    Ok(output) => {
-                        // Gate failed — collapse the molecule under lock.
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        let reason = format!(
-                            "gate step \"{}\" failed (exit {}): {}{}",
-                            next_step.id,
-                            output.status.code().unwrap_or(-1),
-                            stdout.trim(),
-                            stderr.trim()
-                        );
-                        {
-                            let _g = store.lock_fleet()?;
-                            updated.status = cosmon_core::molecule::MoleculeStatus::Collapsed;
-                            updated.collapse_reason = Some(reason.clone());
-                            updated.updated_at = Utc::now();
-                            store.save_molecule(&updated.id.clone(), &updated)?;
-                        }
-                        if !ctx.json {
-                            eprintln!("  💥 gate \"{}\" failed: {reason}", next_step.id);
-                        }
-                    }
-                    Err(e) => {
-                        let reason = format!("gate step \"{}\" spawn error: {e}", next_step.id);
-                        {
-                            let _g = store.lock_fleet()?;
-                            updated.status = cosmon_core::molecule::MoleculeStatus::Collapsed;
-                            updated.collapse_reason = Some(reason.clone());
-                            updated.updated_at = Utc::now();
-                            store.save_molecule(&updated.id.clone(), &updated)?;
-                        }
-                        if !ctx.json {
-                            eprintln!("  💥 {reason}");
-                        }
-                    }
-                }
-
-                let _ = timeout_secs; // used by tackle; informational here
-            }
-        }
-    }
-
-    // Emit legacy molecule_evolved event.
-    let _ = cosmon_filestore::event::append(
-        &ops_dir.join("events.jsonl"),
-        &Envelope::now(Event::MoleculeEvolved {
-            molecule_id: mol_id.clone(),
-            step: outcome.completed_step.index,
-            total: updated.total_steps,
-        }),
-    );
-
-    // Emit EventV2 records.
-    let events_path = ops_dir.join("events.jsonl");
-    let step_seq = event_log::emit_one(
-        &events_path,
-        EventV2::MoleculeStepCompleted {
-            molecule_id: mol_id.clone(),
-            step: outcome.completed_step.index,
-            total: updated.total_steps,
-            duration_ms: None,
-            step_hash: None,
-            evidence: non_empty(&args.evidence),
+    let view = match evolve_op(
+        &store,
+        &ops_dir,
+        &mol_id,
+        &EvolveOpRequest {
+            evidence: &args.evidence,
+            formula: &formula,
         },
-        None,
-    )
-    .ok();
-
-    if matches!(outcome.new_state, NewState::Completed) {
-        let _ = event_log::emit_one(
-            &events_path,
-            EventV2::MoleculeCompleted {
-                molecule_id: mol_id.clone(),
-                duration_ms: None,
-                reason: "all steps completed".to_owned(),
-                summary: non_empty(&args.evidence),
-            },
-            step_seq,
-        );
-    }
-
-    // Append to log.md in the molecule directory. `mol_dir` was resolved
-    // before the lock (fleet-scoped path) and reused here.
-    let log_path = mol_dir.join("log.md");
-    let existing_log = fs::read_to_string(&log_path).unwrap_or_default();
-    let new_log = if existing_log.is_empty() {
-        format!("# Evolution Log\n\n{}", outcome.log_entry)
-    } else {
-        format!("{existing_log}{}", outcome.log_entry)
+        &effects,
+    ) {
+        Ok(view) => view,
+        Err(e) => return report_refusal(ctx, &mol_id, e),
     };
-    fs::write(&log_path, new_log).map_err(|e| anyhow::anyhow!("failed to write log.md: {e}"))?;
-
-    // Write briefing.md (or remove if completed).
-    let briefing_path = mol_dir.join("briefing.md");
-    if let Some(ref briefing) = outcome.briefing {
-        let task = cosmon_core::briefing::render_task(&updated.variables);
-        fs::write(&briefing_path, format!("{task}{briefing}"))
-            .map_err(|e| anyhow::anyhow!("failed to write briefing.md: {e}"))?;
-    } else {
-        // Molecule completed — write a final briefing.
-        fs::write(
-            &briefing_path,
-            "# Molecule Briefing\n\n**Status:** COMPLETED\n\nAll steps have been completed.\n",
-        )
-        .map_err(|e| anyhow::anyhow!("failed to write briefing.md: {e}"))?;
-    }
-
-    // Committee-posture delivery: the briefing we just (re)wrote is a fresh
-    // projection of the formula step and carries NO adversarial contract. If
-    // this molecule is a committee seat — i.e. the durable, regeneration-stable
-    // `committee-posture.md` exists in its directory — deliver the stable
-    // pointer to it so the seat's persona witness stays satisfied across every
-    // step advance (committee-20260723-c0a1, witness 2 = `BriefingNotInjected`).
-    // Runs before the seal below so the seal covers the delivered pointer.
-    deliver_committee_posture_reference(&mol_dir, &briefing_path)?;
-
-    // Soft-contract seal: hash the briefing we just wrote and append it
-    // to `MoleculeData::briefing_seals`. Defensive — any failure is
-    // logged and swallowed; seal emission must never block step advance.
-    // `step` is the zero-based index of the step the worker is now on
-    // (i.e. the step this briefing introduces), which matches the
-    // briefing regeneration that just happened.
-    let seal_step = u32::try_from(updated.current_step).unwrap_or(u32::MAX);
-    if let Some(seal) = try_seal_briefing(&briefing_path, seal_step) {
-        // Defensive: seal persistence is best-effort and never blocks step
-        // advance, so the guard's lock-acquisition / load / save errors are
-        // captured into a local `Result` rather than propagated (ADR-131
-        // Decision 2 — lexical guard, explicit error capture).
-        let persisted: Result<(), cosmon_core::error::CosmonError> = 'seal: {
-            let _g = match store.lock_fleet() {
-                Ok(g) => g,
-                Err(e) => break 'seal Err(e),
-            };
-            let mut mol = match store.load_molecule(&mol_id) {
-                Ok(m) => m,
-                Err(e) => break 'seal Err(e),
-            };
-            mol.briefing_seals.push(seal.clone());
-            mol.updated_at = Utc::now();
-            store.save_molecule(&mol_id, &mol)
-        };
-        if let Err(e) = persisted {
-            eprintln!("warning: could not persist briefing seal: {e}");
-        } else {
-            let _ = event_log::emit_one(
-                &events_path,
-                EventV2::BriefingSealed {
-                    molecule_id: mol_id.clone(),
-                    step: seal.step,
-                    hash: seal.hash.clone(),
-                    sealed_at: seal.sealed_at,
-                    bytes: seal.briefing_bytes,
-                    canonical_version: seal.canonical_version,
-                },
-                step_seq,
-            );
-        }
-    }
-
-    // Bootstrap-context seal (W2 of delib-20260519-e6db, adversary
-    // F2.1+F2.2). The agent-harness bootstrap walk surfaces every
-    // `AGENTS.md` / `CLAUDE.md` from `project_root_buf` up to the
-    // enclosing `.git/` as fenced `<bootstrap_context>` blocks. We
-    // hash that exact byte stream so a later `cs verify` can re-run
-    // the walk and detect cross-worktree poisoning — a peer worker
-    // dropping an AGENTS.md between this advance and the audit.
-    //
-    // Same defensive discipline as briefing_seal — any failure is
-    // logged and swallowed, never blocks step advance. The walk
-    // itself is refuse-above-`.git/`; outside a git checkout it
-    // returns an empty string and we seal an empty buffer (so the
-    // verifier observes "no bootstrap content" rather than "no seal
-    // recorded").
-    let bootstrap_bytes =
-        cosmon_agent_harness::bootstrap::collect_bootstrap_context(&project_root_buf);
-    // Snapshot the walk output into the molecule. The bootstrap walk
-    // covers the operator's ambient `AGENTS.md` / `CLAUDE.md`, which live
-    // OUTSIDE the molecule and drift legitimately (the operator edits
-    // their own instructions; the worktree is torn down and `cs verify`
-    // runs from a different cwd). Re-walking at verify time therefore
-    // fires on ambient drift, not tampering. Sealing an immutable
-    // snapshot of the walk-as-it-was-at-this-step preserves genuine
-    // tamper-evidence (a rewrite of the recorded snapshot is still
-    // caught) without alarming on honest ambient evolution.
-    let bootstrap_seal =
-        BriefingSeal::of_text(seal_step, &bootstrap_bytes).with_snapshot(&bootstrap_bytes);
-    // Same defensive capture as the briefing seal above (ADR-131 Decision 2).
-    let persisted: Result<(), cosmon_core::error::CosmonError> = 'bootstrap: {
-        let _g = match store.lock_fleet() {
-            Ok(g) => g,
-            Err(e) => break 'bootstrap Err(e),
-        };
-        let mut mol = match store.load_molecule(&mol_id) {
-            Ok(m) => m,
-            Err(e) => break 'bootstrap Err(e),
-        };
-        mol.bootstrap_seals.push(bootstrap_seal.clone());
-        mol.updated_at = Utc::now();
-        store.save_molecule(&mol_id, &mol)
-    };
-    if let Err(e) = persisted {
-        eprintln!("warning: could not persist bootstrap seal: {e}");
-    } else {
-        let _ = event_log::emit_one(
-            &events_path,
-            EventV2::BootstrapSealed {
-                molecule_id: mol_id.clone(),
-                step: bootstrap_seal.step,
-                hash: bootstrap_seal.hash.clone(),
-                sealed_at: bootstrap_seal.sealed_at,
-                bytes: bootstrap_seal.briefing_bytes,
-                canonical_version: bootstrap_seal.canonical_version,
-            },
-            step_seq,
-        );
-    }
-
-    // Receipt (godel's intent+receipt pattern, ADR-036): artifacts have
-    // landed, so clear the `pending_step` intent atomically. A crash
-    // between the main state advance and this clear leaves a stale
-    // intent record — idempotent replay of `cs evolve` observes the
-    // mismatch (intent.target_step vs committed current_step) and can
-    // treat it as a no-op marker to be cleared.
-    {
-        let _g = store.lock_fleet()?;
-        let mut mol = store.load_molecule(&mol_id)?;
-        if mol.pending_step.is_some() {
-            mol.pending_step = None;
-            mol.updated_at = Utc::now();
-            store.save_molecule(&mol_id, &mol)?;
-        }
-    }
+    let (updated, outcome) = (view.updated, view.outcome);
 
     // Output result.
     if ctx.json {
@@ -1340,128 +666,495 @@ The molecule has NOT advanced — its state is unchanged, so this is recoverable
     Ok(())
 }
 
-/// Return the subset of `expected` artifacts that are absent from `mol_dir`.
+/// Print a refused advance the way `cs evolve` always has, and decide
+/// whether it is an error exit.
 ///
-/// Each entry is a path relative to `mol_dir`. A trailing `/` (e.g.
-/// `"responses/"`) marks a **directory that must exist and be non-empty** —
-/// an empty `responses/` is as much a near-loss as a missing one (no proof
-/// of work landed). Every other entry must resolve to an existing path
-/// (file or directory).
-///
-/// This is the read-only, idempotent core of the artifact-presence HARD gate
-/// (Lever B). It never mutates state; the caller turns
-/// a non-empty result into a failed advance. See
-/// [`cosmon_core::formula::Step::expected_artifacts`] for the doctrine
-/// (why this blocks where the briefing-seal family swallows).
-fn missing_expected_artifacts(mol_dir: &Path, expected: &[String]) -> Vec<String> {
-    unsatisfied_expected_artifacts(mol_dir, expected, None)
-}
-
-/// The acceptance-artifact presence check, shared by the `cs evolve` gate
-/// (per-step, `min_mtime = None`) and the in-process / detached-local finalize
-/// guard (whole-formula, `min_mtime = Some(step_start)`).
-///
-/// An entry is *unsatisfied* — i.e. fails to prove work — when any of the four
-/// failure modes the acceptance-artifact contract names holds (Jesse #4):
-///
-/// * **absent** — the declared path does not exist under `mol_dir`;
-/// * **empty** — a declared file exists but is zero bytes, or a declared
-///   directory (`"…/"`) exists but holds no entry. A zero-byte file is as much
-///   a near-loss as none: a weak model that `touch`es its deliverable without
-///   writing it must not pass;
-/// * **outside the molecule dir** — the entry is absolute or climbs out with
-///   `..`. Such a path can never be satisfied by a real deliverable *inside*
-///   the recovery window, so it is treated as unsatisfied rather than resolved
-///   against something the `cs done` teardown will not preserve;
-/// * **stale** — when `min_mtime` is given, the artifact (or, for a directory,
-///   its freshest child) was last modified *before* the step started. A file
-///   left over from a previous tackle is not proof that *this* turn did work.
-///
-/// The check is read-only and idempotent. Legacy steps that declare no
-/// `acceptance_artifacts` yield an empty `expected` slice and thus an empty
-/// result — backward-compatible.
-pub(crate) fn unsatisfied_expected_artifacts(
-    mol_dir: &Path,
-    expected: &[String],
-    min_mtime: Option<SystemTime>,
-) -> Vec<String> {
-    expected
-        .iter()
-        .filter(|entry| !artifact_satisfied(mol_dir, entry, min_mtime))
-        .cloned()
-        .collect()
-}
-
-/// Whether a single declared `entry` is satisfied under `mol_dir`. See
-/// [`unsatisfied_expected_artifacts`] for the four failure modes this rejects.
-fn artifact_satisfied(mol_dir: &Path, entry: &str, min_mtime: Option<SystemTime>) -> bool {
-    let rel = entry.trim_end_matches('/');
-    // Containment: the declared path must resolve strictly *inside* `mol_dir`.
-    // An absolute path or one climbing out with `..` can never be a deliverable
-    // inside the recovery window, so it is unsatisfiable by construction.
-    if rel.is_empty() || Path::new(rel).is_absolute() {
-        return false;
-    }
-    if Path::new(rel)
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return false;
-    }
-    let path = mol_dir.join(rel);
-    let Ok(canonical_root) = mol_dir.canonicalize() else {
-        return false;
-    };
-    let mut cursor = canonical_root.clone();
-    for component in Path::new(rel).components() {
-        cursor.push(component.as_os_str());
-        if fs::symlink_metadata(&cursor).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-            return false;
+/// A verification failure — retryable or final — is reported and exits 0:
+/// the molecule is either untouched or parked, and the worker's next move is
+/// its own. Every other refusal is an error.
+fn report_refusal(ctx: &Context, mol_id: &MoleculeId, err: EvolveError) -> anyhow::Result<()> {
+    match err {
+        EvolveError::EnergyExhausted { cap } => {
+            let reason = format!("energy-exhausted (cap={cap}, remaining=0)");
+            if ctx.json {
+                let json_out = serde_json::json!({
+                    "molecule": mol_id.as_str(),
+                    "stuck": true,
+                    "reason": reason,
+                    "energy_exhausted": true,
+                    "energy_cap": cap,
+                });
+                println!("{}", serde_json::to_string(&json_out).unwrap());
+            } else {
+                eprintln!("error: {reason}");
+                println!("❄️  {mol_id} stuck: {reason}");
+            }
+            anyhow::bail!("{reason}");
         }
+        EvolveError::VerificationRetry {
+            step,
+            output,
+            retries_remaining,
+        } => {
+            eprintln!(
+                "warning: verification failed for step \"{step}\": {output}, {retries_remaining} retries remaining"
+            );
+            if ctx.json {
+                let json_out = serde_json::json!({
+                    "molecule": mol_id.as_str(),
+                    "verification_failed": true,
+                    "step": step,
+                    "output": output,
+                    "retries_remaining": retries_remaining,
+                });
+                println!("{}", serde_json::to_string(&json_out).unwrap());
+            }
+            Ok(())
+        }
+        EvolveError::VerificationExhausted { reason } => {
+            if ctx.json {
+                let json_out = serde_json::json!({
+                    "molecule": mol_id.as_str(),
+                    "verification_failed": true,
+                    "stuck": true,
+                    "reason": reason,
+                });
+                println!("{}", serde_json::to_string(&json_out).unwrap());
+            } else {
+                eprintln!("error: {reason}");
+                println!("❄️ {mol_id} stuck: {reason}");
+            }
+            Ok(())
+        }
+        EvolveError::ArtifactsMissing {
+            step,
+            mol_dir,
+            missing,
+        } => {
+            let reason = format!(
+                "step \"{step}\" declares acceptance_artifacts that are missing from the molecule directory.\n  \
+canonical molecule_dir: {mol_dir}\n  missing: {}\n\n\
+Move the misplaced artifact(s) into the canonical directory above, then re-run `cs evolve`. \
+The molecule has NOT advanced — its state is unchanged, so this is recoverable until `cs done` tears down the worktree.",
+                missing.join(", "),
+            );
+            if ctx.json {
+                let json_out = serde_json::json!({
+                    "molecule": mol_id.as_str(),
+                    "artifact_guard_failed": true,
+                    "advanced": false,
+                    "step": step,
+                    "molecule_dir": mol_dir,
+                    "missing_artifacts": missing,
+                });
+                println!("{}", serde_json::to_string(&json_out).unwrap());
+            } else {
+                eprintln!("error: {reason}");
+            }
+            anyhow::bail!("{reason}");
+        }
+        EvolveError::NotRunnable(_, status) => {
+            Err(cosmon_core::evolve::EvolveError::NotRunnable { status }.into())
+        }
+        other => Err(other.into()),
     }
-    let Ok(canonical_path) = path.canonicalize() else {
-        return false;
-    };
-    if canonical_path == canonical_root || !canonical_path.starts_with(&canonical_root) {
-        return false;
-    }
-    if entry.ends_with('/') {
-        // Directory contract: exists, holds at least one entry, and — when a
-        // step-start floor is given — at least one entry is fresher than it.
-        let Ok(read) = fs::read_dir(&path) else {
-            return false;
+}
+
+/// What `cs evolve` does on the worker's own machine around the shared
+/// advance. See [`cosmon_state::ops::evolve::evolve`] for why these are not part of it.
+struct CliEffects<'a> {
+    ctx: &'a Context,
+    store: &'a FileStore,
+    ops_dir: &'a Path,
+    mol_id: &'a MoleculeId,
+    formula: &'a Formula,
+    main_root: &'a Path,
+    project_root: &'a Path,
+}
+
+impl EvolveEffects for CliEffects<'_> {
+    fn verify_step(
+        &self,
+        mol: &cosmon_state::MoleculeData,
+        step: &cosmon_core::formula::Step,
+    ) -> Result<(), StepRefusal> {
+        let Some(verification) = &step.verification else {
+            return Ok(());
         };
-        let mut saw_child = false;
-        for child in read.flatten() {
-            if child
-                .file_type()
-                .is_ok_and(|file_type| file_type.is_symlink())
-            {
-                continue;
-            }
-            saw_child = true;
-            if mtime_at_or_after(&child.path(), min_mtime) {
-                return true;
-            }
+        if verification.criteria.is_empty() {
+            return Ok(());
         }
-        // Non-empty but every child is stale (only reachable with a floor);
-        // an empty directory falls through here too.
-        saw_child && min_mtime.is_none()
-    } else {
-        match fs::metadata(&path) {
-            Ok(meta) if meta.is_file() && meta.len() > 0 => {
-                min_mtime.is_none_or(|floor| meta.modified().is_ok_and(|m| m >= floor))
-            }
-            _ => false,
+        // Trust gate (B5, RCE-by-clone): `verification.criteria` is a
+        // repo-supplied shell string. Refuse to run it unless the operator has
+        // vouched for this repository (`cs trust`). This runs BEFORE any state
+        // mutation, so a refusal leaves the molecule untouched.
+        cosmon_cli::trust::ensure_trusted(self.project_root)
+            .map_err(|e| StepRefusal::Other(e.to_string()))?;
+
+        // Run in the worker's own worktree (see `worker_worktree_root`), not
+        // the main-repo path derived from `ops_dir` — otherwise verification
+        // would shell out against the main worktree's tree state instead of
+        // the worker's WIP code.
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&verification.criteria)
+            .current_dir(self.project_root)
+            .output()
+            .map_err(|e| StepRefusal::Other(format!("failed to run verification command: {e}")))?;
+        if output.status.success() {
+            return Ok(());
         }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let combined = if stderr.is_empty() {
+            stdout.to_string()
+        } else {
+            format!("{stdout}{stderr}")
+        };
+        let combined = combined.trim().to_owned();
+        let _ = mol;
+        if verification.max_retries > 0 {
+            // Do NOT persist the step advancement — the agent can fix and retry.
+            return Err(StepRefusal::Retry {
+                output: combined,
+                retries_remaining: verification.max_retries,
+            });
+        }
+        Err(StepRefusal::Exhausted {
+            reason: format!(
+                "verification failed after {} retries: {}",
+                verification.max_retries, combined
+            ),
+        })
+    }
+
+    fn repatriate(&self, mol_dir: &Path, missing: &[String]) -> Vec<String> {
+        // Lever C (task-20260504-33f6): before the gate fails, try to
+        // auto-repatriate any declared artifact the worker wrote to the
+        // worktree root instead of the canonical `mol_dir`.
+        let repatriated = repatriate_misplaced_artifacts(mol_dir, self.project_root, missing);
+        if !repatriated.is_empty() {
+            eprintln!(
+                "warning: auto-repatriated misplaced acceptance artifact(s) into the molecule directory: {}\n  \
+the worker wrote them to the worktree root ({}) instead of the canonical molecule_dir ({}); \
+they would have been destroyed at `cs done` teardown.",
+                repatriated.join(", "),
+                self.project_root.display(),
+                mol_dir.display(),
+            );
+        }
+        repatriated
+    }
+
+    fn append_legacy_event(&self, events_path: &Path, envelope: &Envelope) {
+        let _ = cosmon_filestore::event::append(events_path, envelope);
+    }
+
+    fn on_completed(&self, state_dir: &Path, id: &MoleculeId) {
+        crate::energy_probe::capture_realized_at_completion(state_dir, id);
+    }
+
+    fn warn(&self, message: &str) {
+        eprintln!("warning: {message}");
+    }
+
+    fn after_advance(
+        &self,
+        updated: &mut cosmon_state::MoleculeData,
+        outcome: &cosmon_core::evolve::EvolveOutcome,
+    ) -> Result<(), String> {
+        self.auto_commit_and_gate(updated, outcome)
+            .map_err(|e| e.to_string())
+    }
+
+    fn after_briefing(
+        &self,
+        updated: &cosmon_state::MoleculeData,
+        briefing_path: &Path,
+        seal_step: u32,
+        causal_parent: Option<cosmon_core::event_v2::Seq>,
+    ) -> Result<(), String> {
+        let _ = (updated, briefing_path);
+        self.seal_bootstrap(seal_step, causal_parent);
+        Ok(())
     }
 }
 
-/// Whether `path`'s mtime is at or after `floor` (always true when no floor).
-fn mtime_at_or_after(path: &Path, floor: Option<SystemTime>) -> bool {
-    match floor {
-        None => true,
-        Some(floor) => fs::metadata(path).is_ok_and(|m| m.modified().is_ok_and(|t| t >= floor)),
+impl CliEffects<'_> {
+    /// Per-step auto-commit and the inline gate step, in the order the
+    /// command has always run them: after the advance is persisted, before
+    /// any event is emitted.
+    #[allow(clippy::too_many_lines)]
+    fn auto_commit_and_gate(
+        &self,
+        updated: &mut cosmon_state::MoleculeData,
+        outcome: &cosmon_core::evolve::EvolveOutcome,
+    ) -> anyhow::Result<()> {
+        let ctx = self.ctx;
+        let store = self.store;
+        let ops_dir = self.ops_dir;
+        let mol_id = self.mol_id;
+        let formula = self.formula;
+        let project_root_buf = self.project_root;
+
+        // Worktree guard (idea-20260531-1e1b). The auto-commit below must land
+        // in the worktree `cs tackle` assigned to this molecule, never in an
+        // unrelated repo the worker happens to be cwd'd in (the genericize
+        // ghost-committer). Resolved from the bound worker's recorded repo;
+        // `None` for legacy / test molecules, which then behave as today.
+        let recorded_worktree = recorded_worktree_for(store, updated, self.main_root);
+
+        // Per-step auto-commit — give each step its own restore anchor.
+        // See `auto_commit_step` for the Carnot rationale.
+        {
+            let completed_spec = &formula.steps[outcome.completed_step.index];
+            let step_name = if completed_spec.title.is_empty() {
+                completed_spec.id.clone()
+            } else {
+                completed_spec.title.clone()
+            };
+            guarded_auto_commit(
+                ctx,
+                recorded_worktree.as_deref(),
+                project_root_buf,
+                mol_id.as_str(),
+                outcome.completed_step.index + 1,
+                formula.steps.len(),
+                &step_name,
+                "step",
+            );
+        }
+
+        // Auto-execute gate step: if the new current step is a shell gate, run it
+        // inline so the worker doesn't have to call `cs tackle` again.  This makes
+        // mixed agent→gate sequences seamless (e.g. verify → auto-freeze).
+        if let NewState::Active { current_step, .. } = &outcome.new_state {
+            if let Some(next_step) = formula.steps.get(*current_step) {
+                if next_step.is_gate() {
+                    let gate_cmd = next_step.command.as_deref().unwrap_or("");
+                    let timeout_secs = next_step.gate_timeout_secs();
+
+                    if !ctx.json {
+                        eprintln!("⚙️  Auto-executing gate step \"{}\" …", next_step.id);
+                    }
+
+                    // Trust gate (B5, RCE-by-clone): the gate step's `command` is
+                    // a repo-supplied shell string. Refuse unless this repository
+                    // is trusted (`cs trust`).
+                    cosmon_cli::trust::ensure_trusted(project_root_buf)?;
+
+                    // Run the gate command outside the lock (shell execution),
+                    // in the worker's own worktree — gates such as `cargo test`
+                    // must observe the worker's WIP code, not the main repo.
+                    let gate_result = Command::new("sh")
+                        .arg("-c")
+                        .arg(gate_cmd)
+                        .current_dir(project_root_buf)
+                        .output();
+
+                    // Lock only for the state mutation after gate execution.
+                    match gate_result {
+                        Ok(output) if output.status.success() => {
+                            // Gate succeeded — advance past it under lock.
+                            {
+                                let _g = store.lock_fleet()?;
+                                let gate_step_id = cosmon_core::id::StepId::new(&next_step.id)?;
+                                let gate_request = EvolveRequest {
+                                    evidence: format!(
+                                        "gate step \"{}\" auto-executed (exit 0)",
+                                        next_step.id
+                                    ),
+                                    timestamp: Utc::now(),
+                                };
+                                let gate_outcome = evolve::evolve(
+                                    updated.status,
+                                    updated.current_step,
+                                    &updated.completed_steps,
+                                    formula,
+                                    &gate_request,
+                                )?;
+                                updated.completed_steps.push(gate_step_id);
+                                let gate_now = Utc::now();
+                                updated.updated_at = gate_now;
+                                updated.last_progress_at = Some(gate_now);
+                                updated.last_output_at = Some(gate_now);
+                                match &gate_outcome.new_state {
+                                    NewState::Active { current_step, .. } => {
+                                        updated.current_step = *current_step;
+                                    }
+                                    NewState::Completed => {
+                                        if updated.freeze_on_last_step {
+                                            updated.status =
+                                                cosmon_core::molecule::MoleculeStatus::Frozen;
+                                        } else {
+                                            updated.status =
+                                                cosmon_core::molecule::MoleculeStatus::Completed;
+                                        }
+                                        updated.current_step = updated.total_steps;
+                                    }
+                                    _ => {}
+                                }
+                                if updated.status
+                                    == cosmon_core::molecule::MoleculeStatus::Completed
+                                {
+                                    crate::energy_probe::capture_realized_at_completion(
+                                        ops_dir, mol_id,
+                                    );
+                                }
+                                store.save_molecule(&updated.id.clone(), updated)?;
+
+                                // Emit gate step-completed event.
+                                let gate_events_path = ops_dir.join("events.jsonl");
+                                let _ = event_log::emit_one(
+                                    &gate_events_path,
+                                    EventV2::MoleculeStepCompleted {
+                                        molecule_id: mol_id.clone(),
+                                        step: gate_outcome.completed_step.index,
+                                        total: formula.steps.len(),
+                                        duration_ms: None,
+                                        step_hash: None,
+                                        evidence: Some(gate_request.evidence.clone()),
+                                    },
+                                    None,
+                                );
+
+                                if matches!(gate_outcome.new_state, NewState::Completed) {
+                                    let _ = event_log::emit_one(
+                                        &gate_events_path,
+                                        EventV2::MoleculeCompleted {
+                                            molecule_id: mol_id.clone(),
+                                            duration_ms: None,
+                                            reason: format!(
+                                                "gate step \"{}\" auto-executed, all steps done",
+                                                next_step.id
+                                            ),
+                                            summary: Some(gate_request.evidence.clone()),
+                                        },
+                                        None,
+                                    );
+                                }
+                            }
+
+                            if !ctx.json {
+                                eprintln!("  ✅ gate \"{}\" passed", next_step.id);
+                            }
+
+                            // Per-step auto-commit for the gate step (gates often
+                            // touch files — e.g. fmt fixes — and deserve their own
+                            // restore anchor).
+                            let gate_name = if next_step.title.is_empty() {
+                                next_step.id.clone()
+                            } else {
+                                next_step.title.clone()
+                            };
+                            let gate_step_one_based =
+                                updated.completed_steps.len().min(formula.steps.len());
+                            guarded_auto_commit(
+                                ctx,
+                                recorded_worktree.as_deref(),
+                                project_root_buf,
+                                mol_id.as_str(),
+                                gate_step_one_based,
+                                formula.steps.len(),
+                                &gate_name,
+                                "gate",
+                            );
+                        }
+                        Ok(output) => {
+                            // Gate failed — collapse the molecule under lock.
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            let reason = format!(
+                                "gate step \"{}\" failed (exit {}): {}{}",
+                                next_step.id,
+                                output.status.code().unwrap_or(-1),
+                                stdout.trim(),
+                                stderr.trim()
+                            );
+                            {
+                                let _g = store.lock_fleet()?;
+                                updated.status = cosmon_core::molecule::MoleculeStatus::Collapsed;
+                                updated.collapse_reason = Some(reason.clone());
+                                updated.updated_at = Utc::now();
+                                store.save_molecule(&updated.id.clone(), updated)?;
+                            }
+                            if !ctx.json {
+                                eprintln!("  💥 gate \"{}\" failed: {reason}", next_step.id);
+                            }
+                        }
+                        Err(e) => {
+                            let reason = format!("gate step \"{}\" spawn error: {e}", next_step.id);
+                            {
+                                let _g = store.lock_fleet()?;
+                                updated.status = cosmon_core::molecule::MoleculeStatus::Collapsed;
+                                updated.collapse_reason = Some(reason.clone());
+                                updated.updated_at = Utc::now();
+                                store.save_molecule(&updated.id.clone(), updated)?;
+                            }
+                            if !ctx.json {
+                                eprintln!("  💥 {reason}");
+                            }
+                        }
+                    }
+
+                    let _ = timeout_secs; // used by tackle; informational here
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Bootstrap-context seal (W2 of delib-20260519-e6db, adversary
+    /// F2.1+F2.2). The agent-harness bootstrap walk surfaces every
+    /// `AGENTS.md` / `CLAUDE.md` from the project root up to the enclosing
+    /// `.git/` as fenced `<bootstrap_context>` blocks. We hash that exact byte
+    /// stream so a later `cs verify` can re-run the walk and detect
+    /// cross-worktree poisoning. Defensive: any failure is logged and
+    /// swallowed, never blocks step advance.
+    fn seal_bootstrap(&self, seal_step: u32, step_seq: Option<cosmon_core::event_v2::Seq>) {
+        let store = self.store;
+        let mol_id = self.mol_id;
+        let events_path = self.ops_dir.join("events.jsonl");
+        let bootstrap_bytes =
+            cosmon_agent_harness::bootstrap::collect_bootstrap_context(self.project_root);
+        // Snapshot the walk output into the molecule. The bootstrap walk covers
+        // the operator's ambient `AGENTS.md` / `CLAUDE.md`, which live OUTSIDE
+        // the molecule and drift legitimately; sealing an immutable snapshot of
+        // the walk-as-it-was-at-this-step keeps tamper-evidence without
+        // alarming on honest ambient evolution.
+        let bootstrap_seal =
+            BriefingSeal::of_text(seal_step, &bootstrap_bytes).with_snapshot(&bootstrap_bytes);
+        // Defensive capture (ADR-131 Decision 2).
+        let persisted: Result<(), cosmon_core::error::CosmonError> = 'bootstrap: {
+            let _g = match store.lock_fleet() {
+                Ok(g) => g,
+                Err(e) => break 'bootstrap Err(e),
+            };
+            let mut mol = match store.load_molecule(mol_id) {
+                Ok(m) => m,
+                Err(e) => break 'bootstrap Err(e),
+            };
+            mol.bootstrap_seals.push(bootstrap_seal.clone());
+            mol.updated_at = Utc::now();
+            store.save_molecule(mol_id, &mol)
+        };
+        if let Err(e) = persisted {
+            eprintln!("warning: could not persist bootstrap seal: {e}");
+        } else {
+            let _ = event_log::emit_one(
+                &events_path,
+                EventV2::BootstrapSealed {
+                    molecule_id: mol_id.clone(),
+                    step: bootstrap_seal.step,
+                    hash: bootstrap_seal.hash.clone(),
+                    sealed_at: bootstrap_seal.sealed_at,
+                    bytes: bootstrap_seal.briefing_bytes,
+                    canonical_version: bootstrap_seal.canonical_version,
+                },
+                step_seq,
+            );
+        }
     }
 }
 
@@ -1564,124 +1257,11 @@ fn move_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Deliver the committee-posture pointer into `briefing.md`, when — and only
-/// when — the molecule is a committee seat.
-///
-/// A committee seat carries its adversarial contract in the durable,
-/// regeneration-stable
-/// [`committee-posture.md`](cosmon_core::committee::COMMITTEE_POSTURE_FILE) file
-/// that no lifecycle verb rewrites. This function appends the stable
-/// [`committee_posture_reference`](cosmon_core::committee::committee_posture_reference)
-/// pointer to whatever `briefing.md` currently holds, so the seat's persona
-/// witness sees a briefing that *references* its contract — the second fact
-/// [`AdversarialBriefing::from_durable_injection`](cosmon_core::committee::AdversarialBriefing::from_durable_injection)
-/// tests, and the one that fails as `BriefingNotInjected`.
-///
-/// No-ops for ordinary molecules (no durable file → nothing to point at) and is
-/// idempotent (skips when the pointer is already present), so calling it after
-/// every briefing write never stacks duplicate stanzas.
-///
-/// # Why the name is not `reinstate`
-///
-/// It was, and the name was load-bearing in the wrong direction. Under that
-/// name the function ran from exactly one place — the step-advance path below —
-/// and *re-establishing* is precisely what it did: the contract provably
-/// survived regeneration, while nothing asked whether it was there **before the
-/// first regeneration**. Measured on 2026-07-28: immediately after `cs
-/// nucleate` plus writing `committee-posture.md`, a seat's `briefing.md`
-/// contained zero references to it, so the witness returned `injected = false`
-/// for **every seat on its step 1** — the step on which the verdict contract
-/// must be written, and the one a provider refusal is most likely to end on. A
-/// verb named for restoration reads as complete once restoration works; a verb
-/// named for delivery is unfinished anywhere a briefing is written and does not
-/// call it (committee-20260728-1668 F1).
-///
-/// The same argument ran once more at the other end. [`cs
-/// complete`](super::complete) rewrites `briefing.md` down to a terse
-/// `**Status:** COMPLETED` line, and it is the verb every seat ends with — so
-/// without a third call site the pointer existed exactly while a seat was
-/// running and was gone by the time anything read the seat's record, which is
-/// the only time such a record is read. Measured on committee-20260728-2d37's
-/// two seats on 2026-07-29: pointer present after `cs tackle`, `grep -c
-/// committee-posture.md briefing.md == 0` after `cs complete`, both seats.
-///
-/// # The rule this function is under
-///
-/// **Every production write of `briefing.md` calls this immediately after** —
-/// before the first step (`cs tackle`), at every advance (`cs evolve`), and
-/// after the last (`cs complete`). The rule is not left to memory: the
-/// `committee_posture_delivery_lint` suite reads the sources and fails on any
-/// briefing write that neither calls this nor carries an inline
-/// `committee-posture: exempt — <reason>` waiver on the write. `cs nucleate` is
-/// one such waiver, and reading it is how you learn that a call there would be
-/// a permanent no-op — nucleation mints the directory, so nothing can pre-exist
-/// it.
-///
-/// # Errors
-///
-/// Returns an error only if the durable file exists (this *is* a committee
-/// seat) but appending the pointer to `briefing.md` fails — a real I/O fault on
-/// the seat's contract delivery, which must not pass silently.
-pub(super) fn deliver_committee_posture_reference(
-    mol_dir: &Path,
-    briefing_path: &Path,
-) -> anyhow::Result<()> {
-    let posture_path = mol_dir.join(cosmon_core::committee::COMMITTEE_POSTURE_FILE);
-    if !posture_path.exists() {
-        // Not a committee seat — nothing to point at.
-        return Ok(());
-    }
-    let reference = cosmon_core::committee::committee_posture_reference();
-    let current = fs::read_to_string(briefing_path).unwrap_or_default();
-    if current.contains(reference.trim()) {
-        // Already delivered this step — stay idempotent.
-        return Ok(());
-    }
-    let mut body = current;
-    if !body.ends_with('\n') {
-        body.push('\n');
-    }
-    body.push('\n');
-    body.push_str(reference);
-    // committee-posture: exempt — this write IS the delivery; calling itself
-    // would recurse, and the idempotence check above already ran.
-    fs::write(briefing_path, body).map_err(|e| {
-        anyhow::anyhow!("failed to deliver committee-posture pointer into briefing.md: {e}")
-    })
-}
-
-/// Compute a [`BriefingSeal`] over `briefing.md`. Returns `None` if the
-/// file cannot be read — the caller treats this as "no seal", never as
-/// an error. Seal emission is a probe, not a lock.
-///
-/// The seal carries an immutable snapshot of the briefing **as it was at
-/// this step**. cosmon regenerates `briefing.md` on every advance (and
-/// `cs complete` rewrites it once more at the end), so verifying a
-/// historical seal against the current file would flag cosmon's own
-/// honest per-step rewrite as tampering. Snapshotting the content into
-/// the molecule lets `cs verify` check each step's briefing against its
-/// own epoch. Binary (non-UTF-8) briefings carry no text snapshot and
-/// fall back to the live-file comparison at verify time.
-fn try_seal_briefing(briefing_path: &Path, step: u32) -> Option<BriefingSeal> {
-    match fs::read(briefing_path) {
-        Ok(bytes) => {
-            let seal = BriefingSeal::of_text_or_bytes(step, &bytes);
-            Some(match std::str::from_utf8(&bytes) {
-                Ok(text) => seal.with_snapshot(text),
-                Err(_) => seal,
-            })
-        }
-        Err(e) => {
-            eprintln!("warning: could not seal briefing.md: {e}");
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
+    use std::time::SystemTime;
 
     #[test]
     fn posture_reference_is_noop_without_the_durable_file() {

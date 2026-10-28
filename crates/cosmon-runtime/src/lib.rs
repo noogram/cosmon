@@ -58,6 +58,7 @@ mod dag_policy;
 pub mod dispatch_ledger;
 pub mod guard;
 pub mod resident;
+pub mod resurrect;
 pub mod tackle_exec;
 pub mod witness;
 

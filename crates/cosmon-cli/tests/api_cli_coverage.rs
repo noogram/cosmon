@@ -396,7 +396,9 @@ const NEVER_VERBS: &[&str] = &[
     // under its own name with the full `cs done` parameter set. What stays
     // restricted is WHICH molecules a requester may close — the
     // multi-tenant question, deliberately unanswered.
-    "evolve",
+    // `evolve` left it 2026-10-28 (ADR-080 §5.6, pilot plan 0001 lot E1):
+    // advancing a step is an operation over the molecule, exposed as
+    // `POST /v1/molecules/:id/evolve`.
     "complete",
     "purge",
     "reconcile",

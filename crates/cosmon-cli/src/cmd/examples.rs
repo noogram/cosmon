@@ -210,10 +210,12 @@ pub const THAW: &str = "EXAMPLES:
 SEE ALSO: cs freeze (counterpart), cs resume (nudge idle workers).";
 
 pub const PRIME: &str = "EXAMPLES:
-  cs prime                    # load .cosmon/config.toml, report gates
+  cs prime task-20261028-3daf # print the propulsion reminder for one molecule
+  cs prime --hook             # same, for the first running molecule (SessionStart hook)
 
-Boot-time self-check. No network calls; verifies the local project is
-well-formed.";
+Prints the current step, its description and exit criteria, and the completed
+and pending steps. Read-only; prints nothing for a completed or collapsed
+molecule. Remote: `cosmon-remote molecule prime <id>`.";
 
 pub const RESUME: &str = "EXAMPLES:
   cs resume                   # nudge all idle workers

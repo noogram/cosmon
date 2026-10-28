@@ -89,7 +89,7 @@ advance → terminate → infrastructure → introspection.
 | `cs init` | NO | — | Bootstrap of a new galaxy; operator-only, hardware/filesystem-bound. |
 | `cs trust` | NO | — | Per-repo, human trust grant for repo-supplied shell (B5, RCE-by-clone). The `direnv allow` of cosmon; a local operator gesture recorded outside the repo. Never on the wire — a remote tenant granting trust would defeat the gate. |
 | `cs tackle` | V1 | `POST /v1/molecules/:id/tackle` | Operator → propelled, shipped 2026-05-12 (`task-20260512-c6de`); scopes `cosmon:molecule:write` **and** `cosmon:worker:spawn`, because it burns Anthropic credit. The row read `V1 (TBD)` at `POST /v1/molecules/:id/transitions` — a generic transition endpoint that was never built — for four months after the real route went live; corrected 2026-09-22 (`task-20260922-45cd`). Its local `--force` is a boolean session-reclaim and respawn request, not a value-bearing remote mode; issue #89 additionally pins the local pre-spawn refusal for a decidably incoherent named-vendor adapter/model pair, while unknown/self-hosted pairs remain opaque. For a refused `local` adapter, both surfaces lead with configuring an already-running OpenAI-compatible server and link the local-model guide; neither tells a pilot to start a server or download a model without asking the user. The `--harness <KEY>=<VALUE>` flag (ADR-177 / issue #65) has **no wire counterpart** and is not a gap: the RPP tackle route dispatches through the in-process executor, whose `DispatchPin::harness` carries the run's rung-1 directive when the embedder sets one — the tenant HTTP route does not, so every remote dispatch resolves harness settings from the executing step's own `[steps.harness]` pin alone (rung 2). Since COSMON-DEV #75 that pin **is carried** to codex and claude, its native override channels; it is refused, not silently dropped, only for an adapter with no channel at all — `501 tackle_unsupported_harness`, a label distinct from `tackle_unsupported_step` because the remedy differs (drop the pin or change the adapter, versus wait for the U6 cut-over). Exposing the flag remotely would mean minting a wire vocabulary for a map cosmon deliberately does not interpret; that needs its own decision, not a pass-through. `--reclaim-derived` (the pre-spawn disk-pressure check, ADR-178 / issue #61) is likewise cs-only and allowlisted in `crates/cosmon-thin-cli/tests/cli-flag-allowlist.toml`: it reclaims bytes in a local `.worktrees/` tree a remote tenant does not have. |
-| `cs evolve` | NO | — | Worker-internal (CLAUDE.md *Command perimeters*; ADR-080 §5.1). NEVER exposed. |
+| `cs evolve` | V1 | `POST /v1/molecules/:id/evolve` | Advance a molecule past its current formula step with `--evidence`. Left the closed list on 2026-10-28 (ADR-080 §5.6, pilot plan 0001 lot E1, requested by Leanear): the route calls `cosmon_state::ops::evolve`, an operation over the molecule that touches no worker process. A step that declares a shell verification command is refused `501 evolve_unsupported_step`; the auto-commit, inline gate step and bootstrap seal of the local verb are not run. Scope `cosmon:molecule:write`. `cs complete` stays NEVER. |
 | `cs complete` | NO | — | Worker-internal (CLAUDE.md *Command perimeters*; ADR-080 §5.1). NEVER exposed. |
 | `cs collapse` | V1 | `POST /v1/molecules/:id/collapse` | Terminal transition, shipped in the T-CST-EXPAND cut (`task-20260504-af6b`, 2026-05-04). The row named `POST /v1/molecules/:id/transitions` (`transition=collapse`) — a *design* for a generic transition endpoint that was never built; each transition got its own path instead. Corrected 2026-09-22 (`task-20260922-45cd`) when the drift gate started reading the real route set. |
 | `cs collapse --key --expect-status --expect-revision` | V1 | `PUT /v1/molecules/:id/collapse-receipts/:key` | Nine-outcome ADR-187 contract. Strict keyed body; verified JWT actor and tenant lease guard. No old-server fallback. |
@@ -106,10 +106,10 @@ advance → terminate → infrastructure → introspection.
 | `cs resume` | NO | — | Resume an Inert worker (alias of `cs tackle --resume`); operator-driven. |
 | `cs claim` | NO | — | Pilot claims a molecule; the runtime defers to the human until it is released. Operator/pilot coordination gesture, not a remote act. |
 | `cs release` | NO | — | Releases a pilot claim, returning the molecule to the runtime frontier. Mirror of `cs claim`; operator/pilot-driven. |
-| `cs resurrect` | NO | — | Recover a dead worker; operator-driven. |
+| `cs resurrect` | V1 | `POST /v1/molecules/:id/resurrect` | Revive a `Frozen` wreck with a fresh worker (`dry_run` composes the prompt only). Shared preconditions and record (`cosmon_runtime::resurrect`) and the library executor `tackle` spawns through. Bounded like `tackle`: `cosmon:molecule:write` AND `cosmon:worker:spawn`, and the per-noyau live-worker ceiling (`429 tackle_ceiling`). Pilot plan 0001 lot E1 (2026-10-28). |
 | `cs teardown` | NO | — | Infrastructure teardown; operator-only. |
 | `cs purge` | **NO (NEVER)** | — | Destroys cosmon state. Catastrophic, irreversible. Operator-only by definition. ADR-080 §5.1. Its `--worktrees` reclamation pass and `--dry-run` (issue 61) add no route and change nothing here: the pass acquires a local `flock` and deletes local build output, which a remote tenant has neither of. It removes no worktree under any flag ([ADR-178](../adr/178-no-automatic-path-removes-a-worktree.md)). |
-| `cs prime` | NO | — | Pre-flight checks; local-shell convenience. |
+| `cs prime` | V1 | `GET /v1/molecules/:id/prime` | Re-inject the current step context of a live molecule: a READ returning what `cs prime` prints (`reminder`) and its structure (`context`). A terminal molecule answers `terminal: true`. Scope `cosmon:molecule:read`. Pilot plan 0001 lot E1 (2026-10-28). The help text previously described a config self-check the code never did; it was corrected in the same change. |
 | `cs migrate` | NO | — | Schema/state migration; operator-only. |
 | `cs harvest` | NO | — | Scheduler-only (cron-driven); not a remote act. |
 | `cs worker-supervise` | NO | — | Hidden local transport helper invoked by `cs tackle`: waits for its direct child and publishes a launch-bound receipt using the local claim, cwd and terminal. No RPP route; callers dispatch through `cs tackle`. |
@@ -134,7 +134,7 @@ advance → terminate → infrastructure → introspection.
 | `cs tail` | NO | — | Local log tail. Its remote analogue **exists** and is not this row: `GET /v1/molecules/{id}/logs` (`task-20260523-ad25`, 2026-05-23) SSE-tails the worker's live tmux pane under `cosmon:logs:subscribe` with live admission rechecks, and `GET /v1/molecules/{id}/session` reads the same thread after the worker exits. Both are *adapter-only* — they have no `cs` verb and participate in no §8p bijection — so `cs tail` itself stays local. The row previously said the SSE alternative was "V2", eight months after it shipped; corrected 2026-09-22 (`task-20260922-45cd`). |
 | `cs tokens` | NO | — | Read-only IFBDD aggregator over the local `tokens.jsonl` sink (T-V1-IFBDD-METER). Per-molecule transcript totals are already exposed through `GET /v1/molecules/:id`; no tenant aggregate route is added. Re-evaluate only if the partner needs a total that cannot be reconstructed from molecule reads. |
 | `cs note` | NO (V1 TBD) | — | Append-only molecule note; re-evaluate at V1 if tenant_auditor asks. |
-| `cs deps` | NO | — | Read-only DAG visualisation; covered by `GET /v1/molecules/:id` payload. |
+| `cs deps` | V1 | `GET /v1/molecules/:id/deps` | Blocking, lineage and citation links, direct or `?transitive=true`. Cross-galaxy links are listed and not resolved. Scope `cosmon:molecule:read`. Pilot plan 0001 lot E1 (2026-10-28). |
 | `cs mission` | NO | — | Read-only DAG view joining the ledger's blocked_by edges to completion merge commits (delib-20260720-cff4 Phase 1). Local git+ledger read; the payload it renders is already covered by `GET /v1/molecules/:id`. |
 | `cs sync` | NO | — | Worktree-side base-sync (`git merge main`) stamping a `Base-Sync` trailer (delib-20260720-cff4 Phase 1). Runs inside the worker's local worktree before `cs done`; no remote act of its own (the fold that crosses into main is `cs done`, exposed since issue #51 behind the operator's harvest seal). |
 | `cs diverge` | NO | — | Local diff tool. |
@@ -336,10 +336,12 @@ Two clusters of verbs are flagged `**NO (NEVER)**` in the table.
 They are the structural hard-floor of §8p and ADR-080 §5.1; the
 test refuses to admit any axum route for them:
 
-**Worker-only (CLAUDE.md *Command perimeters*).** `cs evolve`,
-`cs complete`. Workers run inside their own worktree with their own
-`cs` binary; the RPP must not reach into a worker's process. A
-network-bearing principal is by definition not a worker.
+**Worker-only (CLAUDE.md *Command perimeters*).** `cs complete`.
+Workers run inside their own worktree with their own `cs` binary; the
+RPP must not reach into a worker's process. A network-bearing principal
+is by definition not a worker. (`cs evolve` left this cluster on
+2026-10-28, ADR-080 §5.6: the route advances the molecule's state and
+touches no worker process.)
 
 **Operator-only (ADR-080 §5.1).** `cs purge`,
 `cs reconcile`, `cs verify`, `cs whisper --to-session`, `cs drop`,

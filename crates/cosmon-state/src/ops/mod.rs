@@ -14,7 +14,8 @@
 //! [`tag`](fn@tag), [`nucleate`](fn@nucleate),
 //! [`ensemble`](fn@ensemble) / [`vitals`](fn@vitals) /
 //! [`collapse`](fn@collapse) / [`freeze`](fn@freeze) / [`thaw`](fn@thaw) /
-//! [`stuck`](fn@stuck).
+//! [`stuck`](fn@stuck), plus the advance and read cuts [`evolve`](fn@evolve),
+//! [`deps`](fn@deps) and [`prime`](fn@prime) (pilot plan 0001, lot E1).
 //!
 //! Every verb-level error implements [`error::OpsError`] — the wire
 //! contract that lets the cs-cli, the cs-api, and the out-of-process
@@ -29,13 +30,16 @@
 
 pub mod await_operator;
 pub mod collapse;
+pub mod deps;
 pub mod ensemble;
 pub mod error;
+pub mod evolve;
 pub mod freeze;
 pub mod model_attribution;
 pub mod molecule_status;
 pub mod nucleate;
 pub mod observe;
+pub mod prime;
 pub mod stuck;
 pub mod tag;
 pub mod thaw;
@@ -49,10 +53,14 @@ pub use collapse::{
     collapse, CollapseAuthority, CollapseError, CollapseJson, CollapseOutcome, CollapseRequest,
     CollapseView, ExecuteError, KeyedCollapse, KeyedCollapseJson, LeaseRefusal, NoLeaseCheck,
 };
+pub use deps::{deps, DepsError, DepsJson, DepsRequest, DepsView};
 pub use ensemble::{
     ensemble, EnsembleEntryJson, EnsembleError, EnsembleJson, EnsembleRequest, EnsembleView,
 };
 pub use error::{is_kebab_case, ErrorWire, OpsError};
+pub use evolve::{
+    evolve, EvolveEffects, EvolveError, EvolveJson, EvolveOpRequest, EvolveView, StepRefusal,
+};
 pub use freeze::{freeze, FreezeError, FreezeJson, FreezeRequest, FreezeView};
 pub use model_attribution::{
     latest_model_selection, model_selections, realized_attribution, realized_provenance,
@@ -64,6 +72,7 @@ pub use observe::{
     detect_ghost, observe, observe_loaded, MoleculeView, ObserveError, ObserveJson,
     ObserveResponse, ResponseMetrics,
 };
+pub use prime::{prime, PrimeContext, PrimeError, PrimeJson, PrimeStep, PrimeView, StepPosition};
 pub use stuck::{stuck, StuckError, StuckJson, StuckRequest, StuckView};
 pub use tag::{tag, TagDelta, TagError, TagJson};
 pub use thaw::{thaw, ThawError, ThawJson, ThawRequest, ThawView};

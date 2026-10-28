@@ -88,8 +88,13 @@ pub const REQUEST_ID_ENV: &str = "COSMON_API_REQUEST_ID";
 /// answered here; ADR-176 D5 still refuses an `owner` field. What continues
 /// to gate the *effect* is the operator's `[harvest_authority]` arming
 /// (ADR-176 D1), which this change does not touch.
+///
+/// `evolve` left the list on 2026-10-28 (ADR-080 §5.6, pilot plan 0001 lot E1):
+/// advancing a step is an operation over the molecule, exposed as
+/// `POST /v1/molecules/{id}/evolve`. The route runs the shared library
+/// operation in-process, so no `cs` is spawned under the envelope; `complete`,
+/// its terminal sibling, stays listed.
 pub const OPERATOR_ONLY_VERBS: &[&str] = &[
-    "evolve",
     "complete",
     "security",
     "kill",

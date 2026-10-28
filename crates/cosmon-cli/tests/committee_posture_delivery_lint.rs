@@ -145,19 +145,43 @@ fn src_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
-/// Collect every production briefing write in the crate, guarded or not.
-fn all_briefing_writes() -> Vec<Write> {
+/// Every `.rs` file whose briefing writes this lint governs, with its display
+/// name: this crate's sources, and `cosmon-state`'s `ops/evolve.rs`, where
+/// `cs evolve`'s advance now lives so that the RPP route calls the same
+/// operation. Dropping that file would leave the moved writes ungoverned while
+/// the rule below still passed.
+///
+/// Deliberately that one file and not all of `cosmon-state`: widening to the
+/// whole crate surfaces `ops/nucleate.rs`, a briefing write that has never been
+/// governed here (see the R3-7 note in `committee_seat_dispatch.rs`) and whose
+/// verdict is not this change's to give.
+fn scanned_sources() -> Vec<(PathBuf, String)> {
     let mut files = Vec::new();
     rust_sources(&src_root(), &mut files);
+    let mut out: Vec<(PathBuf, String)> = files
+        .into_iter()
+        .map(|path| {
+            let name = path
+                .strip_prefix(src_root())
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            (path, name)
+        })
+        .collect();
+    out.push((
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../cosmon-state/src/ops/evolve.rs"),
+        "cosmon-state/ops/evolve.rs".to_owned(),
+    ));
+    out
+}
+
+/// Collect every production briefing write in the scanned roots, guarded or not.
+fn all_briefing_writes() -> Vec<Write> {
     let mut found = Vec::new();
-    for path in files {
+    for (path, name) in scanned_sources() {
         let src =
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let name = path
-            .strip_prefix(src_root())
-            .unwrap_or(&path)
-            .display()
-            .to_string();
         let lines = production_lines(&src);
         for (idx, (lineno, text)) in lines.iter().enumerate() {
             if text.contains("fs::write(") && targets_briefing(&lines, idx) {
@@ -174,18 +198,11 @@ fn all_briefing_writes() -> Vec<Write> {
 /// seat without its pointer, silently.
 #[test]
 fn every_production_briefing_write_delivers_the_committee_posture_pointer() {
-    let mut files = Vec::new();
-    rust_sources(&src_root(), &mut files);
     let mut offenders = Vec::new();
-    for path in &files {
+    for (path, name) in &scanned_sources() {
         let src =
             fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let name = path
-            .strip_prefix(src_root())
-            .unwrap_or(path)
-            .display()
-            .to_string();
-        offenders.extend(unguarded_writes(&src, &name));
+        offenders.extend(unguarded_writes(&src, name));
     }
     assert!(
         offenders.is_empty(),

@@ -569,3 +569,22 @@ read-only attachment client. See [configuration](../project-config.md).
 | User intent | CLI | UI | Remote |
 |---|---|---|---|
 | Find a molecule absent from live state | `cs observe <id>` identifies an exact or unique-prefix archive match and names `cs archive show <full-id>`; exit status remains 1 | No matching change audited | No matching change audited |
+
+## Remote evolve, resurrect, deps and prime (pilot plan 0001, lot E1, 2026-10-28)
+
+| User intent | CLI | Remote CLI / API | UI |
+|---|---|---|---|
+| Advance a step | `cs evolve <id> --evidence … --formula …` | `cosmon-remote molecule evolve <id> --evidence …`; `POST /v1/molecules/{id}/evolve` (formula resolved from the tenant project) | No matching change audited |
+| Revive a wreck | `cs resurrect <id> [--dry-run]` | `cosmon-remote molecule resurrect <id> [--dry-run]`; `POST /v1/molecules/{id}/resurrect` | No matching change audited |
+| Show blocking, lineage, citation links | `cs deps <id> [--transitive]` | `cosmon-remote molecule deps <id> [--transitive]`; `GET /v1/molecules/{id}/deps` | No matching change audited |
+| Re-inject the current step context | `cs prime <id>` | `cosmon-remote molecule prime <id>`; `GET /v1/molecules/{id}/prime` | No matching change audited |
+
+Each route calls the operation its verb calls (`cosmon_state::ops::{evolve,
+deps, prime}`; `cosmon_runtime::resurrect` plus the library executor for
+`resurrect`). Remote differences, all deliberate: no `--formula` path (the
+formula is the tenant project's); a step declaring a shell verification is
+refused `501`; cross-galaxy links in `deps` are listed, not resolved;
+`resurrect` needs the spawn scope and the per-noyau ceiling. `cs prime`'s help
+text, which described a config self-check the code never performed, now
+describes the propulsion reminder it prints; `cs evolve` is no longer on the
+operator-only list (ADR-080 §5.6).

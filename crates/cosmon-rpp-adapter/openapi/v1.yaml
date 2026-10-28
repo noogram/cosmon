@@ -1056,6 +1056,296 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
+  /v1/molecules/{id}/evolve:
+    post:
+      operationId: evolveMolecule
+      summary: Advance a molecule past its current formula step (cs evolve).
+      description: |
+        Calls `cosmon_state::ops::evolve`, the operation `cs evolve`
+        calls, so a step advanced remotely leaves the molecule in the
+        state a local advance would. The formula is the one the
+        tenant's project holds for the molecule's formula id.
+
+        The caller-machine effects of the CLI (a shell verification
+        command, artifact repatriation from a worktree, the per-step
+        auto-commit, the inline gate step, the bootstrap seal) are not
+        part of this route. A step that declares a shell verification
+        command is refused `501 evolve_unsupported_step`; it is never
+        passed silently.
+
+        ## Required scope
+
+        `cosmon:molecule:write`.
+      tags: [molecules]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EvolveBody"
+            examples:
+              step_done:
+                summary: Close the current step
+                value:
+                  evidence: "implemented and verified: cargo test -p cosmon-state passes"
+      responses:
+        "200":
+          description: Step advanced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvolveEnvelope"
+        "400":
+          description: Missing or empty evidence, or malformed body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Molecule not found in caller's tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Not runnable (terminal), step refused, energy budget exhausted, verification failed, or acceptance artifacts missing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "501":
+          description: The current step declares a shell verification command (`evolve_unsupported_step`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Rate limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/molecules/{id}/resurrect:
+    post:
+      operationId: resurrectMolecule
+      summary: Revive a wrecked molecule with a fresh worker (cs resurrect).
+      description: |
+        Revives a `Frozen` molecule whose worker was lost. The
+        preconditions, the resurrection lock, the bootstrap prompt, the
+        breadcrumb and the events are `cosmon_runtime::resurrect`, shared
+        with `cs resurrect`; the worker is spawned through the same
+        library executor, preflight and ledger-before-spawn discipline as
+        `tackle`.
+
+        It spawns a worker, so it is bounded exactly as `tackle` is: it
+        needs both scopes, and it counts against the per-noyau
+        live-worker ceiling (`429 tackle_ceiling`) before anything is
+        spawned.
+
+        With `dry_run`, the bootstrap prompt is composed and returned and
+        nothing is spawned or written.
+
+        ## Required scope
+
+        `cosmon:molecule:write` AND `cosmon:worker:spawn`.
+      tags: [molecules]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResurrectBody"
+      responses:
+        "200":
+          description: Worker spawned (or prompt composed, with `dry_run`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResurrectEnvelope"
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing a required scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Molecule not found in caller's tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Not a wreck, a worker is still alive (`already_active`), another resurrection is running, artifacts missing, or a pinned launch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Per-noyau live-worker ceiling (`tackle_ceiling`) or rate limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: A dispatch precondition failed or the worker could not be spawned (same labels as `tackle`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/molecules/{id}/deps:
+    get:
+      operationId: depsMolecule
+      summary: Show a molecule's blocking, lineage and citation links (cs deps).
+      description: |
+        Calls `cosmon_state::ops::deps`, the walk `cs deps` calls.
+        Cross-galaxy links are listed and not resolved: resolving one
+        reads another galaxy's state, which a tenant-facing surface does
+        not do.
+
+        ## Required scope
+
+        `cosmon:molecule:read`.
+      tags: [molecules]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+        - in: query
+          name: transitive
+          required: false
+          description: Walk the full transitive closure instead of only direct edges.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: The molecule's links.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DepsEnvelope"
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Molecule not found in caller's tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: The id is an ambiguous prefix.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Rate limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/molecules/{id}/prime:
+    get:
+      operationId: primeMolecule
+      summary: Show the step context of a live molecule (cs prime).
+      description: |
+        Calls `cosmon_state::ops::prime`, the operation `cs prime`
+        calls. A READ: it returns the step context a worker would be
+        re-injected with and changes nothing. For a molecule that is
+        `completed` or `collapsed` there is nothing to prime, and the
+        answer says so: `terminal: true`, no `context`, no `reminder`.
+
+        ## Required scope
+
+        `cosmon:molecule:read`.
+      tags: [molecules]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+      responses:
+        "200":
+          description: The step context, or the typed terminal answer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrimeEnvelope"
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Molecule not found in caller's tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Rate limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
   /v1/molecules/{id}/tackle:
     post:
       operationId: tackleMolecule
@@ -4095,6 +4385,189 @@ components:
         stuck:
           type: object
           additionalProperties: true
+
+    EvolveBody:
+      type: object
+      required: [evidence]
+      additionalProperties: false
+      properties:
+        evidence:
+          type: string
+          description: Evidence documenting why the current step is complete.
+
+    EvolveEnvelope:
+      type: object
+      required: [request_id, evolve]
+      properties:
+        request_id:
+          type: string
+        evolve:
+          type: object
+          required: [molecule, completed_step, new_status, new_step, warnings]
+          properties:
+            molecule:
+              type: string
+            completed_step:
+              type: string
+            new_status:
+              type: string
+              description: Status after the advance (`running`, `completed`, `frozen`).
+            new_step:
+              type: [string, "null"]
+              description: Id of the step the molecule is now on; null once it completed.
+            warnings:
+              type: array
+              items:
+                type: string
+
+    ResurrectBody:
+      type: object
+      additionalProperties: false
+      properties:
+        dry_run:
+          type: boolean
+          default: false
+          description: Compose and return the bootstrap prompt without spawning.
+
+    ResurrectEnvelope:
+      type: object
+      required: [request_id, resurrect]
+      properties:
+        request_id:
+          type: string
+        resurrect:
+          type: object
+          required: [molecule_id]
+          properties:
+            molecule_id:
+              type: string
+            status:
+              type: string
+              description: "`running` once the worker is spawned."
+            worker_session:
+              type: string
+            branch:
+              type: string
+            spawned_at:
+              type: string
+              format: date-time
+            dry_run:
+              type: boolean
+              description: Present and true on a dry run.
+            composed_prompt_bytes:
+              type: integer
+              description: Dry run only.
+            prior_count:
+              type: integer
+              description: Dry run only. Resurrections already recorded.
+            prompt:
+              type: string
+              description: Dry run only. The composed bootstrap prompt.
+
+    DepsCrossGalaxyRef:
+      type: object
+      required: [galaxy, mol_id, ref]
+      properties:
+        galaxy:
+          type: string
+        mol_id:
+          type: string
+        ref:
+          type: string
+          description: Canonical `galaxy:mol_id` spelling.
+
+    DepsEnvelope:
+      type: object
+      required: [request_id, deps]
+      properties:
+        request_id:
+          type: string
+        deps:
+          type: object
+          required:
+            [molecule, status, transitive, upstream, downstream, cross_galaxy_upstream, cross_galaxy_downstream]
+          properties:
+            molecule:
+              type: string
+            status:
+              type: string
+            transitive:
+              type: boolean
+            upstream:
+              type: array
+              items:
+                type: string
+            downstream:
+              type: array
+              items:
+                type: string
+            cross_galaxy_upstream:
+              type: array
+              items:
+                $ref: "#/components/schemas/DepsCrossGalaxyRef"
+            cross_galaxy_downstream:
+              type: array
+              items:
+                $ref: "#/components/schemas/DepsCrossGalaxyRef"
+
+    PrimeStep:
+      type: object
+      required: [number, title, position]
+      properties:
+        number:
+          type: integer
+          description: 1-based position of the step.
+        title:
+          type: string
+        position:
+          type: string
+          enum: [done, current, pending]
+        description:
+          type: string
+          description: Present on the current step only.
+        exit_criteria:
+          type: string
+          description: Present on the current step only, when declared.
+
+    PrimeEnvelope:
+      type: object
+      required: [request_id, prime]
+      properties:
+        request_id:
+          type: string
+        prime:
+          type: object
+          required: [molecule, terminal, status]
+          properties:
+            molecule:
+              type: string
+            terminal:
+              type: boolean
+              description: True when the molecule is completed or collapsed and there is nothing to prime.
+            status:
+              type: string
+            context:
+              type: object
+              description: Absent for a terminal molecule.
+              required: [molecule, status, step, total_steps]
+              properties:
+                molecule:
+                  type: string
+                status:
+                  type: string
+                step:
+                  type: integer
+                  description: 1-based number of the current step.
+                total_steps:
+                  type: integer
+                steps:
+                  type: array
+                  description: Absent when the formula cannot be read.
+                  items:
+                    $ref: "#/components/schemas/PrimeStep"
+            reminder:
+              type: string
+              description: The propulsion reminder `cs prime` prints. Absent for a terminal molecule.
 
     ArtifactEntry:
       type: object

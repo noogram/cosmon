@@ -76,6 +76,31 @@ pub fn freeze() {}
 )]
 pub fn stuck() {}
 
+/// Wire stub for `POST /v1/molecules/:id/evolve` (pilot plan 0001, lot E1).
+#[cosmon_thin_macro::verb(
+    method = "POST",
+    path = "/v1/molecules/:id/evolve",
+    principal = "tenant"
+)]
+pub fn evolve() {}
+
+/// Wire stub for `POST /v1/molecules/:id/resurrect` (pilot plan 0001, lot E1).
+/// Spawns a worker, so it is bounded like `tackle`.
+#[cosmon_thin_macro::verb(
+    method = "POST",
+    path = "/v1/molecules/:id/resurrect",
+    principal = "tenant"
+)]
+pub fn resurrect() {}
+
+/// Wire stub for `GET /v1/molecules/:id/deps` (pilot plan 0001, lot E1).
+#[cosmon_thin_macro::verb(method = "GET", path = "/v1/molecules/:id/deps", principal = "tenant")]
+pub fn deps() {}
+
+/// Wire stub for `GET /v1/molecules/:id/prime` (pilot plan 0001, lot E1).
+#[cosmon_thin_macro::verb(method = "GET", path = "/v1/molecules/:id/prime", principal = "tenant")]
+pub fn prime() {}
+
 /// Wire stub for `POST /v1/molecules/:id/tackle` (remote-tackle V2).
 #[cosmon_thin_macro::verb(
     method = "POST",

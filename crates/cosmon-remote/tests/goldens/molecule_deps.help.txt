@@ -1,0 +1,13 @@
+`GET /v1/molecules/{id}/deps` — blocking, lineage and citation links of a molecule. Cross-galaxy links are listed, not resolved
+
+Usage: cosmon-remote molecule deps [OPTIONS] <ID>
+
+Arguments:
+  <ID>  
+
+Options:
+      --profile <PROFILE>  Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --transitive         Walk the full transitive closure instead of only direct edges
+      --json               Render machine-readable JSON instead of human text where applicable
+      --token <TOKEN>      Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+  -h, --help               Print help

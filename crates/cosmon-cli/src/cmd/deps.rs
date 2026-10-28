@@ -21,12 +21,9 @@
 //!
 //! Read-only by construction: never mutates state, never spawns workers.
 
-use std::collections::{HashSet, VecDeque};
-
-use cosmon_core::id::MoleculeId;
-use cosmon_core::interaction::{CrossGalaxyRef, MoleculeLink};
-use cosmon_core::molecule::MoleculeStatus;
-use cosmon_state::{MoleculeData, MoleculeFilter, StateStore};
+use cosmon_core::interaction::CrossGalaxyRef;
+use cosmon_state::ops::deps::{deps, status_label, DepsJson, DepsRequest};
+use cosmon_state::StateStore;
 
 use super::cross_galaxy::{resolve_cross_galaxy_ref, CrossGalaxyResolution};
 use super::Context;
@@ -43,216 +40,51 @@ pub struct Args {
 }
 
 /// Execute the `deps` command.
+///
+/// The walk is [`cosmon_state::ops::deps::deps`], the same operation
+/// `GET /v1/molecules/:id/deps` calls. This module adds what only a local
+/// operator can do: resolving cross-galaxy references against the other
+/// galaxies on this machine.
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let state_dir = ctx.config.clone().unwrap_or_else(super::default_state_dir);
     let store = ctx.store_at(&state_dir);
 
-    let target_id = resolve_molecule_id(store.as_ref(), &args.molecule)?;
-    let target = store.load_molecule(&target_id)?;
-
-    let (upstream, downstream) = if args.transitive {
-        collect_transitive(store.as_ref(), &target_id)?
-    } else {
-        (
-            direct_neighbors(&target, Direction::Upstream),
-            direct_neighbors(&target, Direction::Downstream),
-        )
-    };
-
-    // Cross-galaxy edges are listed but not traversed transitively
-    // (Phase 1 of ADR-035 — transitive cross-galaxy walking requires
-    // remote state access on every hop, which is reserved for the
-    // resident-runtime DagPolicy work). We surface only the direct
-    // refs declared on the target molecule itself.
-    let cross_upstream = direct_cross_galaxy_neighbors(&target, Direction::Upstream);
-    let cross_downstream = direct_cross_galaxy_neighbors(&target, Direction::Downstream);
+    let view = deps(
+        store.as_ref(),
+        &args.molecule,
+        &DepsRequest {
+            transitive: args.transitive,
+        },
+    )?;
 
     if ctx.json {
-        emit_json(
-            &target,
-            &upstream,
-            &downstream,
-            &cross_upstream,
-            &cross_downstream,
-            args.transitive,
-        );
+        emit_json(&DepsJson::from_view(&view), &view);
     } else {
-        emit_human(
-            store.as_ref(),
-            &target,
-            &upstream,
-            &downstream,
-            &cross_upstream,
-            &cross_downstream,
-            args.transitive,
-        );
+        emit_human(store.as_ref(), &view);
     }
-
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Molecule resolution (exact, prefix)
-// ---------------------------------------------------------------------------
-
-/// Resolve a molecule ID from an exact match or a prefix match.
-///
-/// Exact match wins. Prefix match is accepted only if unambiguous.
-fn resolve_molecule_id(store: &dyn StateStore, query: &str) -> anyhow::Result<MoleculeId> {
-    if let Ok(exact) = MoleculeId::new(query) {
-        if store.load_molecule(&exact).is_ok() {
-            return Ok(exact);
-        }
-    }
-    let all = store.list_molecules(&MoleculeFilter::default())?;
-    let matches: Vec<_> = all
-        .iter()
-        .filter(|m| m.id.as_str().starts_with(query))
-        .collect();
-    match matches.len() {
-        0 => Err(anyhow::anyhow!("no molecule matching `{query}`")),
-        1 => Ok(matches[0].id.clone()),
-        n => Err(anyhow::anyhow!(
-            "ambiguous prefix `{query}` matches {n} molecules"
-        )),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Transitive walk
-// ---------------------------------------------------------------------------
-
-/// BFS walk of both directions from `start_id`, returning the full
-/// upstream and downstream closures (excluding `start_id` itself).
-///
-/// Cycle-safe: visited set prevents infinite loops. Returns molecule IDs
-/// in discovery order for a stable output (though the caller may sort).
-fn collect_transitive(
-    store: &dyn StateStore,
-    start_id: &MoleculeId,
-) -> anyhow::Result<(Vec<MoleculeId>, Vec<MoleculeId>)> {
-    let upstream = walk_edges(store, start_id, Direction::Upstream)?;
-    let downstream = walk_edges(store, start_id, Direction::Downstream)?;
-    Ok((upstream, downstream))
-}
-
-/// Which edge type to follow during the BFS walk.
-#[derive(Clone, Copy)]
-enum Direction {
-    /// Follow `BlockedBy` + `RefinedBy` links — walk towards the roots
-    /// (both the progression ancestors and the citers).
-    Upstream,
-    /// Follow `Blocks` + `Refines` links — walk towards the leaves (both
-    /// the progression descendants and the citations).
-    Downstream,
-}
-
-/// Pull every direct cross-galaxy reference of the requested direction
-/// off the molecule. Order matches `typed_links` insertion (which is
-/// the order the operator declared them on the CLI), giving a stable,
-/// human-readable view.
-fn direct_cross_galaxy_neighbors(mol: &MoleculeData, dir: Direction) -> Vec<CrossGalaxyRef> {
-    mol.typed_links
-        .iter()
-        .filter_map(|link| match (dir, link) {
-            (Direction::Upstream, MoleculeLink::CrossGalaxyBlockedBy { source }) => Some(source),
-            (Direction::Downstream, MoleculeLink::CrossGalaxyBlocks { target }) => Some(target),
-            _ => None,
-        })
-        .cloned()
-        .collect()
-}
-
-/// Return direct neighbors across progression, lineage, and citation edges.
-/// Duplicates are de-duplicated in first-seen order.
-fn direct_neighbors(mol: &MoleculeData, dir: Direction) -> Vec<MoleculeId> {
-    let mut seen: HashSet<MoleculeId> = HashSet::new();
-    let mut out: Vec<MoleculeId> = Vec::new();
-    let lineage: Vec<&MoleculeId> = mol
-        .typed_links
-        .iter()
-        .filter_map(|link| match (dir, link) {
-            (Direction::Upstream, MoleculeLink::DecayedFrom { id })
-            | (Direction::Downstream, MoleculeLink::DecayProduct { id }) => Some(id),
-            _ => None,
-        })
-        .collect();
-    let groups: [Vec<&MoleculeId>; 3] = match dir {
-        Direction::Upstream => [mol.blocked_by(), lineage, mol.refined_by()],
-        Direction::Downstream => [mol.blocks(), lineage, mol.refines()],
-    };
-    for group in groups {
-        for id in group {
-            if seen.insert(id.clone()) {
-                out.push(id.clone());
-            }
-        }
-    }
-    out
-}
-
-/// BFS walk in one direction.
-fn walk_edges(
-    store: &dyn StateStore,
-    start_id: &MoleculeId,
-    dir: Direction,
-) -> anyhow::Result<Vec<MoleculeId>> {
-    let mut seen: HashSet<MoleculeId> = HashSet::new();
-    // Include start_id in the seen set so cycles do not put the starting
-    // molecule back into its own upstream/downstream list. The user does
-    // not want to see "A blocks A" reflected in its deps view.
-    seen.insert(start_id.clone());
-    let mut queue: VecDeque<MoleculeId> = VecDeque::new();
-    let mut out: Vec<MoleculeId> = Vec::new();
-
-    // Prime the queue with the direct neighbors of the starting molecule.
-    let start = store.load_molecule(start_id)?;
-    for id in direct_neighbors(&start, dir) {
-        if seen.insert(id.clone()) {
-            queue.push_back(id);
-        }
-    }
-
-    while let Some(id) = queue.pop_front() {
-        out.push(id.clone());
-        if let Ok(mol) = store.load_molecule(&id) {
-            for n in direct_neighbors(&mol, dir) {
-                if seen.insert(n.clone()) {
-                    queue.push_back(n);
-                }
-            }
-        }
-    }
-    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
 // Output
 // ---------------------------------------------------------------------------
 
-fn emit_json(
-    target: &MoleculeData,
-    upstream: &[MoleculeId],
-    downstream: &[MoleculeId],
-    cross_upstream: &[CrossGalaxyRef],
-    cross_downstream: &[CrossGalaxyRef],
-    transitive: bool,
-) {
-    let out = serde_json::json!({
-        "molecule": target.id.as_str(),
-        "status": target.status.to_string(),
-        "transitive": transitive,
-        "upstream": upstream.iter().map(MoleculeId::as_str).collect::<Vec<_>>(),
-        "downstream": downstream.iter().map(MoleculeId::as_str).collect::<Vec<_>>(),
-        "cross_galaxy_upstream": cross_upstream.iter().map(cross_galaxy_json).collect::<Vec<_>>(),
-        "cross_galaxy_downstream": cross_downstream.iter().map(cross_galaxy_json).collect::<Vec<_>>(),
-    });
+fn emit_json(wire: &DepsJson, view: &cosmon_state::ops::deps::DepsView) {
+    let mut out = serde_json::to_value(wire).unwrap_or(serde_json::Value::Null);
+    // The CLI alone enriches cross-galaxy edges with their current
+    // resolution so consumers can mark unreachable galaxies without a
+    // second round-trip.
+    out["cross_galaxy_upstream"] = view.cross_upstream.iter().map(cross_galaxy_json).collect();
+    out["cross_galaxy_downstream"] = view
+        .cross_downstream
+        .iter()
+        .map(cross_galaxy_json)
+        .collect();
     println!("{out}");
 }
 
 /// Render a cross-galaxy reference as JSON, including its current
-/// resolution status so consumers can mark unreachable galaxies in
-/// the UI without a second round-trip.
+/// resolution status.
 fn cross_galaxy_json(cgr: &CrossGalaxyRef) -> serde_json::Value {
     let resolution = resolve_cross_galaxy_ref(cgr);
     serde_json::json!({
@@ -263,48 +95,43 @@ fn cross_galaxy_json(cgr: &CrossGalaxyRef) -> serde_json::Value {
     })
 }
 
-fn emit_human(
-    store: &dyn StateStore,
-    target: &MoleculeData,
-    upstream: &[MoleculeId],
-    downstream: &[MoleculeId],
-    cross_upstream: &[CrossGalaxyRef],
-    cross_downstream: &[CrossGalaxyRef],
-    transitive: bool,
-) {
-    let label = if transitive { "transitive" } else { "direct" };
-    println!("Deps for {} ({}) — {label}", target.id, target.status);
+fn emit_human(store: &dyn StateStore, view: &cosmon_state::ops::deps::DepsView) {
+    let label = if view.transitive {
+        "transitive"
+    } else {
+        "direct"
+    };
+    println!(
+        "Deps for {} ({}) — {label}",
+        view.target.id, view.target.status
+    );
     println!();
-    println!("  ⬆ Upstream links ({}):", upstream.len());
-    if upstream.is_empty() && cross_upstream.is_empty() {
+    println!("  ⬆ Upstream links ({}):", view.upstream.len());
+    if view.upstream.is_empty() && view.cross_upstream.is_empty() {
         println!("    (none — this molecule has no upstream links)");
     } else {
-        for id in upstream {
-            let status = status_hint(store, id);
-            println!("    - {id}{status}");
+        for id in &view.upstream {
+            println!("    - {id}{}", status_hint(store, id));
         }
-        for cgr in cross_upstream {
+        for cgr in &view.cross_upstream {
             println!("    - {cgr}{}", cross_galaxy_status_hint(cgr));
         }
     }
     println!();
-    println!("  ⬇ Downstream links ({}):", downstream.len());
-    if downstream.is_empty() && cross_downstream.is_empty() {
+    println!("  ⬇ Downstream links ({}):", view.downstream.len());
+    if view.downstream.is_empty() && view.cross_downstream.is_empty() {
         println!("    (none — this molecule has no downstream links)");
     } else {
-        for id in downstream {
-            let status = status_hint(store, id);
-            println!("    - {id}{status}");
+        for id in &view.downstream {
+            println!("    - {id}{}", status_hint(store, id));
         }
-        for cgr in cross_downstream {
+        for cgr in &view.cross_downstream {
             println!("    - {cgr}{}", cross_galaxy_status_hint(cgr));
         }
     }
 }
 
-/// Render a short status suffix for a cross-galaxy reference. Mirrors
-/// [`status_hint`] but consults the cross-galaxy resolver instead of
-/// the local store.
+/// Render a short status suffix for a cross-galaxy reference.
 fn cross_galaxy_status_hint(cgr: &CrossGalaxyRef) -> String {
     match resolve_cross_galaxy_ref(cgr) {
         CrossGalaxyResolution::Resolved { status, .. } => format!(" [cross-galaxy/{status}]"),
@@ -313,34 +140,25 @@ fn cross_galaxy_status_hint(cgr: &CrossGalaxyRef) -> String {
     }
 }
 
-/// Render a short status suffix for a molecule ID in the dependency list.
-/// If the molecule can be loaded, returns `" [status]"`; otherwise a
-/// " `missing`" marker to flag dangling references the user should fix.
-fn status_hint(store: &dyn StateStore, id: &MoleculeId) -> String {
-    match store.load_molecule(id) {
-        Ok(m) => {
-            let label = match m.status {
-                MoleculeStatus::Completed => "completed",
-                MoleculeStatus::Collapsed => "collapsed",
-                MoleculeStatus::Running => "running",
-                MoleculeStatus::Pending => "pending",
-                MoleculeStatus::Queued => "queued",
-                MoleculeStatus::Frozen => "frozen",
-                MoleculeStatus::Starved => "starved",
-                _ => "unknown",
-            };
-            format!(" [{label}]")
-        }
-        Err(_) => " [MISSING]".to_owned(),
+/// Short status suffix for a molecule id: `" [status]"`, or `" [MISSING]"`
+/// for a dangling reference the user should fix.
+fn status_hint(store: &dyn StateStore, id: &cosmon_core::id::MoleculeId) -> String {
+    match status_label(store, id) {
+        Some(label) => format!(" [{label}]"),
+        None => " [MISSING]".to_owned(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cosmon_core::id::MoleculeId;
     use cosmon_core::id::{FleetId, FormulaId};
     use cosmon_core::interaction::MoleculeLink;
+    use cosmon_core::molecule::MoleculeStatus;
     use cosmon_filestore::FileStore;
+    use cosmon_state::ops::deps::{direct_neighbors, resolve_molecule_id, walk_edges, Direction};
+    use cosmon_state::MoleculeData;
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -485,7 +303,11 @@ mod tests {
         }
 
         assert_eq!(
-            collect_transitive(&store, &mission_id).unwrap().1,
+            (
+                walk_edges(&store, &mission_id, Direction::Upstream).unwrap(),
+                walk_edges(&store, &mission_id, Direction::Downstream).unwrap()
+            )
+                .1,
             vec![first_id.clone(), second_id]
         );
         assert_eq!(
@@ -503,7 +325,10 @@ mod tests {
         let (_tmp, store) = make_store();
         let (a_id, b_id, c_id) = build_chain(&store);
 
-        let (upstream, downstream) = collect_transitive(&store, &a_id).unwrap();
+        let (upstream, downstream) = (
+            walk_edges(&store, &a_id, Direction::Upstream).unwrap(),
+            walk_edges(&store, &a_id, Direction::Downstream).unwrap(),
+        );
         assert!(upstream.is_empty(), "A is root, no upstream expected");
         // A blocks B which blocks C → full downstream closure = [B, C].
         assert_eq!(downstream.len(), 2);
@@ -516,7 +341,10 @@ mod tests {
         let (_tmp, store) = make_store();
         let (a_id, b_id, c_id) = build_chain(&store);
 
-        let (upstream, downstream) = collect_transitive(&store, &c_id).unwrap();
+        let (upstream, downstream) = (
+            walk_edges(&store, &c_id, Direction::Upstream).unwrap(),
+            walk_edges(&store, &c_id, Direction::Downstream).unwrap(),
+        );
         assert!(downstream.is_empty(), "C is leaf, no downstream expected");
         // C is blocked_by B which is blocked_by A → full upstream = [B, A].
         assert_eq!(upstream.len(), 2);
@@ -551,7 +379,10 @@ mod tests {
         store.save_molecule(&a.id, &a).unwrap();
         store.save_molecule(&b.id, &b).unwrap();
 
-        let (upstream, downstream) = collect_transitive(&store, &a_id).unwrap();
+        let (upstream, downstream) = (
+            walk_edges(&store, &a_id, Direction::Upstream).unwrap(),
+            walk_edges(&store, &a_id, Direction::Downstream).unwrap(),
+        );
         // Walker terminates and each opposite molecule is reported exactly once.
         assert_eq!(upstream.len(), 1);
         assert_eq!(downstream.len(), 1);

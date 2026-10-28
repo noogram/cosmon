@@ -313,7 +313,7 @@ Commands:
   freeze             Freeze a worker — suspend with state preservation (preemption)
   thaw               Thaw a worker — resume a frozen worker's Claude session
   trust              Trust — grant this repository permission to run its own formulas/hooks (the `direnv allow` of cosmon; refuses repo-supplied shell until granted)
-  prime              Prime the system — load .cosmon/config.toml and self-check gates
+  prime              Prime — re-inject the current step context of a running molecule
   resume             Resume — convenience alias for `cs patrol --propel --molecule <id>`
   teardown           Teardown a fleet — gracefully stop all fleet workers
   purge              Purge dead workers from fleet state without changing molecule status

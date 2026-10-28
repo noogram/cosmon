@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Molecule resurrection — pure prompt composition for `cs resurrect`.
+//! Molecule resurrection — the part of `cs resurrect` and
+//! `POST /v1/molecules/:id/resurrect` that does not depend on how a worker
+//! is spawned.
 //!
 //! Resurrection is the operation that re-attaches an observer (a fresh
 //! worker) to a molecule whose previous worker crashed. The molecule never
 //! died — only the observer was lost. This module
 //! houses the **pure** half of the machinery: a single function that reads
 //! a molecule directory and composes the bootstrap prompt for the new
-//! worker. CLI wiring (tmux spawn, status flip, event emission) lives in
-//! `cosmon-cli::cmd::resurrect`.
+//! worker. Around it, [`prepare`] checks the preconditions and takes the
+//! resurrection lock, and [`ResurrectPlan::record`] leaves the breadcrumb and
+//! the events. Both callers run those two and differ only in the spawn between
+//! them: the CLI through its tmux path, the RPP route through
+//! [`crate::tackle_exec::LibraryExecutor::resurrect`].
 //!
 //! The prompt is composed in causal order (shannon's "directed lossy code"):
 //!
@@ -25,9 +30,19 @@
 //! gated (a commit means a step actually landed), and chronological.
 
 use std::fmt::Write as _;
+use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use chrono::Utc;
+use cosmon_core::event_v2::EventV2;
+use cosmon_core::id::MoleculeId;
+use cosmon_core::molecule::MoleculeStatus;
+use cosmon_filestore::FileStore;
+use cosmon_state::{MoleculeData, StateStore};
+use fs2::FileExt;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// A resurrection-specific error surface.
@@ -36,7 +51,6 @@ use thiserror::Error;
 /// v1.1 is a minor-version change (tolnay).
 #[derive(Debug, Error)]
 #[non_exhaustive]
-#[allow(dead_code)]
 pub enum ResurrectError {
     /// The target molecule is not in a wreck state — refuse to act.
     #[error("molecule {molecule_id} is not a wreck (status={status}); resurrection is only valid for stuck molecules")]
@@ -70,6 +84,13 @@ pub enum ResurrectError {
         /// Molecule ID.
         molecule_id: String,
     },
+    /// The molecule was dispatched through a pinned Codex Exec launch, which
+    /// has no continuation contract an unpinned Claude worker could honour.
+    #[error("resurrect: pinned Codex Exec has no qualified continuation contract; resolve explicitly before a new dispatch")]
+    PinnedExec,
+    /// The molecule could not be loaded or the state store failed.
+    #[error("state store error: {0}")]
+    State(String),
     /// Transport backend (tmux) error.
     #[error("transport error: {0}")]
     Transport(String),
@@ -290,6 +311,217 @@ fn list_responses(mol_dir: &Path) -> Option<Vec<String>> {
     Some(names)
 }
 
+/// What [`prepare`] established: everything a spawn needs, plus the lock that
+/// keeps a second resurrection out until the plan is dropped.
+#[derive(Debug)]
+pub struct ResurrectPlan {
+    /// The wrecked molecule, as loaded.
+    pub molecule: MoleculeData,
+    /// Canonical molecule directory.
+    pub mol_dir: PathBuf,
+    /// Branch of the molecule's worktree.
+    pub branch: String,
+    /// Session name the new worker reuses.
+    pub session_name: String,
+    /// Resurrections already recorded for this molecule.
+    pub prior_count: u32,
+    /// The composed bootstrap prompt.
+    pub prompt: String,
+    /// Byte length of [`Self::prompt`].
+    pub composed_prompt_bytes: u64,
+    wrecks_dir: PathBuf,
+    _lock: fs::File,
+}
+
+/// Check the resurrection preconditions, take the resurrection lock and
+/// compose the bootstrap prompt. Mutates nothing but the lock file.
+///
+/// Preconditions, all of which must hold: the molecule is not pinned to a
+/// Codex Exec launch; it is `Frozen`; `prompt.md` and `briefing.md` exist; no
+/// worker session is alive (`session_alive`, asked of the session name the new
+/// worker would reuse); and no other resurrection holds the lock.
+///
+/// # Errors
+///
+/// A [`ResurrectError`] naming the first precondition that failed.
+pub fn prepare(
+    store: &FileStore,
+    state_dir: &Path,
+    id: &MoleculeId,
+    repo_root: &Path,
+    session_alive: &dyn Fn(&str) -> bool,
+) -> Result<ResurrectPlan, ResurrectError> {
+    let mol = store
+        .load_molecule(id)
+        .map_err(|e| ResurrectError::State(e.to_string()))?;
+    if cosmon_state::transport_pin::pinned_molecules(state_dir)?.contains(id) {
+        return Err(ResurrectError::PinnedExec);
+    }
+    // Frozen is the wreck state produced by `cs recover`.
+    if mol.status != MoleculeStatus::Frozen {
+        return Err(ResurrectError::NotAWreck {
+            molecule_id: id.as_str().to_owned(),
+            status: mol.status.to_string(),
+        });
+    }
+    let mol_dir = store.molecule_dir(id);
+    for required in ["prompt.md", "briefing.md"] {
+        if !mol_dir.join(required).exists() {
+            return Err(ResurrectError::ArtifactsMissing {
+                mol_dir: mol_dir.clone(),
+                missing: required.to_owned(),
+            });
+        }
+    }
+
+    let branch = mol
+        .originating_branch
+        .clone()
+        .unwrap_or_else(|| format!("feat/{}", id.as_str()));
+    let session_name = mol
+        .session_name
+        .clone()
+        .unwrap_or_else(|| id.as_str().to_owned());
+    if session_alive(&session_name) {
+        return Err(ResurrectError::DoubleResurrect {
+            molecule_id: id.as_str().to_owned(),
+            session: session_name,
+        });
+    }
+
+    // Rejects a concurrent second invocation.
+    fs::create_dir_all(&mol_dir)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(mol_dir.join("resurrect.lock"))?;
+    lock.try_lock_exclusive()
+        .map_err(|_| ResurrectError::FlockContended {
+            molecule_id: id.as_str().to_owned(),
+        })?;
+
+    // One breadcrumb file per resurrection: the filesystem is the count.
+    let wrecks_dir = mol_dir.join("wrecks");
+    let prior_count = count_prior_wrecks(&wrecks_dir);
+    let prompt = compose_resurrection_prompt(
+        &mol_dir,
+        &ComposeContext {
+            molecule_id: id.as_str(),
+            branch: &branch,
+            repo_root,
+            prior_count,
+            next_step_display: Some(format!("Step {}/{}", mol.current_step + 1, mol.total_steps)),
+            synthesis_is_draft: false,
+        },
+    )?;
+    let composed_prompt_bytes = prompt.len() as u64;
+    Ok(ResurrectPlan {
+        molecule: mol,
+        mol_dir,
+        branch,
+        session_name,
+        prior_count,
+        prompt,
+        composed_prompt_bytes,
+        wrecks_dir,
+        _lock: lock,
+    })
+}
+
+impl ResurrectPlan {
+    /// Leave the breadcrumb and the events of a resurrection that spawned.
+    ///
+    /// `prior_session` is the session the molecule held *before* the
+    /// resurrection. The breadcrumb is best-effort; the events are too, as
+    /// everywhere on the event log.
+    pub fn record(&self, state_dir: &Path, repo_root: &Path, prior_session: Option<String>) {
+        let prompt_hash = {
+            let mut h = Sha256::new();
+            h.update(self.prompt.as_bytes());
+            format!("{:x}", h.finalize())
+        };
+        let tip_sha = resolve_tip_sha(repo_root, &self.branch);
+        if let Err(e) = write_breadcrumb(
+            &self.wrecks_dir,
+            &tip_sha,
+            self.prior_count,
+            &prompt_hash,
+            self.composed_prompt_bytes,
+        ) {
+            eprintln!("warn: failed to write resurrect breadcrumb: {e}");
+        }
+        let events_path = state_dir.join("events.jsonl");
+        let _ = cosmon_state::event_log::emit_one(
+            &events_path,
+            EventV2::Resurrected {
+                molecule_id: self.molecule.id.clone(),
+                from_session: prior_session,
+                composed_prompt_bytes: self.composed_prompt_bytes,
+                t_orig_tokens: None,
+                prior_count: self.prior_count,
+            },
+            None,
+        );
+        let _ = cosmon_state::event_log::emit_one(
+            &events_path,
+            EventV2::MoleculeStatusChanged {
+                molecule_id: self.molecule.id.clone(),
+                from: "frozen".to_owned(),
+                to: "running".to_owned(),
+            },
+            None,
+        );
+    }
+}
+
+/// Number of resurrections already recorded under `wrecks_dir`.
+#[must_use]
+pub fn count_prior_wrecks(wrecks_dir: &Path) -> u32 {
+    let Ok(rd) = fs::read_dir(wrecks_dir) else {
+        return 0;
+    };
+    let n = rd
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .count();
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+fn resolve_tip_sha(repo_root: &Path, branch: &str) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", branch])
+        .current_dir(repo_root)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
+        _ => String::new(),
+    }
+}
+
+fn write_breadcrumb(
+    wrecks_dir: &Path,
+    tip_sha: &str,
+    prior_count: u32,
+    prompt_hash: &str,
+    prompt_bytes: u64,
+) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(wrecks_dir)?;
+    let ts = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let path = wrecks_dir.join(format!("{ts}.json"));
+    let payload = serde_json::json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "tip_sha": tip_sha,
+        "prior_count": prior_count,
+        "composed_prompt_hash": prompt_hash,
+        "composed_prompt_bytes": prompt_bytes,
+        "t_orig_tokens": serde_json::Value::Null,
+    });
+    let mut f = fs::File::create(&path)?;
+    f.write_all(serde_json::to_string_pretty(&payload)?.as_bytes())?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +657,34 @@ mod tests {
         assert!(out.contains("intent"));
         assert!(out.contains("plan"));
         assert!(out.contains("Prior resurrection count: 0"));
+    }
+
+    #[test]
+    fn count_prior_wrecks_handles_missing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(count_prior_wrecks(&tmp.path().join("does-not-exist")), 0);
+    }
+
+    #[test]
+    fn count_prior_wrecks_counts_only_json_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("wrecks");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("one.json"), "{}").unwrap();
+        fs::write(dir.join("two.json"), "{}").unwrap();
+        fs::write(dir.join("note.txt"), "ignore").unwrap();
+        assert_eq!(count_prior_wrecks(&dir), 2);
+    }
+
+    #[test]
+    fn write_breadcrumb_produces_valid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("wrecks");
+        let p = write_breadcrumb(&dir, "abc123", 1, "deadbeef", 2048).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(v["tip_sha"], "abc123");
+        assert_eq!(v["prior_count"], 1);
+        assert_eq!(v["composed_prompt_hash"], "deadbeef");
+        assert_eq!(v["composed_prompt_bytes"], 2048);
     }
 }

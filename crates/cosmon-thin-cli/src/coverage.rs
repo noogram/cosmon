@@ -68,11 +68,11 @@ pub const OPERATOR_ONLY: &[OperatorOnlyEntry] = &[
     // `cosmon-remote molecule done`; cs-thin carries no arm for it for the
     // reason recorded in `tests/cli-flag-allowlist.toml` — it holds no
     // galaxy, so it could only ever demonstrate the refusal.
-    OperatorOnlyEntry {
-        name: "evolve",
-        adr_ref: "ADR-080 §5.1",
-        note: None,
-    },
+    // `evolve` left this list on 2026-10-28 (ADR-080 §5.6, pilot plan 0001
+    // lot E1): advancing a step is an operation over the molecule, exposed
+    // as `POST /v1/molecules/{id}/evolve`. The caller-machine effects of
+    // `cs evolve` (shell verification, auto-commit, inline gate) are not
+    // part of the route.
     OperatorOnlyEntry {
         name: "complete",
         adr_ref: "ADR-080 §5.1",
