@@ -975,8 +975,9 @@ version = "1.11.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.pulldown-cmark]]
-version = "0.13.3"
+version = "0.13.5"
 criteria = "safe-to-deploy"
+notes = "Unaudited security update from previously exempted 0.13.3; independent review pending. This exemption is not an audit."
 
 [[exemptions.pulldown-cmark-escape]]
 version = "0.11.0"
