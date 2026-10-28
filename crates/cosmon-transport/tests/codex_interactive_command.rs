@@ -114,14 +114,16 @@ fn mode_default_is_interactive() {
     assert_eq!(CodexMode::default(), CodexMode::Interactive);
 }
 
-/// `[adapters.codex].mode = "exec"` reproduces the legacy fire-and-forget
-/// shape, with the prompt baked into the command line.
+/// `[adapters.codex].mode = "exec"` keeps the fire-and-forget shape, with the
+/// prompt baked into the command line after the default posture flag (without
+/// it `codex exec` runs read-only and the worker can neither write nor commit).
 #[test]
-fn exec_mode_is_byte_identical_legacy_shape() {
+fn exec_mode_is_the_batch_shape() {
     let cmd = build_codex_command(&config(CodexMode::Exec, Some("run the batch job"), vec![]));
     assert_eq!(
         cmd,
-        "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec 'run the batch job'"
+        "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec \
+         --dangerously-bypass-approvals-and-sandbox 'run the batch job'"
     );
 }
 
@@ -132,7 +134,8 @@ fn exec_mode_escapes_prompt_apostrophe() {
     let cmd = build_codex_command(&config(CodexMode::Exec, Some("it's a batch"), vec![]));
     assert_eq!(
         cmd,
-        "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec 'it'\\''s a batch'"
+        "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec \
+         --dangerously-bypass-approvals-and-sandbox 'it'\\''s a batch'"
     );
 }
 

@@ -191,6 +191,12 @@ this stage.
 
 ### Fixed
 
+- A codex worker launched with `[adapters.codex] mode = "exec"` could not write
+  its worktree, commit, or write the galaxy state store: `codex exec` ran with
+  its read-only default sandbox, and `workspace-write` keeps `.git` read-only
+  even under `--add-dir`. Exec mode now gets the same
+  `--dangerously-bypass-approvals-and-sandbox` posture as interactive mode.
+  A sandbox setting in `--harness`, or a non-empty `extra_args`, replaces it.
 - `cs prime` help described a config self-check ("load .cosmon/config.toml and
   self-check gates") that the command never performed. It re-injects the
   current step context of a running molecule, and its help, man page and book
