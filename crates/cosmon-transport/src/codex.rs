@@ -415,10 +415,47 @@ pub const INTERACTIVE_LOG_LEVEL: &str = "error";
 ///
 /// Overridable per-installation via `[adapters.codex].extra_args`; when
 /// that row is non-empty it replaces this default set verbatim.
-pub const DEFAULT_INTERACTIVE_ARGS: &[&str] = &[
-    "--dangerously-bypass-approvals-and-sandbox",
-    "--no-alt-screen",
-];
+pub const DEFAULT_INTERACTIVE_ARGS: &[&str] = &[BYPASS_SANDBOX_FLAG, "--no-alt-screen"];
+
+/// Flag that gives a codex worker its autonomy posture: no approval prompts and
+/// no internal sandbox.
+pub const BYPASS_SANDBOX_FLAG: &str = "--dangerously-bypass-approvals-and-sandbox";
+
+/// Argv tokens (and `-c` key prefixes) by which an operator selects a codex
+/// sandbox or permission posture of their own.
+const OPERATOR_SANDBOX_FLAGS: &[&str] = &["--sandbox", "-s", "--full-auto", BYPASS_SANDBOX_FLAG];
+
+/// Whether `args` already pick a sandbox/permission posture: a sandbox flag, or
+/// a `-c sandbox_mode=…` / `-c default_permissions=…` setting.
+fn sets_sandbox_posture(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let arg = arg.trim();
+        OPERATOR_SANDBOX_FLAGS.contains(&arg)
+            || arg.starts_with("--sandbox=")
+            || arg.starts_with("sandbox_mode=")
+            || arg.starts_with("default_permissions=")
+    })
+}
+
+/// Posture flags of a [`CodexMode::Exec`] worker.
+///
+/// `codex exec` without a sandbox flag runs `read-only`: the worker cannot
+/// write its worktree, commit, or write the galaxy state store (observed
+/// 2026-10-28, and `workspace-write` keeps every `.git` directory read-only even
+/// under `--add-dir`, so no sandboxed posture can commit). An exec worker runs
+/// in the same externally supervised worktree as an interactive one, so it gets
+/// the same posture ([`BYPASS_SANDBOX_FLAG`]) unless the operator chose one:
+/// a non-empty `extra_args` replaces the default verbatim, and a sandbox setting
+/// in `harness_args` suppresses it.
+fn exec_posture_args(config: &CodexSessionConfig) -> Vec<String> {
+    if !config.extra_args.is_empty() {
+        config.extra_args.clone()
+    } else if sets_sandbox_posture(&config.harness_args) {
+        Vec::new()
+    } else {
+        vec![BYPASS_SANDBOX_FLAG.to_owned()]
+    }
+}
 
 /// Configuration for spawning a codex session.
 #[derive(Debug, Clone)]
@@ -448,9 +485,9 @@ pub struct CodexSessionConfig {
     /// Optional model pin resolved by the common Incarnation selector.
     /// Carried as codex's native `--model` flag in both launch modes.
     pub model: Option<String>,
-    /// Extra flags for the interactive spawn. Empty means "use
-    /// [`DEFAULT_INTERACTIVE_ARGS`]"; a non-empty list replaces the
-    /// defaults verbatim. Ignored in [`CodexMode::Exec`].
+    /// Extra flags for the spawn. Empty means "use the mode's default posture"
+    /// ([`DEFAULT_INTERACTIVE_ARGS`], or [`BYPASS_SANDBOX_FLAG`] in
+    /// [`CodexMode::Exec`]); a non-empty list replaces that default verbatim.
     pub extra_args: Vec<String>,
     /// Optional IFBDD telemetry context.
     pub telemetry: Option<AdapterTelemetry>,
@@ -607,6 +644,10 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
                 cmd.push_str(" --model ");
                 cmd.push_str(&shell_escape(model));
             }
+            for flag in exec_posture_args(config) {
+                cmd.push(' ');
+                cmd.push_str(&shell_escape(&flag));
+            }
             if let Some(ref prompt) = config.prompt {
                 let escaped = prompt.replace('\'', "'\\''");
                 let _ = write!(cmd, " '{escaped}'");
@@ -707,6 +748,7 @@ pub fn supervised_worker_args(config: &CodexSessionConfig) -> Vec<String> {
     }
     match config.mode {
         CodexMode::Exec => {
+            args.extend(exec_posture_args(config));
             if let Some(prompt) = &config.prompt {
                 args.push(prompt.clone());
             }
@@ -1751,14 +1793,16 @@ printf '%s\000' "${OPENAI_API_KEY-unset}" "${CODEX_API_KEY-unset}" "${GIT_AUTHOR
         assert_eq!(CodexMode::from_config_str("batch"), CodexMode::Interactive);
     }
 
-    /// Exec mode keeps the legacy `codex exec '<prompt>'` fire-and-forget
-    /// shape, with the default API-key strip ahead of the binary.
+    /// Exec mode keeps the `codex exec '<prompt>'` fire-and-forget shape, with
+    /// the default API-key strip ahead of the binary and the default posture
+    /// flag before the prompt.
     #[test]
-    fn build_command_exec_mode_is_unchanged() {
+    fn build_command_exec_mode_has_the_batch_shape() {
         let c = cfg(CodexMode::Exec, Some("do the thing"), vec![]);
         assert_eq!(
             build_codex_command(&c),
-            "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec 'do the thing'"
+            "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec \
+             --dangerously-bypass-approvals-and-sandbox 'do the thing'"
         );
     }
 
@@ -1767,7 +1811,8 @@ printf '%s\000' "${OPENAI_API_KEY-unset}" "${CODEX_API_KEY-unset}" "${GIT_AUTHOR
         let c = cfg(CodexMode::Exec, Some("it's done"), vec![]);
         assert_eq!(
             build_codex_command(&c),
-            "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec 'it'\\''s done'"
+            "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec \
+             --dangerously-bypass-approvals-and-sandbox 'it'\\''s done'"
         );
     }
 
@@ -1832,6 +1877,107 @@ printf '%s\000' "${OPENAI_API_KEY-unset}" "${CODEX_API_KEY-unset}" "${GIT_AUTHOR
     fn empty_writable_roots_emit_no_add_dir() {
         let c = cfg(CodexMode::Interactive, None, vec![]);
         assert!(!build_codex_command(&c).contains("--add-dir"));
+    }
+
+    // -- Exec-mode posture (2026-10-28): `codex exec` defaults to a read-only
+    // sandbox, under which a worker can write neither its worktree nor the
+    // state store, and cannot commit even under `workspace-write`. --
+
+    /// By default an exec worker carries the same bypass flag as an
+    /// interactive one, placed before the positional prompt.
+    #[test]
+    fn exec_mode_carries_the_bypass_by_default() {
+        let c = cfg(CodexMode::Exec, Some("do it"), vec![]);
+        let cmd = build_codex_command(&c);
+        assert!(
+            cmd.ends_with(" --dangerously-bypass-approvals-and-sandbox 'do it'"),
+            "{cmd:?}"
+        );
+        assert_eq!(
+            supervised_worker_args(&c),
+            [
+                "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "do it"
+            ]
+        );
+    }
+
+    /// A sandbox mode the operator set through `--harness` wins: no bypass.
+    #[test]
+    fn exec_mode_operator_harness_sandbox_wins() {
+        for setting in [
+            "sandbox_mode=\"workspace-write\"",
+            "default_permissions=\":workspace\"",
+        ] {
+            let mut c = cfg(CodexMode::Exec, Some("do it"), vec![]);
+            c.harness_args = vec!["-c".to_owned(), setting.to_owned()];
+            assert!(
+                !build_codex_command(&c).contains("bypass"),
+                "{setting}: bypass must not override the operator"
+            );
+            assert!(!supervised_worker_args(&c)
+                .iter()
+                .any(|arg| arg.contains("bypass")));
+        }
+    }
+
+    /// Non-empty `extra_args` replace the default posture in exec mode too.
+    #[test]
+    fn exec_mode_extra_args_replace_the_default() {
+        let c = cfg(
+            CodexMode::Exec,
+            Some("do it"),
+            vec!["--sandbox".into(), "workspace-write".into()],
+        );
+        let cmd = build_codex_command(&c);
+        assert!(
+            cmd.ends_with(" --sandbox workspace-write 'do it'"),
+            "{cmd:?}"
+        );
+        assert!(!cmd.contains("bypass"), "{cmd:?}");
+    }
+
+    /// The shell-string and the supervised-argv builders agree on the default
+    /// exec posture and on every operator override.
+    #[cfg(unix)]
+    #[test]
+    fn exec_posture_is_equivalent_in_both_builders() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempdir()?;
+        let executable = root.path().join("echo-args");
+        fs::write(&executable, "#!/bin/sh\nprintf '%s\\000' \"$@\"\n")?;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+        let overrides: [(Vec<String>, Vec<String>); 3] = [
+            (vec![], vec![]),
+            (
+                vec![],
+                vec!["-c".into(), "sandbox_mode=\"read-only\"".into()],
+            ),
+            (vec!["--full-auto".into()], vec![]),
+        ];
+        for (extra_args, harness_args) in overrides {
+            let mut c = cfg(CodexMode::Exec, Some("it's \"quoted\""), extra_args);
+            c.binary = executable.clone();
+            c.pass_api_key = true;
+            c.harness_args = harness_args;
+            let legacy = std::process::Command::new("/bin/sh")
+                .args(["-c", &build_codex_command(&c)])
+                .output()?;
+            let direct = std::process::Command::new(&executable)
+                .args(supervised_worker_args(&c))
+                .output()?;
+            assert_eq!(direct.stdout, legacy.stdout, "{:?}", c.extra_args);
+        }
+        Ok(())
+    }
+
+    /// Interactive argv is unchanged by the exec posture.
+    #[test]
+    fn interactive_posture_is_unchanged() {
+        let c = cfg(CodexMode::Interactive, None, vec![]);
+        assert!(build_codex_command(&c)
+            .ends_with("--dangerously-bypass-approvals-and-sandbox --no-alt-screen"));
     }
 
     #[test]
