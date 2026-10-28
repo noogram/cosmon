@@ -209,6 +209,8 @@ this stage.
 
 ### Fixed
 
+- `cs run` retains realized-model capture per molecule across DAG ticks, reading only appended journal bytes after the initial fold.
+
 - `cs fleet resolve` dropped an agent's `adapter` key without a word. `adapter`
   is now an agent field next to `model`, carried into the resolved output
   (`--json` and the plain listing). Any other key the fleet schema does not

@@ -547,6 +547,24 @@ fn colorize_status(status: MoleculeStatus) -> String {
 mod tests {
     use super::*;
 
+    /// Pin the production wiring as well as RuntimeCapture's behavioral
+    /// tests: construction belongs outside the closure passed to the loop.
+    #[test]
+    fn wait_poll_uses_the_held_runtime_capture() {
+        let source = include_str!("wait.rs");
+        let run = source.split("mod tests {").next().unwrap();
+        let held = run
+            .find("let mut capture = crate::energy_probe::RuntimeCapture::new")
+            .unwrap();
+        let callback = run.find("let on_poll = || capture.poll();").unwrap();
+        let call = run
+            .find("match wait_for_status_with_metrics_probed(")
+            .unwrap();
+        assert!(held < callback && callback < call);
+        assert!(run[call..].contains("        on_poll,"));
+        assert!(!run.contains("capture_realized_runtime("));
+    }
+
     #[test]
     fn test_parse_statuses_defaults() {
         let parsed = parse_statuses(&["completed".to_owned(), "collapsed".to_owned()]).unwrap();

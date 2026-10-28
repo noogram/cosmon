@@ -515,9 +515,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &probe_state_dir,
         &super::tmux_socket_name(ctx),
     );
-    let tick_probe: cosmon_runtime::TickProbe = Box::new(move |mol_id| {
-        crate::energy_probe::capture_realized_runtime(&probe_state_dir, mol_id, &probe_backends);
-    });
+    let tick_probe = runtime_tick_probe(probe_state_dir, probe_backends);
     let mut runtime = Runtime::new(store_box, policy, executor, config)
         .with_liveness_check(liveness)
         .with_run_bounds(bounds)
@@ -811,6 +809,23 @@ fn ctrlc_wire(handle: &cosmon_runtime::ShutdownSignal) -> Result<(), ()> {
     ctrlc::set_handler(move || h.trip()).map_err(|_| ())
 }
 
+/// Keep each molecule's journal fold and session cursor for the lifetime of
+/// this run. New molecules (including sweep additions) are captured lazily.
+fn runtime_tick_probe(
+    state_dir: PathBuf,
+    backends: Vec<cosmon_transport::TmuxBackend>,
+) -> cosmon_runtime::TickProbe {
+    let mut captures = std::collections::HashMap::new();
+    Box::new(move |mol_id| {
+        captures
+            .entry(mol_id.clone())
+            .or_insert_with(|| {
+                crate::energy_probe::RuntimeCapture::new(&state_dir, mol_id, backends.clone())
+            })
+            .poll();
+    })
+}
+
 /// Resolve the opt-in run-wide adapter directive for `cs run --resident`
 /// (COSMON-DEV #21).
 ///
@@ -1095,6 +1110,210 @@ mod tests {
     use cosmon_state::MoleculeData;
     use std::collections::HashMap;
     use tempfile::TempDir;
+
+    /// Drive the production run probe with two interleaved molecules. The
+    /// byte counter observes actual journal reads, independent of the cache.
+    #[test]
+    fn run_tick_probe_does_not_reread_the_journal() {
+        let root = TempDir::new().unwrap();
+        let state_dir = root.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let log = cosmon_state::event_log::resolve_events_log_path(&state_dir);
+        // Valid unrelated events ensure a reset really has bytes to re-read,
+        // without resolving live workers or touching user session logs.
+        let event = cosmon_core::event_v2::EventV2::WorkerSpawned {
+            transport: None,
+            worker_id: cosmon_core::id::WorkerId::new("fixture-worker").unwrap(),
+            molecule: None,
+            session_name: "fixture".into(),
+            role: "polecat".into(),
+            adapter_name: "codex".into(),
+            loop_ownership: Default::default(),
+        };
+        cosmon_state::event_log::emit_one(&log, event.clone(), None).unwrap();
+        let ids = [
+            MoleculeId::new("task-20261028-aa01").unwrap(),
+            MoleculeId::new("task-20261028-aa02").unwrap(),
+        ];
+        let mut probe = runtime_tick_probe(state_dir, Vec::new());
+        let bytes = cosmon_state::event_log::journal_bytes_read_by_this_thread;
+        let start = bytes();
+        for id in &ids {
+            probe(id);
+        }
+        assert_eq!(
+            bytes() - start,
+            std::fs::metadata(&log).unwrap().len() * 2,
+            "both molecules must consume the complete initial journal"
+        );
+        let before = bytes();
+        for id in &ids {
+            probe(id);
+        }
+        assert_eq!(bytes() - before, 0, "second tick re-read consumed bytes");
+
+        let old_len = std::fs::metadata(&log).unwrap().len();
+        cosmon_state::event_log::emit_one(&log, event, None).unwrap();
+        let appended = std::fs::metadata(&log).unwrap().len() - old_len;
+        let before = bytes();
+        for id in &ids {
+            probe(id);
+        }
+        assert_eq!(
+            bytes() - before,
+            appended * 2,
+            "each capture reads only the append"
+        );
+
+        // Exercise both the resolved-cwd/tick path and the unresolved-cwd
+        // retry path, not only poll's no-worker early return. An in-process
+        // adapter keeps this journal test independent of user session logs.
+        let store = FileStore::new(root.path().join("state"));
+        let mut fleet = cosmon_state::Fleet::default();
+        for (index, id) in ids.iter().enumerate() {
+            store
+                .save_molecule(
+                    id,
+                    &sample_mol(id.as_str(), MoleculeStatus::Running, Vec::new()),
+                )
+                .unwrap();
+            let worker = cosmon_core::id::WorkerId::new(format!("fixture-worker-{index}")).unwrap();
+            let mut data = cosmon_state::WorkerData::new(
+                worker.clone(),
+                cosmon_core::id::AgentId::new("tackle").unwrap(),
+                cosmon_core::agent::AgentRole::Implementation,
+                cosmon_core::clearance::Clearance::Write,
+                cosmon_core::worker::WorkerStatus::Active,
+            );
+            if index == 0 {
+                data.repo = Some(root.path().to_string_lossy().into_owned());
+            }
+            data.current_molecule = Some(id.clone());
+            fleet.workers.insert(worker.clone(), data);
+            cosmon_state::event_log::emit_one(
+                &log,
+                cosmon_core::event_v2::EventV2::AdapterSelected {
+                    mol_id: id.clone(),
+                    adapter_name: "local".into(),
+                    selected_at: Utc::now(),
+                    selection_source: cosmon_core::event_v2::AdapterSelectionSource::Cli {
+                        flag: "local".into(),
+                    },
+                    role_hint: None,
+                    loop_ownership: Default::default(),
+                },
+                None,
+            )
+            .unwrap();
+            cosmon_state::event_log::emit_one(
+                &log,
+                cosmon_core::event_v2::EventV2::WorkerSpawned {
+                    transport: None,
+                    worker_id: worker,
+                    molecule: Some(id.clone()),
+                    session_name: "fixture".into(),
+                    role: "polecat".into(),
+                    adapter_name: "local".into(),
+                    loop_ownership: Default::default(),
+                },
+                None,
+            )
+            .unwrap();
+        }
+        store.save_fleet(&fleet).unwrap();
+        for (index, id) in ids.iter().enumerate() {
+            let mut witness = crate::energy_probe::RealizedCapture::new(
+                &root.path().join("state"),
+                id,
+                root.path(),
+                None,
+            );
+            assert_eq!(
+                witness.last_worker(),
+                Some(cosmon_core::id::WorkerId::new(format!("fixture-worker-{index}")).unwrap()),
+                "the fixture must reach poll's worker-present path"
+            );
+            probe(id);
+        }
+        let before = bytes();
+        for _ in 0..12 {
+            for id in &ids {
+                probe(id);
+            }
+        }
+        assert_eq!(
+            bytes() - before,
+            0,
+            "resolved capture or cwd retry re-read the journal"
+        );
+    }
+
+    /// Manual attribution probe: point ONLY at a private snapshot of a real
+    /// galaxy (capture may append observations). Measures the production DAG
+    /// tick seam, excluding scheduler/renderer/store-snapshot costs.
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "requires a private real-galaxy snapshot and molecule IDs"]
+    fn run_tick_probe_real_journal_cpu() {
+        fn cpu_seconds() -> f64 {
+            let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+            // SAFETY: getrusage initializes the valid output pointer on success.
+            assert_eq!(
+                unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+                0
+            );
+            // SAFETY: successful getrusage initialized this value.
+            let usage = unsafe { usage.assume_init() };
+            usage.ru_utime.tv_sec as f64
+                + usage.ru_utime.tv_usec as f64 / 1e6
+                + usage.ru_stime.tv_sec as f64
+                + usage.ru_stime.tv_usec as f64 / 1e6
+        }
+        let state = PathBuf::from(std::env::var("COSMON_PROBE_BENCH_STATE").unwrap());
+        let ids: Vec<_> = std::env::var("COSMON_PROBE_BENCH_IDS")
+            .unwrap()
+            .split(',')
+            .map(|id| MoleculeId::new(id).unwrap())
+            .collect();
+        assert!(ids.len() >= 2);
+        let mode = std::env::var("COSMON_PROBE_BENCH_MODE").unwrap();
+        let mut probe = if mode == "before" {
+            Box::new(move |id: &MoleculeId| {
+                crate::energy_probe::capture_realized_runtime(&state, id, &[]);
+            }) as cosmon_runtime::TickProbe
+        } else {
+            assert_eq!(mode, "after");
+            runtime_tick_probe(state, Vec::new())
+        };
+        let bytes = cosmon_state::event_log::journal_bytes_read_by_this_thread;
+        let cold_cpu = cpu_seconds();
+        let cold_bytes = bytes();
+        for id in &ids {
+            probe(id);
+        }
+        println!(
+            "mode={mode} initial_cpu_s={} initial_bytes={}",
+            cpu_seconds() - cold_cpu,
+            bytes() - cold_bytes
+        );
+        // Consume any observations appended by the first capture.
+        for id in &ids {
+            probe(id);
+        }
+        for tick in 0..5 {
+            let start = cpu_seconds();
+            let before = bytes();
+            for id in &ids {
+                probe(id);
+            }
+            println!(
+                "mode={mode} tick={tick} molecules={} cpu_s={:.6} journal_bytes={}",
+                ids.len(),
+                cpu_seconds() - start,
+                bytes() - before
+            );
+        }
+    }
 
     // COSMON-DEV #21 (G1 contract §1): the resident scheduler owns exactly ONE
     // run-wide flag intent — the `cs run --adapter <name>` flag. It does NOT
