@@ -54,8 +54,9 @@ for response in 404 empty malformed; do
   else
     status=$?
   fi
-  if grep -q 'integer expression expected' "$stderr"; then
-    echo "FAIL: $response response emitted an integer-expression diagnostic" >&2
+  if [ -s "$stderr" ]; then
+    echo "FAIL: $response response wrote to gate stderr:" >&2
+    cat "$stderr" >&2
     exit 1
   fi
   if ! grep -q '\[GATE FAIL\] 11\. branch protection exists but lists 0 required checks' "$stdout"; then
