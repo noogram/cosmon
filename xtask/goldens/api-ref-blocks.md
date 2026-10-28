@@ -1,5 +1,5 @@
 ===== routes-v1 =====
-**59 routes `/v1/` gelées** — recomptées depuis le canon à chaque génération (`crates/cosmon-rpp-adapter/data/surface_events.txt`, cosmon). La colonne *Effet* est dérivée du scope requis (godel C5 : un scope distinct par effet coûteux ou irréversible, ADR-080 §6.5) — jamais éditée à la main.
+**62 routes `/v1/` gelées** — recomptées depuis le canon à chaque génération (`crates/cosmon-rpp-adapter/data/surface_events.txt`, cosmon). La colonne *Effet* est dérivée du scope requis (godel C5 : un scope distinct par effet coûteux ou irréversible, ADR-080 §6.5) — jamais éditée à la main.
 
 | # | Famille | Méthode | Path | Scope requis | §8p | Effet |
 |---|---|---|---|---|---|---|
@@ -22,48 +22,51 @@
 | 17 | molecule | POST | `/v1/molecules/{id}/resurrect` | `cosmon:molecule:write` **ET** `cosmon:worker:spawn` | tenant-verb | `[coûteux]` |
 | 18 | molecule | GET | `/v1/molecules/{id}/deps` | `cosmon:molecule:read` | tenant-verb |  |
 | 19 | molecule | GET | `/v1/molecules/{id}/prime` | `cosmon:molecule:read` | tenant-verb |  |
-| 20 | artifact | GET | `/v1/molecules/{id}/artifacts` | `cosmon:artifact:read` | adapter-only |  |
-| 21 | artifact | GET | `/v1/molecules/{id}/artifacts/{token}` | `cosmon:artifact:read` | adapter-only |  |
-| 22 | artifact | PUT | `/v1/molecules/{id}/artifacts/{token}` | `cosmon:artifact:write` | adapter-only |  |
-| 23 | harvest | GET | `/v1/harvest/status` | `cosmon:molecule:read` | adapter-only |  |
-| 24 | harvest | POST | `/v1/harvest/challenge` | `cosmon:molecule:harvest` | adapter-only |  |
-| 25 | harvest | POST | `/v1/harvest/grants` | `cosmon:molecule:harvest` | adapter-only |  |
-| 26 | auth-claude | POST | `/v1/auth/claude/start` | — | adapter-only |  |
-| 27 | auth-claude | POST | `/v1/auth/claude/email` | — | adapter-only |  |
-| 28 | auth-claude | GET | `/v1/auth/claude/{session_id}` | — | adapter-only |  |
-| 29 | auth-claude | DELETE | `/v1/auth/claude/{session_id}` | — | adapter-only |  |
-| 30 | auth-claude | POST | `/v1/auth/claude/confirm` | — | adapter-only |  |
-| 31 | observ. | GET | `/v1/auth/me` | — | adapter-only |  |
-| 32 | observ. | GET | `/v1/events` | `cosmon:events:subscribe` | adapter-only |  |
-| 33 | observ. | GET | `/v1/molecules/{id}/logs` | `cosmon:logs:subscribe` | adapter-only |  |
-| 34 | observ. | GET | `/v1/quota` | `cosmon:molecule:read` | adapter-only |  |
-| 35 | observ. | GET | `/v1/noyaux` | — | adapter-only |  |
-| 36 | observ. | GET | `/v1/workers` | `cosmon:worker:read` | adapter-only |  |
-| 37 | observ. | GET | `/v1/vitals` | `cosmon:molecule:read` | adapter-only |  |
-| 38 | observ. | GET | `/v1/ledger` | `cosmon:events:subscribe` **ET** `cosmon:molecule:read` | adapter-only |  |
-| 39 | avatar-canal | POST | `/v1/avatar/converse` | `cosmon:pilote:converse` | tenant-verb |  |
-| 40 | avatar-canal | POST | `/v1/avatar/perceive` | `cosmon:world:observe` | adapter-only |  |
-| 41 | avatar-life | GET | `/v1/avatar/{instance_id}/status` | `cosmon:world:observe` | tenant-verb |  |
-| 42 | avatar-life | POST | `/v1/avatar/{instance_id}/incarnate` | `cosmon:pilote:converse` | tenant-verb |  |
-| 43 | avatar-life | POST | `/v1/avatar/{instance_id}/grant` | `cosmon:pilote:converse` | tenant-verb |  |
-| 44 | avatar-life | GET | `/v1/avatar/{instance_id}/audit` | `cosmon:world:observe` | tenant-verb |  |
-| 45 | avatar-life | GET | `/v1/avatar/{instance_id}/mould-info` | `cosmon:world:observe` | tenant-verb |  |
-| 46 | admin | POST | `/v1/admin/habilitations` | — | adapter-only |  |
-| 47 | admin | GET | `/v1/admin/habilitations` | — | adapter-only |  |
-| 48 | admin | DELETE | `/v1/admin/habilitations/{id}` | — | adapter-only |  |
-| 49 | admin | POST | `/v1/admin/reload` | — | adapter-only |  |
-| 50 | admin | POST | `/v1/admin/federations` | — | adapter-only |  |
-| 51 | admin | GET | `/v1/admin/federations` | — | adapter-only |  |
-| 52 | admin | DELETE | `/v1/admin/federations/{id}` | — | adapter-only |  |
-| 53 | admin | DELETE | `/v1/admin/federations/{id}/galaxies/{galaxy}` | — | adapter-only |  |
-| 54 | admin | PUT | `/v1/admin/noyaux/{noyau}/harvest-authority` | — | adapter-only |  |
-| 55 | work | GET | `/v1/work/{owner}` | `cosmon:work:read` | adapter-only |  |
-| 56 | work | POST | `/v1/work/{owner}/messages` | `cosmon:work:write` | adapter-only |  |
-| 57 | work | GET | `/v1/work/{owner}/inbox` | `cosmon:work:read` | adapter-only |  |
-| 58 | work | POST | `/v1/work/{owner}/inbox` | `cosmon:work:read` | adapter-only |  |
-| 59 | work | POST | `/v1/work/{owner}/messages/{key}/ack` | `cosmon:work:write` | adapter-only |  |
+| 20 | molecule | POST | `/v1/molecules/{id}/decay` | `cosmon:molecule:write` | tenant-verb |  |
+| 21 | molecule | POST | `/v1/molecules/merge` | `cosmon:molecule:write` | tenant-verb |  |
+| 22 | molecule | POST | `/v1/molecules/{id}/transform` | `cosmon:molecule:write` | tenant-verb |  |
+| 23 | artifact | GET | `/v1/molecules/{id}/artifacts` | `cosmon:artifact:read` | adapter-only |  |
+| 24 | artifact | GET | `/v1/molecules/{id}/artifacts/{token}` | `cosmon:artifact:read` | adapter-only |  |
+| 25 | artifact | PUT | `/v1/molecules/{id}/artifacts/{token}` | `cosmon:artifact:write` | adapter-only |  |
+| 26 | harvest | GET | `/v1/harvest/status` | `cosmon:molecule:read` | adapter-only |  |
+| 27 | harvest | POST | `/v1/harvest/challenge` | `cosmon:molecule:harvest` | adapter-only |  |
+| 28 | harvest | POST | `/v1/harvest/grants` | `cosmon:molecule:harvest` | adapter-only |  |
+| 29 | auth-claude | POST | `/v1/auth/claude/start` | — | adapter-only |  |
+| 30 | auth-claude | POST | `/v1/auth/claude/email` | — | adapter-only |  |
+| 31 | auth-claude | GET | `/v1/auth/claude/{session_id}` | — | adapter-only |  |
+| 32 | auth-claude | DELETE | `/v1/auth/claude/{session_id}` | — | adapter-only |  |
+| 33 | auth-claude | POST | `/v1/auth/claude/confirm` | — | adapter-only |  |
+| 34 | observ. | GET | `/v1/auth/me` | — | adapter-only |  |
+| 35 | observ. | GET | `/v1/events` | `cosmon:events:subscribe` | adapter-only |  |
+| 36 | observ. | GET | `/v1/molecules/{id}/logs` | `cosmon:logs:subscribe` | adapter-only |  |
+| 37 | observ. | GET | `/v1/quota` | `cosmon:molecule:read` | adapter-only |  |
+| 38 | observ. | GET | `/v1/noyaux` | — | adapter-only |  |
+| 39 | observ. | GET | `/v1/workers` | `cosmon:worker:read` | adapter-only |  |
+| 40 | observ. | GET | `/v1/vitals` | `cosmon:molecule:read` | adapter-only |  |
+| 41 | observ. | GET | `/v1/ledger` | `cosmon:events:subscribe` **ET** `cosmon:molecule:read` | adapter-only |  |
+| 42 | avatar-canal | POST | `/v1/avatar/converse` | `cosmon:pilote:converse` | tenant-verb |  |
+| 43 | avatar-canal | POST | `/v1/avatar/perceive` | `cosmon:world:observe` | adapter-only |  |
+| 44 | avatar-life | GET | `/v1/avatar/{instance_id}/status` | `cosmon:world:observe` | tenant-verb |  |
+| 45 | avatar-life | POST | `/v1/avatar/{instance_id}/incarnate` | `cosmon:pilote:converse` | tenant-verb |  |
+| 46 | avatar-life | POST | `/v1/avatar/{instance_id}/grant` | `cosmon:pilote:converse` | tenant-verb |  |
+| 47 | avatar-life | GET | `/v1/avatar/{instance_id}/audit` | `cosmon:world:observe` | tenant-verb |  |
+| 48 | avatar-life | GET | `/v1/avatar/{instance_id}/mould-info` | `cosmon:world:observe` | tenant-verb |  |
+| 49 | admin | POST | `/v1/admin/habilitations` | — | adapter-only |  |
+| 50 | admin | GET | `/v1/admin/habilitations` | — | adapter-only |  |
+| 51 | admin | DELETE | `/v1/admin/habilitations/{id}` | — | adapter-only |  |
+| 52 | admin | POST | `/v1/admin/reload` | — | adapter-only |  |
+| 53 | admin | POST | `/v1/admin/federations` | — | adapter-only |  |
+| 54 | admin | GET | `/v1/admin/federations` | — | adapter-only |  |
+| 55 | admin | DELETE | `/v1/admin/federations/{id}` | — | adapter-only |  |
+| 56 | admin | DELETE | `/v1/admin/federations/{id}/galaxies/{galaxy}` | — | adapter-only |  |
+| 57 | admin | PUT | `/v1/admin/noyaux/{noyau}/harvest-authority` | — | adapter-only |  |
+| 58 | work | GET | `/v1/work/{owner}` | `cosmon:work:read` | adapter-only |  |
+| 59 | work | POST | `/v1/work/{owner}/messages` | `cosmon:work:write` | adapter-only |  |
+| 60 | work | GET | `/v1/work/{owner}/inbox` | `cosmon:work:read` | adapter-only |  |
+| 61 | work | POST | `/v1/work/{owner}/inbox` | `cosmon:work:read` | adapter-only |  |
+| 62 | work | POST | `/v1/work/{owner}/messages/{key}/ack` | `cosmon:work:write` | adapter-only |  |
 
-Découpage : **19** molecule + **3** artifact + **3** harvest + **5** auth-claude + **8** observ. + **2** avatar-canal + **5** avatar-life + **9** admin + **5** work = **59**.
+Découpage : **22** molecule + **3** artifact + **3** harvest + **5** auth-claude + **8** observ. + **2** avatar-canal + **5** avatar-life + **9** admin + **5** work = **62**.
 
 ===== bijection-8p =====
 | Route | Statut bijection (§8p) |
@@ -87,6 +90,9 @@ Découpage : **19** molecule + **3** artifact + **3** harvest + **5** auth-claud
 | `POST /v1/molecules/{id}/resurrect` | ✅ liée (verbe tenant, bijection testée) |
 | `GET /v1/molecules/{id}/deps` | ✅ liée (verbe tenant, bijection testée) |
 | `GET /v1/molecules/{id}/prime` | ✅ liée (verbe tenant, bijection testée) |
+| `POST /v1/molecules/{id}/decay` | ✅ liée (verbe tenant, bijection testée) |
+| `POST /v1/molecules/merge` | ✅ liée (verbe tenant, bijection testée) |
+| `POST /v1/molecules/{id}/transform` | ✅ liée (verbe tenant, bijection testée) |
 | `GET /v1/molecules/{id}/artifacts` | ⊘ exempte (adapter-only) |
 | `GET /v1/molecules/{id}/artifacts/{token}` | ⊘ exempte (adapter-only) |
 | `PUT /v1/molecules/{id}/artifacts/{token}` | ⊘ exempte (adapter-only) |
@@ -128,5 +134,5 @@ Découpage : **19** molecule + **3** artifact + **3** harvest + **5** auth-claud
 | `POST /v1/work/{owner}/inbox` | ⊘ exempte (adapter-only) |
 | `POST /v1/work/{owner}/messages/{key}/ack` | ⊘ exempte (adapter-only) |
 
-Bijection liée : **23** (17 molecule + 1 avatar-canal + 5 avatar-life). Exemptes : **36**. Total : **59** — recompté depuis le canon (colonne `exposure`) à chaque génération.
+Bijection liée : **26** (20 molecule + 1 avatar-canal + 5 avatar-life). Exemptes : **36**. Total : **62** — recompté depuis le canon (colonne `exposure`) à chaque génération.
 

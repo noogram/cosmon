@@ -588,3 +588,23 @@ refused `501`; cross-galaxy links in `deps` are listed, not resolved;
 text, which described a config self-check the code never performed, now
 describes the propulsion reminder it prints; `cs evolve` is no longer on the
 operator-only list (ADR-080 §5.6).
+
+## Remote decay, merge and transform (pilot plan 0001, lot E2, 2026-10-28)
+
+| User intent | CLI | Remote CLI / API | UI |
+|---|---|---|---|
+| Decompose an idea, issue or deliberation | `cs decay <id> --formula … --reason … [--product-kind …] [--blocks …]` | `cosmon-remote molecule decay <id> --formula … --reason … [--product-kind …] [--blocks …]`; `POST /v1/molecules/{id}/decay` | No matching change audited |
+| Synthesise several molecules into one | `cs merge <id> <id>… --formula … --reason … [--product-kind …]` | `cosmon-remote molecule merge <id> <id>… --formula … --reason … [--product-kind …]`; `POST /v1/molecules/merge` | No matching change audited |
+| Change a molecule's kind | `cs transform <id> --to … --reason …` | `cosmon-remote molecule transform <id> --to … --reason …`; `POST /v1/molecules/{id}/transform` | No matching change audited |
+
+Each route calls the operation its verb calls (`cosmon_state::ops::{decay,
+merge, transform}`), so both leave the same state from the same fixture; the
+two test suites assert the same projection of the store. Remote differences,
+all deliberate: the wire has no `--count` or `--chain` (the f4e1 guard allows
+one product, so there is nothing to chain); a `blocks` target that does not
+exist, and a merge source that is missing or kind-refused, are refused before
+anything is written, for `cs` as well (previously `cs decay --blocks <missing>`
+left the product behind); a merge source the caller's tenant does not hold
+answers `404 not_found` whether it never existed or belongs to another
+binding. The `cs` JSON output is unchanged and is the route's `decay`,
+`merge` or `transform` object.

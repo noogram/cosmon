@@ -613,13 +613,14 @@ pub fn ensure_decay_count_is_heterogeneous(
     parent: &MoleculeId,
     count: usize,
 ) -> Result<(), GuardError> {
-    if count > 1 {
-        return Err(GuardError::DecayHomogeneousCount {
+    // The rule is the shared operation's, so `cs decay` and the RPP route read
+    // one definition; this wrapper only keeps the CLI's exit code.
+    cosmon_state::ops::ensure_decay_count_is_heterogeneous(parent, count).map_err(|_| {
+        GuardError::DecayHomogeneousCount {
             parent: parent.clone(),
             count,
-        });
-    }
-    Ok(())
+        }
+    })
 }
 
 /// Gödel guard — refuse `cs tackle` when the calling session is a broker.

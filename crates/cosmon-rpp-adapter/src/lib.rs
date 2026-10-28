@@ -487,6 +487,22 @@ pub fn router(state: AppState) -> Router {
             "/v1/molecules/{id}/prime",
             get(routes::molecules::prime_molecule),
         )
+        // The three molecule interactions Leanear asked for (pilot plan 0001,
+        // lot E2): each calls the operation its `cs` verb calls
+        // (`ops::decay`, `ops::merge`, `ops::transform`). `merge` is N → 1 and
+        // has no single molecule in its path.
+        .route(
+            "/v1/molecules/{id}/decay",
+            post(routes::molecules::decay_molecule),
+        )
+        .route(
+            "/v1/molecules/merge",
+            post(routes::molecules::merge_molecules),
+        )
+        .route(
+            "/v1/molecules/{id}/transform",
+            post(routes::molecules::transform_molecule),
+        )
         .route(
             "/v1/molecules/{id}/tackle",
             post(routes::molecules::tackle_molecule),
