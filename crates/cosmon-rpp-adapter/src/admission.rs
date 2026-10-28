@@ -107,6 +107,15 @@ pub enum Verb {
     DepsMolecule,
     /// `GET /v1/molecules/{id}/prime` — the step context of a live molecule.
     PrimeMolecule,
+    /// `POST /v1/molecules/{id}/decay` — 1 → N: the source completes and
+    /// product molecules are nucleated (the shared `ops::decay`).
+    DecayMolecule,
+    /// `POST /v1/molecules/merge` — N → 1: the sources complete and a
+    /// synthesis molecule is nucleated (the shared `ops::merge`).
+    MergeMolecules,
+    /// `POST /v1/molecules/{id}/transform` — the molecule changes kind and
+    /// keeps its identity (the shared `ops::transform`).
+    TransformMolecule,
     /// `POST /v1/molecules/{id}/tackle` (T9 remote-tackle V2).
     /// Spawns a worker session through the
     /// subprocess envelope (§3.5) — `cs tackle :id` inside the
@@ -222,6 +231,9 @@ impl Verb {
             Self::ResurrectMolecule => "resurrect",
             Self::DepsMolecule => "deps",
             Self::PrimeMolecule => "prime",
+            Self::DecayMolecule => "decay",
+            Self::MergeMolecules => "merge",
+            Self::TransformMolecule => "transform",
             Self::TackleMolecule => "tackle",
             Self::RunMolecule => "run",
             // "done", now that it is one gesture again. `land` was a second

@@ -21,6 +21,9 @@ Commands:
   resurrect         `POST /v1/molecules/{id}/resurrect` — revive a wrecked (frozen) molecule with a fresh worker. Spawns, so it needs the spawn scope and counts against the same live-worker ceiling as `tackle` [coûteux]
   deps              `GET /v1/molecules/{id}/deps` — blocking, lineage and citation links of a molecule. Cross-galaxy links are listed, not resolved
   prime             `GET /v1/molecules/{id}/prime` — the current step context of a live molecule (what `cs prime` prints). Read-only; a terminal molecule answers `terminal: true` and nothing to prime
+  decay             `POST /v1/molecules/{id}/decay` — decay the molecule (idea, issue or deliberation) into one product molecule and complete it. The product copies the source's variables, so there is exactly one
+  merge             `POST /v1/molecules/merge` — merge two or more molecules into one synthesis molecule and complete the sources. Every source is checked first: one the tenant cannot reach refuses the whole merge, as `not_found`, and nothing is written
+  transform         `POST /v1/molecules/{id}/transform` — change the molecule's kind along an edge of the kind graph (idea → task, task → issue, …); it keeps its identity
   tag               `POST /v1/molecules/{id}/tags`
   help              Print this message or the help of the given subcommand(s)
 

@@ -26,12 +26,14 @@ THE 7 VERBS — RPP-exposable (ADR-080 §8p):
   collapse   POST   /v1/molecules/:id/collapse       scope: cosmon:molecule:write
   collapse_receipt GET    /v1/molecules/:id/collapse-receipts/:key scope: cosmon:molecule:read
   converse   POST   /v1/avatar/converse              scope: cosmon:pilote:converse
+  decay      POST   /v1/molecules/:id/decay          scope: cosmon:molecule:write
   deps       GET    /v1/molecules/:id/deps           scope: cosmon:molecule:read
   done       POST   /v1/molecules/:id/done           scope: cosmon:molecule:write
   ensemble   GET    /v1/molecules                    scope: cosmon:molecule:read
   evolve     POST   /v1/molecules/:id/evolve         scope: cosmon:molecule:write
   freeze     POST   /v1/molecules/:id/freeze         scope: cosmon:molecule:write
   keyed_collapse PUT    /v1/molecules/:id/collapse-receipts/:key scope: cosmon:molecule:write
+  merge      POST   /v1/molecules/merge              scope: cosmon:molecule:write
   nucleate   POST   /v1/molecules                    scope: cosmon:molecule:write
   observe    GET    /v1/molecules/:id                scope: cosmon:molecule:read
   prime      GET    /v1/molecules/:id/prime          scope: cosmon:molecule:read
@@ -41,6 +43,7 @@ THE 7 VERBS — RPP-exposable (ADR-080 §8p):
   stuck      POST   /v1/molecules/:id/stuck          scope: cosmon:molecule:write
   tackle     POST   /v1/molecules/:id/tackle         scope: cosmon:molecule:write+cosmon:worker:spawn
   tag        POST   /v1/molecules/:id/tags           scope: cosmon:molecule:write
+  transform  POST   /v1/molecules/:id/transform      scope: cosmon:molecule:write
 
 OPERATOR-ONLY VERBS — refused by §8p (see ADR-080 §5.1):
   These verbs exist on local `cs` but DO NOT cross the wire. Their

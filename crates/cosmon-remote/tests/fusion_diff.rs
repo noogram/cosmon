@@ -308,10 +308,11 @@ fn molecule_diff_is_the_blessed_lifecycle_and_conditional_collapse_help() {
     }
     assert_eq!(
         added.len(),
-        13,
+        16,
         "blessed: thaw correction + tackle marker + run line + done line + session line \
          + status line + --token reword + conditional collapse + receipt lookup \
-         + evolve, resurrect, deps and prime lines (pilot plan 0001 lot E1), got {added:?}"
+         + evolve, resurrect, deps and prime lines (pilot plan 0001 lot E1) \
+         + decay, merge and transform lines (lot E2), got {added:?}"
     );
     for line in [collapse_post, receipt_post] {
         assert!(
@@ -362,6 +363,10 @@ fn molecule_diff_is_the_blessed_lifecycle_and_conditional_collapse_help() {
         ("resurrect", "POST /v1/molecules/{id}/resurrect"),
         ("deps", "GET /v1/molecules/{id}/deps"),
         ("prime", "GET /v1/molecules/{id}/prime"),
+        // Lot E2.
+        ("decay", "POST /v1/molecules/{id}/decay"),
+        ("merge", "POST /v1/molecules/merge"),
+        ("transform", "POST /v1/molecules/{id}/transform"),
     ] {
         let head = format!("  {verb:8}  `{route}`");
         assert!(

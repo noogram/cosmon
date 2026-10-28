@@ -101,6 +101,27 @@ pub fn deps() {}
 #[cosmon_thin_macro::verb(method = "GET", path = "/v1/molecules/:id/prime", principal = "tenant")]
 pub fn prime() {}
 
+/// Wire stub for `POST /v1/molecules/:id/decay` (pilot plan 0001, lot E2).
+#[cosmon_thin_macro::verb(
+    method = "POST",
+    path = "/v1/molecules/:id/decay",
+    principal = "tenant"
+)]
+pub fn decay() {}
+
+/// Wire stub for `POST /v1/molecules/merge` (pilot plan 0001, lot E2).
+/// N → 1, so no molecule id in the path.
+#[cosmon_thin_macro::verb(method = "POST", path = "/v1/molecules/merge", principal = "tenant")]
+pub fn merge() {}
+
+/// Wire stub for `POST /v1/molecules/:id/transform` (pilot plan 0001, lot E2).
+#[cosmon_thin_macro::verb(
+    method = "POST",
+    path = "/v1/molecules/:id/transform",
+    principal = "tenant"
+)]
+pub fn transform() {}
+
 /// Wire stub for `POST /v1/molecules/:id/tackle` (remote-tackle V2).
 #[cosmon_thin_macro::verb(
     method = "POST",

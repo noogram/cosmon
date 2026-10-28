@@ -1551,6 +1551,72 @@ impl Client {
         decode_json(resp).await
     }
 
+    /// `POST /v1/molecules/{id}/decay` — decay the molecule into a product
+    /// molecule (`cs decay`). `product_kind` defaults to `task` server-side.
+    pub async fn decay(
+        &self,
+        id: &str,
+        formula: &str,
+        reason: &str,
+        product_kind: Option<&str>,
+        blocks: &[String],
+    ) -> Result<serde_json::Value> {
+        let mut body = serde_json::json!({
+            "formula": formula,
+            "reason": reason,
+            "blocks": blocks,
+        });
+        if let Some(kind) = product_kind {
+            body["product_kind"] = serde_json::json!(kind);
+        }
+        let resp = self
+            .send(
+                self.req_canon(canon::POST_V1_MOLECULES_ID_DECAY, &[id])
+                    .json(&body),
+            )
+            .await?;
+        decode_json(resp).await
+    }
+
+    /// `POST /v1/molecules/merge` — merge the sources into one synthesis
+    /// molecule (`cs merge`). All sources are checked before anything is
+    /// written; `product_kind` defaults to `decision` server-side.
+    pub async fn merge(
+        &self,
+        sources: &[String],
+        formula: &str,
+        reason: &str,
+        product_kind: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let mut body = serde_json::json!({
+            "sources": sources,
+            "formula": formula,
+            "reason": reason,
+        });
+        if let Some(kind) = product_kind {
+            body["product_kind"] = serde_json::json!(kind);
+        }
+        let resp = self
+            .send(
+                self.req_canon(canon::POST_V1_MOLECULES_MERGE, &[])
+                    .json(&body),
+            )
+            .await?;
+        decode_json(resp).await
+    }
+
+    /// `POST /v1/molecules/{id}/transform` — change the molecule's kind
+    /// (`cs transform --to`).
+    pub async fn transform(&self, id: &str, to: &str, reason: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .send(
+                self.req_canon(canon::POST_V1_MOLECULES_ID_TRANSFORM, &[id])
+                    .json(&serde_json::json!({ "to": to, "reason": reason })),
+            )
+            .await?;
+        decode_json(resp).await
+    }
+
     // ── Artifacts (e653) ──────────────────────────────────────────────
 
     /// `GET /v1/molecules/{id}/artifacts`.

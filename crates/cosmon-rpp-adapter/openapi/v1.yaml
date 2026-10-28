@@ -1346,6 +1346,272 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
+  /v1/molecules/{id}/decay:
+    post:
+      operationId: decayMolecule
+      summary: Decay a molecule into a product molecule (cs decay).
+      description: |
+        Calls `cosmon_state::ops::decay`, the operation `cs decay` calls.
+        The source (an idea, issue or deliberation) completes and one
+        product molecule is nucleated from `formula` in the tenant's
+        project, linked back to it.
+
+        The product copies the source's variables, so `cs decay` refuses
+        more than one (`--count`); the route creates exactly one, and has
+        no `count` or `chain` field. `blocks` names molecules of the
+        caller's tenant that the product then blocks. Everything that can
+        refuse is checked before the first write.
+
+        decay creates a molecule as `POST /v1/molecules` does and is
+        bounded as it is: by the admission every route crosses, and by
+        nothing of its own.
+
+        ## Required scope
+
+        `cosmon:molecule:write`.
+      tags: [molecules]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DecayBody"
+            examples:
+              split:
+                summary: Turn an idea into a task
+                value:
+                  formula: task-work
+                  reason: "scoped enough to build"
+      responses:
+        "200":
+          description: Source completed, product created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DecayEnvelope"
+        "400":
+          description: Malformed body, or an invalid `product_kind`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing `cosmon:molecule:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: |
+            The molecule, a `blocks` target or the formula is not in the
+            caller's tenant (`not_found`, `formula_not_found`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: |
+            The molecule's kind does not decay (`cannot_decay`), the formula
+            is unusable (`formula_unavailable`) or cannot be instantiated
+            from the source's variables (`nucleation_failed`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Rate limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/molecules/merge:
+    post:
+      operationId: mergeMolecules
+      summary: Merge several molecules into one synthesis molecule (cs merge).
+      description: |
+        Calls `cosmon_state::ops::merge`, the operation `cs merge` calls.
+        The sources complete and one synthesis molecule is nucleated from
+        `formula`, carrying the variables of every source and linked back
+        to all of them.
+
+        All or nothing. Every source is looked up in the caller's own
+        tenant, the way every `/v1/molecules/{id}/...` route looks up its
+        molecule, before anything is written. A source the tenant does not
+        hold, whether it never existed or belongs to another binding,
+        refuses the whole merge with `404 not_found` and no identifier in
+        the body: the answer is the same for both, so the route cannot be
+        used to ask whether another tenant's molecule exists. A refused
+        merge creates no synthesis molecule, modifies no source and
+        appends no event.
+
+        A source the tenant does hold whose kind cannot merge is the
+        caller's own, and is named: `409 source_not_mergeable` with
+        `source` and `kind`.
+
+        merge creates a molecule as `POST /v1/molecules` does and is
+        bounded as it is: by the admission every route crosses, and by
+        nothing of its own.
+
+        ## Required scope
+
+        `cosmon:molecule:write`.
+      tags: [molecules]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MergeBody"
+            examples:
+              synthesise:
+                summary: Merge two research tasks into a decision
+                value:
+                  sources: ["task-20261028-1111", "task-20261028-2222"]
+                  formula: task-work
+                  reason: "findings converge"
+      responses:
+        "200":
+          description: Sources completed, synthesis molecule created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MergeEnvelope"
+        "400":
+          description: Fewer than two sources (`merge_needs_two_sources`), an invalid `product_kind`, or a malformed body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing `cosmon:molecule:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: |
+            A source, or the formula, is not in the caller's tenant
+            (`not_found`, `formula_not_found`). The same answer for a
+            source that does not exist and one that belongs to another
+            binding.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: |
+            A source of the caller's tenant cannot merge
+            (`source_not_mergeable`, with `source` and `kind`), the formula
+            is unusable (`formula_unavailable`) or cannot be instantiated
+            (`nucleation_failed`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Rate limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/molecules/{id}/transform:
+    post:
+      operationId: transformMolecule
+      summary: Change a molecule's kind (cs transform).
+      description: |
+        Calls `cosmon_state::ops::transform`, the operation `cs transform`
+        calls. The molecule keeps its identity and changes kind along an
+        edge of the kind graph (idea to task, decision or issue; issue to
+        task; task to issue; deliberation to decision).
+
+        ## Required scope
+
+        `cosmon:molecule:write`.
+      tags: [molecules]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransformBody"
+            examples:
+              promote:
+                summary: Promote an idea to a task
+                value:
+                  to: task
+                  reason: "ready to build"
+      responses:
+        "200":
+          description: Kind changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransformEnvelope"
+        "400":
+          description: Malformed body, or `to` is not a molecule kind.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing `cosmon:molecule:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Molecule not found in caller's tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: The kind graph has no edge from the molecule's kind to `to` (`not_transformable`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Rate limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
   /v1/molecules/{id}/tackle:
     post:
       operationId: tackleMolecule
@@ -4998,6 +5264,131 @@ components:
         timestamp: { type: string, format: date-time }
         seq: { type: integer, minimum: 0 }
         mol_seq: { type: integer, minimum: 0 }
+
+    DecayBody:
+      type: object
+      required: [formula, reason]
+      additionalProperties: false
+      properties:
+        formula:
+          type: string
+          description: Formula the product molecule is nucleated from.
+        reason:
+          type: string
+          description: Why the molecule decays.
+        product_kind:
+          type: string
+          default: task
+          description: Kind of the product molecule.
+        blocks:
+          type: array
+          items:
+            type: string
+          description: Molecules of the caller's tenant the product blocks.
+
+    DecayEnvelope:
+      type: object
+      required: [request_id, decay]
+      properties:
+        request_id:
+          type: string
+        decay:
+          type: object
+          required: [interaction, source, products, product_kind, reason]
+          properties:
+            interaction:
+              type: string
+              enum: [decay]
+            source:
+              type: string
+            products:
+              type: array
+              items:
+                type: string
+            product_kind:
+              type: string
+            reason:
+              type: string
+
+    MergeBody:
+      type: object
+      required: [sources, formula, reason]
+      additionalProperties: false
+      properties:
+        sources:
+          type: array
+          minItems: 2
+          items:
+            type: string
+          description: The molecules to merge, all in the caller's tenant.
+        formula:
+          type: string
+          description: Formula the synthesis molecule is nucleated from.
+        reason:
+          type: string
+          description: Why the molecules merge.
+        product_kind:
+          type: string
+          default: decision
+          description: Kind of the synthesis molecule.
+
+    MergeEnvelope:
+      type: object
+      required: [request_id, merge]
+      properties:
+        request_id:
+          type: string
+        merge:
+          type: object
+          required: [interaction, sources, product, product_kind, reason]
+          properties:
+            interaction:
+              type: string
+              enum: [merge]
+            sources:
+              type: array
+              items:
+                type: string
+            product:
+              type: string
+            product_kind:
+              type: string
+            reason:
+              type: string
+
+    TransformBody:
+      type: object
+      required: [to, reason]
+      additionalProperties: false
+      properties:
+        to:
+          type: string
+          description: Target kind.
+        reason:
+          type: string
+          description: Why the kind changes.
+
+    TransformEnvelope:
+      type: object
+      required: [request_id, transform]
+      properties:
+        request_id:
+          type: string
+        transform:
+          type: object
+          required: [interaction, molecule, from, to, reason]
+          properties:
+            interaction:
+              type: string
+              enum: [transform]
+            molecule:
+              type: string
+            from:
+              type: string
+            to:
+              type: string
+            reason:
+              type: string
 
     ApiError:
       type: object

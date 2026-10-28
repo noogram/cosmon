@@ -12,12 +12,14 @@ cs-thin verbs --check (cosmon-thin-cli v0.1.0, target: (unset))
 ✓ collapse       POST   /v1/molecules/:id/collapse
 ✓ collapse_receipt GET    /v1/molecules/:id/collapse-receipts/:key
 ✓ converse       POST   /v1/avatar/converse
+✓ decay          POST   /v1/molecules/:id/decay
 ✓ deps           GET    /v1/molecules/:id/deps
 ✓ done           POST   /v1/molecules/:id/done
 ✓ ensemble       GET    /v1/molecules
 ✓ evolve         POST   /v1/molecules/:id/evolve
 ✓ freeze         POST   /v1/molecules/:id/freeze
 ✓ keyed_collapse PUT    /v1/molecules/:id/collapse-receipts/:key
+✓ merge          POST   /v1/molecules/merge
 ✓ nucleate       POST   /v1/molecules
 ✓ observe        GET    /v1/molecules/:id
 ✓ prime          GET    /v1/molecules/:id/prime
@@ -27,6 +29,7 @@ cs-thin verbs --check (cosmon-thin-cli v0.1.0, target: (unset))
 ✓ stuck          POST   /v1/molecules/:id/stuck
 ✓ tackle         POST   /v1/molecules/:id/tackle
 ✓ tag            POST   /v1/molecules/:id/tags
+✓ transform      POST   /v1/molecules/:id/transform
 
 ⚠ complete       OPERATOR-ONLY (ADR-080 §5.1)
 ⚠ security activate OPERATOR-ONLY (ADR-080 §5.1)
@@ -38,6 +41,6 @@ cs-thin verbs --check (cosmon-thin-cli v0.1.0, target: (unset))
 ⚠ drop           OPERATOR-ONLY (ADR-080 §5.1)
 
 ─────────────────────────────────────────────────
-23/23 RPP-exposable verbs covered.
+26/26 RPP-exposable verbs covered.
 8 operator-only verbs by design (see ADR-080 §5.1).
 Status: COMPLETE.

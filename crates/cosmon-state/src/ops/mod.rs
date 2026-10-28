@@ -15,7 +15,9 @@
 //! [`ensemble`](fn@ensemble) / [`vitals`](fn@vitals) /
 //! [`collapse`](fn@collapse) / [`freeze`](fn@freeze) / [`thaw`](fn@thaw) /
 //! [`stuck`](fn@stuck), plus the advance and read cuts [`evolve`](fn@evolve),
-//! [`deps`](fn@deps) and [`prime`](fn@prime) (pilot plan 0001, lot E1).
+//! [`deps`](fn@deps) and [`prime`](fn@prime) (pilot plan 0001, lot E1), and
+//! the molecule interactions [`decay`](fn@decay), [`merge`](fn@merge) and
+//! [`transform`](fn@transform) (lot E2).
 //!
 //! Every verb-level error implements [`error::OpsError`] — the wire
 //! contract that lets the cs-cli, the cs-api, and the out-of-process
@@ -35,6 +37,7 @@ pub mod ensemble;
 pub mod error;
 pub mod evolve;
 pub mod freeze;
+pub mod interaction;
 pub mod model_attribution;
 pub mod molecule_status;
 pub mod nucleate;
@@ -62,6 +65,11 @@ pub use evolve::{
     evolve, EvolveEffects, EvolveError, EvolveJson, EvolveOpRequest, EvolveView, StepRefusal,
 };
 pub use freeze::{freeze, FreezeError, FreezeJson, FreezeRequest, FreezeView};
+pub use interaction::{
+    decay, ensure_decay_count_is_heterogeneous, merge, transform, DecayError, DecayJson,
+    DecayRequest, DecayView, InteractionEffects, MergeError, MergeJson, MergeRequest, MergeView,
+    TransformError, TransformJson, TransformRequest, TransformView,
+};
 pub use model_attribution::{
     latest_model_selection, model_selections, realized_attribution, realized_provenance,
     ModelAttribution,

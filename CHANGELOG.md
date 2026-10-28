@@ -44,6 +44,24 @@ this stage.
 
 ### Added
 
+- RPP and `cosmon-remote`: `decay` — `POST /v1/molecules/{id}/decay`,
+  `cosmon-remote molecule decay <id> --formula … --reason …`. An idea, issue or
+  deliberation completes and one product molecule is nucleated from the named
+  formula. The route calls the operation `cs decay` calls
+  (`cosmon_state::ops::decay`). It creates exactly one product, as `cs decay`
+  allows; there is no `--count` or `--chain` on the wire. Scope
+  `cosmon:molecule:write`.
+- RPP and `cosmon-remote`: `merge` — `POST /v1/molecules/merge`,
+  `cosmon-remote molecule merge <id> <id>… --formula … --reason …`. The
+  sources complete and one synthesis molecule is nucleated. Every source is
+  looked up in the caller's own tenant before anything is written; a source the
+  tenant does not hold, whether nonexistent or another binding's, refuses the
+  whole merge with the `404 not_found` a nonexistent molecule gets, and
+  creates, changes and appends nothing. Scope `cosmon:molecule:write`.
+- RPP and `cosmon-remote`: `transform` — `POST /v1/molecules/{id}/transform`,
+  `cosmon-remote molecule transform <id> --to … --reason …`. Changes a
+  molecule's kind along an edge of the kind graph. Scope
+  `cosmon:molecule:write`.
 - RPP and `cosmon-remote`: `evolve` — `POST /v1/molecules/{id}/evolve`,
   `cosmon-remote molecule evolve <id> --evidence …`. It calls the operation
   `cs evolve` calls, so a remote advance leaves the molecule's state, log,
@@ -197,6 +215,10 @@ this stage.
   even under `--add-dir`. Exec mode now gets the same
   `--dangerously-bypass-approvals-and-sandbox` posture as interactive mode.
   A sandbox setting in `--harness`, or a non-empty `extra_args`, replaces it.
+- `cs decay --blocks <id>` with an `<id>` that does not exist no longer leaves the
+  product molecule behind: every refusal is now checked before the first write.
+  `cs merge` likewise loads and checks every source before writing the
+  synthesis molecule.
 - `cs prime` help described a config self-check ("load .cosmon/config.toml and
   self-check gates") that the command never performed. It re-injects the
   current step context of a running molecule, and its help, man page and book

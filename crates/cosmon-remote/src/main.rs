@@ -560,6 +560,47 @@ enum MoleculeCmd {
     },
     #[command(about = format!("{} — the current step context of a live molecule (what `cs prime` prints). Read-only; a terminal molecule answers `terminal: true` and nothing to prime{}", canon::GET_V1_MOLECULES_ID_PRIME.label(), canon::GET_V1_MOLECULES_ID_PRIME.effect_suffix()))]
     Prime { id: String },
+    #[command(about = format!("{} — decay the molecule (idea, issue or deliberation) into one product molecule and complete it. The product copies the source's variables, so there is exactly one{}", canon::POST_V1_MOLECULES_ID_DECAY.label(), canon::POST_V1_MOLECULES_ID_DECAY.effect_suffix()))]
+    Decay {
+        id: String,
+        /// Formula the product molecule is nucleated from.
+        #[arg(long)]
+        formula: String,
+        /// Why the molecule decays.
+        #[arg(long)]
+        reason: String,
+        /// Kind of the product molecule (server default: task).
+        #[arg(long)]
+        product_kind: Option<String>,
+        /// A molecule the product blocks. Repeatable.
+        #[arg(long)]
+        blocks: Vec<String>,
+    },
+    #[command(about = format!("{} — merge two or more molecules into one synthesis molecule and complete the sources. Every source is checked first: one the tenant cannot reach refuses the whole merge, as `not_found`, and nothing is written{}", canon::POST_V1_MOLECULES_MERGE.label(), canon::POST_V1_MOLECULES_MERGE.effect_suffix()))]
+    Merge {
+        /// The molecules to merge (at least two).
+        #[arg(required = true, num_args = 1..)]
+        sources: Vec<String>,
+        /// Formula the synthesis molecule is nucleated from.
+        #[arg(long)]
+        formula: String,
+        /// Why the molecules merge.
+        #[arg(long)]
+        reason: String,
+        /// Kind of the synthesis molecule (server default: decision).
+        #[arg(long)]
+        product_kind: Option<String>,
+    },
+    #[command(about = format!("{} — change the molecule's kind along an edge of the kind graph (idea → task, task → issue, …); it keeps its identity{}", canon::POST_V1_MOLECULES_ID_TRANSFORM.label(), canon::POST_V1_MOLECULES_ID_TRANSFORM.effect_suffix()))]
+    Transform {
+        id: String,
+        /// Target kind.
+        #[arg(long)]
+        to: String,
+        /// Why the kind changes.
+        #[arg(long)]
+        reason: String,
+    },
     #[command(about = format!("{}{}", canon::POST_V1_MOLECULES_ID_TAGS.label(), canon::POST_V1_MOLECULES_ID_TAGS.effect_suffix()))]
     Tag {
         id: String,
@@ -1958,6 +1999,33 @@ async fn run_molecule(
                 _ if !json && body["prime"]["terminal"] == true => {}
                 _ => print_json(json, &body),
             }
+        }
+        MoleculeCmd::Decay {
+            id,
+            formula,
+            reason,
+            product_kind,
+            blocks,
+        } => {
+            let body = client
+                .decay(&id, &formula, &reason, product_kind.as_deref(), &blocks)
+                .await?;
+            print_json(json, &body);
+        }
+        MoleculeCmd::Merge {
+            sources,
+            formula,
+            reason,
+            product_kind,
+        } => {
+            let body = client
+                .merge(&sources, &formula, &reason, product_kind.as_deref())
+                .await?;
+            print_json(json, &body);
+        }
+        MoleculeCmd::Transform { id, to, reason } => {
+            let body = client.transform(&id, &to, &reason).await?;
+            print_json(json, &body);
         }
         MoleculeCmd::Tag { id, add, remove } => {
             if add.is_empty() && remove.is_empty() {

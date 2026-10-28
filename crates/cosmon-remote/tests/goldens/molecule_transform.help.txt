@@ -1,0 +1,14 @@
+`POST /v1/molecules/{id}/transform` — change the molecule's kind along an edge of the kind graph (idea → task, task → issue, …); it keeps its identity
+
+Usage: cosmon-remote molecule transform [OPTIONS] --to <TO> --reason <REASON> <ID>
+
+Arguments:
+  <ID>  
+
+Options:
+      --profile <PROFILE>  Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --to <TO>            Target kind
+      --json               Render machine-readable JSON instead of human text where applicable
+      --reason <REASON>    Why the kind changes
+      --token <TOKEN>      Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+  -h, --help               Print help

@@ -2123,6 +2123,368 @@ pub async fn evolve_molecule(
     })))
 }
 
+// ---------------------------------------------------------------------------
+// decay / merge / transform (pilot plan 0001, lot E2)
+// ---------------------------------------------------------------------------
+//
+// Each route calls the operation its `cs` verb calls — `ops::decay`,
+// `ops::merge`, `ops::transform` — over the admitted tenant's own store, so
+// the two surfaces produce the same molecule state from the same fixture.
+//
+// Scope: all three need `cosmon:molecule:write`. Bounds: decay and merge
+// create molecules, as `POST /v1/molecules` (nucleate) does, and nucleate
+// carries no bound of its own — only the admission every route crosses (the
+// per-subject rate limit and the deny-list). The B1/B2/B3 bounds belong to
+// `run`, the live-worker ceiling to `tackle` and `resurrect`. These routes
+// add none.
+
+/// The legacy event writer the shared interaction operations are handed:
+/// the same one `cs` hands them.
+struct RemoteInteractionEffects;
+
+impl ops::InteractionEffects for RemoteInteractionEffects {
+    fn append_legacy_event(&self, events_path: &Path, envelope: &cosmon_core::event::Envelope) {
+        let _ = cosmon_filestore::event::append(events_path, envelope);
+    }
+}
+
+/// The status a molecule reads as right now, or empty when it cannot be
+/// read — the "previous status" of a state-change event.
+fn status_label(store: &FileStore, id: &MoleculeId) -> String {
+    store
+        .load_molecule(id)
+        .map(|m| m.status.to_string())
+        .unwrap_or_default()
+}
+
+/// Publish the state change of one molecule an interaction touched.
+fn publish_status_change(
+    state: &AppState,
+    spark: &Spark,
+    store: &FileStore,
+    id: &MoleculeId,
+    previous: &str,
+) {
+    state.events.publish(MoleculeEvent::state_changed(
+        spark.noyau.as_str(),
+        id.as_str(),
+        previous,
+        status_label(store, id),
+    ));
+}
+
+/// Body of `POST /v1/molecules/:id/decay`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecayBody {
+    /// Formula the product is nucleated from (`cs decay --formula`).
+    pub formula: String,
+    /// Kind of the product (`--product-kind`, default `task`).
+    #[serde(default)]
+    pub product_kind: Option<String>,
+    /// Why the molecule decays (`--reason`).
+    pub reason: String,
+    /// Molecules the product blocks (`--blocks`, repeatable).
+    #[serde(default)]
+    pub blocks: Vec<String>,
+}
+
+/// `POST /v1/molecules/:id/decay` — `cs decay` over the wire.
+///
+/// Calls [`ops::decay()`]. The route creates exactly one product, which is
+/// what `cs decay` allows: the product copies the source's variables, so
+/// `--count` above one is refused by the f4e1 guard and has no wire
+/// counterpart. `--chain` has none either, for the same reason — it wires
+/// products to each other and there is one.
+pub async fn decay_molecule(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(molecule_id_str): AxumPath<String>,
+    body: Result<Json<DecayBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let token = extract_bearer(&headers).map_err(|e| state.reject(e))?;
+    let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
+        .map_err(|e| state.reject(e))?;
+    authorise_scope(
+        &state,
+        &jwt,
+        "decay",
+        &[SCOPE_MOLECULE_WRITE],
+        SCOPE_MOLECULE_WRITE,
+    )?;
+    let Json(body) = body.map_err(|_| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        label: "invalid_json_body",
+        request_id: None,
+        retry_after_seconds: None,
+    })?;
+    let spark = build_spark(&state, &jwt, Verb::DecayMolecule, Some(&molecule_id_str))?;
+    let api_error = |status: StatusCode, label: &'static str| ApiError {
+        status,
+        label,
+        request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
+    };
+    let source = parse_molecule_id(&molecule_id_str, &spark)?;
+    // A malformed `blocks` id is the same 404 as one that names nothing.
+    let blocks = body
+        .blocks
+        .iter()
+        .map(|raw| parse_molecule_id(raw, &spark))
+        .collect::<Result<Vec<_>, _>>()?;
+    let tenant_root = admitted_tenant_root(&state, &spark)?;
+    let paths = cosmon_runtime::tackle_exec::TenantPaths::rooted_at(&tenant_root);
+    let store = FileStore::new(&paths.state_dir);
+    let previous = status_label(&store, &source);
+
+    let view = ops::decay(
+        &store,
+        &paths.state_dir,
+        &paths.formulas_dir,
+        &ops::DecayRequest {
+            source: &source,
+            formula: body.formula.trim(),
+            count: 1,
+            product_kind: body.product_kind.as_deref().unwrap_or("task"),
+            reason: &body.reason,
+            chain: false,
+            blocks: &blocks,
+        },
+        &RemoteInteractionEffects,
+    )
+    .map_err(|e| {
+        use ops::DecayError as E;
+        match &e {
+            E::HomogeneousCount { .. } => {
+                api_error(StatusCode::BAD_REQUEST, "decay_homogeneous_count")
+            }
+            E::SourceNotFound(_) | E::BlockTargetNotFound(_) => {
+                api_error(StatusCode::NOT_FOUND, "not_found")
+            }
+            E::CannotDecay(_) => api_error(StatusCode::CONFLICT, "cannot_decay"),
+            E::InvalidKind(_) => api_error(StatusCode::BAD_REQUEST, "invalid_kind"),
+            E::FormulaNotFound(_) => api_error(StatusCode::NOT_FOUND, "formula_not_found"),
+            E::FormulaParse(_) => api_error(StatusCode::CONFLICT, "formula_unavailable"),
+            E::NucleateFailed(_) => api_error(StatusCode::CONFLICT, "nucleation_failed"),
+            E::StoreUnavailable(_) => {
+                api_error(StatusCode::SERVICE_UNAVAILABLE, "store_unavailable")
+            }
+        }
+    })?;
+
+    publish_status_change(&state, &spark, &store, &view.source, &previous);
+    for product in &view.products {
+        publish_status_change(&state, &spark, &store, product, "");
+    }
+    Ok(Json(json!({
+        "request_id": spark.request_id,
+        "decay": ops::DecayJson::from_view(&view),
+    })))
+}
+
+/// Body of `POST /v1/molecules/merge`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MergeBody {
+    /// The molecules to merge; at least two.
+    pub sources: Vec<String>,
+    /// Formula the synthesis molecule is nucleated from (`--formula`).
+    pub formula: String,
+    /// Kind of the synthesis molecule (`--product-kind`, default
+    /// `decision`).
+    #[serde(default)]
+    pub product_kind: Option<String>,
+    /// Why the sources merge (`--reason`).
+    pub reason: String,
+}
+
+/// `POST /v1/molecules/merge` — `cs merge` over the wire.
+///
+/// Calls [`ops::merge()`] over the admitted tenant's store. Every source is
+/// looked up there before anything is written, the way every
+/// `/v1/molecules/{id}/…` route looks up its molecule: a source the store
+/// does not hold — because it never existed, or because it belongs to
+/// another tenant — answers the same `404 not_found`, with no id in it, and
+/// refuses the whole merge. A source that is held but of a kind that cannot
+/// merge is the caller's own to know about, and is named.
+pub async fn merge_molecules(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<MergeBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Response, ApiError> {
+    let token = extract_bearer(&headers).map_err(|e| state.reject(e))?;
+    let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
+        .map_err(|e| state.reject(e))?;
+    authorise_scope(
+        &state,
+        &jwt,
+        "merge",
+        &[SCOPE_MOLECULE_WRITE],
+        SCOPE_MOLECULE_WRITE,
+    )?;
+    let Json(body) = body.map_err(|_| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        label: "invalid_json_body",
+        request_id: None,
+        retry_after_seconds: None,
+    })?;
+    let spark = build_spark(&state, &jwt, Verb::MergeMolecules, None)?;
+    let api_error = |status: StatusCode, label: &'static str| ApiError {
+        status,
+        label,
+        request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
+    };
+    if body.sources.len() < 2 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "merge_needs_two_sources",
+        ));
+    }
+    let sources = body
+        .sources
+        .iter()
+        .map(|raw| parse_molecule_id(raw, &spark))
+        .collect::<Result<Vec<_>, _>>()?;
+    let tenant_root = admitted_tenant_root(&state, &spark)?;
+    let paths = cosmon_runtime::tackle_exec::TenantPaths::rooted_at(&tenant_root);
+    let store = FileStore::new(&paths.state_dir);
+    let previous: Vec<String> = sources.iter().map(|id| status_label(&store, id)).collect();
+
+    let view = ops::merge(
+        &store,
+        &paths.state_dir,
+        &paths.formulas_dir,
+        &ops::MergeRequest {
+            sources: &sources,
+            formula: body.formula.trim(),
+            product_kind: body.product_kind.as_deref().unwrap_or("decision"),
+            reason: &body.reason,
+        },
+        &RemoteInteractionEffects,
+    );
+    let view = match view {
+        Ok(view) => view,
+        Err(ops::MergeError::SourceNotMergeable { id, kind }) => {
+            let body = json!({
+                "error": "source_not_mergeable",
+                "request_id": spark.request_id,
+                "source": id.as_str(),
+                "kind": kind.to_string(),
+            });
+            return Ok((StatusCode::CONFLICT, Json(body)).into_response());
+        }
+        Err(e) => {
+            use ops::MergeError as E;
+            return Err(match &e {
+                E::TooFewSources => api_error(StatusCode::BAD_REQUEST, "merge_needs_two_sources"),
+                E::SourceNotFound(_) => api_error(StatusCode::NOT_FOUND, "not_found"),
+                E::SourceNotMergeable { .. } => {
+                    api_error(StatusCode::CONFLICT, "source_not_mergeable")
+                }
+                E::InvalidKind(_) => api_error(StatusCode::BAD_REQUEST, "invalid_kind"),
+                E::FormulaNotFound(_) => api_error(StatusCode::NOT_FOUND, "formula_not_found"),
+                E::FormulaParse(_) => api_error(StatusCode::CONFLICT, "formula_unavailable"),
+                E::NucleateFailed(_) => api_error(StatusCode::CONFLICT, "nucleation_failed"),
+                E::StoreUnavailable(_) => {
+                    api_error(StatusCode::SERVICE_UNAVAILABLE, "store_unavailable")
+                }
+            });
+        }
+    };
+
+    for (source, before) in view.sources.iter().zip(&previous) {
+        publish_status_change(&state, &spark, &store, source, before);
+    }
+    publish_status_change(&state, &spark, &store, &view.product, "");
+    Ok(Json(json!({
+        "request_id": spark.request_id,
+        "merge": ops::MergeJson::from_view(&view),
+    }))
+    .into_response())
+}
+
+/// Body of `POST /v1/molecules/:id/transform`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransformBody {
+    /// The target kind (`cs transform --to`).
+    pub to: String,
+    /// Why the kind changes (`--reason`).
+    pub reason: String,
+}
+
+/// `POST /v1/molecules/:id/transform` — `cs transform` over the wire.
+///
+/// Calls [`ops::transform()`]: the molecule keeps its identity and changes
+/// kind along an edge of the kind graph.
+pub async fn transform_molecule(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(molecule_id_str): AxumPath<String>,
+    body: Result<Json<TransformBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let token = extract_bearer(&headers).map_err(|e| state.reject(e))?;
+    let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
+        .map_err(|e| state.reject(e))?;
+    authorise_scope(
+        &state,
+        &jwt,
+        "transform",
+        &[SCOPE_MOLECULE_WRITE],
+        SCOPE_MOLECULE_WRITE,
+    )?;
+    let Json(body) = body.map_err(|_| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        label: "invalid_json_body",
+        request_id: None,
+        retry_after_seconds: None,
+    })?;
+    let spark = build_spark(
+        &state,
+        &jwt,
+        Verb::TransformMolecule,
+        Some(&molecule_id_str),
+    )?;
+    let molecule = parse_molecule_id(&molecule_id_str, &spark)?;
+    let tenant_root = admitted_tenant_root(&state, &spark)?;
+    let paths = cosmon_runtime::tackle_exec::TenantPaths::rooted_at(&tenant_root);
+    let store = FileStore::new(&paths.state_dir);
+    let api_error = |status: StatusCode, label: &'static str| ApiError {
+        status,
+        label,
+        request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
+    };
+
+    let view = ops::transform(
+        &store,
+        &paths.state_dir,
+        &ops::TransformRequest {
+            molecule: &molecule,
+            to: &body.to,
+            reason: &body.reason,
+        },
+        &RemoteInteractionEffects,
+    )
+    .map_err(|e| {
+        use ops::TransformError as E;
+        match &e {
+            E::MoleculeNotFound(_) => api_error(StatusCode::NOT_FOUND, "not_found"),
+            E::InvalidKind(_) => api_error(StatusCode::BAD_REQUEST, "invalid_kind"),
+            E::NotTransformable { .. } => api_error(StatusCode::CONFLICT, "not_transformable"),
+            E::StoreUnavailable(_) => {
+                api_error(StatusCode::SERVICE_UNAVAILABLE, "store_unavailable")
+            }
+        }
+    })?;
+
+    Ok(Json(json!({
+        "request_id": spark.request_id,
+        "transform": ops::TransformJson::from_view(&view),
+    })))
+}
+
 /// Body of `POST /v1/molecules/:id/resurrect`. Optional: an empty body is
 /// `{"dry_run": false}`.
 #[derive(Debug, Deserialize, Default)]
