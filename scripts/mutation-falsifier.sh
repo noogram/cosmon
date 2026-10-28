@@ -32,7 +32,8 @@
 #
 # Usage:
 #   ./scripts/mutation-falsifier.sh [--base <ref>] [--package <p>] \
-#                                   [--whole-tree] [--timeout <secs>] [-- <extra cargo-mutants args>]
+#                                   [--whole-tree] [--timeout <secs>] [--shard <k/n>] [--output <dir>] \
+#                                   [--build-timeout <secs>] [-- <extra cargo-mutants args>]
 #   ./scripts/mutation-falsifier.sh --check       # is cargo-mutants available? (0/2, no run)
 #   ./scripts/mutation-falsifier.sh --self-test   # prove the falsifier catches a real hole
 #
@@ -40,9 +41,12 @@
 #   --whole-tree    audit the whole workspace, not just the diff (nightly cron)
 #   --package <p>   restrict to one cargo package (-p passthrough)
 #   --timeout <s>   per-mutant test timeout (cargo-mutants -t; default 120)
+#   --build-timeout <s>  cap each mutant build; baseline is not capped by this option
+#   --shard <k/n>   zero-based cargo-mutants shard, applied before execution
+#   --output <dir>  retain cargo-mutants reports and timings under dir/mutants.out
 #
 # Exit: 0 all mutants caught / none in scope · 1 mutant(s) survived (test hole)
-#       · 2 cargo-mutants unavailable or invocation error.
+#       · 2 tool unavailable, execution failure, or timed-out audit.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -124,9 +128,22 @@ BASE=""
 WHOLE_TREE=0
 PACKAGE=""
 TIMEOUT=120
+SHARD=""
+OUTPUT=""
+BUILD_TIMEOUT=""
 EXTRA=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --shard|--output|--build-timeout)
+      if [ $# -lt 2 ] || [ -z "$2" ]; then
+        echo "mutation-falsifier: $1 requires a value" >&2; exit 2
+      fi
+      case "$1" in
+        --shard) SHARD="$2" ;;
+        --output) OUTPUT="$2" ;;
+        --build-timeout) BUILD_TIMEOUT="$2" ;;
+      esac
+      shift 2 ;;
     --base)       BASE="${2:-}"; shift 2 ;;
     --whole-tree) WHOLE_TREE=1; shift ;;
     --package)    PACKAGE="${2:-}"; shift 2 ;;
@@ -148,8 +165,21 @@ if [ -z "$BASE" ]; then
   else BASE="main"; fi
 fi
 
-OUT_DIR="$(mktemp -d)"; trap 'rm -rf "$OUT_DIR"' EXIT
-ARGS=(mutants --no-times -t "$TIMEOUT" -o "$OUT_DIR")
+if [ -n "$SHARD" ]; then
+  if ! [[ "$SHARD" =~ ^([0-9]{1,6})/([0-9]{1,6})$ ]] ||
+     (( 10#${BASH_REMATCH[2]} == 0 || 10#${BASH_REMATCH[1]} >= 10#${BASH_REMATCH[2]} )); then
+    echo "mutation-falsifier: invalid zero-based shard '$SHARD'" >&2; exit 2
+  fi
+fi
+if [ -n "$OUTPUT" ]; then
+  mkdir -p "$OUTPUT" || exit 2
+  OUT_DIR="$(cd "$OUTPUT" && pwd)"
+else
+  OUT_DIR="$(mktemp -d)"; trap 'rm -rf "$OUT_DIR"' EXIT
+fi
+ARGS=(mutants -t "$TIMEOUT" -o "$OUT_DIR")
+[ -n "$SHARD" ] && ARGS+=(--shard "$SHARD")
+[ -n "$BUILD_TIMEOUT" ] && ARGS+=(--build-timeout "$BUILD_TIMEOUT")
 [ -n "$PACKAGE" ] && ARGS+=(-p "$PACKAGE")
 
 if [ "$WHOLE_TREE" -eq 0 ]; then
@@ -169,30 +199,28 @@ if [ "$WHOLE_TREE" -eq 0 ]; then
 fi
 [ "$WHOLE_TREE" -eq 1 ] && echo "mutation-falsifier: mutating the WHOLE tree (timeout ${TIMEOUT}s/mutant)"
 
-# Run. cargo-mutants' own exit code varies by version; we treat the authoritative
-# signal as the MISSED list on disk, not the process code.
-cargo "${ARGS[@]}" "${EXTRA[@]}" >/dev/null 2>&1 || true
-
-# cargo-mutants nests its result files under `<-o dir>/mutants.out/`.
+# Keep progress and timings visible even if the runner is interrupted. A failed
+# baseline/invocation must remain an incomplete audit, never a clean result.
+echo "mutation-falsifier: cargo ${ARGS[*]} ${EXTRA[*]}" | tee "$OUT_DIR/command.txt"
+cargo "${ARGS[@]}" "${EXTRA[@]}" 2>&1 | tee "$OUT_DIR/cargo-mutants.log"
+rc=${PIPESTATUS[0]}
 RESULT_DIR="$OUT_DIR/mutants.out"
 MISSED="$RESULT_DIR/missed.txt"
 if [ ! -e "$MISSED" ]; then
-  # No missed.txt means cargo-mutants produced no outcome files — either no
-  # mutants in scope or a build failure. Distinguish via the caught list.
-  if [ -e "$RESULT_DIR/caught.txt" ] || [ -e "$RESULT_DIR/unviable.txt" ]; then
-    echo "mutation-falsifier: no surviving mutants — every mutant in scope was caught. CLEAN."
-    exit 0
-  fi
-  echo "mutation-falsifier: no mutants generated in scope (or the baseline build failed). Nothing to falsify." >&2
-  exit 0
+  echo "mutation-falsifier: missing report (cargo-mutants exit $rc); audit incomplete" >&2
+  exit 2
 fi
 
 # `grep -c` prints the count (0 when empty) but exits 1 on no match; `|| true`
 # keeps the single "0" without appending a second line.
 survivors="$(grep -c . "$MISSED" 2>/dev/null || true)"
 survivors="${survivors:-0}"
+if [ "$rc" -ne 0 ] && [ "$survivors" -eq 0 ]; then
+  echo "mutation-falsifier: cargo-mutants exit $rc; timeouts or incomplete audit (see report)" >&2
+  exit 2
+fi
 if [ "$survivors" -eq 0 ]; then
-  echo "mutation-falsifier: no surviving mutants — every mutant in scope was caught. CLEAN."
+  echo "mutation-falsifier: no surviving mutants reported (see reports for unviable mutants). CLEAN."
   exit 0
 fi
 

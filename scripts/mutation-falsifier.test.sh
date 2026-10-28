@@ -66,6 +66,118 @@ fi
 if bash "$GATE" --self-test; then ok "--self-test passes (or SKIPs cleanly)"
 else bad "--self-test should pass"; fi
 
+# A fake cargo records the actual boundary arguments and leaves independent
+# outcome fixtures. This checks forwarding and failure reporting without a
+# workspace mutation sweep.
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/cargo" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$MF_ARGS"
+[ "${2:-}" = --version ] && { echo 'cargo-mutants fixture'; exit 0; }
+while [ $# -gt 0 ]; do
+  if [ "$1" = -o ]; then out="$2"; break; fi
+  shift
+done
+[ "$MF_MODE" = missing ] && exit 4
+mkdir -p "$out/mutants.out"
+: > "$out/mutants.out/missed.txt"
+[ "$MF_MODE" = missed ] && echo 'independent surviving mutant' > "$out/mutants.out/missed.txt"
+echo 'fixture progress and timing'
+[ "$MF_MODE" = failed ] && exit 4
+[ "$MF_MODE" = timeout ] && exit 3
+[ "$MF_MODE" = missed ] && exit 2
+exit 0
+SH
+chmod +x "$WORK/bin/cargo"
+for mode in clean missed failed missing timeout; do
+  MF_MODE="$mode" MF_ARGS="$WORK/args" PATH="$WORK/bin:$PATH" \
+    bash "$GATE" --whole-tree --package cosmon-core --shard 3/256 \
+      --build-timeout 180 --output "$WORK/$mode" -- --jobs 1 --no-shuffle --sharding round-robin > "$WORK/$mode.log" 2>&1
+  rc=$?
+  case "$mode" in clean) expected=0 ;; missed) expected=1 ;; *) expected=2 ;; esac
+  [ "$rc" -eq "$expected" ] && ok "$mode report → $expected" || bad "$mode report exit $rc"
+done
+python3 - "$WORK/args" <<'PYTEST'
+import sys
+args = open(sys.argv[1]).read().splitlines()
+for option, value in [("--shard", "3/256"), ("--build-timeout", "180"), ("-p", "cosmon-core"), ("-t", "120"), ("--jobs", "1"), ("--sharding", "round-robin")]:
+    assert args[args.index(option) + 1] == value, args
+PYTEST
+[ $? -eq 0 ] && ok "shard, build budget and package reach cargo-mutants" || bad "lost arguments"
+[ -s "$WORK/missed/mutants.out/missed.txt" ] && \
+  grep -q 'independent surviving mutant' "$WORK/missed.log" && \
+  grep -q 'fixture progress and timing' "$WORK/missed/cargo-mutants.log" && \
+  grep -q -- '--shard 3/256' "$WORK/missed/command.txt" && \
+  ok "survivor and timing reports retained" || bad "lost report"
+for shard in 1/1 0/0 invalid; do
+  MF_MODE=clean MF_ARGS="$WORK/invalid-args" PATH="$WORK/bin:$PATH" \
+    bash "$GATE" --whole-tree --shard "$shard" > "$WORK/invalid.log" 2>&1
+  rc=$?
+  [ "$rc" -eq 2 ] && grep -q 'invalid zero-based shard' "$WORK/invalid.log" && \
+    ok "reject invalid shard $shard" || bad "accepted invalid shard $shard"
+done
+
+# Execute the workflow's actual shell body with boundary stubs across an
+# entire rotation. This catches missing/duplicated shards, a lost deadline,
+# or matrix fail-fast cancelling its siblings.
+python3 - "$HERE/../.github/workflows/ci.yml" "$WORK/rotation" <<'PYTEST'
+import datetime
+import os
+from pathlib import Path
+import subprocess
+import sys
+import yaml
+
+job = yaml.safe_load(Path(sys.argv[1]).read_text())["jobs"]["mutation-falsifier"]
+assert job["continue-on-error"] is True
+assert job["if"] == "github.event_name == 'schedule'"
+assert job["timeout-minutes"] == 180
+assert job["strategy"]["fail-fast"] is False
+slots = job["strategy"]["matrix"]["slot"]
+assert slots == list(range(8))
+assert job["strategy"]["max-parallel"] <= 8
+assert sum(s.get("timeout-minutes", 0) for s in job["steps"]) + 151.5 < job["timeout-minutes"]
+step = next(s for s in job["steps"] if s.get("env", {}).get("SHARD_SLOT"))
+root = Path(sys.argv[2])
+(root / "scripts").mkdir(parents=True)
+(root / "bin").mkdir()
+files = {
+    "bin/date": '#!/bin/sh\n[ "$1 $2 $3 $4" = "-u -d $CREATED_AT +%s" ] || exit 10\necho "$EPOCH_SECONDS"\n',
+    "bin/gh": '#!/bin/sh\n[ "$1 $2 $3 $4" = "api repos/fixture/repo/actions/runs/17 --jq .created_at" ] || exit 11\necho "$CREATED_AT"\n',
+    "bin/timeout": '#!/bin/sh\n[ "$1" = 60s ] && { shift; exec "$@"; }\n[ "$1 $2 $3" = "--signal=TERM --kill-after=30s 150m" ] || exit 9\nshift 3\nexec "$@"\n',
+    "scripts/mutation-falsifier.sh": '#!/bin/sh\nprintf "%s\\n" "$@" >> "$CAPTURE"\n',
+}
+for name, body in files.items():
+    path = root / name
+    path.write_text(body)
+    path.chmod(0o755)
+capture = root / "args"
+for day in range(31, 63):  # includes modulo wrap at day 32
+    for slot in slots:
+        env = dict(os.environ, PATH=str(root / "bin") + ":" + os.environ["PATH"],
+                   EPOCH_SECONDS=str(day * 86400), SHARD_SLOT=str(slot), CAPTURE=str(capture),
+                   CREATED_AT=datetime.datetime.fromtimestamp(day * 86400, datetime.timezone.utc).isoformat(),
+                   GITHUB_REPOSITORY="fixture/repo", GITHUB_RUN_ID="17", GITHUB_SHA="fixture")
+        subprocess.run(["bash", "-eu", "-c", step["run"]], cwd=root, env=env,
+                       check=True, stdout=subprocess.DEVNULL)
+args = capture.read_text().splitlines()
+shards = [args[i + 1] for i, arg in enumerate(args) if arg == "--shard"]
+assert sorted(shards) == sorted(f"{k}/256" for k in range(256))
+# A fixed source inventory is partitioned completely, exactly once, using
+# the selected round-robin algorithm; the boundary must request it.
+assert args.count("round-robin") == 256
+assert args.count("cosmon-core") == 256
+assert args.count("--whole-tree") == 256
+assert args.count("--build-timeout") == 256
+assert args.count("--no-shuffle") == 256
+upload = next(s for s in job["steps"] if "upload-artifact@" in s.get("uses", ""))
+assert upload["if"] == "always()"
+assert upload["with"]["path"] == "mutation-report/"
+assert upload["with"]["retention-days"] >= 32
+assert (root / "mutation-report/rotation.txt").is_file()
+PYTEST
+[ $? -eq 0 ] && ok "workflow covers all 256 shards in 32 nights with an inner deadline" || bad "workflow rotation or advisory budget"
+
 echo "────────────────────────────────────────────"
 echo "mutation-falsifier.test: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
