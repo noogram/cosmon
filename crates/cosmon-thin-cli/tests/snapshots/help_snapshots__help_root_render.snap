@@ -26,12 +26,16 @@ THE 7 VERBS — RPP-exposable (ADR-080 §8p):
   collapse   POST   /v1/molecules/:id/collapse       scope: cosmon:molecule:write
   collapse_receipt GET    /v1/molecules/:id/collapse-receipts/:key scope: cosmon:molecule:read
   converse   POST   /v1/avatar/converse              scope: cosmon:pilote:converse
+  deps       GET    /v1/molecules/:id/deps           scope: cosmon:molecule:read
   done       POST   /v1/molecules/:id/done           scope: cosmon:molecule:write
   ensemble   GET    /v1/molecules                    scope: cosmon:molecule:read
+  evolve     POST   /v1/molecules/:id/evolve         scope: cosmon:molecule:write
   freeze     POST   /v1/molecules/:id/freeze         scope: cosmon:molecule:write
   keyed_collapse PUT    /v1/molecules/:id/collapse-receipts/:key scope: cosmon:molecule:write
   nucleate   POST   /v1/molecules                    scope: cosmon:molecule:write
   observe    GET    /v1/molecules/:id                scope: cosmon:molecule:read
+  prime      GET    /v1/molecules/:id/prime          scope: cosmon:molecule:read
+  resurrect  POST   /v1/molecules/:id/resurrect      scope: cosmon:molecule:write+cosmon:worker:spawn
   run        POST   /v1/molecules/:id/run            scope: cosmon:molecule:write+cosmon:worker:spawn
   status     GET    /v1/molecules/:id/status         scope: cosmon:molecule:read
   stuck      POST   /v1/molecules/:id/stuck          scope: cosmon:molecule:write
@@ -44,7 +48,6 @@ OPERATOR-ONLY VERBS — refused by §8p (see ADR-080 §5.1):
   incompatible with a JWT-bearing remote principal. cs-thin will
   never grow a sub-command for them — by design.
 
-  ⚠ evolve                 operator-only (ADR-080 §5.1)
   ⚠ complete               operator-only (ADR-080 §5.1)
   ⚠ security activate      operator-only (ADR-080 §5.1)
   ⚠ kill                   operator-only (ADR-080 §5.1)

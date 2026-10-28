@@ -942,6 +942,36 @@ impl TenantPaths {
     }
 }
 
+/// The bootstrap prompt of a resurrection that was composed and not spawned.
+#[derive(Debug, Clone)]
+pub struct ResurrectionPrompt {
+    /// The composed bootstrap prompt.
+    pub prompt: String,
+    /// Byte length of [`Self::prompt`].
+    pub composed_prompt_bytes: u64,
+    /// Resurrections already recorded for this molecule.
+    pub prior_count: u32,
+}
+
+/// Why [`LibraryExecutor::resurrect`] did not revive a molecule.
+#[derive(Debug, thiserror::Error)]
+pub enum ResurrectExecError {
+    /// The molecule cannot be resurrected: not a wreck, artifacts missing, a
+    /// worker still alive, another resurrection running, or a pinned launch.
+    #[error(transparent)]
+    Precondition(#[from] crate::resurrect::ResurrectError),
+    /// The dispatch half failed; same taxonomy as [`LibraryExecutor::tackle`].
+    /// Boxed: the dispatch error is large and this one rides in a `Result`.
+    #[error(transparent)]
+    Dispatch(Box<TackleExecError>),
+}
+
+impl From<TackleExecError> for ResurrectExecError {
+    fn from(err: TackleExecError) -> Self {
+        Self::Dispatch(Box::new(err))
+    }
+}
+
 /// The library implementation of the runtime's [`Executor`] seam: plan →
 /// execute in-process, spawning through an injectable transport backend
 /// instead of shelling `cs tackle`.
@@ -1205,6 +1235,149 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // ambient model env is ignored — the in-process equivalent of
         // `SubprocessExecutor::apply_dispatch_pin`'s `--adapter`/`--model` +
         // env strip.
+        let (selection, project_config) =
+            self.select_dispatch(id, &mol, formula.as_ref(), pin, &state_dir)?;
+
+        let mol_dir = store.molecule_dir(id);
+        let briefing = std::fs::read_to_string(mol_dir.join("briefing.md")).ok();
+        let repo_root = git_repo_root(&self.cwd)?;
+        // After every refusal above, so a dispatch that never happened does
+        // not retarget the molecule.
+        stamp_run_base(&store, &mut mol, pin)?;
+        let plan = TacklePlan::from_parts(
+            selection,
+            &PromptRequest {
+                molecule: molecule_brief(&mol),
+                formula: formula.as_ref(),
+                briefing: briefing.as_deref(),
+                config: &project_config,
+                molecule_dir: &mol_dir,
+                workdir: None,
+                no_worktree: false,
+                repo_root: Some(&repo_root),
+            },
+            mol.base_branch.clone(),
+            None,
+        );
+
+        self.execute(&store, &state_dir, &repo_root, &mol, &plan, false)
+    }
+
+    /// Apply the embedder's adapter floor without displacing any model the
+    /// standard selection chain already resolved.
+    /// Revive a wrecked molecule with a fresh worker.
+    ///
+    /// The library counterpart of `cs resurrect`, called by
+    /// `POST /v1/molecules/:id/resurrect`. The preconditions, the lock, the
+    /// bootstrap prompt, the breadcrumb and the events are
+    /// [`crate::resurrect`]'s, shared with the CLI; what this adds is the
+    /// spawn, through the injected backend and under the same adapter
+    /// selection, preflight and ledger-before-spawn discipline as
+    /// [`Self::tackle`] — so a resurrection is bounded exactly as a first
+    /// dispatch is.
+    ///
+    /// The adapter is Claude, as `cs resurrect` has always rebuilt a Claude
+    /// session; `pin` may still name a model.
+    ///
+    /// # Errors
+    ///
+    /// [`ResurrectExecError::Precondition`] when the molecule cannot be
+    /// resurrected, [`ResurrectExecError::Dispatch`] when the spawn fails (the
+    /// ledger is rolled back and the molecule is left `Frozen`).
+    pub fn resurrect(
+        &self,
+        id: &MoleculeId,
+        pin: &DispatchPin,
+    ) -> Result<TackleReceipt, ResurrectExecError> {
+        let state_dir = self.paths.state_dir.clone();
+        let store = FileStore::new(&state_dir);
+        let repo_root = git_repo_root(&self.cwd)?;
+        let alive = |session: &str| {
+            WorkerId::new(session).is_ok_and(|wid| self.backend.is_alive(&wid).unwrap_or(false))
+        };
+        let revival = crate::resurrect::prepare(&store, &state_dir, id, &repo_root, &alive)?;
+
+        let mol = revival.molecule.clone();
+        let formula = load_formula(&self.paths.formulas_dir, &mol);
+        let claude_pin = DispatchPin {
+            adapter: Some("claude".to_owned()),
+            ..pin.clone()
+        };
+        let (selection, project_config) =
+            self.select_dispatch(id, &mol, formula.as_ref(), &claude_pin, &state_dir)?;
+        let mut plan = TacklePlan::from_parts(
+            selection,
+            &PromptRequest {
+                molecule: molecule_brief(&mol),
+                formula: formula.as_ref(),
+                briefing: None,
+                config: &project_config,
+                molecule_dir: &revival.mol_dir,
+                workdir: None,
+                no_worktree: false,
+                repo_root: Some(&repo_root),
+            },
+            mol.base_branch.clone(),
+            None,
+        );
+        // The worker is briefed with the resurrection prompt, not the
+        // first-dispatch one, and on the branch the wreck was on.
+        plan.prompt.clone_from(&revival.prompt);
+        plan.branch_name.clone_from(&revival.branch);
+
+        let receipt = self.execute(&store, &state_dir, &repo_root, &mol, &plan, true)?;
+        revival.record(&state_dir, &repo_root, mol.session_name.clone());
+        Ok(receipt)
+    }
+
+    /// Compose the bootstrap prompt [`Self::resurrect`] would hand the new
+    /// worker, without spawning (`cs resurrect --dry-run`).
+    ///
+    /// Runs the same preconditions as [`Self::resurrect`] and releases the
+    /// resurrection lock on return. No state mutation, no event, no breadcrumb.
+    ///
+    /// # Errors
+    ///
+    /// [`ResurrectExecError::Precondition`] when the molecule cannot be
+    /// resurrected.
+    pub fn resurrection_prompt(
+        &self,
+        id: &MoleculeId,
+    ) -> Result<ResurrectionPrompt, ResurrectExecError> {
+        let state_dir = self.paths.state_dir.clone();
+        let store = FileStore::new(&state_dir);
+        let repo_root = git_repo_root(&self.cwd)?;
+        let alive = |session: &str| {
+            WorkerId::new(session).is_ok_and(|wid| self.backend.is_alive(&wid).unwrap_or(false))
+        };
+        let revival = crate::resurrect::prepare(&store, &state_dir, id, &repo_root, &alive)?;
+        Ok(ResurrectionPrompt {
+            prompt: revival.prompt.clone(),
+            composed_prompt_bytes: revival.composed_prompt_bytes,
+            prior_count: revival.prior_count,
+        })
+    }
+
+    /// Resolve and announce the adapter and model of a dispatch.
+    ///
+    /// Shared by [`Self::tackle`] and [`Self::resurrect`]: the same selection
+    /// chain, the same preflight, the same `AdapterSelected` / `ModelSelected`
+    /// events — a resurrection spawns a worker and is bounded exactly as a
+    /// first dispatch is.
+    fn select_dispatch(
+        &self,
+        id: &MoleculeId,
+        mol: &MoleculeData,
+        formula: Option<&cosmon_core::formula::Formula>,
+        pin: &DispatchPin,
+        state_dir: &Path,
+    ) -> Result<
+        (
+            cosmon_core::tackle_plan::TackleSelection,
+            cosmon_core::config::ProjectConfig,
+        ),
+        TackleExecError,
+    > {
         let (env_default_adapter, env_model) = selection_env_defaults(pin);
         let config_path = self.paths.config_path.clone();
         let project_config =
@@ -1216,7 +1389,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             molecule_adapter: None,
             model_flag: pin.model.as_deref(),
             molecule_model: mol.model_recommendation(),
-            formula: formula.as_ref(),
+            formula,
             current_step: mol.current_step,
             env_default_adapter: env_default_adapter.as_deref(),
             env_default_model: env_model
@@ -1247,7 +1420,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // CLI does — before any filesystem side effect, best-effort by the
         // emit helpers' own contract.
         emit_adapter_selected(
-            &state_dir,
+            state_dir,
             id,
             selection.adapter.as_str(),
             selection.adapter_source.clone(),
@@ -1255,7 +1428,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             selection.loop_ownership,
         );
         emit_model_selected(
-            &state_dir,
+            state_dir,
             id,
             selection.adapter.as_str(),
             selection.preferred_model.as_deref(),
@@ -1265,33 +1438,9 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // Prompt inputs. The briefing is read as-written; the fleet-template
         // injection and committee-posture delivery stay with the CLI until
         // U6 (they are dispatch-adjacent conveniences, not the contract).
-        let mol_dir = store.molecule_dir(id);
-        let briefing = std::fs::read_to_string(mol_dir.join("briefing.md")).ok();
-        let repo_root = git_repo_root(&self.cwd)?;
-        // After every refusal above, so a dispatch that never happened does
-        // not retarget the molecule.
-        stamp_run_base(&store, &mut mol, pin)?;
-        let plan = TacklePlan::from_parts(
-            selection,
-            &PromptRequest {
-                molecule: molecule_brief(&mol),
-                formula: formula.as_ref(),
-                briefing: briefing.as_deref(),
-                config: &project_config,
-                molecule_dir: &mol_dir,
-                workdir: None,
-                no_worktree: false,
-                repo_root: Some(&repo_root),
-            },
-            mol.base_branch.clone(),
-            None,
-        );
-
-        self.execute(&store, &state_dir, &repo_root, &mol, &plan)
+        Ok((selection, project_config))
     }
 
-    /// Apply the embedder's adapter floor without displacing any model the
-    /// standard selection chain already resolved.
     fn apply_adapter_model_fallback(
         &self,
         selection: &mut cosmon_core::tackle_plan::TackleSelection,
@@ -1376,6 +1525,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         repo_root: &Path,
         mol: &MoleculeData,
         plan: &TacklePlan,
+        resurrecting: bool,
     ) -> Result<TackleReceipt, TackleExecError> {
         let worktree_path = plan
             .worktree_path
@@ -1391,7 +1541,15 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             eprintln!("warning: protected path left writable: {failure}");
         }
 
-        match self.dispatch_in_worktree(store, state_dir, repo_root, mol, plan, &worktree_path) {
+        match self.dispatch_in_worktree(
+            store,
+            state_dir,
+            repo_root,
+            mol,
+            plan,
+            &worktree_path,
+            resurrecting,
+        ) {
             Ok(receipt) => Ok(receipt),
             // The one failure that must NOT clean up: a session was
             // spawned, its briefing failed, and its teardown could not be
@@ -1438,7 +1596,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
     /// commit landed.
     // Keep the post-spawn rollback branches beside the dispatch they undo:
     // moving them to a helper makes the resource ownership boundary opaque.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // `resurrecting` is the one switch between a first dispatch and a revival.
     fn dispatch_in_worktree(
         &self,
         store: &FileStore,
@@ -1447,6 +1605,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         mol: &MoleculeData,
         plan: &TacklePlan,
         worktree_path: &Path,
+        resurrecting: bool,
     ) -> Result<TackleReceipt, TackleExecError> {
         // Harness settings (ADR-177 / issue #65), rendered onto the adapter's
         // own override channel. An adapter with no channel is refused before
@@ -1526,7 +1685,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // below; see `crate::dispatch_ledger` for the six molecules lost to
         // the other order.
         let pre_dispatch_snapshot = mol.clone();
-        let (_updated, recorded) = dispatch_ledger::commit_dispatch(
+        let (updated, recorded) = dispatch_ledger::commit_dispatch(
             store,
             mol,
             &DispatchRecord {
@@ -1542,6 +1701,29 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             },
         )?;
         debug_assert_eq!(recorded.molecule(), &plan.molecule_id);
+        if resurrecting {
+            // `commit_dispatch` only promotes Pending/Queued; a resurrection
+            // starts from Frozen, so state the transition it exists to
+            // perform. `stuck_at` marks a stuck-flavoured Frozen: clear it so
+            // a later collapse does not carry a stale blocker across the
+            // resurrection. The ledger now says a worker is Active while no
+            // process exists, so a failure here must undo the record — outside
+            // the fleet guard, whose flock is not reentrant.
+            let promoted = match store.lock_fleet() {
+                Ok(_g) => {
+                    let mut next = updated;
+                    next.status = cosmon_core::molecule::MoleculeStatus::Running;
+                    next.stuck_at = None;
+                    next.updated_at = chrono::Utc::now();
+                    store.save_molecule(&plan.molecule_id, &next)
+                }
+                Err(e) => Err(e),
+            };
+            if let Err(e) = promoted {
+                dispatch_ledger::rollback_dispatch(store, &pre_dispatch_snapshot, &wid);
+                return Err(e.into());
+            }
+        }
 
         let agent = AgentDefinition {
             id: agent_id,

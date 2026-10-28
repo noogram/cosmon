@@ -6,9 +6,9 @@
 //! reset, crash recovery, or turn boundary. Outputs the current step
 //! context to stdout so Claude picks it up as a system reminder.
 
-use cosmon_core::formula::Formula;
 use cosmon_core::id::MoleculeId;
 use cosmon_filestore::FileStore;
+use cosmon_state::ops::prime::{prime, PrimeView};
 use cosmon_state::{MoleculeFilter, StateStore};
 
 use super::Context;
@@ -24,7 +24,6 @@ pub struct Args {
 }
 
 /// Execute the `prime` command.
-#[allow(clippy::too_many_lines, clippy::comparison_chain)]
 pub fn run(_ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let state_dir = cosmon_filestore::resolve_state_dir(None);
     let store = FileStore::new(&state_dir);
@@ -47,53 +46,10 @@ pub fn run(_ctx: &Context, args: &Args) -> anyhow::Result<()> {
         ));
     };
 
-    if mol.status.is_terminal() {
-        return Ok(());
-    }
-
     let formulas_dir = cosmon_filestore::resolve_formulas_dir(None);
-    let formula_path = formulas_dir.join(format!("{}.formula.toml", mol.formula_id));
-    let formula = std::fs::read_to_string(&formula_path)
-        .ok()
-        .and_then(|t| Formula::parse(&t).ok());
-
-    println!(
-        "🚨 PROPULSION REMINDER — You are executing molecule `{}`.\n",
-        mol.id
-    );
-
-    if let Some(ref formula) = formula {
-        println!(
-            "**Progress:** step {}/{}\n",
-            mol.current_step + 1,
-            mol.total_steps
-        );
-        for (i, step) in formula.steps.iter().enumerate() {
-            if i < mol.current_step {
-                println!("- [x] Step {}: {}", i + 1, step.title);
-            } else if i == mol.current_step {
-                println!("- [>] **Step {}: {}** ◀ EXECUTE NOW", i + 1, step.title);
-                println!("  {}", step.description);
-                if let Some(ref criteria) = step.exit_criteria {
-                    println!("  Exit criteria: {criteria}");
-                }
-            } else {
-                println!("- [ ] Step {}: {}", i + 1, step.title);
-            }
-        }
-    } else {
-        println!(
-            "Step {}/{} — continue execution.",
-            mol.current_step + 1,
-            mol.total_steps
-        );
+    match prime(&store, &formulas_dir, &mol.id)? {
+        PrimeView::Terminal { .. } => {}
+        PrimeView::Context(ctx) => print!("{}", ctx.render()),
     }
-
-    println!("\n**Do NOT pause. Execute the current step immediately.**");
-    println!(
-        "When ALL steps done: `cs complete {} --reason \"<summary>\"`",
-        mol.id
-    );
-
     Ok(())
 }

@@ -24,7 +24,6 @@ mod native;
 mod neurion_hint;
 mod operator_event;
 mod pow;
-mod resurrect;
 mod root_help;
 mod text;
 mod visual;
@@ -188,7 +187,7 @@ enum Command {
     /// (the `direnv allow` of cosmon; refuses repo-supplied shell until granted)
     Trust(cmd::trust::Args),
 
-    /// Prime the system — load .cosmon/config.toml and self-check gates
+    /// Prime — re-inject the current step context of a running molecule
     #[command(after_help = cmd::examples::PRIME)]
     Prime(cmd::prime::Args),
 

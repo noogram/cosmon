@@ -121,3 +121,7 @@ POST /v1/work/{owner}/messages | task-20261023-9e78 | 2026-10-23 | tenant | cosm
 GET /v1/work/{owner}/inbox | task-20261023-9e78 | 2026-10-23 | tenant | cosmon:work:read | adapter-only | Peek at the bound seat inbox without recording delivery
 POST /v1/work/{owner}/inbox | task-20261023-9e78 | 2026-10-23 | tenant | cosmon:work:read | adapter-only | Pull bounded evidence at an explicit safe point
 POST /v1/work/{owner}/messages/{key}/ack | task-20261023-9e78 | 2026-10-23 | tenant | cosmon:work:write | adapter-only | Record the bound recipient treatment of one message
+POST /v1/molecules/{id}/evolve | task-20261028-3daf | 2026-10-28 | tenant | cosmon:molecule:write | tenant-verb | Advance a molecule past its current formula step (evolve)
+POST /v1/molecules/{id}/resurrect | task-20261028-3daf | 2026-10-28 | tenant | cosmon:molecule:write+cosmon:worker:spawn | tenant-verb | Revive a wrecked molecule with a fresh worker (bounded like tackle)
+GET /v1/molecules/{id}/deps | task-20261028-3daf | 2026-10-28 | tenant | cosmon:molecule:read | tenant-verb | Show a molecule's blocking, lineage and citation links (deps)
+GET /v1/molecules/{id}/prime | task-20261028-3daf | 2026-10-28 | tenant | cosmon:molecule:read | tenant-verb | Show the step context of a live molecule (prime)

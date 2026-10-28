@@ -17,6 +17,10 @@ Commands:
   freeze            `POST /v1/molecules/{id}/freeze`
   thaw              `POST /v1/molecules/{id}/freeze` with `state: "active"` — resume a frozen molecule (the legacy `/thaw` route is 410 Gone)
   stuck             `POST /v1/molecules/{id}/stuck`
+  evolve            `POST /v1/molecules/{id}/evolve` — advance the molecule past its current formula step. The formula is the one the tenant's project holds for it. A step that declares a shell verification command is refused (501), never passed silently
+  resurrect         `POST /v1/molecules/{id}/resurrect` — revive a wrecked (frozen) molecule with a fresh worker. Spawns, so it needs the spawn scope and counts against the same live-worker ceiling as `tackle` [coûteux]
+  deps              `GET /v1/molecules/{id}/deps` — blocking, lineage and citation links of a molecule. Cross-galaxy links are listed, not resolved
+  prime             `GET /v1/molecules/{id}/prime` — the current step context of a live molecule (what `cs prime` prints). Read-only; a terminal molecule answers `terminal: true` and nothing to prime
   tag               `POST /v1/molecules/{id}/tags`
   help              Print this message or the help of the given subcommand(s)
 

@@ -65,15 +65,9 @@ fn every_operator_only_verb_is_refused_under_the_envelope() {
     // would otherwise reach a handler. (An argv clap rejects exits 2
     // before the gate is consulted; that is still a refusal with no state
     // mutation, but it would make this assertion measure clap.)
+    // `evolve` left the list on 2026-10-28 (ADR-080 §5.6): it is a molecule
+    // operation, exposed as `POST /v1/molecules/{id}/evolve`.
     let invocations: &[&[&str]] = &[
-        &[
-            "evolve",
-            "task-20260101-aaaa",
-            "--evidence",
-            "e",
-            "--formula",
-            "f",
-        ],
         &["complete", "task-20260101-aaaa"],
         &["security", "status"],
         &["kill", "task-20260101-aaaa"],

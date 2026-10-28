@@ -1858,6 +1858,466 @@ pub async fn stuck_molecule(
 }
 
 // ---------------------------------------------------------------------------
+// evolve / resurrect / deps / prime (pilot plan 0001, lot E1)
+// ---------------------------------------------------------------------------
+//
+// Each route calls the operation its `cs` verb calls. `evolve`, `deps` and
+// `prime` are `cosmon_state::ops`; `resurrect` is the shared preconditions of
+// `cosmon_runtime::resurrect` plus the library executor, which is also what
+// `tackle` spawns through.
+
+/// Resolve the admitted tenant's root, or the same 404 every route answers.
+fn admitted_tenant_root(state: &AppState, spark: &Spark) -> Result<std::path::PathBuf, ApiError> {
+    let tenant_root = state.galaxies_root.join(spark.noyau.as_str());
+    if tenant_root.exists() {
+        Ok(tenant_root)
+    } else {
+        Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            label: "not_found",
+            request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
+        })
+    }
+}
+
+/// A malformed molecule id is a 404, never a 400 (turing §8.2.3 — no
+/// existence oracle).
+fn parse_molecule_id(raw: &str, spark: &Spark) -> Result<MoleculeId, ApiError> {
+    MoleculeId::new(raw).map_err(|_| ApiError {
+        status: StatusCode::NOT_FOUND,
+        label: "not_found",
+        request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
+    })
+}
+
+/// Query string of `GET /v1/molecules/:id/deps`.
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DepsQuery {
+    /// Walk the full transitive closure instead of only direct edges
+    /// (`cs deps --transitive`).
+    #[serde(default)]
+    pub transitive: bool,
+}
+
+/// `GET /v1/molecules/:id/deps` — `cs deps` over the wire.
+///
+/// Calls [`ops::deps()`], the walk `cs deps` calls. Cross-galaxy edges are
+/// listed and not resolved: resolving one reads another galaxy's state, which
+/// a tenant-facing surface must not do.
+pub async fn deps_molecule(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(molecule_id_str): AxumPath<String>,
+    Query(query): Query<DepsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let token = extract_bearer(&headers).map_err(|e| state.reject(e))?;
+    let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
+        .map_err(|e| state.reject(e))?;
+    authorise_scope(
+        &state,
+        &jwt,
+        "deps",
+        &[SCOPE_MOLECULE_READ, SCOPE_MOLECULE_WRITE],
+        SCOPE_MOLECULE_READ,
+    )?;
+    let spark = build_spark(&state, &jwt, Verb::DepsMolecule, Some(&molecule_id_str))?;
+    let molecule_id = parse_molecule_id(&molecule_id_str, &spark)?;
+    let tenant_root = admitted_tenant_root(&state, &spark)?;
+    let store = FileStore::new(tenant_root.join(".cosmon").join("state"));
+
+    let view = ops::deps(
+        &store,
+        molecule_id.as_str(),
+        &ops::DepsRequest {
+            transitive: query.transitive,
+        },
+    )
+    .map_err(|e| {
+        let (status, label) = match &e {
+            ops::DepsError::MoleculeNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+            ops::DepsError::AmbiguousPrefix(_, _) => (StatusCode::CONFLICT, "ambiguous_prefix"),
+            ops::DepsError::StoreUnavailable(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "store_unavailable")
+            }
+        };
+        ApiError {
+            status,
+            label,
+            request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
+        }
+    })?;
+    Ok(Json(json!({
+        "request_id": spark.request_id,
+        "deps": ops::DepsJson::from_view(&view),
+    })))
+}
+
+/// `GET /v1/molecules/:id/prime` — `cs prime` over the wire.
+///
+/// A READ: it returns the step context `cs prime` prints, and changes
+/// nothing. A terminal molecule has nothing to prime; that is a typed `200`
+/// (`terminal: true`, no `context`), not an error.
+pub async fn prime_molecule(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(molecule_id_str): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let token = extract_bearer(&headers).map_err(|e| state.reject(e))?;
+    let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
+        .map_err(|e| state.reject(e))?;
+    authorise_scope(
+        &state,
+        &jwt,
+        "prime",
+        &[SCOPE_MOLECULE_READ, SCOPE_MOLECULE_WRITE],
+        SCOPE_MOLECULE_READ,
+    )?;
+    let spark = build_spark(&state, &jwt, Verb::PrimeMolecule, Some(&molecule_id_str))?;
+    let molecule_id = parse_molecule_id(&molecule_id_str, &spark)?;
+    let tenant_root = admitted_tenant_root(&state, &spark)?;
+    let paths = cosmon_runtime::tackle_exec::TenantPaths::rooted_at(&tenant_root);
+    let store = FileStore::new(&paths.state_dir);
+
+    let view = ops::prime(&store, &paths.formulas_dir, &molecule_id).map_err(|e| match &e {
+        ops::PrimeError::MoleculeNotFound(_) => ApiError {
+            status: StatusCode::NOT_FOUND,
+            label: "not_found",
+            request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
+        },
+        ops::PrimeError::StoreUnavailable(_) => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: "store_unavailable",
+            request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
+        },
+    })?;
+    Ok(Json(json!({
+        "request_id": spark.request_id,
+        "prime": ops::PrimeJson::from_view(&view),
+    })))
+}
+
+/// Body of `POST /v1/molecules/:id/evolve`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvolveBody {
+    /// Evidence documenting why the current step is complete
+    /// (`cs evolve --evidence`).
+    pub evidence: String,
+}
+
+/// What a tenant-facing advance does around the shared operation: nothing
+/// that runs on a machine of the caller's. The one required effect appends
+/// the legacy event line; the defaults refuse a step that declares a shell
+/// verification, and skip the auto-commit, the inline gate and the
+/// bootstrap seal, which all belong to a worker's worktree.
+struct RemoteEvolveEffects;
+
+impl ops::EvolveEffects for RemoteEvolveEffects {
+    fn append_legacy_event(&self, events_path: &Path, envelope: &cosmon_core::event::Envelope) {
+        let _ = cosmon_filestore::event::append(events_path, envelope);
+    }
+}
+
+/// `POST /v1/molecules/:id/evolve` — `cs evolve` over the wire.
+///
+/// Calls [`ops::evolve()`], the advance `cs evolve` calls, with the formula the
+/// tenant's own formulas directory holds for the molecule. A step that
+/// declares a shell verification command is refused `501
+/// evolve_unsupported_step`, never passed silently: running a repo-supplied
+/// shell string on behalf of a remote caller is not something this surface
+/// does.
+pub async fn evolve_molecule(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(molecule_id_str): AxumPath<String>,
+    body: Result<Json<EvolveBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let token = extract_bearer(&headers).map_err(|e| state.reject(e))?;
+    let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
+        .map_err(|e| state.reject(e))?;
+    authorise_scope(
+        &state,
+        &jwt,
+        "evolve",
+        &[SCOPE_MOLECULE_WRITE],
+        SCOPE_MOLECULE_WRITE,
+    )?;
+    let Json(body) = body.map_err(|_| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        label: "invalid_json_body",
+        request_id: None,
+        retry_after_seconds: None,
+    })?;
+    let spark = build_spark(&state, &jwt, Verb::EvolveMolecule, Some(&molecule_id_str))?;
+    let molecule_id = parse_molecule_id(&molecule_id_str, &spark)?;
+    let tenant_root = admitted_tenant_root(&state, &spark)?;
+    let paths = cosmon_runtime::tackle_exec::TenantPaths::rooted_at(&tenant_root);
+    let store = FileStore::new(&paths.state_dir);
+    let api_error = |status: StatusCode, label: &'static str| ApiError {
+        status,
+        label,
+        request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
+    };
+
+    let molecule = store
+        .load_molecule(&molecule_id)
+        .map_err(|e| collapse_store_error(&e, &spark.request_id))?;
+    let previous_status = molecule.status.to_string();
+    let formula_path = paths
+        .formulas_dir
+        .join(format!("{}.formula.toml", molecule.formula_id));
+    let formula = std::fs::read_to_string(&formula_path)
+        .ok()
+        .and_then(|text| cosmon_core::formula::Formula::parse(&text).ok())
+        .ok_or_else(|| api_error(StatusCode::CONFLICT, "formula_unavailable"))?;
+
+    let view = ops::evolve(
+        &store,
+        &paths.state_dir,
+        &molecule_id,
+        &ops::EvolveOpRequest {
+            evidence: &body.evidence,
+            formula: &formula,
+        },
+        &RemoteEvolveEffects,
+    )
+    .map_err(|e| {
+        use ops::EvolveError as E;
+        let (status, label) = match &e {
+            E::MoleculeNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+            E::NotRunnable(_, _) => (StatusCode::CONFLICT, "not_runnable"),
+            E::Refused(cosmon_core::evolve::EvolveError::MissingEvidence { .. }) => {
+                (StatusCode::BAD_REQUEST, "missing_evidence")
+            }
+            E::Refused(_) => (StatusCode::CONFLICT, "step_refused"),
+            E::EnergyExhausted { .. } => (StatusCode::CONFLICT, "energy_exhausted"),
+            E::VerificationRetry { .. } | E::VerificationExhausted { .. } => {
+                (StatusCode::CONFLICT, "verification_failed")
+            }
+            E::ArtifactsMissing { .. } => (StatusCode::CONFLICT, "artifacts_missing"),
+            E::Unsupported { .. } => (StatusCode::NOT_IMPLEMENTED, "evolve_unsupported_step"),
+            E::StoreUnavailable(_) | E::Effect(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "store_unavailable")
+            }
+        };
+        api_error(status, label)
+    })?;
+
+    let wire = ops::EvolveJson::from_view(&view);
+    state.events.publish(MoleculeEvent::state_changed(
+        spark.noyau.as_str(),
+        molecule_id.as_str(),
+        previous_status,
+        wire.new_status.clone(),
+    ));
+    Ok(Json(json!({
+        "request_id": spark.request_id,
+        "evolve": wire,
+    })))
+}
+
+/// Body of `POST /v1/molecules/:id/resurrect`. Optional: an empty body is
+/// `{"dry_run": false}`.
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ResurrectBody {
+    /// Compose and return the bootstrap prompt without spawning
+    /// (`cs resurrect --dry-run`). No state mutation, no event, no
+    /// breadcrumb.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// Map a resurrection refusal onto the wire. Every outcome is a stable label;
+/// the dispatch half reuses `tackle`'s taxonomy unchanged.
+fn resurrect_exec_error_to_response(
+    err: &cosmon_runtime::tackle_exec::ResurrectExecError,
+    request_id: &str,
+) -> ApiError {
+    use cosmon_runtime::resurrect::ResurrectError as R;
+    use cosmon_runtime::tackle_exec::ResurrectExecError as E;
+    let (status, label) = match err {
+        E::Precondition(R::NotAWreck { .. }) => (StatusCode::CONFLICT, "not_a_wreck"),
+        E::Precondition(R::DoubleResurrect { .. }) => (StatusCode::CONFLICT, "already_active"),
+        E::Precondition(R::FlockContended { .. }) => {
+            (StatusCode::CONFLICT, "resurrection_in_progress")
+        }
+        E::Precondition(R::ArtifactsMissing { .. }) => (StatusCode::CONFLICT, "artifacts_missing"),
+        E::Precondition(R::PinnedExec) => (StatusCode::CONFLICT, "pinned_exec"),
+        E::Precondition(_) => (StatusCode::SERVICE_UNAVAILABLE, "store_unavailable"),
+        E::Dispatch(e) => return tackle_exec_error_to_response(e, request_id),
+    };
+    ApiError {
+        status,
+        label,
+        request_id: Some(request_id.to_owned()),
+        retry_after_seconds: None,
+    }
+}
+
+/// `POST /v1/molecules/:id/resurrect` — `cs resurrect` over the wire.
+///
+/// Revives a `Frozen` wreck with a fresh worker. It spawns, so it is bounded
+/// exactly as `tackle` is: it needs `cosmon:molecule:write` AND
+/// `cosmon:worker:spawn`, it counts against the per-noyau live-worker
+/// ceiling (`429 tackle_ceiling`) before anything is spawned, and it
+/// dispatches through the same library executor, preflight and
+/// ledger-before-spawn discipline.
+#[allow(clippy::too_many_lines)] // Authentication, admission and spawn stay auditable in order.
+pub async fn resurrect_molecule(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(molecule_id_str): AxumPath<String>,
+    body: Option<Json<ResurrectBody>>,
+) -> Result<Json<Value>, ApiError> {
+    let token = extract_bearer(&headers).map_err(|e| state.reject(e))?;
+    let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
+        .map_err(|e| state.reject(e))?;
+    // Two scopes, composed with AND, exactly as `tackle`: `:molecule:write`
+    // for the transition, `:worker:spawn` because a worker burns budget.
+    authorise_scope(
+        &state,
+        &jwt,
+        "resurrect",
+        &[SCOPE_MOLECULE_WRITE],
+        SCOPE_MOLECULE_WRITE,
+    )?;
+    authorise_scope(
+        &state,
+        &jwt,
+        "resurrect:spawn",
+        &[SCOPE_WORKER_SPAWN],
+        SCOPE_WORKER_SPAWN,
+    )?;
+    let Json(body) = body.unwrap_or_default();
+    let spark = build_spark(
+        &state,
+        &jwt,
+        Verb::ResurrectMolecule,
+        Some(&molecule_id_str),
+    )?;
+    let molecule_id = parse_molecule_id(&molecule_id_str, &spark)?;
+    // Resolve through the same store path as GET: a later "not found" cannot
+    // then be read as the molecule-existence oracle.
+    run_observe(&state, &spark, &jwt, &molecule_id)?;
+    let tenant_root = admitted_tenant_root(&state, &spark)?;
+
+    // The per-noyau live-worker ceiling, before anything is spawned — the
+    // same bound `tackle` enforces (delib-20260709-943e M3).
+    let live_workers = count_live_workers(&tenant_root);
+    if live_workers >= DEFAULT_TACKLE_CEILING_PER_NOYAU {
+        tracing::warn!(
+            noyau = %spark.noyau.as_str(),
+            live_workers,
+            ceiling = DEFAULT_TACKLE_CEILING_PER_NOYAU,
+            request_id = %spark.request_id,
+            "resurrect refused: per-noyau live-worker ceiling reached"
+        );
+        state.metrics.record_reject("tackle_ceiling");
+        return Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            label: "tackle_ceiling",
+            request_id: Some(spark.request_id.clone()),
+            retry_after_seconds: None,
+        });
+    }
+
+    let artifact_dir = state
+        .artifact_root
+        .join(spark.noyau.as_str())
+        .join(&molecule_id_str);
+    let _ = std::fs::create_dir_all(&artifact_dir);
+    let envelope = WorkerEnvelope {
+        tenant_root: tenant_root.clone(),
+        artifact_dir: Some(artifact_dir),
+        anthropic_api_key: state.anthropic_api_key.clone(),
+        claude_model: state.claude_model.clone(),
+    };
+    let preflight = tenant_preflight(&state, &envelope, &tenant_root);
+    let backend = EnvelopedBackend::new(state.worker_backend.for_tenant(&tenant_root), &envelope);
+    let executor = LibraryExecutor::new(&tenant_root, backend)
+        .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root))
+        .with_tackled_by(cosmon_core::tackle::TackledBy::Human)
+        .with_adapter_model_fallback(CLAUDE_ADAPTER, state.claude_model.clone(), ANTHROPIC_MODEL)
+        .with_preflight(preflight)
+        .with_launch_policy(tenant_launch_policy(&envelope))
+        .with_briefing_delivery(tenant_briefing_delivery());
+
+    if body.dry_run {
+        let dry_id = molecule_id.clone();
+        let dry = tokio::task::spawn_blocking(move || executor.resurrection_prompt(&dry_id))
+            .await
+            .map_err(|_| ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                label: "tackle_unavailable",
+                request_id: Some(spark.request_id.clone()),
+                retry_after_seconds: None,
+            })?
+            .map_err(|e| resurrect_exec_error_to_response(&e, &spark.request_id))?;
+        return Ok(Json(json!({
+            "request_id": spark.request_id,
+            "resurrect": {
+                "molecule_id": molecule_id_str,
+                "dry_run": true,
+                "composed_prompt_bytes": dry.composed_prompt_bytes,
+                "prior_count": dry.prior_count,
+                "prompt": dry.prompt,
+            },
+        })));
+    }
+
+    let dispatch_id = molecule_id.clone();
+    let revived = tokio::task::spawn_blocking(move || {
+        executor
+            .resurrect(&dispatch_id, &DispatchPin::default())
+            .map_err(Box::new)
+    })
+    .await
+    .map_err(|_| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        label: "tackle_unavailable",
+        request_id: Some(spark.request_id.clone()),
+        retry_after_seconds: None,
+    })?;
+    let receipt = match revived.map_err(|boxed| *boxed) {
+        Ok(receipt) => receipt,
+        Err(e) => {
+            tracing::warn!(
+                request_id = %spark.request_id,
+                molecule_id = %molecule_id_str,
+                error = %e,
+                "resurrect refused"
+            );
+            return Err(resurrect_exec_error_to_response(&e, &spark.request_id));
+        }
+    };
+
+    state.events.publish(MoleculeEvent::state_changed(
+        spark.noyau.as_str(),
+        &molecule_id_str,
+        "frozen",
+        "running",
+    ));
+    Ok(Json(json!({
+        "request_id": spark.request_id,
+        "resurrect": {
+            "molecule_id": molecule_id_str,
+            "status": "running",
+            "worker_session": receipt.session_name,
+            "branch": receipt.branch_name,
+            "spawned_at": chrono::Utc::now().to_rfc3339(),
+        },
+    })))
+}
+
+// ---------------------------------------------------------------------------
 // Tackle (`POST /v1/molecules/:id/tackle`) — library-direct (issue #54 U6)
 // ---------------------------------------------------------------------------
 

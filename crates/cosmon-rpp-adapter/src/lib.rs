@@ -467,6 +467,26 @@ pub fn router(state: AppState) -> Router {
             "/v1/molecules/{id}/stuck",
             post(routes::molecules::stuck_molecule),
         )
+        // The four verbs Leanear asked for (pilot plan 0001, lot E1). Each
+        // route calls the operation its `cs` verb calls — `ops::evolve`,
+        // `ops::deps`, `ops::prime`, and the resurrection preconditions plus
+        // the library executor — so the two surfaces cannot drift.
+        .route(
+            "/v1/molecules/{id}/evolve",
+            post(routes::molecules::evolve_molecule),
+        )
+        .route(
+            "/v1/molecules/{id}/resurrect",
+            post(routes::molecules::resurrect_molecule),
+        )
+        .route(
+            "/v1/molecules/{id}/deps",
+            get(routes::molecules::deps_molecule),
+        )
+        .route(
+            "/v1/molecules/{id}/prime",
+            get(routes::molecules::prime_molecule),
+        )
         .route(
             "/v1/molecules/{id}/tackle",
             post(routes::molecules::tackle_molecule),

@@ -308,9 +308,10 @@ fn molecule_diff_is_the_blessed_lifecycle_and_conditional_collapse_help() {
     }
     assert_eq!(
         added.len(),
-        9,
+        13,
         "blessed: thaw correction + tackle marker + run line + done line + session line \
-         + status line + --token reword + conditional collapse + receipt lookup, got {added:?}"
+         + status line + --token reword + conditional collapse + receipt lookup \
+         + evolve, resurrect, deps and prime lines (pilot plan 0001 lot E1), got {added:?}"
     );
     for line in [collapse_post, receipt_post] {
         assert!(
@@ -354,6 +355,20 @@ fn molecule_diff_is_the_blessed_lifecycle_and_conditional_collapse_help() {
             .any(|l| l.starts_with("  status    `GET /v1/molecules/{id}/status`")),
         "missing the blessed status verb line (the poll surface), got {added:?}"
     );
+    // Pilot plan 0001 lot E1: the four verbs Leanear asked for. Each is an
+    // additive line, which is why it can join a surface pinned this tightly.
+    for (verb, route) in [
+        ("evolve", "POST /v1/molecules/{id}/evolve"),
+        ("resurrect", "POST /v1/molecules/{id}/resurrect"),
+        ("deps", "GET /v1/molecules/{id}/deps"),
+        ("prime", "GET /v1/molecules/{id}/prime"),
+    ] {
+        let head = format!("  {verb:8}  `{route}`");
+        assert!(
+            added.iter().any(|l| l.starts_with(&head)),
+            "missing the blessed {verb} verb line, got {added:?}"
+        );
+    }
 }
 
 /// No operator-only verb may appear on

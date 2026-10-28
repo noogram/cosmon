@@ -8,7 +8,7 @@
 //! and flips the molecule back to `Running`. The molecule never died —
 //! only the observer was lost.
 //!
-//! Pre-conditions (all must hold, else [`ResurrectError`]):
+//! Pre-conditions (all must hold, else [`ResurrectError`](cosmon_runtime::resurrect::ResurrectError)):
 //!
 //! - `status == Frozen` (the output of `cs recover` for a wreck)
 //! - tmux session is not alive (no competing worker)
@@ -22,24 +22,17 @@
 //! - Status flip `Frozen → Running`
 //! - Tmux session spawned (same `session_name` as the original when known).
 
-use std::fs;
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
-
 use chrono::Utc;
-use cosmon_core::event_v2::EventV2;
 use cosmon_core::id::WorkerId;
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_core::spawn_seam::validate_adapter_name;
 use cosmon_core::transport::TransportBackend;
 use cosmon_filestore::FileStore;
+use cosmon_runtime::resurrect::prepare;
 use cosmon_state::{MoleculeData, StateStore};
 use cosmon_transport::TmuxBackend;
-use fs2::FileExt;
-use sha2::{Digest, Sha256};
 
 use super::Context;
-use crate::resurrect::{compose_resurrection_prompt, ComposeContext, ResurrectError};
 
 /// Arguments for the `resurrect` subcommand.
 #[derive(clap::Args)]
@@ -64,84 +57,25 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let mol = resolve_molecule(&store, &args.molecule)?;
     let mol_id = mol.id.clone();
     super::worker_transport::refuse_exec_control(&mol, "resurrect")?;
-    // Frozen/recovered snapshots may have released the process. A historical
-    // qualified Exec dispatch still cannot be resumed as an unpinned Claude worker.
-    anyhow::ensure!(!cosmon_state::transport_pin::pinned_molecules(&state_dir)?.contains(&mol_id),
-        "resurrect: pinned Codex Exec has no qualified continuation contract; resolve explicitly before a new dispatch");
-
-    // Pre-condition: state == Frozen (the wreck state produced by `cs recover`).
-    if mol.status != MoleculeStatus::Frozen {
-        return Err(anyhow::Error::from(ResurrectError::NotAWreck {
-            molecule_id: mol_id.as_str().to_owned(),
-            status: mol.status.to_string(),
-        }));
-    }
-
-    let mol_dir = store.molecule_dir(&mol_id);
-
-    // Pre-condition: prompt.md and briefing.md exist.
-    for required in ["prompt.md", "briefing.md"] {
-        if !mol_dir.join(required).exists() {
-            return Err(anyhow::Error::from(ResurrectError::ArtifactsMissing {
-                mol_dir: mol_dir.clone(),
-                missing: required.to_owned(),
-            }));
-        }
-    }
-
-    // Resolve session + branch context.
+    // Resolve session + branch context, then check the preconditions, take the
+    // resurrection lock and compose the prompt — the part `POST
+    // /v1/molecules/:id/resurrect` runs too. A historical qualified Exec
+    // dispatch cannot be resumed as an unpinned Claude worker; `prepare`
+    // refuses it.
     let repo_root = crate::cmd::tackle::find_repo_root()?;
-    let branch = mol
-        .originating_branch
-        .clone()
-        .unwrap_or_else(|| format!("feat/{}", mol_id.as_str()));
-    let session_name = mol
-        .session_name
-        .clone()
-        .unwrap_or_else(|| mol_id.as_str().to_owned());
     let socket = super::tmux_socket_name(ctx);
     let backend = TmuxBackend::new(&socket);
+    let plan = prepare(&store, &state_dir, &mol_id, &repo_root, &|session| {
+        WorkerId::new(session).is_ok_and(|wid| backend.is_alive(&wid).unwrap_or(false))
+    })?;
+    let mol = plan.molecule.clone();
+    let mol_dir = plan.mol_dir.clone();
+    let branch = plan.branch.clone();
+    let session_name = plan.session_name.clone();
     let wid = WorkerId::new(&session_name)?;
-
-    // Pre-condition: tmux session must NOT be alive.
-    if backend.is_alive(&wid).unwrap_or(false) {
-        return Err(anyhow::Error::from(ResurrectError::DoubleResurrect {
-            molecule_id: mol_id.as_str().to_owned(),
-            session: session_name.clone(),
-        }));
-    }
-
-    // Acquire resurrection flock — rejects concurrent second invocations.
-    fs::create_dir_all(&mol_dir)?;
-    let lock_path = mol_dir.join("resurrect.lock");
-    let lock_file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)?;
-    lock_file
-        .try_lock_exclusive()
-        .map_err(|_| ResurrectError::FlockContended {
-            molecule_id: mol_id.as_str().to_owned(),
-        })?;
-
-    // Count prior resurrections by scanning the breadcrumb directory.
-    // Cheap and authoritative — one file per resurrection, filesystem is truth.
-    let wrecks_dir = mol_dir.join("wrecks");
-    let prior_count = count_prior_wrecks(&wrecks_dir);
-
-    // Compose the bootstrap prompt (pure function).
-    let compose_ctx = ComposeContext {
-        molecule_id: mol_id.as_str(),
-        branch: &branch,
-        repo_root: &repo_root,
-        prior_count,
-        next_step_display: Some(format!("Step {}/{}", mol.current_step + 1, mol.total_steps)),
-        synthesis_is_draft: false,
-    };
-    let prompt =
-        compose_resurrection_prompt(&mol_dir, &compose_ctx).map_err(anyhow::Error::from)?;
-    let composed_prompt_bytes = prompt.len() as u64;
+    let prior_count = plan.prior_count;
+    let prompt = plan.prompt.clone();
+    let composed_prompt_bytes = plan.composed_prompt_bytes;
 
     if args.dry_run {
         if ctx.json {
@@ -166,9 +100,6 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     if !worktree_path.exists() {
         crate::cmd::tackle::create_worktree(&repo_root, &worktree_path, &branch, None)?;
     }
-
-    // Resolve tip sha for the breadcrumb (best effort — empty branch OK).
-    let tip_sha = resolve_tip_sha(&repo_root, &branch);
 
     // Spawn the tmux session and inject the composed prompt.
     // `cs resurrect` rebuilds a Claude session by construction (see
@@ -333,44 +264,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // resurrection into the `Resurrected` event.
     let prior_session = prior.session_name.clone();
 
-    // Breadcrumb — small metadata file, NOT an artifact duplicate.
-    let prompt_hash = {
-        let mut h = Sha256::new();
-        h.update(prompt.as_bytes());
-        format!("{:x}", h.finalize())
-    };
-    if let Err(e) = write_breadcrumb(
-        &wrecks_dir,
-        &tip_sha,
-        prior_count,
-        &prompt_hash,
-        composed_prompt_bytes,
-    ) {
-        eprintln!("warn: failed to write resurrect breadcrumb: {e}");
-    }
-
-    // Emit Resurrected event + status change.
-    let events_path = state_dir.join("events.jsonl");
-    let _ = cosmon_state::event_log::emit_one(
-        &events_path,
-        EventV2::Resurrected {
-            molecule_id: mol_id.clone(),
-            from_session: prior_session,
-            composed_prompt_bytes,
-            t_orig_tokens: None,
-            prior_count,
-        },
-        None,
-    );
-    let _ = cosmon_state::event_log::emit_one(
-        &events_path,
-        EventV2::MoleculeStatusChanged {
-            molecule_id: mol_id.clone(),
-            from: "frozen".to_owned(),
-            to: "running".to_owned(),
-        },
-        None,
-    );
+    // Breadcrumb (a small metadata file, NOT an artifact duplicate) and the
+    // `Resurrected` + status-change events.
+    plan.record(&state_dir, &repo_root, prior_session);
 
     if ctx.json {
         let out = serde_json::json!({
@@ -401,7 +297,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         );
     }
 
-    drop(lock_file);
+    drop(plan);
     Ok(())
 }
 
@@ -411,85 +307,4 @@ fn resolve_molecule(store: &FileStore, query: &str) -> anyhow::Result<MoleculeDa
     store
         .load_molecule(&mid)
         .map_err(|e| anyhow::anyhow!("molecule {query} not found: {e}"))
-}
-
-fn count_prior_wrecks(wrecks_dir: &Path) -> u32 {
-    let Ok(rd) = fs::read_dir(wrecks_dir) else {
-        return 0;
-    };
-    let n = rd
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-        .count();
-    u32::try_from(n).unwrap_or(u32::MAX)
-}
-
-fn resolve_tip_sha(repo_root: &Path, branch: &str) -> String {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", branch])
-        .current_dir(repo_root)
-        .output();
-    match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
-        _ => String::new(),
-    }
-}
-
-fn write_breadcrumb(
-    wrecks_dir: &Path,
-    tip_sha: &str,
-    prior_count: u32,
-    prompt_hash: &str,
-    prompt_bytes: u64,
-) -> std::io::Result<PathBuf> {
-    fs::create_dir_all(wrecks_dir)?;
-    let ts = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    let path = wrecks_dir.join(format!("{ts}.json"));
-    let payload = serde_json::json!({
-        "timestamp": Utc::now().to_rfc3339(),
-        "tip_sha": tip_sha,
-        "prior_count": prior_count,
-        "composed_prompt_hash": prompt_hash,
-        "composed_prompt_bytes": prompt_bytes,
-        "t_orig_tokens": serde_json::Value::Null,
-    });
-    let mut f = fs::File::create(&path)?;
-    f.write_all(serde_json::to_string_pretty(&payload)?.as_bytes())?;
-    Ok(path)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn count_prior_wrecks_handles_missing_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let missing = tmp.path().join("does-not-exist");
-        assert_eq!(count_prior_wrecks(&missing), 0);
-    }
-
-    #[test]
-    fn count_prior_wrecks_counts_only_json_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("wrecks");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("one.json"), "{}").unwrap();
-        fs::write(dir.join("two.json"), "{}").unwrap();
-        fs::write(dir.join("note.txt"), "ignore").unwrap();
-        assert_eq!(count_prior_wrecks(&dir), 2);
-    }
-
-    #[test]
-    fn write_breadcrumb_produces_valid_json() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("wrecks");
-        let p = write_breadcrumb(&dir, "abc123", 1, "deadbeef", 2048).unwrap();
-        let body = fs::read_to_string(&p).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["tip_sha"], "abc123");
-        assert_eq!(v["prior_count"], 1);
-        assert_eq!(v["composed_prompt_hash"], "deadbeef");
-        assert_eq!(v["composed_prompt_bytes"], 2048);
-    }
 }

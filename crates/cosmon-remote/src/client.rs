@@ -1505,6 +1505,52 @@ impl Client {
         decode_json(resp).await
     }
 
+    /// `POST /v1/molecules/{id}/evolve` — advance the molecule past its
+    /// current formula step (`cs evolve --evidence`). The formula is the one
+    /// the tenant's project holds for the molecule; there is no `--formula`
+    /// path to send.
+    pub async fn evolve(&self, id: &str, evidence: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .send(
+                self.req_canon(canon::POST_V1_MOLECULES_ID_EVOLVE, &[id])
+                    .json(&serde_json::json!({ "evidence": evidence })),
+            )
+            .await?;
+        decode_json(resp).await
+    }
+
+    /// `POST /v1/molecules/{id}/resurrect` — revive a wrecked molecule with a
+    /// fresh worker (`cs resurrect`). With `dry_run` the server composes and
+    /// returns the bootstrap prompt without spawning.
+    pub async fn resurrect(&self, id: &str, dry_run: bool) -> Result<serde_json::Value> {
+        let resp = self
+            .send(
+                self.req_canon(canon::POST_V1_MOLECULES_ID_RESURRECT, &[id])
+                    .json(&serde_json::json!({ "dry_run": dry_run })),
+            )
+            .await?;
+        decode_json(resp).await
+    }
+
+    /// `GET /v1/molecules/{id}/deps` — blocking, lineage and citation links
+    /// (`cs deps [--transitive]`).
+    pub async fn deps(&self, id: &str, transitive: bool) -> Result<serde_json::Value> {
+        let mut rb = self.req_canon(canon::GET_V1_MOLECULES_ID_DEPS, &[id]);
+        if transitive {
+            rb = rb.query(&[("transitive", "true")]);
+        }
+        decode_json(self.send(rb).await?).await
+    }
+
+    /// `GET /v1/molecules/{id}/prime` — the current step context of a live
+    /// molecule (`cs prime <id>`). A READ.
+    pub async fn prime(&self, id: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .send(self.req_canon(canon::GET_V1_MOLECULES_ID_PRIME, &[id]))
+            .await?;
+        decode_json(resp).await
+    }
+
     // ── Artifacts (e653) ──────────────────────────────────────────────
 
     /// `GET /v1/molecules/{id}/artifacts`.

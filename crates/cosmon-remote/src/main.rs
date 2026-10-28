@@ -537,6 +537,29 @@ enum MoleculeCmd {
         #[arg(long)]
         reason: String,
     },
+    #[command(about = format!("{} — advance the molecule past its current formula step. The formula is the one the tenant's project holds for it. A step that declares a shell verification command is refused (501), never passed silently{}", canon::POST_V1_MOLECULES_ID_EVOLVE.label(), canon::POST_V1_MOLECULES_ID_EVOLVE.effect_suffix()))]
+    Evolve {
+        id: String,
+        /// Evidence documenting why the current step is complete.
+        #[arg(long)]
+        evidence: String,
+    },
+    #[command(about = format!("{} — revive a wrecked (frozen) molecule with a fresh worker. Spawns, so it needs the spawn scope and counts against the same live-worker ceiling as `tackle`{}", canon::POST_V1_MOLECULES_ID_RESURRECT.label(), canon::POST_V1_MOLECULES_ID_RESURRECT.effect_suffix()))]
+    Resurrect {
+        id: String,
+        /// Compose and print the bootstrap prompt without spawning.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    #[command(about = format!("{} — blocking, lineage and citation links of a molecule. Cross-galaxy links are listed, not resolved{}", canon::GET_V1_MOLECULES_ID_DEPS.label(), canon::GET_V1_MOLECULES_ID_DEPS.effect_suffix()))]
+    Deps {
+        id: String,
+        /// Walk the full transitive closure instead of only direct edges.
+        #[arg(long)]
+        transitive: bool,
+    },
+    #[command(about = format!("{} — the current step context of a live molecule (what `cs prime` prints). Read-only; a terminal molecule answers `terminal: true` and nothing to prime{}", canon::GET_V1_MOLECULES_ID_PRIME.label(), canon::GET_V1_MOLECULES_ID_PRIME.effect_suffix()))]
+    Prime { id: String },
     #[command(about = format!("{}{}", canon::POST_V1_MOLECULES_ID_TAGS.label(), canon::POST_V1_MOLECULES_ID_TAGS.effect_suffix()))]
     Tag {
         id: String,
@@ -1905,6 +1928,36 @@ async fn run_molecule(
         MoleculeCmd::Stuck { id, reason } => {
             let body = client.stuck(&id, &ReasonRequest { reason }).await?;
             print_json(json, &body);
+        }
+        MoleculeCmd::Evolve { id, evidence } => {
+            let body = client.evolve(&id, &evidence).await?;
+            print_json(json, &body);
+        }
+        MoleculeCmd::Resurrect { id, dry_run } => {
+            let body = client.resurrect(&id, dry_run).await?;
+            if !json && dry_run {
+                // The prompt is the point of a dry run: print it as `cs
+                // resurrect --dry-run` does.
+                if let Some(prompt) = body["resurrect"]["prompt"].as_str() {
+                    println!("{prompt}");
+                    return Ok(());
+                }
+            }
+            print_json(json, &body);
+        }
+        MoleculeCmd::Deps { id, transitive } => {
+            let body = client.deps(&id, transitive).await?;
+            print_json(json, &body);
+        }
+        MoleculeCmd::Prime { id } => {
+            let body = client.prime(&id).await?;
+            // The reminder is the same text `cs prime` prints; a terminal
+            // molecule has none, and `cs prime` prints nothing for it.
+            match body["prime"]["reminder"].as_str() {
+                Some(reminder) if !json => print!("{reminder}"),
+                _ if !json && body["prime"]["terminal"] == true => {}
+                _ => print_json(json, &body),
+            }
         }
         MoleculeCmd::Tag { id, add, remove } => {
             if add.is_empty() && remove.is_empty() {

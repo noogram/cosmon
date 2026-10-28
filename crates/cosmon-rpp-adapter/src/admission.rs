@@ -97,6 +97,16 @@ pub enum Verb {
     ThawMolecule,
     /// `POST /v1/molecules/{id}/stuck` (T-CST-EXPAND).
     StuckMolecule,
+    /// `POST /v1/molecules/{id}/evolve` — advance a molecule past its
+    /// current formula step (the shared `cosmon_state::ops::evolve`).
+    EvolveMolecule,
+    /// `POST /v1/molecules/{id}/resurrect` — revive a wrecked molecule with
+    /// a fresh worker. Spawns, so it is bounded like tackle.
+    ResurrectMolecule,
+    /// `GET /v1/molecules/{id}/deps` — blocking, lineage and citation links.
+    DepsMolecule,
+    /// `GET /v1/molecules/{id}/prime` — the step context of a live molecule.
+    PrimeMolecule,
     /// `POST /v1/molecules/{id}/tackle` (T9 remote-tackle V2).
     /// Spawns a worker session through the
     /// subprocess envelope (§3.5) — `cs tackle :id` inside the
@@ -208,6 +218,10 @@ impl Verb {
             Self::FreezeMolecule => "freeze",
             Self::ThawMolecule => "thaw",
             Self::StuckMolecule => "stuck",
+            Self::EvolveMolecule => "evolve",
+            Self::ResurrectMolecule => "resurrect",
+            Self::DepsMolecule => "deps",
+            Self::PrimeMolecule => "prime",
             Self::TackleMolecule => "tackle",
             Self::RunMolecule => "run",
             // "done", now that it is one gesture again. `land` was a second

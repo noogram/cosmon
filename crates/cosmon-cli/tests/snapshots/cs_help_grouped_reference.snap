@@ -104,7 +104,7 @@ Integrity & audit:
 Tools:
   guide                Operator handbook
   pilot                Pilot — interactive cognitive pilot REPL over a client-side model (--experimental). --remote pilots an avatar over the §8p wire (ADR-115)
-  prime                Prime the system — load .cosmon/config.toml and self-check gates
+  prime                Prime — re-inject the current step context of a running molecule
   paths                Paths — project the write-path taxonomy (`--writes`), a pure derived view
   archive              Archive — operator view over durable terminal snapshots (list/show/verify/prune, ADR-030)
   journal              Write down what you notice while you work; anything worth doing becomes a task without you stopping to file it
