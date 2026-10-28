@@ -183,6 +183,7 @@ this stage.
 
 ### Security
 
+- Updated `pulldown-cmark` from 0.13.3 to 0.13.5 to fix RUSTSEC-2026-0414: exponential event growth with `ENABLE_WIKILINKS`.
 - Updated `tokio` from 1.50.0 to 1.51.6 to fix RUSTSEC-2026-0386: `AsyncFd`
   constructors violated I/O safety.
 - Dependency advisories fixed by updating locked versions: `quinn-proto`
