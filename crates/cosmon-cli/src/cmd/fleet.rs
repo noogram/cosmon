@@ -76,7 +76,7 @@ pub enum FleetCommand {
     ListTemplates,
     /// Initialize a fleet from a template (copies to .cosmon/fleet.toml)
     Init(InitArgs),
-    /// Resolve a fleet.toml (follow `[[fleet.include]]`) and print the flattened fleet
+    /// Resolve a fleet.toml (follow `[[fleet.include]]`), refuse keys the schema does not carry, and print the flattened fleet
     Resolve(ResolveArgs),
 }
 
@@ -207,13 +207,16 @@ fn run_init(ctx: &Context, args: &InitArgs) -> anyhow::Result<()> {
             "  1. Edit {} to adjust workdir and agent prompts",
             output_path.display()
         );
-        println!("  2. Deploy: cs deploy {}", output_path.display());
+        println!(
+            "  2. Check the composition: cs fleet resolve {}",
+            output_path.display()
+        );
     }
 
     if has_placeholder {
         eprintln!();
         eprintln!(
-            "⚠ fleet template has placeholder workdir — edit {} to set a real workdir before deploying",
+            "⚠ fleet template has placeholder workdir — edit {} to set a real workdir before dispatching",
             output_path.display()
         );
     }
@@ -283,7 +286,7 @@ fn run_resolve(ctx: &Context, args: &ResolveArgs) -> anyhow::Result<()> {
 pub(crate) fn resolve_fleet_at(master_path: &Path) -> anyhow::Result<FleetSpec> {
     let master_text = fs::read_to_string(master_path)
         .map_err(|e| anyhow::anyhow!("failed to read fleet file {}: {e}", master_path.display()))?;
-    let master = FleetSpec::parse(&master_text)
+    let master = FleetSpec::parse_strict(&master_text)
         .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", master_path.display()))?;
 
     if master.includes.is_empty() {
@@ -312,7 +315,7 @@ pub(crate) fn resolve_fleet_at(master_path: &Path) -> anyhow::Result<FleetSpec> 
                 master_path.display()
             )
         })?;
-        let child = FleetSpec::parse(&child_text).map_err(|e| {
+        let child = FleetSpec::parse_strict(&child_text).map_err(|e| {
             anyhow::anyhow!(
                 "failed to parse included fleet {}: {e}",
                 child_path.display()
@@ -396,6 +399,7 @@ fn fleet_to_json(fleet: &FleetSpec, master_path: &Path) -> serde_json::Value {
                 "origin_fleet_id": a.origin_fleet_id,
                 "prompt": a.prompt,
                 "model": a.model,
+                "adapter": a.adapter,
             })
         })
         .collect();
@@ -419,11 +423,14 @@ fn render_resolved_plain(fleet: &FleetSpec, master_path: &Path) {
     for a in &fleet.agents {
         let origin = a.origin_fleet_id.as_deref().unwrap_or("-");
         println!(
-            "  {:<24} role={:<14} clearance={:<6} origin={}",
+            "  {:<24} role={:<14} clearance={:<6} origin={}{}",
             a.name.as_str(),
             a.role.to_string(),
             a.clearance.to_string(),
-            origin
+            origin,
+            a.adapter
+                .as_deref()
+                .map_or_else(String::new, |ad| format!(" adapter={ad}")),
         );
     }
 }

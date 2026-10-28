@@ -1,0 +1,31 @@
+# Minimised from a multi-strat fleet proposal (pilot-lab, 2026-10-28): two
+# agents, one pinned to the codex adapter next to its `model`. `cs fleet
+# resolve` used to drop the `adapter` key without a word.
+fleet = "adapter-pins"
+version = 2
+description = "Per-agent adapter pins"
+workdir = "."
+
+[[agents]]
+name = "mission-lead"
+role = "orchestration"
+clearance = "write"
+model = "claude-opus-5-5"
+adapter = "claude"
+prompt = "Mission lead."
+
+[[agents]]
+name = "implementer"
+role = "research"
+clearance = "write"
+model = "gpt-6.1-sol"
+adapter = "codex"
+
+[[agents]]
+name = "unpinned"
+role = "research"
+clearance = "read"
+
+[[channels]]
+from = "mission-lead"
+to = "implementer"

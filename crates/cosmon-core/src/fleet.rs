@@ -123,6 +123,22 @@ pub enum FleetSpecError {
     #[error("invalid fleet.id `{0}`: must match [a-z0-9][a-z0-9-]*")]
     MalformedFleetId(String),
 
+    /// A key the schema does not carry, refused by [`FleetSpec::parse_strict`].
+    ///
+    /// Silently dropping such a key loses the author's intent without a
+    /// trace (a mistyped `modle`, or `adapter` before it was a field), so the
+    /// strict path names the key, the table it sits in, and the agent when
+    /// the table is an `[[agents]]` entry. The file is named by the caller.
+    #[error("unknown key `{key}` in {location}; expected one of: {expected}")]
+    UnknownKey {
+        /// The key as written in the TOML.
+        key: String,
+        /// Human-readable table, e.g. ``agent `pilot` `` or `the top level`.
+        location: String,
+        /// Comma-separated keys the table does accept.
+        expected: String,
+    },
+
     /// A child fleet carried a field forbidden in included fleets (tolnay
     /// — reserve operational knobs to the master).
     #[error("field `{field}` is not allowed in an included child fleet ({fleet_id})")]
@@ -240,6 +256,8 @@ struct RawAgentSpec {
     prompt: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    adapter: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -378,6 +396,13 @@ pub struct FleetAgentSpec {
     pub prompt: Option<String>,
     /// Optional model override (e.g. "haiku", "sonnet", "opus").
     pub model: Option<String>,
+    /// Optional adapter pin (e.g. "claude", "codex").
+    ///
+    /// Dispatch in cosmon is per adapter, so an agent declares which one
+    /// runs it next to its `model`. Carried verbatim like
+    /// [`CrossProviderReview::reviewer_adapter`]; the resolver does not
+    /// validate the name against the installed adapters.
+    pub adapter: Option<String>,
     /// Fleet identity of the fleet file that originally declared this agent.
     ///
     /// Set by [`FleetSpec::compose`] during load-time flattening so the
@@ -441,6 +466,7 @@ impl FleetSpec {
                 clearance: Clearance::Write,
                 prompt: None,
                 model: None,
+                adapter: None,
                 origin_fleet_id: None,
             }],
             channels: HashMap::new(),
@@ -513,6 +539,7 @@ impl FleetSpec {
                 clearance,
                 prompt: ra.prompt.clone(),
                 model: ra.model.clone(),
+                adapter: ra.adapter.clone(),
                 origin_fleet_id: None,
             });
         }
@@ -570,6 +597,28 @@ impl FleetSpec {
             grades,
             includes,
         })
+    }
+
+    /// Parse like [`FleetSpec::parse`], but refuse any key the schema does
+    /// not carry.
+    ///
+    /// [`FleetSpec::parse`] ignores unknown keys because the dispatch paths
+    /// (`cs tackle`, `cs nucleate`) read fleet files that other tools extend
+    /// with their own tables. The resolver is the one place whose job is to
+    /// report what a fleet file *means*, so it uses this entry point: a key
+    /// that would not reach the flattened output is an error naming the key
+    /// and its table (and the agent, for an `[[agents]]` entry), never a
+    /// silent drop. The schema documents no extension mechanism.
+    ///
+    /// # Errors
+    ///
+    /// [`FleetSpecError::UnknownKey`] for the first unknown key; otherwise
+    /// the errors of [`FleetSpec::parse`].
+    pub fn parse_strict(toml_text: &str) -> Result<Self, FleetSpecError> {
+        let doc: toml::Table =
+            toml::from_str(toml_text).map_err(|e| FleetSpecError::Toml(e.to_string()))?;
+        check_unknown_keys(&doc)?;
+        Self::parse(toml_text)
     }
 
     /// Compose a parent fleet with already-parsed child fleets into ONE
@@ -816,6 +865,98 @@ fn parse_include(ri: &RawInclude) -> Result<FleetInclude, FleetSpecError> {
     })
 }
 
+const ROOT_KEYS: &[&str] = &[
+    "fleet",
+    "version",
+    "description",
+    "workdir",
+    "organization_type",
+    "review",
+    "agents",
+    "channels",
+    "constitution",
+    "grades",
+];
+const FLEET_BLOCK_KEYS: &[&str] = &["id", "schema_version", "include"];
+const INCLUDE_KEYS: &[&str] = &["source", "as"];
+const REVIEW_KEYS: &[&str] = &["cross_provider", "reviewer_adapter"];
+const AGENT_KEYS: &[&str] = &["name", "role", "clearance", "prompt", "model", "adapter"];
+const CHANNEL_KEYS: &[&str] = &["from", "to"];
+const CONSTITUTION_KEYS: &[&str] = &["pillars", "conflict_resolution"];
+const GRADE_KEYS: &[&str] = &["id", "description", "order", "promote_requires"];
+const PROMOTE_KEYS: &[&str] = &["role", "min_reviews"];
+
+/// Fail on the first key of `table` that is not in `allowed`.
+fn refuse_unknown(
+    table: &toml::Table,
+    allowed: &[&str],
+    location: &str,
+) -> Result<(), FleetSpecError> {
+    match table.keys().find(|k| !allowed.contains(&k.as_str())) {
+        None => Ok(()),
+        Some(key) => Err(FleetSpecError::UnknownKey {
+            key: key.clone(),
+            location: location.to_owned(),
+            expected: allowed.join(", "),
+        }),
+    }
+}
+
+/// Iterate the `[[name]]` entries (an array of tables) under `table`.
+fn each_entry<'a>(table: &'a toml::Table, name: &str) -> impl Iterator<Item = &'a toml::Table> {
+    table
+        .get(name)
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table)
+}
+
+/// Walk the document against the schema, mirroring [`RawFleetSpec`].
+fn check_unknown_keys(doc: &toml::Table) -> Result<(), FleetSpecError> {
+    refuse_unknown(doc, ROOT_KEYS, "the top level")?;
+    if let Some(block) = doc.get("fleet").and_then(toml::Value::as_table) {
+        refuse_unknown(block, FLEET_BLOCK_KEYS, "the `[fleet]` table")?;
+        for inc in each_entry(block, "include") {
+            refuse_unknown(inc, INCLUDE_KEYS, "a `[[fleet.include]]` entry")?;
+        }
+    }
+    if let Some(review) = doc.get("review").and_then(toml::Value::as_table) {
+        refuse_unknown(review, REVIEW_KEYS, "the `[review]` table")?;
+    }
+    for agent in each_entry(doc, "agents") {
+        let name = agent
+            .get("name")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("<unnamed>");
+        refuse_unknown(agent, AGENT_KEYS, &format!("agent `{name}`"))?;
+    }
+    for channel in each_entry(doc, "channels") {
+        refuse_unknown(channel, CHANNEL_KEYS, "a `[[channels]]` entry")?;
+    }
+    if let Some(c) = doc.get("constitution").and_then(toml::Value::as_table) {
+        refuse_unknown(c, CONSTITUTION_KEYS, "the `[constitution]` table")?;
+    }
+    for grade in each_entry(doc, "grades") {
+        let id = grade
+            .get("id")
+            .and_then(toml::Value::as_str)
+            .unwrap_or("<unnamed>");
+        refuse_unknown(grade, GRADE_KEYS, &format!("grade `{id}`"))?;
+        if let Some(p) = grade
+            .get("promote_requires")
+            .and_then(toml::Value::as_table)
+        {
+            refuse_unknown(
+                p,
+                PROMOTE_KEYS,
+                &format!("`promote_requires` of grade `{id}`"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Best-effort line number of the `name = "<agent>"` line in a fleet TOML text.
 ///
 /// Used by resolvers to enrich duplicate-agent error messages. Returns a
@@ -863,6 +1004,132 @@ clearance = "read"
 from = "alpha"
 to = "beta"
 "#;
+
+    #[test]
+    fn test_adapter_is_carried_on_the_agent() {
+        let spec = FleetSpec::parse(
+            r#"
+fleet = "t"
+
+[[agents]]
+name = "a"
+role = "implementation"
+clearance = "write"
+model = "gpt-6.1-sol"
+adapter = "codex"
+"#,
+        )
+        .unwrap();
+        assert_eq!(spec.agents[0].adapter.as_deref(), Some("codex"));
+        assert_eq!(spec.agents[0].model.as_deref(), Some("gpt-6.1-sol"));
+    }
+
+    #[test]
+    fn test_parse_strict_refuses_unknown_agent_key_naming_key_and_agent() {
+        let err = FleetSpec::parse_strict(
+            r#"
+fleet = "t"
+
+[[agents]]
+name = "a"
+role = "implementation"
+clearance = "write"
+modle = "opus"
+"#,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("`modle`"), "{msg}");
+        assert!(msg.contains("agent `a`"), "{msg}");
+        assert!(msg.contains("adapter"), "expected keys listed: {msg}");
+    }
+
+    #[test]
+    fn test_parse_strict_accepts_every_documented_table() {
+        let spec = FleetSpec::parse_strict(
+            r#"
+organization_type = "lab"
+fleet = "t"
+version = 2
+description = "d"
+workdir = "."
+
+[review]
+cross_provider = true
+reviewer_adapter = "codex"
+
+[[agents]]
+name = "a"
+role = "implementation"
+clearance = "write"
+prompt = "p"
+model = "m"
+adapter = "claude"
+
+[[agents]]
+name = "b"
+role = "advisory"
+clearance = "read"
+
+[[channels]]
+from = "a"
+to = "b"
+
+[constitution]
+pillars = ["x"]
+conflict_resolution = "y"
+
+[[grades]]
+id = "g"
+order = 0
+description = "d"
+[grades.promote_requires]
+role = "advisory"
+min_reviews = 2
+"#,
+        )
+        .unwrap();
+        assert_eq!(spec.agents.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_strict_checks_the_fleet_block_and_includes() {
+        let err = FleetSpec::parse_strict(
+            r#"
+[fleet]
+id = "m"
+schema_version = 1
+
+[[fleet.include]]
+source = "file:./c.toml"
+alias = "c"
+"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("`alias`"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_stays_lenient_for_the_dispatch_paths() {
+        // `cs tackle` falls back to a fleet-of-one when `parse` errors, so
+        // tolerating foreign keys here is what keeps a galaxy's extended
+        // fleet.toml from being silently ignored at dispatch.
+        let spec = FleetSpec::parse(
+            r#"
+fleet = "t"
+[parameters]
+mission = "x"
+
+[[agents]]
+name = "a"
+role = "implementation"
+clearance = "write"
+tools = ["Read"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(spec.agents.len(), 1);
+    }
 
     #[test]
     fn test_parse_minimal_fleet() {

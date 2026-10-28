@@ -447,3 +447,182 @@ fn fleet_resolve_appears_in_help() {
         "fleet subcommand list should contain `resolve`: {stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Keys the resolver does not carry are never lost in silence
+// ---------------------------------------------------------------------------
+
+/// The minimised reproduction of the pilot-lab report: an agent that
+/// declares `adapter` next to `model`.
+const ADAPTER_FIXTURE: &str = include_str!("fixtures/fleet_adapter_agent.toml");
+
+fn resolve_json(path: &std::path::Path) -> serde_json::Value {
+    let out = cosmon_bin()
+        .arg("--json")
+        .arg("fleet")
+        .arg("resolve")
+        .arg(path)
+        .output()
+        .expect("run cs fleet resolve");
+    assert!(
+        out.status.success(),
+        "resolve failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("resolve --json emits JSON")
+}
+
+/// `adapter` is an agent field: it reaches the flattened output, per agent,
+/// next to `model`, and an agent that declares none carries `null`.
+#[test]
+fn agent_adapter_survives_resolution() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("fleet.toml");
+    fs::write(&path, ADAPTER_FIXTURE).unwrap();
+
+    let value = resolve_json(&path);
+    let agents = value["fleet"]["agents"].as_array().expect("agents array");
+    let by_name = |n: &str| {
+        agents
+            .iter()
+            .find(|a| a["name"] == n)
+            .unwrap_or_else(|| panic!("agent {n} missing"))
+    };
+    assert_eq!(by_name("implementer")["adapter"], "codex");
+    assert_eq!(by_name("implementer")["model"], "gpt-6.1-sol");
+    assert_eq!(by_name("mission-lead")["adapter"], "claude");
+    assert!(by_name("unpinned")["adapter"].is_null());
+}
+
+/// The plain-text listing shows the pin too, so a human reading it does not
+/// conclude the key was dropped.
+#[test]
+fn agent_adapter_shown_in_plain_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("fleet.toml");
+    fs::write(&path, ADAPTER_FIXTURE).unwrap();
+
+    let out = cosmon_bin()
+        .arg("fleet")
+        .arg("resolve")
+        .arg(&path)
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("implementer"))
+        .expect("implementer line");
+    assert!(line.contains("adapter=codex"), "line={line}");
+}
+
+/// An agent key outside the schema is refused with the key, the agent and
+/// the file named — not dropped.
+#[test]
+fn unknown_agent_key_is_refused_by_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("fleet.toml");
+    // `adaptr` is a typo of `adapter`: the exact silent loss the resolver
+    // used to hide.
+    fs::write(
+        &path,
+        ADAPTER_FIXTURE.replace("adapter = \"codex\"", "adaptr = \"codex\""),
+    )
+    .unwrap();
+
+    let out = cosmon_bin()
+        .arg("fleet")
+        .arg("resolve")
+        .arg(&path)
+        .output()
+        .expect("run");
+    assert!(!out.status.success(), "unknown key must fail the resolve");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("`adaptr`"), "key not named: {stderr}");
+    assert!(
+        stderr.contains("agent `implementer`"),
+        "agent not named: {stderr}"
+    );
+    assert!(
+        stderr.contains(&path.display().to_string()),
+        "file not named: {stderr}"
+    );
+}
+
+/// Strictness is not limited to agents: any table the schema defines
+/// refuses keys it does not carry (here the top level).
+#[test]
+fn unknown_top_level_key_is_refused_by_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("fleet.toml");
+    fs::write(
+        &path,
+        format!("{ADAPTER_FIXTURE}\n[parameters]\nmission = \"x\"\n"),
+    )
+    .unwrap();
+
+    let out = cosmon_bin()
+        .arg("fleet")
+        .arg("resolve")
+        .arg(&path)
+        .output()
+        .expect("run");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("`parameters`"), "key not named: {stderr}");
+    assert!(stderr.contains("top level"), "table not named: {stderr}");
+}
+
+/// An included child is held to the same rule, and the error names the
+/// child's file rather than the master's.
+#[test]
+fn unknown_key_in_included_child_names_the_child_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("fleets")).unwrap();
+    fs::write(
+        root.join("fleets/dev.toml"),
+        r#"[fleet]
+schema_version = 1
+id = "dev"
+
+[[agents]]
+name = "coder"
+role = "implementation"
+clearance = "write"
+harness = "codex"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("fleet.toml"),
+        r#"[fleet]
+schema_version = 1
+id = "master"
+
+[[fleet.include]]
+source = "file:./fleets/dev.toml"
+"#,
+    )
+    .unwrap();
+
+    let out = cosmon_bin()
+        .arg("fleet")
+        .arg("resolve")
+        .arg(root.join("fleet.toml"))
+        .output()
+        .expect("run");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("`harness`"), "key not named: {stderr}");
+    assert!(
+        stderr.contains("agent `coder`"),
+        "agent not named: {stderr}"
+    );
+    assert!(
+        stderr.contains("dev.toml"),
+        "child file not named: {stderr}"
+    );
+}
