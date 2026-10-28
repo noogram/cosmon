@@ -325,12 +325,42 @@ fn book_markdown_files() -> Vec<PathBuf> {
     out
 }
 
+/// Extract the `cs <verb>` tokens (verb = lowercase, may contain `-`) cited
+/// in `text`.
+fn cited_verbs(text: &str) -> BTreeSet<String> {
+    let mut cited = BTreeSet::new();
+    for (idx, _) in text.match_indices("cs ") {
+        let rest = &text[idx + 3..];
+        let verb: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+            .collect();
+        // Require a sensible verb length and a word boundary before `cs`.
+        let boundary_ok = idx == 0
+            || text[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_ascii_alphanumeric());
+        // A verb never starts with `-`. Without this, the `-` accepted
+        // above (for `rotate-key`) also swallows flags, so any prose
+        // containing `cs --<flag>` — including `cargo build --bin cs
+        // --target <triple>`, which cites cargo's flag, not a cs verb —
+        // is reported as a phantom command. The check is for drift in
+        // what the book tells a reader to *run*; a flag is not a verb.
+        let is_verb_shaped = verb.starts_with(|c: char| c.is_ascii_lowercase());
+        if boundary_ok && is_verb_shaped && verb.len() >= 3 {
+            cited.insert(verb);
+        }
+    }
+    cited
+}
+
 /// Verbs that are cited in the book as **documented forward-references**
 /// to commands that do not yet exist (each is flagged in-prose as
 /// deferred / "when available" / "SEE ALSO"). They are allowlisted so the
 /// phantom check does not flag an intentional aspirational reference. If
 /// one of these lands as a real command, drop it from the list.
-const FORWARD_REFERENCE_VERBS: &[&str] = &["deploy", "git", "rotate-key"];
+const FORWARD_REFERENCE_VERBS: &[&str] = &["git", "rotate-key"];
 
 /// Every `cs <verb>` cited anywhere in the book must resolve to a real
 /// command (ADR-B1′ §5.7 / R7). This catches drift-D1 phantoms — a doc
@@ -352,33 +382,10 @@ fn book_command_names_resolve() {
             .collect()
     };
 
-    // Extract `cs <verb>` tokens (verb = lowercase, may contain `-`).
     let mut cited: BTreeSet<String> = BTreeSet::new();
     for file in book_markdown_files() {
         let text = std::fs::read_to_string(&file).expect("read md");
-        for (idx, _) in text.match_indices("cs ") {
-            let rest = &text[idx + 3..];
-            let verb: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_lowercase() || *c == '-')
-                .collect();
-            // Require a sensible verb length and a word boundary before `cs`.
-            let boundary_ok = idx == 0
-                || text[..idx]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| !c.is_ascii_alphanumeric());
-            // A verb never starts with `-`. Without this, the `-` accepted
-            // above (for `rotate-key`) also swallows flags, so any prose
-            // containing `cs --<flag>` — including `cargo build --bin cs
-            // --target <triple>`, which cites cargo's flag, not a cs verb —
-            // is reported as a phantom command. The check is for drift in
-            // what the book tells a reader to *run*; a flag is not a verb.
-            let is_verb_shaped = verb.starts_with(|c: char| c.is_ascii_lowercase());
-            if boundary_ok && is_verb_shaped && verb.len() >= 3 {
-                cited.insert(verb);
-            }
-        }
+        cited.extend(cited_verbs(&text));
     }
 
     let mut phantoms: Vec<String> = Vec::new();
@@ -397,6 +404,26 @@ fn book_command_names_resolve() {
         phantoms.is_empty(),
         "book cites `cs <verb>` for non-existent command(s): {phantoms:?} — \
 fix the doc or add to FORWARD_REFERENCE_VERBS if intentionally aspirational"
+    );
+}
+
+/// `cs fleet` help (and the `cs fleet init` next steps it describes) must not
+/// send the reader to a command that does not exist: `cs deploy` was cited
+/// there long after ADR-052 retired it.
+#[test]
+fn fleet_help_cites_only_existing_commands() {
+    let (help, code) = run_cs(&["fleet", "--help"]);
+    assert_eq!(code, 0);
+    let mut phantoms: Vec<String> = Vec::new();
+    for verb in cited_verbs(&help) {
+        let (_out, code) = run_cs(&[&verb, "--help"]);
+        if code != 0 {
+            phantoms.push(verb);
+        }
+    }
+    assert!(
+        phantoms.is_empty(),
+        "`cs fleet --help` cites non-existent command(s): {phantoms:?}\n{help}"
     );
 }
 

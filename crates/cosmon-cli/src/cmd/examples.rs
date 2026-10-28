@@ -191,7 +191,9 @@ pub const FLEET: &str = "EXAMPLES:
   cs fleet resolve            # flatten a composable fleet.toml (ADR-038)
   cs fleet resolve --json     # NDJSON for scripting
 
-SEE ALSO: cs deploy (instantiate a fleet from the .fleet.toml).";
+SEE ALSO: cs tackle (dispatch a molecule; reads .cosmon/fleet.toml for the
+  agent prompt), cs nucleate (create a molecule under the fleet's review
+  policy).";
 
 pub const FREEZE: &str = "EXAMPLES:
   cs freeze worker-3                           # suspend, keep state for later thaw

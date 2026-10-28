@@ -76,7 +76,7 @@ pub enum FleetCommand {
     ListTemplates,
     /// Initialize a fleet from a template (copies to .cosmon/fleet.toml)
     Init(InitArgs),
-    /// Resolve a fleet.toml (follow `[[fleet.include]]`) and print the flattened fleet
+    /// Resolve a fleet.toml (follow `[[fleet.include]]`), refuse keys the schema does not carry, and print the flattened fleet
     Resolve(ResolveArgs),
 }
 
@@ -85,6 +85,14 @@ pub enum FleetCommand {
 pub(crate) struct ResolveArgs {
     /// Path to the master fleet.toml (default: .cosmon/fleet.toml via walk-up)
     path: Option<PathBuf>,
+
+    /// Refuse keys the fleet schema does not carry instead of warning about them
+    ///
+    /// By default such a key is reported on stderr (key, agent or table, file)
+    /// and left out of the resolved fleet; with --strict the first one is an
+    /// error and the command exits non-zero.
+    #[arg(long)]
+    strict: bool,
 }
 
 /// Arguments for `cs fleet init`.
@@ -207,13 +215,16 @@ fn run_init(ctx: &Context, args: &InitArgs) -> anyhow::Result<()> {
             "  1. Edit {} to adjust workdir and agent prompts",
             output_path.display()
         );
-        println!("  2. Deploy: cs deploy {}", output_path.display());
+        println!(
+            "  2. Check the composition: cs fleet resolve {}",
+            output_path.display()
+        );
     }
 
     if has_placeholder {
         eprintln!();
         eprintln!(
-            "⚠ fleet template has placeholder workdir — edit {} to set a real workdir before deploying",
+            "⚠ fleet template has placeholder workdir — edit {} to set a real workdir before dispatching",
             output_path.display()
         );
     }
@@ -253,7 +264,7 @@ fn run_resolve(ctx: &Context, args: &ResolveArgs) -> anyhow::Result<()> {
         )
     };
 
-    let flat = resolve_fleet_at(&master_path)?;
+    let flat = resolve_fleet_at(&master_path, args.strict)?;
 
     // Emit FleetTyped for IFBDD instrumentation when the resolved fleet
     // carries an advisory `organization_type` (delib-20260509-18df §D-C).
@@ -280,10 +291,14 @@ fn run_resolve(ctx: &Context, args: &ResolveArgs) -> anyhow::Result<()> {
 /// Pure wrapper around [`cosmon_core::fleet::FleetSpec::compose`] that
 /// supplies the filesystem I/O: each `file:` include is read from disk
 /// relative to the master file's directory.
-pub(crate) fn resolve_fleet_at(master_path: &Path) -> anyhow::Result<FleetSpec> {
+///
+/// A key the schema does not carry never vanishes silently: it is a warning
+/// on stderr naming key, agent or table, and file, or — with `strict` — an
+/// error.
+pub(crate) fn resolve_fleet_at(master_path: &Path, strict: bool) -> anyhow::Result<FleetSpec> {
     let master_text = fs::read_to_string(master_path)
         .map_err(|e| anyhow::anyhow!("failed to read fleet file {}: {e}", master_path.display()))?;
-    let master = FleetSpec::parse(&master_text)
+    let master = parse_reporting_unknown_keys(&master_text, master_path, strict)
         .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", master_path.display()))?;
 
     if master.includes.is_empty() {
@@ -312,12 +327,13 @@ pub(crate) fn resolve_fleet_at(master_path: &Path) -> anyhow::Result<FleetSpec> 
                 master_path.display()
             )
         })?;
-        let child = FleetSpec::parse(&child_text).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to parse included fleet {}: {e}",
-                child_path.display()
-            )
-        })?;
+        let child =
+            parse_reporting_unknown_keys(&child_text, &child_path, strict).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to parse included fleet {}: {e}",
+                    child_path.display()
+                )
+            })?;
         // Tolnay's forbidden-fields guard: included children must not
         // ship their own operational knobs.
         if !child.includes.is_empty() {
@@ -384,6 +400,29 @@ pub(crate) fn resolve_fleet_at(master_path: &Path) -> anyhow::Result<FleetSpec> 
     }
 }
 
+/// Parse one fleet file, accounting for every key the schema does not carry.
+///
+/// Strict: the first such key is the error. Otherwise each is a warning on
+/// stderr, so the resolve succeeds but nothing is dropped without a trace.
+fn parse_reporting_unknown_keys(
+    text: &str,
+    path: &Path,
+    strict: bool,
+) -> Result<FleetSpec, FleetSpecError> {
+    if strict {
+        return FleetSpec::parse_strict(text);
+    }
+    for k in FleetSpec::unknown_keys(text)? {
+        eprintln!(
+            "warning: {}: unknown key `{}` in {} is not carried into the resolved fleet (--strict refuses it)",
+            path.display(),
+            k.key,
+            k.location
+        );
+    }
+    FleetSpec::parse(text)
+}
+
 fn fleet_to_json(fleet: &FleetSpec, master_path: &Path) -> serde_json::Value {
     let agents: Vec<serde_json::Value> = fleet
         .agents
@@ -396,6 +435,7 @@ fn fleet_to_json(fleet: &FleetSpec, master_path: &Path) -> serde_json::Value {
                 "origin_fleet_id": a.origin_fleet_id,
                 "prompt": a.prompt,
                 "model": a.model,
+                "adapter": a.adapter,
             })
         })
         .collect();
@@ -419,11 +459,14 @@ fn render_resolved_plain(fleet: &FleetSpec, master_path: &Path) {
     for a in &fleet.agents {
         let origin = a.origin_fleet_id.as_deref().unwrap_or("-");
         println!(
-            "  {:<24} role={:<14} clearance={:<6} origin={}",
+            "  {:<24} role={:<14} clearance={:<6} origin={}{}",
             a.name.as_str(),
             a.role.to_string(),
             a.clearance.to_string(),
-            origin
+            origin,
+            a.adapter
+                .as_deref()
+                .map_or_else(String::new, |ad| format!(" adapter={ad}")),
         );
     }
 }

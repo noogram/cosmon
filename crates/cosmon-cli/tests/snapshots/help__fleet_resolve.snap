@@ -2,15 +2,28 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Resolve a fleet.toml (follow `[[fleet.include]]`) and print the flattened fleet
+Resolve a fleet.toml (follow `[[fleet.include]]`), refuse keys the schema does not carry, and print the flattened fleet
 
 Usage: cs fleet resolve [OPTIONS] [PATH]
 
 Arguments:
-  [PATH]  Path to the master fleet.toml (default: .cosmon/fleet.toml via walk-up)
+  [PATH]
+          Path to the master fleet.toml (default: .cosmon/fleet.toml via walk-up)
 
 Options:
-      --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)
-  -v, --verbose        Enable verbose output
-      --json           Output in JSON format
-  -h, --help           Print help
+      --config <PATH>
+          Path to the state directory (default: the galaxy's .cosmon/state/)
+
+      --strict
+          Refuse keys the fleet schema does not carry instead of warning about them
+          
+          By default such a key is reported on stderr (key, agent or table, file) and left out of the resolved fleet; with --strict the first one is an error and the command exits non-zero.
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+  -h, --help
+          Print help (see a summary with '-h')

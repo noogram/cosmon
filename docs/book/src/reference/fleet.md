@@ -269,13 +269,15 @@ EXAMPLES:
   cs fleet resolve            # flatten a composable fleet.toml (ADR-038)
   cs fleet resolve --json     # NDJSON for scripting
 
-SEE ALSO: cs deploy (instantiate a fleet from the .fleet.toml).
+SEE ALSO: cs tackle (dispatch a molecule; reads .cosmon/fleet.toml for the
+  agent prompt), cs nucleate (create a molecule under the fleet's review
+  policy).
 
 ###### **Subcommands:**
 
 * `list-templates` — List available fleet templates
 * `init` — Initialize a fleet from a template (copies to .cosmon/fleet.toml)
-* `resolve` — Resolve a fleet.toml (follow `[[fleet.include]]`) and print the flattened fleet
+* `resolve` — Resolve a fleet.toml (follow `[[fleet.include]]`), refuse keys the schema does not carry, and print the flattened fleet
 
 
 
@@ -305,13 +307,19 @@ Initialize a fleet from a template (copies to .cosmon/fleet.toml)
 
 ## `cs fleet resolve`
 
-Resolve a fleet.toml (follow `[[fleet.include]]`) and print the flattened fleet
+Resolve a fleet.toml (follow `[[fleet.include]]`), refuse keys the schema does not carry, and print the flattened fleet
 
-**Usage:** `cs fleet resolve [PATH]`
+**Usage:** `cs fleet resolve [OPTIONS] [PATH]`
 
 ###### **Arguments:**
 
 * `<PATH>` — Path to the master fleet.toml (default: .cosmon/fleet.toml via walk-up)
+
+###### **Options:**
+
+* `--strict` — Refuse keys the fleet schema does not carry instead of warning about them
+
+   By default such a key is reported on stderr (key, agent or table, file) and left out of the resolved fleet; with --strict the first one is an error and the command exits non-zero.
 
 
 

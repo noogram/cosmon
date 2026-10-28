@@ -209,6 +209,15 @@ this stage.
 
 ### Fixed
 
+- `cs fleet resolve` dropped an agent's `adapter` key without a word. `adapter`
+  is now an agent field next to `model`, carried into the resolved output
+  (`--json` and the plain listing). Any other key the fleet schema does not
+  carry is reported as one warning on stderr naming the key, the agent or
+  table, and the file; the new `--strict` flag turns the first such key into
+  an error. Dispatch (`cs tackle`, `cs nucleate`) is unchanged.
+- `cs fleet` help and the `cs fleet init` next-steps pointed to `cs deploy`,
+  which does not exist; they now point to commands that do. The book check
+  that every cited `cs <verb>` resolves no longer allowlists `deploy`.
 - A codex worker launched with `[adapters.codex] mode = "exec"` could not write
   its worktree, commit, or write the galaxy state store: `codex exec` ran with
   its read-only default sandbox, and `workspace-write` keeps `.git` read-only
