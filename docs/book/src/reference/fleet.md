@@ -309,11 +309,17 @@ Initialize a fleet from a template (copies to .cosmon/fleet.toml)
 
 Resolve a fleet.toml (follow `[[fleet.include]]`), refuse keys the schema does not carry, and print the flattened fleet
 
-**Usage:** `cs fleet resolve [PATH]`
+**Usage:** `cs fleet resolve [OPTIONS] [PATH]`
 
 ###### **Arguments:**
 
 * `<PATH>` — Path to the master fleet.toml (default: .cosmon/fleet.toml via walk-up)
+
+###### **Options:**
+
+* `--strict` — Refuse keys the fleet schema does not carry instead of warning about them
+
+   By default such a key is reported on stderr (key, agent or table, file) and left out of the resolved fleet; with --strict the first one is an error and the command exits non-zero.
 
 
 

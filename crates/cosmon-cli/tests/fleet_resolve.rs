@@ -518,8 +518,8 @@ fn agent_adapter_shown_in_plain_output() {
     assert!(line.contains("adapter=codex"), "line={line}");
 }
 
-/// An agent key outside the schema is refused with the key, the agent and
-/// the file named — not dropped.
+/// With `--strict`, an agent key outside the schema is refused with the key,
+/// the agent and the file named — not dropped.
 #[test]
 fn unknown_agent_key_is_refused_by_name() {
     let tmp = tempfile::tempdir().unwrap();
@@ -535,6 +535,7 @@ fn unknown_agent_key_is_refused_by_name() {
     let out = cosmon_bin()
         .arg("fleet")
         .arg("resolve")
+        .arg("--strict")
         .arg(&path)
         .output()
         .expect("run");
@@ -551,8 +552,8 @@ fn unknown_agent_key_is_refused_by_name() {
     );
 }
 
-/// Strictness is not limited to agents: any table the schema defines
-/// refuses keys it does not carry (here the top level).
+/// Strictness is not limited to agents: with `--strict` any table the schema
+/// defines refuses keys it does not carry (here the top level).
 #[test]
 fn unknown_top_level_key_is_refused_by_name() {
     let tmp = tempfile::tempdir().unwrap();
@@ -566,6 +567,7 @@ fn unknown_top_level_key_is_refused_by_name() {
     let out = cosmon_bin()
         .arg("fleet")
         .arg("resolve")
+        .arg("--strict")
         .arg(&path)
         .output()
         .expect("run");
@@ -575,7 +577,7 @@ fn unknown_top_level_key_is_refused_by_name() {
     assert!(stderr.contains("top level"), "table not named: {stderr}");
 }
 
-/// An included child is held to the same rule, and the error names the
+/// With `--strict` an included child is held to the same rule, and the error names the
 /// child's file rather than the master's.
 #[test]
 fn unknown_key_in_included_child_names_the_child_file() {
@@ -611,6 +613,7 @@ source = "file:./fleets/dev.toml"
     let out = cosmon_bin()
         .arg("fleet")
         .arg("resolve")
+        .arg("--strict")
         .arg(root.join("fleet.toml"))
         .output()
         .expect("run");
@@ -625,4 +628,157 @@ source = "file:./fleets/dev.toml"
         stderr.contains("dev.toml"),
         "child file not named: {stderr}"
     );
+}
+
+/// By default a key the schema does not carry is a warning, not a refusal:
+/// the resolve succeeds, and stderr names each dropped key, its agent or
+/// table, and its file — in the master and in an included child alike.
+#[test]
+fn unknown_keys_warn_by_name_and_exit_zero_by_default() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("fleets")).unwrap();
+    fs::write(
+        root.join("fleets/dev.toml"),
+        r#"[fleet]
+schema_version = 1
+id = "dev"
+
+[[agents]]
+name = "coder"
+role = "implementation"
+clearance = "write"
+fan = 3
+"#,
+    )
+    .unwrap();
+    let master = root.join("fleet.toml");
+    fs::write(
+        &master,
+        r#"[fleet]
+schema_version = 1
+id = "master"
+
+[[fleet.include]]
+source = "file:./fleets/dev.toml"
+
+[[agents]]
+name = "lead"
+role = "orchestration"
+clearance = "write"
+adapter = "codex"
+tier = "frontier"
+
+[parameters]
+mission = "x"
+"#,
+    )
+    .unwrap();
+
+    let out = cosmon_bin()
+        .arg("--json")
+        .arg("fleet")
+        .arg("resolve")
+        .arg(&master)
+        .output()
+        .expect("run");
+    assert!(
+        out.status.success(),
+        "default resolve must succeed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let master_label = master.display().to_string();
+    let warns = |key: &str, location: &str, file: &str| {
+        stderr.lines().any(|l| {
+            l.starts_with("warning:")
+                && l.contains(&format!("`{key}`"))
+                && l.contains(location)
+                && l.contains(file)
+        })
+    };
+    assert!(warns("tier", "agent `lead`", &master_label), "{stderr}");
+    assert!(warns("parameters", "top level", &master_label), "{stderr}");
+    assert!(warns("fan", "agent `coder`", "dev.toml"), "{stderr}");
+    assert_eq!(stderr.matches("warning:").count(), 3, "{stderr}");
+
+    // The carried keys still resolve, and stdout stays pure JSON.
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    let agents = value["fleet"]["agents"].as_array().expect("agents");
+    assert_eq!(agents.len(), 2);
+    assert!(agents.iter().any(|a| a["adapter"] == "codex"));
+}
+
+/// A fleet file that stays inside the schema produces no warning at all.
+#[test]
+fn clean_fleet_resolves_without_warnings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("fleet.toml");
+    fs::write(&path, ADAPTER_FIXTURE).unwrap();
+    let out = cosmon_bin()
+        .arg("fleet")
+        .arg("resolve")
+        .arg(&path)
+        .output()
+        .expect("run");
+    assert!(out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("warning:"),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Cosmon's own fleet templates and examples resolve (warnings allowed) —
+/// the resolver must stay usable on the files the project itself ships.
+#[test]
+fn cosmon_own_templates_resolve() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for entry in fs::read_dir(repo.join("templates")).expect("templates dir") {
+        let dir = entry.unwrap().path();
+        let f = dir.join("fleet.toml");
+        if f.is_file() {
+            files.push(f);
+        }
+    }
+    for entry in fs::read_dir(repo.join("examples")).expect("examples dir") {
+        let f = entry.unwrap().path();
+        if f.to_string_lossy().ends_with(".fleet.toml") {
+            files.push(f);
+        }
+    }
+    assert!(files.len() >= 5, "expected shipped fleets, found {files:?}");
+    for f in files {
+        if f.ends_with("templates/formal-research/fleet.toml") {
+            // Pre-existing and unrelated to unknown keys: an agent declares
+            // `role = "observation"`, which is not an `AgentRole`, so the
+            // file never parsed. Pinned as failing for that reason, so the
+            // day the template is fixed this arm fails and must be removed.
+            let out = cosmon_bin()
+                .arg("fleet")
+                .arg("resolve")
+                .arg(&f)
+                .output()
+                .expect("run");
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("unknown role: observation"),
+                "formal-research changed behaviour: drop this exemption: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            continue;
+        }
+        let out = cosmon_bin()
+            .arg("fleet")
+            .arg("resolve")
+            .arg(&f)
+            .output()
+            .expect("run");
+        assert!(
+            out.status.success(),
+            "{} failed to resolve: {}",
+            f.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }

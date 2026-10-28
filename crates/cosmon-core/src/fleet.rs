@@ -123,7 +123,8 @@ pub enum FleetSpecError {
     #[error("invalid fleet.id `{0}`: must match [a-z0-9][a-z0-9-]*")]
     MalformedFleetId(String),
 
-    /// A key the schema does not carry, refused by [`FleetSpec::parse_strict`].
+    /// A key the schema does not carry, refused by `cs fleet resolve --strict`
+    /// ([`FleetSpec::parse_strict`]).
     ///
     /// Silently dropping such a key loses the author's intent without a
     /// trace (a mistyped `modle`, or `adapter` before it was a field), so the
@@ -298,6 +299,30 @@ struct RawChannel {
 // ---------------------------------------------------------------------------
 // Domain types
 // ---------------------------------------------------------------------------
+
+/// A key present in a fleet file that the schema does not carry.
+///
+/// Reported by [`FleetSpec::unknown_keys`]; the file it came from is known
+/// only to the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownKey {
+    /// The key as written in the TOML.
+    pub key: String,
+    /// Human-readable table, e.g. ``agent `pilot` `` or `the top level`.
+    pub location: String,
+    /// Comma-separated keys the table does accept.
+    pub expected: String,
+}
+
+impl From<UnknownKey> for FleetSpecError {
+    fn from(k: UnknownKey) -> Self {
+        Self::UnknownKey {
+            key: k.key,
+            location: k.location,
+            expected: k.expected,
+        }
+    }
+}
 
 /// A declared `[[fleet.include]]` entry — NOT yet resolved.
 ///
@@ -599,25 +624,40 @@ impl FleetSpec {
         })
     }
 
-    /// Parse like [`FleetSpec::parse`], but refuse any key the schema does
-    /// not carry.
+    /// List every key of `toml_text` that the schema does not carry, in
+    /// document order of the tables.
     ///
-    /// [`FleetSpec::parse`] ignores unknown keys because the dispatch paths
-    /// (`cs tackle`, `cs nucleate`) read fleet files that other tools extend
-    /// with their own tables. The resolver is the one place whose job is to
-    /// report what a fleet file *means*, so it uses this entry point: a key
-    /// that would not reach the flattened output is an error naming the key
-    /// and its table (and the agent, for an `[[agents]]` entry), never a
-    /// silent drop. The schema documents no extension mechanism.
+    /// [`FleetSpec::parse`] ignores such keys, so none of them reaches the
+    /// resolved fleet. Real fleet files extend the schema with their own
+    /// keys (`gates`, `variables`, `kill_switch`, per-agent `fan`, …) that
+    /// other tools read; the resolver reports them as warnings instead of
+    /// losing them in silence, and `--strict` turns them into an error. The
+    /// schema documents no extension mechanism.
+    ///
+    /// # Errors
+    ///
+    /// [`FleetSpecError::Toml`] if the text is not valid TOML.
+    pub fn unknown_keys(toml_text: &str) -> Result<Vec<UnknownKey>, FleetSpecError> {
+        let doc: toml::Table =
+            toml::from_str(toml_text).map_err(|e| FleetSpecError::Toml(e.to_string()))?;
+        Ok(collect_unknown_keys(&doc))
+    }
+
+    /// Parse like [`FleetSpec::parse`], but refuse the first key the schema
+    /// does not carry.
+    ///
+    /// This is the `--strict` entry point of the resolver; the dispatch
+    /// paths (`cs tackle`, `cs nucleate`) use the lenient [`FleetSpec::parse`]
+    /// so a foreign table cannot turn into a silent fleet-of-one fallback.
     ///
     /// # Errors
     ///
     /// [`FleetSpecError::UnknownKey`] for the first unknown key; otherwise
     /// the errors of [`FleetSpec::parse`].
     pub fn parse_strict(toml_text: &str) -> Result<Self, FleetSpecError> {
-        let doc: toml::Table =
-            toml::from_str(toml_text).map_err(|e| FleetSpecError::Toml(e.to_string()))?;
-        check_unknown_keys(&doc)?;
+        if let Some(k) = Self::unknown_keys(toml_text)?.into_iter().next() {
+            return Err(k.into());
+        }
         Self::parse(toml_text)
     }
 
@@ -886,20 +926,18 @@ const CONSTITUTION_KEYS: &[&str] = &["pillars", "conflict_resolution"];
 const GRADE_KEYS: &[&str] = &["id", "description", "order", "promote_requires"];
 const PROMOTE_KEYS: &[&str] = &["role", "min_reviews"];
 
-/// Fail on the first key of `table` that is not in `allowed`.
-fn refuse_unknown(
-    table: &toml::Table,
-    allowed: &[&str],
-    location: &str,
-) -> Result<(), FleetSpecError> {
-    match table.keys().find(|k| !allowed.contains(&k.as_str())) {
-        None => Ok(()),
-        Some(key) => Err(FleetSpecError::UnknownKey {
-            key: key.clone(),
-            location: location.to_owned(),
-            expected: allowed.join(", "),
-        }),
-    }
+/// Record every key of `table` that is not in `allowed`.
+fn note_unknown(out: &mut Vec<UnknownKey>, table: &toml::Table, allowed: &[&str], location: &str) {
+    out.extend(
+        table
+            .keys()
+            .filter(|k| !allowed.contains(&k.as_str()))
+            .map(|key| UnknownKey {
+                key: key.clone(),
+                location: location.to_owned(),
+                expected: allowed.join(", "),
+            }),
+    );
 }
 
 /// Iterate the `[[name]]` entries (an array of tables) under `table`.
@@ -913,48 +951,50 @@ fn each_entry<'a>(table: &'a toml::Table, name: &str) -> impl Iterator<Item = &'
 }
 
 /// Walk the document against the schema, mirroring [`RawFleetSpec`].
-fn check_unknown_keys(doc: &toml::Table) -> Result<(), FleetSpecError> {
-    refuse_unknown(doc, ROOT_KEYS, "the top level")?;
+fn collect_unknown_keys(doc: &toml::Table) -> Vec<UnknownKey> {
+    let mut out = Vec::new();
+    note_unknown(&mut out, doc, ROOT_KEYS, "the top level");
     if let Some(block) = doc.get("fleet").and_then(toml::Value::as_table) {
-        refuse_unknown(block, FLEET_BLOCK_KEYS, "the `[fleet]` table")?;
+        note_unknown(&mut out, block, FLEET_BLOCK_KEYS, "the `[fleet]` table");
         for inc in each_entry(block, "include") {
-            refuse_unknown(inc, INCLUDE_KEYS, "a `[[fleet.include]]` entry")?;
+            note_unknown(&mut out, inc, INCLUDE_KEYS, "a `[[fleet.include]]` entry");
         }
     }
     if let Some(review) = doc.get("review").and_then(toml::Value::as_table) {
-        refuse_unknown(review, REVIEW_KEYS, "the `[review]` table")?;
+        note_unknown(&mut out, review, REVIEW_KEYS, "the `[review]` table");
     }
     for agent in each_entry(doc, "agents") {
         let name = agent
             .get("name")
             .and_then(toml::Value::as_str)
             .unwrap_or("<unnamed>");
-        refuse_unknown(agent, AGENT_KEYS, &format!("agent `{name}`"))?;
+        note_unknown(&mut out, agent, AGENT_KEYS, &format!("agent `{name}`"));
     }
     for channel in each_entry(doc, "channels") {
-        refuse_unknown(channel, CHANNEL_KEYS, "a `[[channels]]` entry")?;
+        note_unknown(&mut out, channel, CHANNEL_KEYS, "a `[[channels]]` entry");
     }
     if let Some(c) = doc.get("constitution").and_then(toml::Value::as_table) {
-        refuse_unknown(c, CONSTITUTION_KEYS, "the `[constitution]` table")?;
+        note_unknown(&mut out, c, CONSTITUTION_KEYS, "the `[constitution]` table");
     }
     for grade in each_entry(doc, "grades") {
         let id = grade
             .get("id")
             .and_then(toml::Value::as_str)
             .unwrap_or("<unnamed>");
-        refuse_unknown(grade, GRADE_KEYS, &format!("grade `{id}`"))?;
+        note_unknown(&mut out, grade, GRADE_KEYS, &format!("grade `{id}`"));
         if let Some(p) = grade
             .get("promote_requires")
             .and_then(toml::Value::as_table)
         {
-            refuse_unknown(
+            note_unknown(
+                &mut out,
                 p,
                 PROMOTE_KEYS,
                 &format!("`promote_requires` of grade `{id}`"),
-            )?;
+            );
         }
     }
-    Ok(())
+    out
 }
 
 /// Best-effort line number of the `name = "<agent>"` line in a fleet TOML text.
@@ -1107,6 +1147,28 @@ alias = "c"
         )
         .unwrap_err();
         assert!(err.to_string().contains("`alias`"), "{err}");
+    }
+
+    #[test]
+    fn test_unknown_keys_lists_every_one_with_its_location() {
+        let keys = FleetSpec::unknown_keys(
+            r#"
+fleet = "t"
+gates = []
+
+[[agents]]
+name = "a"
+role = "implementation"
+clearance = "write"
+fan = 3
+"#,
+        )
+        .unwrap();
+        let seen: Vec<(&str, &str)> = keys
+            .iter()
+            .map(|k| (k.key.as_str(), k.location.as_str()))
+            .collect();
+        assert_eq!(seen, vec![("gates", "the top level"), ("fan", "agent `a`")]);
     }
 
     #[test]
