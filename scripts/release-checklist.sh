@@ -263,7 +263,18 @@ fi
 if [ $POST_FLIP -eq 1 ]; then
   if gh api "repos/${REPO_SLUG}/branches/main/protection" >/tmp/rc-prot.log 2>&1; then
     n=$(gh api "repos/${REPO_SLUG}/branches/main/protection/required_status_checks" \
-          --jq '.contexts | length' 2>/dev/null || echo 0)
+          --jq '.contexts | length' 2>/dev/null || true)
+    # `gh` can fail after emitting partial output, and successful jq output can
+    # still be empty or malformed. Keep the comparison's input a bounded
+    # decimal integer in every case.
+    case "$n" in
+      ''|*[!0-9]*) n=0 ;;
+      *)
+        n=$(printf '%s' "$n" | sed 's/^0*//')
+        [ -n "$n" ] || n=0
+        [ "${#n}" -le 9 ] || n=0
+        ;;
+    esac
     if [ "${n:-0}" -ge 1 ]; then
       gate_pass "11. branch protection on main → 200 with ${n} required checks"
     else

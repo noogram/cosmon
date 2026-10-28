@@ -290,6 +290,8 @@ quick:
     ./scripts/no-pilot-env.sh ./scripts/release/render-tap-from-artifacts.test.sh
     ./scripts/no-pilot-env.sh ./scripts/release/check-install-drift.test.sh
     ./scripts/no-pilot-env.sh ./scripts/release/docs-deploy.test.sh
+    ./scripts/no-pilot-env.sh python3 tests/harness/test_rpp_compose_cleanup.py
+    ./scripts/no-pilot-env.sh ./scripts/release-checklist.test.sh
     # gates-bg's detach must actually detach (issue #112) — this one spawns
     # and kills real processes to prove it, so it costs ~2.5 s rather than
     # the sub-second budget of the checks above.
