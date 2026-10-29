@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-cli"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "ansi-to-tui 7.0.0",
  "anyhow",
@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-daemon-supervisor"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-harvest"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-oidc-testkit"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1349,7 +1349,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-process-witness"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "libc",
 ]
@@ -1410,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-remote"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1448,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-rpp-adapter"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-scheduler"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "clap",
