@@ -24,6 +24,7 @@ import secrets
 import select
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
@@ -43,15 +44,28 @@ class RemoteCli:
         # signed by a key the restarted IdP no longer has, so carrying
         # the previous set's profile over would make a fresh set fail for
         # a reason that has nothing to do with what it tests.
-        self.home = cfg.run_dir / "home" / slot
-        self.home.mkdir(parents=True, exist_ok=True)
+        # The run directory may live in a checkout; harvest signing keys
+        # must not. Resolve symlinks before checking the temporary root,
+        # and fall back if TMPDIR itself points into a galaxy/worktree.
+        for root in (Path(tempfile.gettempdir()), Path("/tmp"), Path("/var/tmp")):
+            root = root.resolve()
+            if ".worktrees" in root.parts or any(
+                (ancestor / ".git").exists() or (ancestor / ".cosmon/config.toml").exists()
+                for ancestor in (root, *root.parents)
+            ):
+                continue
+            self._home_dir = tempfile.TemporaryDirectory(prefix=f"cosmon-rpp-{slot}-", dir=root)
+            self.home = Path(self._home_dir.name)
+            break
+        else:
+            raise RuntimeError("no temporary root outside a galaxy or worktree for operator HOME")
         self._signing_password = secrets.token_urlsafe(24)
 
     def _env(self, token_override: Optional[str] = None) -> dict:
         return {
             "HOME": str(self.home),
             "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            # The file backend keeps the credential inside the run dir;
+            # The file backend keeps the credential inside this temporary HOME;
             # the OS keychain is neither touched nor needed.
             "COSMON_REMOTE_CRED_BACKEND": "file",
             "COSMON_REMOTE_TOKEN": token_override or "",

@@ -14,6 +14,51 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "e2e"))
 from harness import compose
 from harness.config import E2EConfig
+from harness.remote import RemoteCli
+
+
+class OperatorHome(unittest.TestCase):
+    def test_home_outside_git_when_run_dir_is_inside_checkout(self):
+        with tempfile.TemporaryDirectory() as root:
+            repo = Path(root).resolve() / "checkout"
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            with patch.dict("os.environ", {"RPP_E2E_RUN_DIR": ".rpp-remote-e2e"}):
+                cfg = E2EConfig.from_env(repo)
+            self.assertEqual(cfg.run_dir, repo / ".rpp-remote-e2e")
+            cli = RemoteCli(cfg, Path("cosmon-remote"), None, slot="sealed")
+            # Clean up the old implementation's directory as well as the
+            # temporary home used by the fixed implementation.
+            self.addCleanup(shutil.rmtree, cli.home, True)
+            home = cli.home.resolve(strict=True)
+            self.assertNotIn(".worktrees", home.parts)
+            for ancestor in (home, *home.parents):
+                self.assertFalse((ancestor / ".git").exists(), str(ancestor))
+                self.assertFalse((ancestor / ".cosmon/config.toml").exists(), str(ancestor))
+            self.assertEqual(cli._env()["HOME"], str(cli.home))
+            other = RemoteCli(cfg, Path("cosmon-remote"), None, slot="sealed")
+            self.addCleanup(shutil.rmtree, other.home, True)
+            self.assertNotEqual(cli.home, other.home)
+            cli._home_dir.cleanup()
+            other._home_dir.cleanup()
+
+    def test_unsafe_temporary_root_is_not_used(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root).resolve()
+            for marker in (".git", ".cosmon/config.toml", ".worktrees"):
+                with self.subTest(marker=marker):
+                    unsafe = root / marker
+                    unsafe.parent.mkdir(parents=True, exist_ok=True)
+                    unsafe.touch() if marker != ".worktrees" else unsafe.mkdir()
+                    cfg = E2EConfig.from_env(root)
+                    temp_root = unsafe if marker == ".worktrees" else root
+                    with patch("harness.remote.tempfile.gettempdir", return_value=str(temp_root)):
+                        cli = RemoteCli(cfg, Path("cosmon-remote"), None)
+                    try:
+                        self.assertFalse(cli.home.is_relative_to(root))
+                    finally:
+                        cli._home_dir.cleanup()
+                    unsafe.rmdir() if marker == ".worktrees" else unsafe.unlink()
 
 
 class TenantReset(unittest.TestCase):
