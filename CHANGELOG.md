@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-30
+
 ### Breaking changes and operator actions on upgrade
 
 - RPP adapter: a binding that declares `[scopes]` is the scope ceiling; token
@@ -210,6 +212,10 @@ this stage.
 ### Fixed
 
 - `cs run` retains realized-model capture per molecule across DAG ticks, reading only appended journal bytes after the initial fold.
+
+- `cs wait` keeps its realized-model capture between polls, so a poll reads only
+  what was appended since the previous one instead of re-parsing the whole
+  journal and spawning tmux each time.
 
 - `cs fleet resolve` dropped an agent's `adapter` key without a word. `adapter`
   is now an agent field next to `model`, carried into the resolved output
@@ -4774,7 +4780,8 @@ release **is**, not how it was built.
   `#![deny(missing_docs)]` on the core, and CI gates on build, test, clippy,
   and fmt.
 
-[Unreleased]: https://github.com/noogram/cosmon/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/noogram/cosmon/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/noogram/cosmon/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/noogram/cosmon/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/noogram/cosmon/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/noogram/cosmon/compare/v0.7.0...v0.7.1
