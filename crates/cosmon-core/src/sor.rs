@@ -870,6 +870,36 @@ mod tests {
     }
 
     #[test]
+    fn candidate_id_is_adapter_or_adapter_slash_model() {
+        assert_eq!(candidate("codex", None).id(), "codex");
+        assert_eq!(
+            candidate("claude", Some("claude-sonnet-5-5")).id(),
+            "claude/claude-sonnet-5-5"
+        );
+    }
+
+    #[test]
+    fn reject_reason_label_is_the_wire_name_of_each_reason() {
+        for reason in [
+            RejectReason::NotSpawnable,
+            RejectReason::PinMismatch,
+            RejectReason::CapacityExhausted,
+            RejectReason::MissingCalibrationOnCritical,
+            RejectReason::StaleCalibrationOnCritical,
+            RejectReason::LocalHistoryUnavailableOnCritical,
+            RejectReason::BudgetExhausted,
+            RejectReason::DiversityRequirementUnmet,
+        ] {
+            let wire = serde_json::to_string(&reason).unwrap();
+            assert_eq!(
+                format!("\"{}\"", reason.label()),
+                wire,
+                "the label of {reason:?} is what the receipt serialises"
+            );
+        }
+    }
+
+    #[test]
     fn status_classify_fresh_stale_missing() {
         let ttl = Duration::hours(1);
         assert_eq!(

@@ -6266,6 +6266,28 @@ mod tests {
         }
     }
 
+    /// Every contract verdict has a wire label, and that label parses back to
+    /// the same verdict, in any case and with surrounding space.
+    #[test]
+    fn a_converge_verdict_label_round_trips_through_parse() {
+        for (verdict, label) in [
+            (ConvergeVerdict::Clean, "CLEAN"),
+            (ConvergeVerdict::Findings, "FINDINGS"),
+            (ConvergeVerdict::Inconclusive, "INCONCLUSIVE"),
+        ] {
+            assert_eq!(verdict.label(), label);
+            assert_eq!(ConvergeVerdict::parse(label), Some(verdict));
+            assert_eq!(
+                ConvergeVerdict::parse(&format!("  {}\n", label.to_ascii_lowercase())),
+                Some(verdict)
+            );
+            assert_eq!(
+                ConvergeVerdict::from_report_line(&format!("VERDICT: {label}")),
+                Some(verdict)
+            );
+        }
+    }
+
     /// The report line is read for its verdict, not its count.
     #[test]
     fn the_report_line_drops_the_count_and_refuses_anything_else() {

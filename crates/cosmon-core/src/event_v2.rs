@@ -4144,6 +4144,77 @@ mod tests {
     }
 
     #[test]
+    fn only_cs_verb_emissions_are_verbs() {
+        // The six operator-level acts: nucleate, tackle, done (completed +
+        // merge dispatched), collapse, stuck.
+        let verbs = [
+            EventV2::MoleculeNucleated {
+                molecule_id: mid("cs-20260411-aaaa"),
+                formula_id: "f".to_owned(),
+                parent_id: None,
+                blocks: Vec::new(),
+            },
+            EventV2::WorkerSpawned {
+                transport: None,
+                worker_id: wid("quartz"),
+                molecule: Some(mid("cs-20260411-aaaa")),
+                session_name: "cs-task-aaaa".to_owned(),
+                role: "polecat".to_owned(),
+                adapter_name: "claude".to_owned(),
+                loop_ownership: LoopOwnership::External.into(),
+            },
+            EventV2::MoleculeCompleted {
+                molecule_id: mid("cs-20260411-aaaa"),
+                duration_ms: None,
+                reason: "ok".to_owned(),
+                summary: None,
+            },
+            EventV2::MergeDispatched {
+                molecule: mid("cs-20260411-aaaa"),
+                branch: "feat/task-x".to_owned(),
+                federation_provenance: None,
+            },
+            EventV2::MoleculeCollapsed {
+                molecule_id: mid("cs-20260411-aaaa"),
+                reason: "boom".to_owned(),
+                kind: None,
+            },
+            EventV2::MoleculeStuck {
+                molecule_id: mid("cs-20260411-aaaa"),
+                reason: StuckReason::BlockerFailed,
+            },
+        ];
+        for event in &verbs {
+            assert!(event.is_verb(), "{event:?} is an operator verb");
+        }
+
+        // Observation artefacts of an already running worker are not verbs.
+        let observations = [
+            EventV2::WorkerHeartbeat {
+                worker_id: wid("quartz"),
+                ts: DateTime::parse_from_rfc3339("2026-04-12T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                activity_hint: ActivityHint::Thinking,
+            },
+            EventV2::EnergyTick {
+                worker_id: wid("quartz"),
+                input_tokens: 1000,
+                output_tokens: 250,
+                cost_usd: 0.015,
+            },
+            EventV2::MoleculeStatusChanged {
+                molecule_id: mid("cs-20260411-aaaa"),
+                from: "pending".to_owned(),
+                to: "running".to_owned(),
+            },
+        ];
+        for event in &observations {
+            assert!(!event.is_verb(), "{event:?} is not an operator verb");
+        }
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)] // exhaustive list of event variants
     fn every_variant_roundtrips() {
         let events = vec![
