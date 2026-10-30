@@ -564,6 +564,39 @@ mod tests {
     use super::*;
     use proptest::{prop_assert, prop_assert_eq};
 
+    #[test]
+    fn failed_or_missing_required_gates_never_admit_completion() {
+        let gate = CompletionGate::with_required([DodProxy::Build]);
+        for observed in [vec![], vec![GateOutcome::new(DodProxy::Build, false)]] {
+            let verdict = gate.evaluate(&observed);
+            assert_eq!(
+                verdict,
+                GateVerdict::Incomplete {
+                    unmet: vec![DodProxy::Build]
+                }
+            );
+            assert!(!verdict.is_complete());
+        }
+        assert!(gate
+            .evaluate(&[GateOutcome::new(DodProxy::Build, true)])
+            .is_complete());
+    }
+
+    #[test]
+    fn required_exposes_the_canonical_or_formula_narrowed_proxy_set() {
+        assert_eq!(CompletionGate::canonical().required(), &DodProxy::CANONICAL);
+        let gate =
+            CompletionGate::with_required([DodProxy::Format, DodProxy::Build, DodProxy::Format]);
+        assert_eq!(gate.required(), &[DodProxy::Build, DodProxy::Format]);
+        // Callers can enumerate the obligations that remain to be witnessed.
+        assert_eq!(
+            gate.evaluate(&[]),
+            GateVerdict::Incomplete {
+                unmet: gate.required().to_vec()
+            }
+        );
+    }
+
     // --- Mechanism 2: completion gate ------------------------------------
 
     fn all_pass() -> Vec<GateOutcome> {

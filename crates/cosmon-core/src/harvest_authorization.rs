@@ -1335,6 +1335,32 @@ pub fn authorize(
 mod tests {
     use super::*;
 
+    #[test]
+    fn decoded_delegation_refuses_human_reservations() -> Result<(), Box<dyn std::error::Error>> {
+        let mission = mol("mission-20261030-abcd");
+        let mut authorization = delegated(&mission, "d34d");
+        assert_eq!(authorization.validate(), Ok(()));
+        // A decoded value can bypass the convenience constructor. Validation
+        // must reject even a well-formed grant when delegation claims a reservation.
+        if let DoneAuthorization::Delegated(capability) = &mut authorization {
+            capability.grant = grant(
+                HarvestScope::Mission {
+                    mission,
+                    policy_digest: "d34d".to_owned(),
+                },
+                &["needs-review"],
+            );
+        }
+        let wire = serde_json::to_string(&authorization)?;
+        let decoded: DoneAuthorization = serde_json::from_str(&wire)?;
+        assert_eq!(decoded.grant().validate(), Ok(()));
+        assert_eq!(
+            decoded.validate(),
+            Err(GrantError::DelegationHasReservations)
+        );
+        Ok(())
+    }
+
     /// A stand-in operator key that accepts everything, so the tests below
     /// exercise the *fact-matching* half rather than the crypto. The crypto
     /// half is asserted end-to-end against a real minisign signature in

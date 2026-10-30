@@ -1026,6 +1026,33 @@ mod tests {
     use crate::id::MoleculeId;
     use chrono::Utc;
 
+    #[test]
+    fn spawn_adapter_scopes_observations_and_empty_legacy_name_preserves_selection() {
+        for spawn_adapter in ["codex", ""] {
+            let observed_adapter = if spawn_adapter.is_empty() {
+                "claude"
+            } else {
+                "codex"
+            };
+            let events = vec![
+                adapter_selected(
+                    "claude",
+                    AdapterSelectionSource::Cli {
+                        flag: "claude".into(),
+                    },
+                ),
+                worker_spawned(spawn_adapter, "worker-current"),
+                model_observed_for(observed_adapter, "reported-model", Some("worker-current")),
+            ];
+            let (attribution, _) = AdapterAttribution::fold_with_provenance(&events);
+            assert_eq!(
+                attribution.realized,
+                Realized::Observed(vec!["reported-model".to_owned()]),
+                "spawn adapter {spawn_adapter:?} must retain the in-scope model observation"
+            );
+        }
+    }
+
     fn mid() -> MoleculeId {
         MoleculeId::new("task-20260712-6609").unwrap()
     }

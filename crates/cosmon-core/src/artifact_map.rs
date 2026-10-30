@@ -477,6 +477,37 @@ fn glob_to_regex(glob: &str) -> Result<Regex, regex::Error> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn audit_refuses_unclassified_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let map = ArtifactMap::parse_toml(
+            r#"
+            [code]
+            location = ["src/**/*.rs"]
+            audience = "public"
+            "#,
+        )?;
+        let report = map.audit(&[Path::new("src/lib.rs"), Path::new("notes.txt")]);
+        assert_eq!(report.total, 2);
+        assert_eq!(report.unclassified, vec!["notes.txt"]);
+        assert!(!report.invariants_hold());
+        Ok(())
+    }
+
+    #[test]
+    fn team_artifacts_keep_team_audience_and_residence() -> Result<(), Box<dyn std::error::Error>> {
+        let map = ArtifactMap::parse_toml(
+            r#"
+            [design]
+            location = ["docs/design/*.md"]
+            audience = "team"
+            "#,
+        )?;
+        let classification = map.classify(Path::new("docs/design/recovery.md"));
+        assert!(matches!(classification, Some(c)
+            if c.genre == "design" && c.audience == Audience::Team && c.residence == Residence::Team));
+        Ok(())
+    }
+
     fn sample_map() -> ArtifactMap {
         ArtifactMap::parse_toml(
             r#"
