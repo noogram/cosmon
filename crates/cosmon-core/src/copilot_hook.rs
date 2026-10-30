@@ -856,6 +856,45 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_reports_exactly_the_events_it_unwired() {
+        // Our hooks on every event: all of them are reported as removed.
+        let installed = install_claude("settings.json", None, CS).expect("install");
+        let removed = uninstall_claude("settings.json", Some(&installed.document)).expect("remove");
+        assert_eq!(removed.events, HookEvent::ALL.to_vec());
+
+        // Someone else's hooks on a wired event, nothing of ours: nothing is
+        // reported and the document is untouched.
+        let theirs = r#"{
+          "hooks": {
+            "Stop": [{"hooks": [{"type": "command", "command": "notify-send done"}]}]
+          }
+        }"#;
+        let untouched = uninstall_claude("settings.json", Some(theirs)).expect("remove");
+        assert!(untouched.events.is_empty(), "{:?}", untouched.events);
+        assert!(!untouched.changed);
+
+        // Ours beside theirs in the same entry, plus a second entry that is
+        // entirely theirs: the event is reported once, and theirs survives.
+        let ours = format!("{CS} {HOOK_MARKER} turn-end");
+        let mixed = serde_json::json!({
+            "hooks": {
+                "Stop": [
+                    {"hooks": [
+                        {"type": "command", "command": "notify-send done"},
+                        {"type": "command", "command": ours},
+                    ]},
+                    {"hooks": [{"type": "command", "command": "other-tool"}]},
+                ]
+            }
+        })
+        .to_string();
+        let removed = uninstall_claude("settings.json", Some(&mixed)).expect("remove");
+        assert_eq!(removed.events, vec![HookEvent::TurnEnd]);
+        let after: Value = serde_json::from_str(&removed.document).expect("valid JSON");
+        assert_eq!(after["hooks"]["Stop"].as_array().expect("kept").len(), 2);
+    }
+
+    #[test]
     fn installed_claude_reports_what_is_actually_wired() {
         assert!(installed_claude("s.json", None).expect("empty").is_empty());
         let edit = install_claude("s.json", None, CS).expect("install");

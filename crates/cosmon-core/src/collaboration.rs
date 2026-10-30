@@ -1096,6 +1096,53 @@ mod tests {
     }
 
     #[test]
+    fn scope_refusal_names_the_capability_family_of_the_binding() {
+        let refuse = |capability, scope| {
+            CollaborationBinding::provision(
+                BindingSpec {
+                    identity: identity("pilot-a"),
+                    capability,
+                    scopes: [scope].into_iter().collect(),
+                    label: None,
+                },
+                BindingId::from_random([1; 8]),
+                AttachmentId::from_random([1; 8]),
+                &proof(1),
+                t(0),
+            )
+            .unwrap_err()
+        };
+
+        let pilot = refuse(
+            CollaborationCapability::PilotMission { mission: owner() },
+            CollaborationScope::WorkWrite,
+        );
+        assert_eq!(
+            pilot,
+            BindingSpecError::ScopeOutsideCapability {
+                scope: CollaborationScope::WorkWrite,
+                capability: "pilot mission",
+            }
+        );
+        assert_eq!(
+            pilot.to_string(),
+            "scope cosmon:work:write does not apply to a pilot mission binding"
+        );
+
+        let work = refuse(
+            CollaborationCapability::WorkSeat {
+                owner: owner(),
+                seat: seat("implementer"),
+            },
+            CollaborationScope::SessionsRead,
+        );
+        assert_eq!(
+            work.to_string(),
+            "scope cosmon:sessions:read does not apply to a work seat binding"
+        );
+    }
+
+    #[test]
     fn duplicate_attachments_make_the_set_untrusted() {
         let first = work_binding(1, "pilot-a", "implementer", &[CollaborationScope::WorkRead]);
         let mut second = work_binding(2, "pilot-b", "reviewer", &[CollaborationScope::WorkRead]);

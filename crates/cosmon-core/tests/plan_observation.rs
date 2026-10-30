@@ -139,6 +139,90 @@ fn expired_and_missing_windows_do_not_survive_as_current() {
     assert_eq!(unknown.plan.windows[0].freshness, Freshness::Stale);
 }
 
+/// One Codex window with no reset time, observed at `observed` and ingested at
+/// `captured`, reclassified at `now` against `max_age`.
+fn freshness_at(
+    observed: &str,
+    captured: DateTime<Utc>,
+    now: DateTime<Utc>,
+    max_age: chrono::Duration,
+) -> Freshness {
+    let raw = format!(
+        "{{\"timestamp\":\"{observed}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"token_count\",\"rate_limits\":{{\"primary\":{{\"used_percent\":5,\"window_minutes\":300}}}}}}}}"
+    );
+    let mut sample = codex_plan(&raw, captured);
+    sample.refresh(now, max_age);
+    sample.plan.windows[0].freshness
+}
+
+#[test]
+fn freshness_boundaries_age_is_stale_only_beyond_the_maximum() {
+    let now = time("2026-09-28T12:00:00Z");
+    let ten = chrono::Duration::minutes(10);
+
+    // A sample seen a minute ago and ingested just now is fresh.
+    assert_eq!(
+        freshness_at("2026-09-28T11:59:00Z", now, now, ten),
+        Freshness::Fresh
+    );
+    // Exactly `max_age` old is still within the allowance, whether the age is
+    // that of the observation or that of the ingestion.
+    assert_eq!(
+        freshness_at("2026-09-28T11:50:00Z", now, now, ten),
+        Freshness::Fresh,
+        "observed exactly max_age ago"
+    );
+    let mut ingested = claude_plan(
+        r#"{"rate_limits":{"five_hour":{"used_percentage":1}}}"#,
+        PlanSource::ClaudeStatusLine,
+        time("2026-09-28T11:50:00Z"),
+    );
+    ingested.refresh(now, ten);
+    assert_eq!(
+        ingested.plan.windows[0].freshness,
+        Freshness::Unknown,
+        "no observation time: ingested exactly max_age ago is not stale, and not proven fresh"
+    );
+    // One second past the allowance is stale on either clock.
+    assert_eq!(
+        freshness_at("2026-09-28T11:49:59Z", now, now, ten),
+        Freshness::Stale
+    );
+    ingested.refresh(now + chrono::Duration::seconds(1), ten);
+    assert_eq!(ingested.plan.windows[0].freshness, Freshness::Stale);
+}
+
+#[test]
+fn freshness_is_unknown_for_an_ingestion_from_the_future() {
+    let now = time("2026-09-28T12:00:00Z");
+    let ten = chrono::Duration::minutes(10);
+    // Ingested a minute ahead of the reader's clock: the sample's own age is
+    // negative, so nothing can be said even though it was observed in the past.
+    assert_eq!(
+        freshness_at(
+            "2026-09-28T11:58:00Z",
+            now + chrono::Duration::minutes(1),
+            now,
+            ten
+        ),
+        Freshness::Unknown
+    );
+}
+
+#[test]
+fn freshness_with_a_zero_maximum_age_accepts_only_the_present_instant() {
+    let now = time("2026-09-28T12:00:00Z");
+    let zero = chrono::Duration::zero();
+    assert_eq!(
+        freshness_at("2026-09-28T12:00:00Z", now, now, zero),
+        Freshness::Fresh
+    );
+    assert_eq!(
+        freshness_at("2026-09-28T11:59:59Z", now, now, zero),
+        Freshness::Stale
+    );
+}
+
 #[test]
 fn new_reset_replaces_old_windows_without_subtracting_account_use() {
     let now = time("2026-09-28T12:00:00Z");
