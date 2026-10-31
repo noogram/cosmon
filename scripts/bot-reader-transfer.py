@@ -9,7 +9,8 @@ drains the local reader, ``status`` reads state without writing anything,
 offers ownership to one destination, ``import`` stages that offer on the
 destination, ``commit`` lets the source decide the offer and release its
 receipt, ``activate`` makes the destination the owner given that receipt, and
-``cancel`` withdraws an uncommitted offer. Manifests and receipts travel on
+``cancel`` withdraws an uncommitted offer. ``reconcile`` clears a conflict
+stop only on an active host after an explicit operator acknowledgement. Manifests and receipts travel on
 stdin as JSON, never as command arguments.
 
 ``transfer`` is the coordinator: it runs those steps in order against two
@@ -181,7 +182,38 @@ def read_payload() -> Any:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Recovery states (inspect status on each host before retrying):
+  not_enrolled: shut down legacy readers, validate history, then enroll.
+  active: may poll unless stopped or latched by api_conflict.
+  fenced: drain inbox then export, or cancel a bare fence.
+  offered: retry the same offer, or cancel --transfer-id before commit.
+  standby: import an offer; staged: activate only with its committed receipt.
+  transferred: source cannot resume; use a new reverse transfer.
+  stopped: preserve unrelated stop controls; transfer_pending: inspect phase.
+  api_conflict: confirm the competitor is gone on that active host, then run
+    bot-reader-transfer.py reconcile --competing-consumer-gone.
+    No time, later HTTP 200, stop-file removal, cancel or activate clears it.
+  indeterminate_in_flight: refuse transfer; establish request completion through
+    separately validated recovery. Reconcile does not clear unknown requests.
+  inbox_not_empty: consume/archive source work before exporting.
+  invalid_state, invalid_checkpoint: investigate trusted state; never reset it.
+  credential_failure: operator provisions credentials out of band.
+  transport_failure, network_failure: inspect reachability and request state;
+    never promote an unreachable source's destination by elapsed time.
+  stale_epoch, receipt_mismatch, offer_mismatch: reject replay or mismatched data.
+  disk_failure, record_conflict, invalid_manifest: preserve evidence and repair
+    the underlying write, content or manifest problem before retrying.
+  destination_not_inactive, not_owner, already_committed, offered_elsewhere:
+    inspect both hosts; never force ownership or discard a committed transfer.
+Transfer success means activation only; verify with a fresh normal capture poll
+and source/destination status. No verify verb or UI/remote client equivalent.
+Guarantee: enrolled readers under operator control only; absence of 409 proves
+no exclusivity against unmanaged consumers. See docs/guides/bot-reader-transfer.md.
+""",
+    )
     verbs = parser.add_subparsers(dest="verb", required=True)
     enroll = verbs.add_parser("enroll", help="make this host the initial reader owner")
     enroll.add_argument("--host-id", required=True, help="stable identity of this host")

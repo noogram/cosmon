@@ -608,3 +608,24 @@ left the product behind); a merge source the caller's tenant does not hold
 answers `404 not_found` whether it never existed or belongs to another
 binding. The `cs` JSON output is unchanged and is the route's `decay`,
 `merge` or `transform` object.
+
+
+## Bot-reader transfer (issue #146, W5)
+
+The operator surface is scripted: `scripts/bot-reader-transfer.py` provides
+`enroll`, `fence`, `status`, `prepare`, `export`, `import`, `commit`, `activate`,
+`cancel`, `transfer`, and local `reconcile --competing-consumer-gone`.
+`scripts/telegram-listen.sh` performs one normal capture poll; both scripts'
+`--help` names recovery states. See the [runbook](bot-reader-transfer.md).
+
+| Surface | Availability |
+| --- | --- |
+| Operator scripts | Supported; host-local journal and lock, authenticated batch SSH coordinator, explicit 409 reconciliation |
+| Verification | Status on both hosts plus a fresh normal destination capture poll; no `verify` verb |
+| Local `cs` CLI and generated help/man | No transfer commands; unchanged |
+| UI / desktop | No equivalent |
+| `cosmon-remote` / RPP API | No equivalent |
+
+Coordinator `transferred` means activation, not observed poll completion.
+Reconciliation preserves fencing and requires active ownership. Neither the
+scripts nor absent surfaces claim exclusivity against unmanaged consumers.
