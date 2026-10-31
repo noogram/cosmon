@@ -10,6 +10,7 @@ client. Git refs and the durable service journal are separate witnesses.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import shutil
 import subprocess
@@ -153,16 +154,20 @@ class TestHarvestMatrix:
         _ok(authority.json("harvest", "grant", "--molecule", molecule))
         other = _nucleate(authority, "unrelated completed worker")
         _work(authority, other, cfg)
+        # The stored-candidate selector deliberately omits grants naming
+        # another target from diagnostics. The import above proves the named
+        # mismatch; done must report that this target has no matching grant.
         _refused(cfg, "mismatched-done", lambda: authority.done(other, "wrong molecule grant"),
-                 "harvest_grant_mismatch")
+                 "harvest_grant_missing")
 
     def test_reserved_target(self, authority, worked, molecule, stack, cfg):
-        _host(stack, "tag", molecule, "--add", "hold:human")
-        try:
-            _refused(cfg, "reserved-target", lambda: authority.done(molecule, "reserved target"),
-                     "reservation_requires_seal", authorization=False)
-        finally:
-            _host(stack, "tag", molecule, "--remove", "hold:human")
+        reserved = _nucleate(authority, "reserved completed target")
+        _work(authority, reserved, cfg)
+        _host(stack, "tag", reserved, "--add", "hold:human")
+        _refused(cfg, "reserved-target", lambda: authority.done(reserved, "reserved target"),
+                 "reservation_requires_seal", authorization=False)
+        # Reservations are monotone. Leave the tag intact until this
+        # disposable tenant is torn down; never weaken its removal guard.
 
     def test_stale_facts_at_effect(self, authority, worked, molecule, stack, cfg):
         _ok(authority.json("harvest", "grant", "--molecule", molecule))
@@ -200,20 +205,25 @@ class TestHarvestMatrix:
         before = _snapshot(cfg, foreign)
         assert before["refs"]
         own_before = _snapshot(cfg)
-        foreign_events = (foreign / ".cosmon/state/fleets/default/molecules" / foreign_id / "events.jsonl").read_bytes()
+        def foreign_state():
+            return {str(path.relative_to(foreign)): hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in (foreign / ".cosmon/state").rglob("*.json*") if path.is_file()}
+
+        state_before = foreign_state()
+        assert state_before, "host nucleation must leave real foreign state"
         rc, payload, stderr = authority.done(foreign_id, "cross tenant denied")
         after = _snapshot(cfg, foreign)
-        events_after = (foreign / ".cosmon/state/fleets/default/molecules" / foreign_id / "events.jsonl").read_bytes()
+        state_after = foreign_state()
         (cfg.artifacts / "cross-tenant-witness.json").write_text(json.dumps({
             "molecule": foreign_id, "rc": rc, "response": payload,
             "foreign_before": before, "foreign_after": after,
             "own_before": own_before, "own_after": _snapshot(cfg),
-            "foreign_events_unchanged": foreign_events == events_after,
+            "foreign_state_before": state_before, "foreign_state_after": state_after,
         }, sort_keys=True))
         assert rc != 0 and (payload or {}).get("error") == "not_found", (payload, stderr)
         assert before == after
         assert own_before == _snapshot(cfg)
-        assert foreign_events == events_after
+        assert state_before == state_after
 
 
 
@@ -243,7 +253,7 @@ class TestMissionHarvest:
         unrelated = _nucleate(cli, "unrelated to the signed mission")
         _work(cli, unrelated, cfg)
         _refused(cfg, "mission-unrelated", lambda: cli.done(unrelated, "outside the mission"),
-                 "harvest_grant_mismatch")
+                 "harvest_grant_missing")
 
 
 @pytest.mark.stack
