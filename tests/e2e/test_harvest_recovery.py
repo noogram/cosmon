@@ -55,6 +55,11 @@ def _journal(cfg, molecule):
             if row["receipt"]["effect"]["molecule"] == molecule]
 
 
+def _consumed(cfg, molecule):
+    return [row for row in _rows(cfg, "consumed.jsonl")
+            if row["effect"]["molecule"] == molecule]
+
+
 def _merges(cfg, molecule):
     out = _git(cfg.galaxy, "log", cfg.base_branch, "--merges", "--format=%H",
                "-F", f"--grep=Mol-Id: {molecule}")
@@ -117,7 +122,7 @@ def _crash_at(stack, cfg, cli, molecule, config_toml, name):
     at_crash = {
         "base": _git(cfg.galaxy, "rev-parse", cfg.base_branch),
         "journal": [row["stage"] for row in _journal(cfg, molecule)],
-        "consumed": len(_rows(cfg, "consumed.jsonl")),
+        "consumed": len(_consumed(cfg, molecule)),
         "merges": _merges(cfg, molecule),
     }
     stack.compose("kill", "rpp-adapter")
@@ -141,7 +146,7 @@ class TestCrashRecovery:
         _ok(logged_in.json("harvest", "init", "--admin-token-file", str(admin_token_file)))
         return logged_in
 
-    def _retry(self, cfg, cli, molecule, crash, label, journal_stages, consumed_rows, *, admitted):
+    def _retry(self, cfg, cli, molecule, crash, label, journal_stages, *, admitted):
         """Retry the documented ``done`` and judge Git plus journal bytes.
 
         ``admitted`` selects the observed contract for the window: a named
@@ -172,7 +177,7 @@ class TestCrashRecovery:
         assert _git(cfg.galaxy, "rev-parse", cfg.base_branch) == base_crash
         assert len(_merges(cfg, molecule)) == 1, "exactly one merge for the molecule"
         assert [row["stage"] for row in _journal(cfg, molecule)] == journal_stages
-        assert len(_rows(cfg, "consumed.jsonl")) == consumed_rows
+        assert len(_consumed(cfg, molecule)) == 1, "the molecule receipt is consumed exactly once"
         assert _hook_calls(cfg, label) == 1, "the interrupted hook is never replayed"
 
     def test_crash_after_merge_before_integrated_checkpoint(
@@ -188,7 +193,7 @@ class TestCrashRecovery:
         assert len(crash["at_crash"]["merges"]) == 1, "Git already holds the merge"
         assert crash["at_crash"]["base"] != crash["base_before"]
         try:
-            self._retry(cfg, cli, molecule, crash, "gate", ["prepared"], 1, admitted=False)
+            self._retry(cfg, cli, molecule, crash, "gate", ["prepared"], admitted=False)
         finally:
             (cfg.galaxy / ".cosmon/config.toml").write_bytes(crash["original_config"])
 
@@ -207,7 +212,7 @@ class TestCrashRecovery:
         assert crash["at_crash"]["journal"] == ["prepared", "integrated"], crash
         assert len(crash["at_crash"]["merges"]) == 1
         try:
-            self._retry(cfg, cli, second, crash, "post", ["prepared", "integrated"], 2, admitted=True)
+            self._retry(cfg, cli, second, crash, "post", ["prepared", "integrated"], admitted=True)
         finally:
             (cfg.galaxy / ".cosmon/config.toml").write_bytes(crash["original_config"])
 
