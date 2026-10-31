@@ -1532,6 +1532,15 @@ mod opencode_markers {
     pub const MODEL: &str = "model:";
     /// The session/share line opencode prints when it starts a run.
     pub const SHARE: &str = "share:";
+    /// The mode line opencode ≥ 2.2.5 prints as its run preamble instead of
+    /// the older labelled lines above: `> build · gemini-3.1-pro-preview`.
+    /// The mode word varies across releases and configurations (build, plan,
+    /// …), so the marker is the middle-dot separator between the mode and the
+    /// model — rare in a worker pane, and stable where the surrounding words
+    /// are not. Measured on opencode 2.2.5 (2026-10-31): a real run in a tmux
+    /// pane prints *only* this line and the tool arrows, none of the older
+    /// markers.
+    pub const MODE_LINE: &str = " · ";
 }
 
 /// `true` when raw terminal `output` carries positive evidence that a live
@@ -1551,6 +1560,7 @@ pub fn opencode_output_is_live(output: &str) -> bool {
         || haystack.contains(opencode_markers::WORKDIR)
         || haystack.contains(opencode_markers::MODEL)
         || haystack.contains(opencode_markers::SHARE)
+        || haystack.contains(opencode_markers::MODE_LINE)
 }
 
 /// The `opencode run` [`LiveProbe`] — opencode's implementation of the
@@ -3140,6 +3150,16 @@ mod tests {
         assert!(!opencode_output_is_live(""));
         assert!(!opencode_output_is_live("bash-5.2$ "));
         assert!(!opencode_output_is_live("some unrelated build log line\n"));
+    }
+
+    #[test]
+    fn opencode_output_live_on_v225_mode_preamble() {
+        // opencode ≥ 2.2.5 prints `> <mode> · <model>` and no labelled
+        // preamble at all; measured in a real tmux pane on 2026-10-31.
+        assert!(opencode_output_is_live(
+            "> build · gemini-3.1-pro-preview\n"
+        ));
+        assert!(opencode_output_is_live("> plan · gemini-3.5-flash\nOK\n"));
     }
 
     #[test]
