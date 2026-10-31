@@ -19,6 +19,10 @@ this stage.
 
 ## [Unreleased]
 
+- Document bot-reader enrollment, transfer, 409 recovery and verification, with script help and an offline runbook rehearsal. (#146)
+
+- Bot readers durably stop after HTTP/API 409 until an explicit local reconciliation; fenced and transferred sources cannot reconcile. (#146)
+
 ## [0.8.0] — 2026-10-30
 
 ### Breaking changes and operator actions on upgrade

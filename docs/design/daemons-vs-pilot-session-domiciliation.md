@@ -348,6 +348,13 @@ pouvoir la faire.
 
 ## 9. Ce que cette délibération ne tranche pas
 
+Le transfert du lecteur de bot entre machines (#146) est désormais décrit dans
+le [runbook opérateur](../guides/bot-reader-transfer.md) : arrêt des lecteurs
+legacy, enrôlement, clôture de la source avant activation, réconciliation après
+409 et vérification par capture durable. La garantie couvre les lecteurs
+participants sous contrôle opérateur ; l'absence de 409 ne prouve pas l'unicité
+d'un lecteur. Ce sujet ne figurait pas dans les trois points ouverts ci-dessous.
+
 - **Le rail canonique de messagerie** (Q5 du CMB) — deux rails coexistent,
   `presence/<sid>.log` + `poll` et la mailbox `<sid>.inbox.jsonl` de M2. ADR-168
   explique pourquoi la mailbox n'a pas de curseur d'octets et pourquoi le legacy
