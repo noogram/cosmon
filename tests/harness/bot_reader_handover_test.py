@@ -453,17 +453,15 @@ class HandoverTest(unittest.TestCase):
         self.assertEqual([poll.status for poll in self.polls(self.b)], [409])
 
         self.api.conflict = False
+        self.assertEqual(self.run_transfer(self.b, "reconcile", "--competing-consumer-gone")[0], 0)
         status, result = self.finish(self.listen(self.b))
         self.assertEqual((status, result.get("outcome")), (0, "captured"))
         self.assertEqual(self.b.inbox(), {42})
         self.assert_single_reader(self.a, self.b)
 
-    @unittest.expectedFailure
     def test_api_conflict_stops_polling_until_reconciled(self) -> None:
         # Plan §2 listener prerequisite 6: a 409 means another consumer holds
         # the credential, so polling stops until an explicit reconciliation.
-        # The W1 listener reports the conflict but polls again on the next
-        # tick; this records that gap until W1's helper latches the stop.
         self.enroll_source()
         self.transferred(self.b)
         self.api.conflict = True
@@ -471,6 +469,35 @@ class HandoverTest(unittest.TestCase):
         self.api.conflict = False
         self.finish(self.listen(self.b))
         self.assertEqual(len(self.polls(self.b)), 1, "polled again after a 409")
+        self.assertTrue(self.b.journal()["conflict_stop"])
+        (self.b.state / "telegram-listen.off").unlink(missing_ok=True)
+        self.assertEqual(self.finish(self.listen(self.b)), (1, {"outcome": "api_conflict"}))
+        self.assertEqual(len(self.polls(self.b)), 1)
+        self.assertNotEqual(self.run_transfer(self.b, "reconcile")[0], 0)
+        self.assertEqual(self.run_transfer(self.b, "reconcile", "--competing-consumer-gone")[0], 0)
+        self.assertFalse(self.b.journal()["conflict_stop"])
+        self.assertEqual(len(self.polls(self.b)), 1, "reconciliation itself polled")
+        self.assertEqual(self.finish(self.listen(self.b)), (0, {"outcome": "empty", "updates": 0, "captured": 0, "checkpoint": 41}))
+        self.assertEqual(len(self.polls(self.b)), 2, "one invocation must admit exactly one poll")
+
+    def test_reconciliation_cannot_reopen_fenced_or_transferred_host(self) -> None:
+        self.enroll_source()
+        self.api.conflict = True
+        self.assertEqual(self.finish(self.listen(self.a))[0], 1)
+        self.api.conflict = False
+        self.assertEqual(self.run_transfer(self.a, "fence")[0], 0)
+        for phase in ("fenced", "transferred"):
+            if phase == "transferred":
+                self.transferred(self.b)
+            before = self.a.journal()
+            self.assertEqual(before["phase"], phase)
+            self.assertEqual(self.run_transfer(self.a, "reconcile", "--competing-consumer-gone"),
+                             (1, {"outcome": "not_owner"}))
+            self.assertEqual(self.a.journal(), before)
+            (self.a.state / "telegram-listen.off").unlink(missing_ok=True)
+            self.assertIn(self.finish(self.listen(self.a))[1]["outcome"], ("stopped", "transfer_pending"))
+            self.assertEqual(len(self.polls(self.a)), 1)
+
 
     def test_dropped_commit_reply_leaves_both_stopped_until_resumed(self) -> None:
         self.enroll_source()

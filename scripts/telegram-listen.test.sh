@@ -82,6 +82,28 @@ grep -q 'api_conflict' <<<"$conflict" || fail "API conflict was not observable"
 [ "$(cat "$ROOT/.cosmon/telegram-offset")" = "41" ] || fail "API conflict moved the checkpoint"
 pass "API conflict is observable and preserves the checkpoint"
 
+# A later HTTP 200 body cannot clear an API-level 409 without reconciliation.
+printf '%s\n' '{"ok":true,"result":[]}' > "$ROOT/response.json"
+requests_before=$(wc -l < "$ROOT/requests.jsonl")
+set +e
+latched=$(COSMON_BOT_READER_TEST_MODE=1 COSMON_BOT_READER_TEST_ROOT="$ROOT" \
+  COSMON_BOT_READER_TEST_ENDPOINT="http://127.0.0.1:$(cat "$ROOT/port")" \
+  bash "$HERE/telegram-listen.sh" 2>&1)
+latched_status=$?
+set -e
+[ "$latched_status" -eq 1 ] || fail "API conflict was not latched"
+grep -q api_conflict <<<"$latched" || fail "latched outcome was not redacted"
+[ "$(wc -l < "$ROOT/requests.jsonl")" -eq "$requests_before" ] || fail "latched reader reached network"
+COSMON_BOT_READER_TEST_MODE=1 COSMON_BOT_READER_TEST_ROOT="$ROOT" \
+  python3 "$HERE/bot-reader-transfer.py" reconcile --competing-consumer-gone >/dev/null
+resumed=$(COSMON_BOT_READER_TEST_MODE=1 COSMON_BOT_READER_TEST_ROOT="$ROOT" \
+  COSMON_BOT_READER_TEST_ENDPOINT="http://127.0.0.1:$(cat "$ROOT/port")" \
+  bash "$HERE/telegram-listen.sh" 2>&1)
+grep -q '"outcome": "empty"' <<<"$resumed" || fail "reconciliation did not resume"
+[ "$(wc -l < "$ROOT/requests.jsonl")" -eq "$((requests_before + 1))" ] || fail "reconciliation did not admit exactly one poll"
+pass "API-level 409 persists across invocations until explicit reconciliation"
+
+
 kill "$SERVER_PID"
 wait "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=""

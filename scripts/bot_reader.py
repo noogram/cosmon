@@ -261,6 +261,8 @@ def validated_manifest(document: Any) -> dict[str, Any]:
 def _validated_journal(document: Any) -> dict[str, Any]:
     if not isinstance(document, dict) or document.get("schema") != JOURNAL_SCHEMA:
         raise CaptureError("invalid_state")
+    if not isinstance(document.get("conflict_stop", False), bool):
+        raise CaptureError("invalid_state")
     host_id = document.get("host_id")
     epoch = document.get("epoch")
     phase = document.get("phase")
@@ -405,6 +407,7 @@ def status(paths: StatePaths) -> dict[str, Any]:
                 host_id=journal["host_id"],
                 epoch=journal["epoch"],
                 phase=journal["phase"],
+                conflict_stop=journal.get("conflict_stop", False),
             )
             if journal.get("transfer") is not None:
                 manifest = journal["transfer"]["manifest"]
@@ -606,6 +609,22 @@ def cancel(paths: StatePaths, transfer_id: str | None) -> dict[str, Any]:
         _remove_owned_stop(paths, journal["fence"])
         write_journal(paths, dict(journal, phase="active", fence=None, transfer=None))
     return {"outcome": "cancelled", "epoch": journal["epoch"]}
+
+
+def reconcile(paths: StatePaths) -> dict[str, Any]:
+    """Clear a conflict stop after the operator confirms the competitor is gone.
+
+    Ownership and stop controls are untouched. Inactive hosts cannot use this
+    acknowledgement to reopen a fenced or transferred source.
+    """
+    with exclusive_lock(paths):
+        journal = read_journal(paths)
+        if journal is None:
+            raise CaptureError("not_enrolled")
+        if journal["phase"] != "active":
+            raise CaptureError("not_owner")
+        write_journal(paths, dict(journal, conflict_stop=False))
+    return {"outcome": "reconciled", "epoch": journal["epoch"]}
 
 
 def import_manifest(paths: StatePaths, document: Any, token_file: Path) -> dict[str, Any]:
@@ -848,6 +867,8 @@ def poll_once(paths: StatePaths, token_file: Path, operator_chat: str, test_endp
             raise CaptureError("not_enrolled")
         if journal["phase"] != "active":
             return {"outcome": "transfer_pending"}
+        if journal.get("conflict_stop", False):
+            raise CaptureError("api_conflict")
         checkpoint = read_checkpoint(paths.checkpoint, required=True)
         token = _read_token(token_file)
         endpoint = _endpoint(test_endpoint, token)
@@ -860,12 +881,18 @@ def poll_once(paths: StatePaths, token_file: Path, operator_chat: str, test_endp
         except CaptureError as error:
             # A network failure may hide a request the server still holds; its
             # marker stays until a later completed poll replaces it.
+            if error.outcome == "api_conflict":
+                write_journal(paths, dict(journal, conflict_stop=True))
             if error.outcome != "network_failure":
                 _clear_in_flight(paths)
             raise
         failpoint = os.environ.get("COSMON_BOT_READER_TEST_INTERRUPT") if test_mode() else None
         try:
             return capture_response(response, operator_chat, paths.inbox, paths.checkpoint, failpoint)
+        except CaptureError as error:
+            if error.outcome == "api_conflict":
+                write_journal(paths, dict(journal, conflict_stop=True))
+            raise
         finally:
             _clear_in_flight(paths)
 

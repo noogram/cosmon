@@ -187,6 +187,9 @@ def main() -> int:
     enroll.add_argument("--host-id", required=True, help="stable identity of this host")
     verbs.add_parser("fence", help="stop new polls, drain the admitted one, record the fence")
     verbs.add_parser("status", help="report local reader state; no network, no writes")
+    reconcile = verbs.add_parser("reconcile", help="clear a 409 stop on this active host only")
+    reconcile.add_argument("--competing-consumer-gone", action="store_true", required=True,
+                           help="operator confirms the competing consumer is gone")
     prepare = verbs.add_parser("prepare", help="enroll this host as an inactive destination")
     prepare.add_argument("--host-id", required=True, help="stable identity of this host")
     export = verbs.add_parser("export", help="fence this owner and offer ownership to one destination")
@@ -219,6 +222,8 @@ def main() -> int:
                 result = bot_reader.fence(paths)
             elif args.verb == "status":
                 result = bot_reader.status(paths)
+            elif args.verb == "reconcile":
+                result = bot_reader.reconcile(paths)
             elif args.verb == "prepare":
                 result = bot_reader.prepare(paths, args.host_id, bot_reader.resolve_token_file())
             elif args.verb == "export":

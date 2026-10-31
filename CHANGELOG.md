@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- Bot readers durably stop after HTTP/API 409 until an explicit local reconciliation; fenced and transferred sources cannot reconcile. (#146)
+
 ## [0.8.0] — 2026-10-30
 
 ### Breaking changes and operator actions on upgrade
