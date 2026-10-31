@@ -91,7 +91,7 @@ fn record(root: &Path, sid: &str) -> serde_json::Value {
 fn each_provider_launch_gets_a_fresh_id_and_preserves_arguments_and_exit_status() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut identities = Vec::new();
-    for name in ["claude", "codex"] {
+    for name in ["claude", "codex", "agy"] {
         provider(
             tmp.path(),
             name,

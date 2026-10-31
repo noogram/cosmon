@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- Add `agy` (Google Antigravity CLI) as a third interactive pilot provider in `cs sessions launch`, clearing an inherited `ANTIGRAVITY_CONVERSATION_ID` and recognising it as a native caller identity.
+
 - Add container witnesses for mission harvest grants and remote harvest refusals. (#128)
 
 - Add container witnesses for the legacy `required = true` upgrade and for service crashes inside the documented gate and `post_merge` windows. (#128)

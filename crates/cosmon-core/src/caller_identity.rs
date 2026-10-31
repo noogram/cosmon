@@ -16,6 +16,8 @@ pub enum Caller<'a> {
     ClaudeCallback(Option<&'a str>),
     /// A Codex callback carrying its optional `thread-id` field.
     CodexCallback(Option<&'a str>),
+    /// An Agy callback carrying its optional `conversation_id` field.
+    AgyCallback(Option<&'a str>),
 }
 
 /// Identity disagreement refuses resolution without exposing private values.
@@ -30,6 +32,9 @@ pub enum ResolutionError {
     /// The callback and subprocess environment identify different callers.
     #[error("Codex callback thread-id disagrees with CODEX_THREAD_ID/CODEX_SESSION_ID; refusing caller identity")]
     ConflictingCodexCallback,
+    /// The callback and subprocess environment identify different callers for Agy.
+    #[error("Agy callback conversation_id disagrees with ANTIGRAVITY_CONVERSATION_ID; refusing caller identity")]
+    ConflictingAgyCallback,
 }
 
 fn nonempty(value: Option<&str>) -> Option<&str> {
@@ -69,7 +74,9 @@ where
         let dispatch = env_lookup("COSMON_SESSION_ID");
         let callback = match caller {
             Caller::Shell => None,
-            Caller::ClaudeCallback(native) | Caller::CodexCallback(native) => nonempty(native),
+            Caller::ClaudeCallback(native)
+            | Caller::CodexCallback(native)
+            | Caller::AgyCallback(native) => nonempty(native),
         };
         return identity(
             nonempty(dispatch.as_deref())
@@ -80,8 +87,10 @@ where
     if !matches!(caller, Caller::ClaudeCallback(_)) {
         let thread = env_lookup("CODEX_THREAD_ID");
         let session = env_lookup("CODEX_SESSION_ID");
+        let agy = env_lookup("ANTIGRAVITY_CONVERSATION_ID");
         let thread = nonempty(thread.as_deref());
         let session = nonempty(session.as_deref());
+        let agy = nonempty(agy.as_deref());
         if matches!((thread, session), (Some(a), Some(b)) if a != b) {
             return Err(ResolutionError::ConflictingCodexEnvironment);
         }
@@ -89,6 +98,14 @@ where
             if let Caller::CodexCallback(payload) = caller {
                 if nonempty(payload).is_some_and(|payload| payload != native) {
                     return Err(ResolutionError::ConflictingCodexCallback);
+                }
+            }
+            return identity(nonempty(explicit).or(Some(native)));
+        }
+        if let Some(native) = agy {
+            if let Caller::AgyCallback(payload) = caller {
+                if nonempty(payload).is_some_and(|payload| payload != native) {
+                    return Err(ResolutionError::ConflictingAgyCallback);
                 }
             }
             return identity(nonempty(explicit).or(Some(native)));
@@ -102,7 +119,9 @@ where
         return identity(launch.as_deref());
     }
     match caller {
-        Caller::ClaudeCallback(native) | Caller::CodexCallback(native) => identity(native),
+        Caller::ClaudeCallback(native)
+        | Caller::CodexCallback(native)
+        | Caller::AgyCallback(native) => identity(native),
         Caller::Shell => {
             let cosmon = env_lookup("COSMON_SESSION_ID");
             let claude = env_lookup("CLAUDE_SESSION_ID");
@@ -146,6 +165,36 @@ mod tests {
         assert!(matches!(
             result,
             Err(ResolutionError::ConflictingCodexEnvironment)
+        ));
+        assert!(!result
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default()
+            .contains("private-fixture"));
+        Ok(())
+    }
+
+    #[test]
+    fn agy_alias_is_usable_but_callback_conflict_is_redacted() -> Result<(), ResolutionError> {
+        let sid = resolve(None, Caller::Shell, |name| {
+            (name == "ANTIGRAVITY_CONVERSATION_ID").then(|| "agy-native-fixture".to_owned())
+        })?;
+        assert_eq!(
+            sid.as_ref().map(SessionId::as_str),
+            Some("agy-native-fixture")
+        );
+
+        let result = resolve(
+            None,
+            Caller::AgyCallback(Some("private-fixture-a")),
+            |name| match name {
+                "ANTIGRAVITY_CONVERSATION_ID" => Some("private-fixture-b".to_owned()),
+                _ => None,
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ResolutionError::ConflictingAgyCallback)
         ));
         assert!(!result
             .err()

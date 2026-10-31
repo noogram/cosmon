@@ -13,6 +13,8 @@ pub enum Provider {
     Claude,
     /// Codex CLI.
     Codex,
+    /// Google Antigravity CLI.
+    Agy,
 }
 
 impl Provider {
@@ -20,6 +22,7 @@ impl Provider {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Agy => "agy",
         }
     }
 }
@@ -55,7 +58,8 @@ impl Launcher for ProcessLauncher {
             .env_remove("COSMON_WORKER_ID")
             .env_remove("CLAUDE_SESSION_ID")
             .env_remove("CODEX_THREAD_ID")
-            .env_remove("CODEX_SESSION_ID");
+            .env_remove("CODEX_SESSION_ID")
+            .env_remove("ANTIGRAVITY_CONVERSATION_ID");
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
