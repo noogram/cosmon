@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- Add container witnesses for mission harvest grants and remote harvest refusals. (#128)
+
 - Document bot-reader enrollment, transfer, 409 recovery and verification, with script help and an offline runbook rehearsal. (#146)
 
 - Bot readers durably stop after HTTP/API 409 until an explicit local reconciliation; fenced and transferred sources cannot reconcile. (#146)

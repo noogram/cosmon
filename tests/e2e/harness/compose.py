@@ -279,7 +279,10 @@ class ComposeStack:
                 continue
             text = path.read_text(encoding="utf-8")
             path.write_text(
-                text.replace("context: ../../..", f"context: {cfg.build_root}"),
+                text.replace("context: ../../..", f"context: {cfg.build_root}").replace(
+                    "image: cs-rpp-adapter:e2e",
+                    "image: " + os.environ.get("RPP_E2E_ADAPTER_IMAGE", "cs-rpp-adapter:e2e"),
+                ),
                 encoding="utf-8",
             )
         pinned = cfg.compose_file.read_text(encoding="utf-8")
@@ -401,7 +404,8 @@ class ComposeStack:
                 # uid 10000, not the host runner. Staging-time chmod cannot
                 # cover entries created later. After down(), clear only this
                 # disposable bind mount as root in the already-built image.
-                image = "cs-rpp-adapter:e2e" if cfg.e2e_stage else "cs-rpp-adapter:v0"
+                image = (os.environ.get("RPP_E2E_ADAPTER_IMAGE", "cs-rpp-adapter:e2e")
+                         if cfg.e2e_stage else "cs-rpp-adapter:v0")
                 try:
                     clear = _run([
                         "docker", "run", "--rm", "--network", "none",
@@ -645,12 +649,14 @@ class ComposeStack:
 
     def build(self) -> None:
         """Build both images. Session-scoped: this is the expensive part."""
+        # Scratch guard mutations use an owned image name, so a mutation
+        # never retags an image another compose project may still need.
         adapter_pin = os.environ.get("RPP_E2E_ADAPTER_IMAGE_ID")
         oidc_pin = os.environ.get("RPP_E2E_OIDC_IMAGE_ID")
         if bool(adapter_pin) != bool(oidc_pin):
             raise AssertionError("both e2e image IDs must be pinned together")
         if adapter_pin and oidc_pin:
-            for name, expected in (("cs-rpp-adapter:e2e", adapter_pin), ("cs-oidc-mock:v0", oidc_pin)):
+            for name, expected in ((os.environ.get("RPP_E2E_ADAPTER_IMAGE", "cs-rpp-adapter:e2e"), adapter_pin), ("cs-oidc-mock:v0", oidc_pin)):
                 actual = _run(["docker", "image", "inspect", name, "--format", "{{.Id}}"]).stdout.strip()
                 if actual != expected:
                     raise AssertionError(f"pinned image {name} changed: {actual or '<missing>'}")

@@ -423,6 +423,14 @@ members of that mission under the signed policy. For offline issuance, run
 `grant --import <challenge.json.signed.json>` on a connected client. The
 export, sign and import modes are exclusive.
 
+Mission membership is set by the operator on the service host, in the tenant
+galaxy: run `cs nucleate <formula> --blocked-by <root-molecule-id> --var
+topic="<member task>"`. The `blocked_by` ancestry must have one root matching
+the signed mission. Complete the root before dispatching its members, because
+these links also block progression. Membership is not conferred by a remote
+harvest command; the remote client's `molecule nucleate` has no `--blocked-by`
+option.
+
 Grants expire after one hour by default; use `--expires-in` to choose minutes,
 hours or days, or deliberately use `--no-expiry` until the epoch changes.
 On expiry or changed facts, inspect `harvest status --molecule` and issue a
