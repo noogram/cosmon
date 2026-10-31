@@ -152,11 +152,11 @@ class TestCrashRecovery:
         status = cli.json("harvest", "status", "--molecule", molecule)[1]
         base_crash = crash["at_crash"]["base"]
         before = _snapshot(cfg)
-        rc, payload, stderr = cli.done(molecule, "retry after crash")
+        rc, payload, stderr = cli.done(molecule, "crash window")
         after = _snapshot(cfg)
         shown = {k: v for k, v in crash.items() if k != "original_config"}
         _write_note(cfg, f"crash-{label}.json", {
-            "label": label, "crash": shown, "retry_rc": rc, "retry_response": payload,
+            "label": label, "crash": shown, "retry_rc": rc, "retry_response": payload, "retry_stderr": stderr[-1500:],
             "status": status, "snapshot_before_retry": before, "snapshot_after_retry": after,
             "merges": _merges(cfg, molecule), "journal": _journal(cfg, molecule),
             "hook_calls": _hook_calls(cfg, label)})
