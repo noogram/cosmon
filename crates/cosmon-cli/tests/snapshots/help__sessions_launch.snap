@@ -13,6 +13,7 @@ Arguments:
           Possible values:
           - claude: Claude Code
           - codex:  Codex CLI
+          - agy:    Google Antigravity CLI
 
   [ARGS]...
           Provider arguments, passed verbatim after `--`

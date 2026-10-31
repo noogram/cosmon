@@ -70,6 +70,7 @@ const GATE_ONLY_POISONS: &[(&str, &str)] = &[
     ("COSMON_SESSION_ID", "synthetic-gate-pilot"),
     ("COSMON_SESSION_LAUNCH_ID", "synthetic-gate-pilot"),
     ("CLAUDE_SESSION_ID", "synthetic-gate-claude"),
+    ("ANTIGRAVITY_CONVERSATION_ID", "synthetic-gate-agy"),
 ];
 
 /// The shell projection is exactly the Rust manifest, in order.

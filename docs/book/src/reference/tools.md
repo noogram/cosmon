@@ -482,6 +482,8 @@ Launch Claude or Codex with a fresh identity shared by hooks and tools
     Claude Code
   - `codex`:
     Codex CLI
+  - `agy`:
+    Google Antigravity CLI
 
 * `<ARGS>` — Provider arguments, passed verbatim after `--`
 
