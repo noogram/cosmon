@@ -323,3 +323,46 @@ fn claude_statusline_rejects_out_of_documented_range_but_stream_allows_overage()
     );
     assert_eq!(stream.plan.windows[0].utilization.get(), 1.25);
 }
+
+/// Quota is read from a Codex rollout line only when both discriminators say
+/// so: the envelope is an `event_msg` and the payload is a `token_count`.
+/// A line that matches one and not the other carries rate limits too, and must
+/// still be ignored, so a session-meta or agent message never freshens quota.
+#[test]
+fn codex_reads_quota_only_from_token_count_event_messages() {
+    let now = time("2026-09-28T12:00:00Z");
+    let limits = |bucket: &str, used: u32| {
+        format!(r#""rate_limits":{{"limit_id":"{bucket}","primary":{{"used_percent":{used}}}}}"#)
+    };
+    let line = |envelope: &str, payload: &str, bucket: &str, used: u32| {
+        format!(
+            r#"{{"type":"{envelope}","payload":{{"type":"{payload}",{}}}}}"#,
+            limits(bucket, used)
+        )
+    };
+
+    let counted = line("event_msg", "token_count", "bucket-counted", 40);
+    let sample = codex_plan(&counted, now);
+    assert_eq!(sample.plan.windows.len(), 1);
+    assert_eq!(sample.plan.windows[0].utilization.get(), 0.40);
+
+    // Right envelope, wrong payload.
+    let wrong_payload = line("event_msg", "agent_message", "bucket-payload", 77);
+    let sample = codex_plan(&wrong_payload, now);
+    assert!(sample.plan.windows.is_empty(), "payload type is checked");
+    // Right payload, wrong envelope.
+    let wrong_envelope = line("response_item", "token_count", "bucket-envelope", 88);
+    let sample = codex_plan(&wrong_envelope, now);
+    assert!(sample.plan.windows.is_empty(), "envelope type is checked");
+
+    // Mixed in one rollout, only the genuine token_count line is read.
+    let rollout = format!("{wrong_payload}\n{counted}\n{wrong_envelope}\n");
+    let sample = codex_plan(&rollout, now);
+    let values: Vec<_> = sample
+        .plan
+        .windows
+        .iter()
+        .map(|w| w.utilization.get())
+        .collect();
+    assert_eq!(values, [0.40]);
+}

@@ -691,6 +691,45 @@ mod tests {
         );
     }
 
+    /// The meta-judge is handed this question to decide whether a verdict fell
+    /// into the trap, so each pathology needs its own single question, and the
+    /// question has to name the mechanism of that pathology (arXiv source in
+    /// `JudgmentPathology::source`), not a generic prompt.
+    #[test]
+    fn each_pathology_asks_its_own_diagnostic_question() {
+        let expected_mechanism = [
+            (JudgmentPathology::Anchoring, "generator's stated root"),
+            (
+                JudgmentPathology::Overconfidence,
+                "without running a falsifier",
+            ),
+            (JudgmentPathology::Confirmation, "could falsify it"),
+            (JudgmentPathology::Sycophancy, "persuasive weight"),
+        ];
+        for (pathology, mechanism) in expected_mechanism {
+            let question = pathology.diagnostic_question();
+            assert!(
+                question.starts_with("Did the verdict "),
+                "{pathology:?} asks about the verdict: {question:?}"
+            );
+            assert!(
+                question.ends_with('?') && question.matches('?').count() == 1,
+                "{pathology:?} is one question: {question:?}"
+            );
+            assert!(
+                question.contains(mechanism),
+                "{pathology:?} names its mechanism {mechanism:?}: {question:?}"
+            );
+        }
+        let mut questions: Vec<_> = JudgmentPathology::ALL
+            .iter()
+            .map(|p| p.diagnostic_question())
+            .collect();
+        questions.sort_unstable();
+        questions.dedup();
+        assert_eq!(questions.len(), 4, "one distinct question per pathology");
+    }
+
     #[test]
     fn valid_entry_passes() {
         assert!(entry("pack-4").validate().is_ok());

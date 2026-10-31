@@ -617,6 +617,29 @@ mod tests {
         assert_eq!(receipt.verify(&key), Err(VerifyError::SignatureMismatch));
     }
 
+    /// `as_str` is the signature a consumer compares and stores: the
+    /// HMAC-SHA256 of the canonical payload hash as 64 lowercase hex
+    /// characters, identical to what `Display` and the serialized receipt carry.
+    #[test]
+    fn test_signature_as_str_is_the_hmac_hex_of_the_payload() {
+        let payload = sample_payload();
+        let key = operator_key();
+        let receipt = Receipt::sign(&payload, &key);
+
+        let expected = hex_encode(&key.hmac_sha256(payload.canonical_hash().as_bytes()));
+        assert_eq!(receipt.signature.as_str(), expected);
+        assert_eq!(receipt.signature.as_str().len(), 64);
+        assert!(receipt
+            .signature
+            .as_str()
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert_eq!(receipt.signature.to_string(), receipt.signature.as_str());
+
+        let wire = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(wire["signature"], receipt.signature.as_str());
+    }
+
     // -- Evidence hash --
 
     #[test]

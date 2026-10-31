@@ -1361,6 +1361,71 @@ mod tests {
         Ok(())
     }
 
+    /// The gate and reason tokens are the additive wire diagnostic of a remote
+    /// harvest refusal. The expected pairs are the table in
+    /// `docs/specs/remote-harvest-contract.md`, so a renamed or blanked token
+    /// breaks the clients that match on it.
+    #[test]
+    fn authorization_cause_gate_and_reason_are_the_contract_tokens() {
+        use HarvestAuthorizationCause as Cause;
+        let contract = [
+            (Cause::ScopeMissing, "scope", "harvest_scope_missing"),
+            (
+                Cause::CredentialExpired,
+                "credential",
+                "harvest_credential_expired",
+            ),
+            (
+                Cause::CredentialRevoked,
+                "credential",
+                "harvest_credential_revoked",
+            ),
+            (Cause::BindingChanged, "binding", "harvest_binding_changed"),
+            (Cause::Disabled, "policy", "harvest_disabled"),
+            (Cause::PolicyConflict, "policy", "harvest_policy_conflict"),
+            (Cause::KeyMissing, "key", "harvest_key_missing"),
+            (Cause::GrantMissing, "grant", "harvest_grant_missing"),
+            (Cause::GrantInvalid, "grant", "harvest_grant_invalid"),
+            (
+                Cause::SignatureInvalid,
+                "grant",
+                "harvest_signature_invalid",
+            ),
+            (Cause::GrantMismatch, "grant", "harvest_grant_mismatch"),
+            (Cause::GrantExpired, "grant", "harvest_grant_expired"),
+            (Cause::GrantRevoked, "grant", "harvest_grant_revoked"),
+            (Cause::FactsChanged, "facts", "harvest_facts_changed"),
+            (
+                Cause::FactsUnavailable,
+                "facts",
+                "harvest_facts_unavailable",
+            ),
+            (
+                Cause::RecoveryRequired,
+                "receipt",
+                "harvest_recovery_required",
+            ),
+            (
+                Cause::EffectUnsupported,
+                "executor",
+                "harvest_effect_unsupported",
+            ),
+            (
+                Cause::OverrideRequiresRatification,
+                "override",
+                "harvest_override_requires_ratification",
+            ),
+        ];
+        for (cause, gate, reason) in contract {
+            assert_eq!(cause.gate(), gate, "gate of {cause:?}");
+            assert_eq!(cause.reason(), reason, "reason of {cause:?}");
+        }
+        let mut reasons: Vec<_> = contract.iter().map(|(cause, ..)| cause.reason()).collect();
+        reasons.sort_unstable();
+        reasons.dedup();
+        assert_eq!(reasons.len(), contract.len(), "one reason per cause");
+    }
+
     /// A stand-in operator key that accepts everything, so the tests below
     /// exercise the *fact-matching* half rather than the crypto. The crypto
     /// half is asserted end-to-end against a real minisign signature in
