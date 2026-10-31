@@ -530,6 +530,31 @@ mod tests {
         }
     }
 
+    // --- Voyant colours ---
+
+    /// A renderer paints each voyant with this CSS colour, so every state needs
+    /// its own well-formed `#RRGGBB` value, and it is the one the vitality
+    /// strip documents: grey for off, green, amber and red for the rest.
+    #[test]
+    fn voyant_color_hex_is_a_distinct_css_colour_per_state() {
+        let palette = [
+            (VoyantState::Off, "#888888"),
+            (VoyantState::Green, "#19C37D"),
+            (VoyantState::Amber, "#F0A202"),
+            (VoyantState::Red, "#FF1744"),
+        ];
+        for (state, hex) in palette {
+            assert_eq!(state.color_hex(), hex, "colour of {state}");
+            assert_eq!(hex.len(), 7);
+            assert!(hex.starts_with('#'));
+            assert!(hex[1..].bytes().all(|b| b.is_ascii_hexdigit()));
+        }
+        let mut colours: Vec<_> = palette.iter().map(|(s, _)| s.color_hex()).collect();
+        colours.sort_unstable();
+        colours.dedup();
+        assert_eq!(colours.len(), 4, "no two states share a colour");
+    }
+
     // --- GREEN branch ---
 
     #[test]

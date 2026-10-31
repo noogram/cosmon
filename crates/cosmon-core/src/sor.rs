@@ -869,6 +869,42 @@ mod tests {
         }
     }
 
+    /// Every term of the score is its observation times its weight: quality is
+    /// the calibration per-mille scaled by the quality weight, so a calibrated
+    /// seat outranks an uncalibrated one by exactly that product.
+    #[test]
+    fn score_candidate_multiplies_each_observation_by_its_weight() {
+        let weights = ScoreWeights {
+            quality: 4,
+            headroom: 7,
+            availability: 3,
+            cost: 2,
+            stale_penalty: 1_000,
+        };
+        let mut seat = candidate("claude", Some("claude-opus-4-8"));
+        seat.calibration = fresh_calib(750);
+        seat.budget_cap = Some(10);
+        seat.consumption = LocalConsumption::Available(4);
+        seat.availability = fresh_avail(900);
+        seat.cost = fresh_cost(100);
+
+        let score = score_candidate(&seat, &weights);
+        assert_eq!(score.quality_term, 3_000, "750 per-mille x weight 4");
+        assert_eq!(score.headroom_term, 42, "6 units of headroom x weight 7");
+        assert_eq!(score.availability_term, 2_700, "900 per-mille x weight 3");
+        assert_eq!(score.cost_term, -200, "cost band 100 negated x weight 2");
+        assert_eq!(score.stale_penalty, 0);
+        assert_eq!(score.total, 3_000 + 42 + 2_700 - 200);
+
+        let default_score = score_candidate(&seat, &ScoreWeights::default());
+        assert_eq!(default_score.quality_term, 7_500, "750 x default weight 10");
+
+        let mut uncalibrated = seat.clone();
+        uncalibrated.calibration =
+            CalibrationObs::new(None, None, None, Duration::hours(24), now());
+        assert_eq!(score_candidate(&uncalibrated, &weights).quality_term, 0);
+    }
+
     #[test]
     fn candidate_id_is_adapter_or_adapter_slash_model() {
         assert_eq!(candidate("codex", None).id(), "codex");

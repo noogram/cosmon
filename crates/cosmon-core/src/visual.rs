@@ -542,6 +542,55 @@ mod tests {
         assert!((16..=231).contains(&idx));
     }
 
+    /// The index is `16 + 36*r + 6*g + b` over the cube levels
+    /// `[0, 95, 135, 175, 215, 255]`, so each channel moves the index by its own
+    /// weight. The pairs are standard xterm-256 colours: corners of the cube,
+    /// the pure axes, and mixed values where r, g and b all differ.
+    #[test]
+    fn truecolor_256_cube_maps_known_colours_to_xterm_indices() {
+        let known = [
+            // Corners and pure axes.
+            ((0, 0, 0), 16),
+            ((255, 255, 255), 231),
+            ((255, 0, 0), 196),
+            ((0, 255, 0), 46),
+            ((0, 0, 255), 21),
+            ((255, 255, 0), 226),
+            ((0, 255, 255), 51),
+            ((255, 0, 255), 201),
+            // Mixed levels, so a swapped or re-weighted channel shows.
+            ((255, 135, 0), 208),
+            ((0, 135, 255), 33),
+            ((95, 0, 175), 55),
+            ((95, 135, 175), 67),
+            ((215, 175, 135), 180),
+            // Mid grey sits on level 2 (135).
+            ((135, 135, 135), 102),
+        ];
+        for (rgb, index) in known {
+            assert_eq!(truecolor_to_256_cube(rgb), index, "xterm index of {rgb:?}");
+        }
+    }
+
+    /// Channels that fall between cube levels round to the nearest level, not
+    /// to the nearest lower one, and the result stays inside the 16..=231 cube.
+    #[test]
+    fn truecolor_256_cube_rounds_each_channel_to_the_nearest_level() {
+        // 100 is 5 above 95 and 35 below 135; 128 is 7 below 135 and 33 above 95.
+        assert_eq!(truecolor_to_256_cube((100, 100, 100)), 16 + 36 + 6 + 1);
+        assert_eq!(truecolor_to_256_cube((128, 128, 128)), 102);
+        // 250 rounds up to 255 (level 5), 20 rounds down to 0.
+        assert_eq!(truecolor_to_256_cube((250, 20, 250)), 16 + 180 + 5);
+        for r in [0u8, 40, 100, 128, 200, 255] {
+            for g in [0u8, 60, 130, 180, 255] {
+                for b in [0u8, 90, 140, 220, 255] {
+                    let index = truecolor_to_256_cube((r, g, b));
+                    assert!((16..=231).contains(&index), "{:?} -> {index}", (r, g, b));
+                }
+            }
+        }
+    }
+
     #[test]
     fn default_token_is_safe() {
         let t = VisualToken::default();

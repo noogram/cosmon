@@ -987,6 +987,53 @@ mod tests {
         assert_eq!(tlc.run_count(), 0);
         assert!(!gate(&status, false).germinates(), "fail-closed");
     }
+    // --- whole-identifier search -------------------------------------------
+
+    /// A property name counts as spelled only as a whole identifier: it is
+    /// found at the very start and at the very end of the proof text, when it
+    /// is the whole text, and next to punctuation, but never inside a longer
+    /// identifier (a letter, digit or underscore on either side).
+    #[test]
+    fn mentions_identifier_matches_whole_identifiers_only() {
+        // Start, end, and the whole text (the exact length boundary).
+        assert!(mentions_identifier(b"Termination == TRUE", "Termination"));
+        assert!(mentions_identifier(b"PROPERTY Termination", "Termination"));
+        assert!(mentions_identifier(b"Termination", "Termination"));
+        // Punctuation and whitespace are boundaries on both sides.
+        assert!(mentions_identifier(b"(Termination)", "Termination"));
+        assert!(mentions_identifier(b"a\nTermination\tb", "Termination"));
+        // A later whole occurrence is found after a rejected embedded one.
+        assert!(mentions_identifier(
+            b"XTermination Termination",
+            "Termination"
+        ));
+        assert!(mentions_identifier(
+            b"Termination_x Termination",
+            "Termination"
+        ));
+
+        // A letter, digit or underscore on either side makes it part of another name.
+        assert!(!mentions_identifier(b"XTermination", "Termination"));
+        assert!(!mentions_identifier(b"Terminations", "Termination"));
+        assert!(!mentions_identifier(b"Termination2", "Termination"));
+        assert!(!mentions_identifier(b"2Termination", "Termination"));
+        assert!(!mentions_identifier(b"_Termination", "Termination"));
+        assert!(!mentions_identifier(b"Termination_", "Termination"));
+        assert!(!mentions_identifier(b"PreTerminationPost", "Termination"));
+    }
+
+    /// Nothing is found when there is nothing to find: an empty name never
+    /// matches (the check skips blank names before it asks), and a proof text
+    /// shorter than the name cannot contain it.
+    #[test]
+    fn mentions_identifier_finds_nothing_for_empty_or_oversized_names() {
+        assert!(!mentions_identifier(b"Termination == TRUE", ""));
+        assert!(!mentions_identifier(b"", ""));
+        assert!(!mentions_identifier(b"", "Termination"));
+        assert!(!mentions_identifier(b"Termina", "Termination"));
+        assert!(!mentions_identifier(b"Terminatio", "Termination"));
+    }
+
     // --- declared properties ----------------------------------------------
 
     /// A seal that claims a property its proof never spells is refused

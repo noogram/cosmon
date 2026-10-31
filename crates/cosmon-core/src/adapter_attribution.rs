@@ -1794,6 +1794,69 @@ mod tests {
         assert_eq!(a.compact_cell(), "codex~>gpt-4o-2024-11-20 [config]");
     }
 
+    /// `realized_drift_display` is the segment a rich surface paints after the
+    /// `~>` of the compact cell: the observed trajectory with a pin-equal head
+    /// dropped, `None` when the run agrees with its pin or nothing was observed.
+    #[test]
+    fn realized_drift_display_is_the_segment_after_the_arrow() {
+        let cli = || {
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            )
+        };
+        let pin = |model: &str| {
+            model_selected(
+                Some(model),
+                ModelSelectionSource::Flag { flag: model.into() },
+            )
+        };
+
+        // Pinned opus, ran opus then sonnet: only the drift target shows.
+        let drifted = AdapterAttribution::fold(&[
+            cli(),
+            pin("claude-opus-4-8"),
+            model_observed("claude-opus-4-8"),
+            model_observed("claude-sonnet-5"),
+        ]);
+        assert_eq!(
+            drifted.realized_drift_display().as_deref(),
+            Some("claude-sonnet-5")
+        );
+        assert!(drifted.compact_cell().contains("~>claude-sonnet-5"));
+
+        // Pinned opus, ran sonnet then haiku: the whole trajectory, joined by `->`.
+        let replaced = AdapterAttribution::fold(&[
+            cli(),
+            pin("claude-opus-4-8"),
+            model_observed("claude-sonnet-5"),
+            model_observed("claude-haiku-5"),
+        ]);
+        assert_eq!(
+            replaced.realized_drift_display().as_deref(),
+            Some("claude-sonnet-5->claude-haiku-5")
+        );
+
+        // No pin, a model was observed: the model id itself.
+        let unpinned = AdapterAttribution::fold(&[cli(), model_observed("gpt-4o-2024-11-20")]);
+        assert_eq!(
+            unpinned.realized_drift_display().as_deref(),
+            Some("gpt-4o-2024-11-20")
+        );
+
+        // Agreement with the pin, and no observation at all: nothing to show.
+        let agreed = AdapterAttribution::fold(&[
+            cli(),
+            pin("claude-opus-4-8"),
+            model_observed("claude-opus-4-8"),
+        ]);
+        assert_eq!(agreed.realized_drift_display(), None);
+        let unobserved = AdapterAttribution::fold(&[cli(), pin("claude-opus-4-8")]);
+        assert_eq!(unobserved.realized_drift_display(), None);
+    }
+
     /// The realized fold reads ONLY `ModelObserved` — never the pin. A pinned
     /// dispatch with no observation must NOT surface the pin as realized: the
     /// structural no-clobber / never-back-fill guard (sibling of
