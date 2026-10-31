@@ -21,6 +21,8 @@ this stage.
 
 - Add container witnesses for mission harvest grants and remote harvest refusals. (#128)
 
+- Add container witnesses for the legacy `required = true` upgrade and for service crashes inside the documented gate and `post_merge` windows. (#128)
+
 - Document bot-reader enrollment, transfer, 409 recovery and verification, with script help and an offline runbook rehearsal. (#146)
 
 - Bot readers durably stop after HTTP/API 409 until an explicit local reconciliation; fenced and transferred sources cannot reconcile. (#146)
