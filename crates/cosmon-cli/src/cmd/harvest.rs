@@ -111,6 +111,9 @@ pub enum HarvestOutcome {
     HarvestFailed,
     /// A supervised launch has no validated terminal evidence; preserve all work.
     ReceiptUnknown,
+    /// The galaxy sets `[harvest] on_pane_died = "mark"`: the exit was
+    /// recorded and `cs done` was not run. The pilot harvests.
+    Marked,
 }
 
 impl HarvestOutcome {
@@ -122,6 +125,7 @@ impl HarvestOutcome {
             Self::Harvested => "harvested",
             Self::HarvestFailed => "harvest_failed",
             Self::ReceiptUnknown => "receipt_unknown",
+            Self::Marked => "marked",
         }
     }
 }
@@ -139,6 +143,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         args.molecule
     );
 
+    run_with_config(ctx, args, &ctx.config_path()).map(|_| ())
+}
+
+/// Body of [`run`] with the galaxy config path made explicit, so a test can
+/// point it at a fixture instead of the working directory's galaxy.
+fn run_with_config(
+    ctx: &Context,
+    args: &Args,
+    config_path: &std::path::Path,
+) -> anyhow::Result<HarvestOutcome> {
     let mol_id = MoleculeId::new(&args.molecule)?;
     let state_dir = ctx.state_dir();
     let store = ctx.store();
@@ -172,7 +186,15 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
-    let outcome = harvest_one(store.as_ref(), &state_dir, &mol_id, args.dry_run)?;
+    // `mark` stops after the recording above. A config that fails to load
+    // (including an unknown `on_pane_died`) is an error, never a merge.
+    let outcome = if args.from_pane_died
+        && pane_died_policy(config_path)? == cosmon_core::config::OnPaneDied::Mark
+    {
+        HarvestOutcome::Marked
+    } else {
+        harvest_one(store.as_ref(), &state_dir, &mol_id, args.dry_run)?
+    };
 
     if ctx.json {
         let payload = serde_json::json!({
@@ -191,7 +213,19 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             "cs done failed for {mol_id} — see event log"
         ));
     }
-    Ok(())
+    Ok(outcome)
+}
+
+/// Read `[harvest] on_pane_died` from the galaxy config.
+///
+/// A missing config file yields the default (`merge`); a file that does not
+/// parse is an error.
+fn pane_died_policy(
+    config_path: &std::path::Path,
+) -> anyhow::Result<cosmon_core::config::OnPaneDied> {
+    Ok(cosmon_filestore::load_project_config(config_path)?
+        .harvest
+        .on_pane_died)
 }
 
 /// Inspect retained scrollback after the process exit and keep any observed
@@ -909,6 +943,95 @@ mod tests {
         let mol = sample_mol(&mid, status, merged);
         store.save_molecule(&mid, &mol).unwrap();
         (tmp, store, mid, state_dir)
+    }
+
+    /// Usage example for `[harvest] on_pane_died`: run the pane-died path of
+    /// `cs harvest` on a completed, unmerged molecule under a galaxy config
+    /// holding `config_toml` (or none), and return what it decided.
+    ///
+    /// `--dry-run` keeps the `merge` path from exec'ing a real `cs done`: it
+    /// stops where `cs done` would start, which is what tells it from `mark`.
+    fn pane_died(config_toml: Option<&str>) -> anyhow::Result<HarvestOutcome> {
+        let (tmp, store, mid, _state_dir) = setup(MoleculeStatus::Completed, false);
+        let config = tmp.path().join("config.toml");
+        if let Some(text) = config_toml {
+            std::fs::write(&config, text)?;
+        }
+        let ctx = Context {
+            verbose: false,
+            json: true,
+            config: Some(tmp.path().to_path_buf()),
+        };
+        let args = Args {
+            molecule: mid.to_string(),
+            dry_run: true,
+            from_pane_died: true,
+            exit_code: Some("0".to_owned()),
+            worker_launch: None,
+            terminal_identity: None,
+        };
+        let outcome = run_with_config(&ctx, &args, &config)?;
+        // Whatever the policy, the exit is recorded and nothing was merged:
+        // the molecule is still in the harvest queue.
+        let after = store.load_molecule(&mid)?;
+        assert!(after.merged_at.is_none() && !after.archived);
+        assert!(crate::cmd::peek::PhaseFilter::is_harvestable(
+            after.status,
+            after.archived
+        ));
+        let events = std::fs::read_to_string(tmp.path().join("events.jsonl"))?;
+        assert!(events.contains("WorkerExited") || events.contains("worker_exited"));
+        Ok(outcome)
+    }
+
+    #[test]
+    fn mark_policy_records_the_exit_and_stops_before_cs_done() {
+        let outcome = pane_died(Some("[harvest]\non_pane_died = \"mark\"\n")).unwrap();
+        assert!(matches!(outcome, HarvestOutcome::Marked));
+    }
+
+    #[test]
+    fn merge_policy_reaches_cs_done() {
+        let outcome = pane_died(Some("[harvest]\non_pane_died = \"merge\"\n")).unwrap();
+        assert!(matches!(outcome, HarvestOutcome::DryRun));
+    }
+
+    #[test]
+    fn absent_policy_behaves_as_merge() {
+        assert!(matches!(pane_died(None).unwrap(), HarvestOutcome::DryRun));
+        let other = pane_died(Some("[worker]\non_complete = \"commit\"\n")).unwrap();
+        assert!(matches!(other, HarvestOutcome::DryRun));
+    }
+
+    #[test]
+    fn invalid_policy_is_refused() {
+        let err = pane_died(Some("[harvest]\non_pane_died = \"merg\"\n"))
+            .expect_err("an unknown value must be refused");
+        assert!(format!("{err:#}").contains("on_pane_died"), "{err:#}");
+    }
+
+    /// Without `--from-pane-died` (a patrol sweep or a manual run) `mark` does
+    /// not apply: the setting governs the pane-died hook only.
+    #[test]
+    fn mark_policy_does_not_affect_a_manual_harvest() {
+        let (tmp, _store, mid, _d) = setup(MoleculeStatus::Completed, false);
+        let config = tmp.path().join("config.toml");
+        std::fs::write(&config, "[harvest]\non_pane_died = \"mark\"\n").unwrap();
+        let ctx = Context {
+            verbose: false,
+            json: true,
+            config: Some(tmp.path().to_path_buf()),
+        };
+        let args = Args {
+            molecule: mid.to_string(),
+            dry_run: true,
+            from_pane_died: false,
+            exit_code: None,
+            worker_launch: None,
+            terminal_identity: None,
+        };
+        let outcome = run_with_config(&ctx, &args, &config).unwrap();
+        assert!(matches!(outcome, HarvestOutcome::DryRun));
     }
 
     #[test]
