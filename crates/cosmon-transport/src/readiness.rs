@@ -1533,6 +1533,12 @@ pub fn agy_output_is_live(output: &str) -> bool {
         if !trimmed.starts_with('{') {
             return false;
         }
+        // `capture-pane -p` (no `-J`) hard-wraps agy's very wide init line,
+        // so a captured row is a fragment that does not parse. The prefix of
+        // agy's own init event is still positive evidence.
+        if trimmed.starts_with("{\"event\":\"init\"") {
+            return true;
+        }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             return false;
         };
@@ -3320,6 +3326,23 @@ mod tests {
     fn agy_output_is_live_on_init_event() {
         let output = "some unrelated text\n{\"event\":\"init\",\"conversation_id\":\"123\",\"init\":{\"model\":\"gemini\"}}\n";
         assert!(agy_output_is_live(output));
+    }
+
+    #[test]
+    fn agy_output_is_live_on_hard_wrapped_init_event() {
+        let init = format!(
+            "{{\"event\":\"init\",\"conversation_id\":\"c1\",\"init\":{{\"model\":\"m\",\"cwd\":\"/w\",\"tools\":[{}]}}}}",
+            (0..40).map(|i| format!("\"tool_{i}\"")).collect::<Vec<_>>().join(",")
+        );
+        let wrapped: Vec<String> = init
+            .as_bytes()
+            .chunks(80)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect();
+        assert!(wrapped.len() > 2);
+        assert!(serde_json::from_str::<serde_json::Value>(&wrapped[0]).is_err());
+        assert!(agy_output_is_live(&wrapped.join("\n")));
+        assert!(!agy_output_is_live("{\"event\":\"step_update\",\"x\":1"));
     }
 
     #[test]

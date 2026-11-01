@@ -33,6 +33,9 @@ pub use crate::spawn::AdapterTelemetry;
 /// agy transport emits.
 pub const ADAPTER_NAME: &str = "agy";
 
+/// The native conversation identity agy would resume if inherited.
+const NATIVE_IDENTITY_VAR: &str = "ANTIGRAVITY_CONVERSATION_ID";
+
 /// Error type for agy adapter operations.
 #[derive(Debug, thiserror::Error)]
 pub enum AgyError {
@@ -107,9 +110,10 @@ pub fn spawn_agy_session_witnessed(
 ) -> Result<Option<cosmon_core::terminal::TerminalIdentity>, AgyError> {
     let cmd = build_agy_command(config, mol_dir);
 
-    // Filter out ANTIGRAVITY_CONVERSATION_ID to prevent inheriting a conversation
+    // Drop an explicit entry too; the inherited value is cleared by
+    // `env -u` in the launched command (see `build_agy_command`).
     let mut env = config.environment.clone();
-    env.retain(|(k, _)| k != "ANTIGRAVITY_CONVERSATION_ID");
+    env.retain(|(k, _)| k != NATIVE_IDENTITY_VAR);
 
     if let Some(t) = &config.telemetry {
         emit_worker_spawn_attempted(
@@ -132,10 +136,18 @@ pub fn spawn_agy_session_witnessed(
 
 /// Build the shell command line for tmux.
 ///
-/// Shape: `agy --print-timeout 0 --output-format stream-json [--model <model>] --dangerously-skip-permissions -p '<prompt>' 2>&1 | tee -a "$COSMON_MOL_DIR/agy-stream.jsonl"`
+/// The pipeline runs under `set -o pipefail` so the pane's exit status is
+/// agy's, not `tee`'s, and agy is launched through `env -u
+/// ANTIGRAVITY_CONVERSATION_ID` so a value inherited from the tmux server
+/// environment never reaches it.
+///
+/// Shape: `set -o pipefail; env -u ANTIGRAVITY_CONVERSATION_ID agy --print-timeout 0 --output-format stream-json [--model <model>] --dangerously-skip-permissions -p '<prompt>' 2>&1 | tee -a "$COSMON_MOL_DIR/agy-stream.jsonl"`
 #[must_use]
 pub fn build_agy_command(config: &AgySessionConfig, mol_dir: &Path) -> String {
-    let mut cmd = shell_escape(&config.binary.to_string_lossy());
+    let mut cmd = format!(
+        "set -o pipefail; env -u {NATIVE_IDENTITY_VAR} {}",
+        shell_escape(&config.binary.to_string_lossy())
+    );
     cmd.push_str(" --print-timeout 0 --output-format stream-json");
 
     if let Some(ref model) = config.model {
@@ -241,4 +253,60 @@ fn shell_escape(s: &str) -> String {
         return s.to_owned();
     }
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(binary: &str) -> AgySessionConfig {
+        AgySessionConfig {
+            socket: "s".into(),
+            session_name: "n".into(),
+            work_dir: "/w".into(),
+            binary: PathBuf::from(binary),
+            prompt: Some("hi".into()),
+            model: None,
+            telemetry: None,
+            pre_existing_worker: None,
+            environment: vec![],
+        }
+    }
+
+    #[test]
+    fn command_clears_inherited_native_identity() {
+        let cmd = build_agy_command(&cfg("agy"), Path::new("/m"));
+        assert!(
+            cmd.contains("env -u ANTIGRAVITY_CONVERSATION_ID agy "),
+            "{cmd}"
+        );
+    }
+
+    #[test]
+    fn command_enables_pipefail_before_the_pipeline() {
+        let cmd = build_agy_command(&cfg("agy"), Path::new("/m"));
+        assert!(cmd.starts_with("set -o pipefail; "), "{cmd}");
+    }
+
+    #[test]
+    fn pipeline_exit_status_is_agys_not_tees() {
+        let dir = std::env::temp_dir().join(format!("agy-pipefail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cmd = build_agy_command(&cfg("false"), &dir);
+        let status = std::process::Command::new("sh")
+            .args(["-c", &cmd])
+            .status()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(status.code(), Some(1), "failed agy must not read as exit 0");
+    }
+
+    #[test]
+    fn receipt_path_is_under_the_molecule_dir() {
+        let cmd = build_agy_command(&cfg("agy"), Path::new("/state/mol-1"));
+        assert!(
+            cmd.contains("tee -a '/state/mol-1/agy-stream.jsonl'"),
+            "{cmd}"
+        );
+    }
 }
