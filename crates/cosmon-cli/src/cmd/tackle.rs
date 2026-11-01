@@ -4983,6 +4983,7 @@ pub(super) fn spawn_and_prompt(
             wid,
             session_name,
             worktree_path,
+            mol_state_dir,
             prompt,
             adapter_entry,
             preferred_model,
@@ -7859,6 +7860,7 @@ fn spawn_agy_and_prompt(
     wid: &cosmon_core::id::WorkerId,
     session_name: &str,
     worktree_path: &std::path::Path,
+    mol_dir: &std::path::Path,
     prompt: &str,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
@@ -7884,10 +7886,7 @@ fn spawn_agy_and_prompt(
         effective_model.as_deref(),
     );
 
-    let mol_dir = std::env::var("COSMON_MOL_DIR")
-        .map_or_else(|_| worktree_path.to_path_buf(), std::path::PathBuf::from);
-
-    *terminal = agy::spawn_agy_session_witnessed(&config, &mol_dir)
+    *terminal = agy::spawn_agy_session_witnessed(&config, mol_dir)
         .map_err(|e| anyhow::anyhow!("cs tackle: agy spawn failed: {e}"))?;
 
     let probe = cosmon_transport::readiness::AgyProbe;
