@@ -24,6 +24,7 @@ configuration surface without reading cosmon source code.
 | `[gates]` | Verification gate commands (language-agnostic) | no |
 | `[archive]` | Durable proof-of-work archive: on/off and retention | no |
 | `[adapters.codex]` / `[adapters.opencode]` | External CLI launch policy and optional gateway binding | no |
+| `[harvest]` | What the `pane-died` hook does after recording a worker's exit | no |
 
 All sections except `[project]` are optional and default to sensible
 values. Missing sections never produce an error.
@@ -163,6 +164,28 @@ an environment variable; its value is injected into the worker's tmux session
 and is not persisted. See the
 [external CLI gateway guide](guides/external-cli-gateway-workers.md) for the
 native provider mapping, protocol limits, and usage-accounting differences.
+
+## `[harvest].on_pane_died` — what happens when a worker's pane ends
+
+```toml
+[harvest]
+on_pane_died = "mark"   # "merge" (default) | "mark"
+```
+
+When a worker's tmux pane ends, the `pane-died` hook records the exit and then
+acts on this setting. The `opencode` and `agy` adapters run a one-shot command,
+so their pane ends as soon as the run ends.
+
+| Value | After the exit is recorded |
+|-------|----------------------------|
+| `merge` (default) | The hook runs `cs done`: merge, teardown, archive. No pilot reviews the worker first. |
+| `mark` | The hook stops. The molecule stays completed and unmerged, listed by `cs status` and `cs peek --phase harvestable` until a pilot runs `cs done`. |
+
+Use `mark` in a galaxy where a pilot reviews workers before they merge. An
+absent section means `merge`. An unknown value (for example `"merg"`) is
+refused when the config loads, and the hook then fails instead of merging.
+The setting is read when the hook runs, so a change applies to panes that are
+already running.
 
 ### Retired sections
 
