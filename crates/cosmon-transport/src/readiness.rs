@@ -1521,6 +1521,54 @@ impl LiveProbe for CodexProbe {
 /// best-effort across opencode CLI versions; if a future release renames the
 /// preamble, widen it here rather than loosening the probe to accept a bare
 /// live session.
+/// `true` when raw terminal `output` carries positive evidence that a live
+/// `agy` process printed it.
+///
+/// Positive evidence is a line that parses as JSON and represents the `init`
+/// event of the agy stream-json output.
+#[must_use]
+pub fn agy_output_is_live(output: &str) -> bool {
+    output.lines().any(|line| {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('{') {
+            return false;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            return false;
+        };
+        v.get("event").and_then(|e| e.as_str()) == Some("init") && v.get("init").is_some()
+    })
+}
+
+/// The `agy` [`LiveProbe`] — agy's implementation of the
+/// substrate-agnostic readiness contract.
+///
+/// Zero-sized. It answers the one question every probe answers by capturing
+/// the pane scrollback and asking [`agy_output_is_live`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AgyProbe;
+
+impl LiveProbe for AgyProbe {
+    fn observe(
+        &self,
+        backend: &dyn TransportBackend,
+        worker_id: &WorkerId,
+    ) -> Result<Liveness, TransportError> {
+        if let Ok(output) = backend.capture_output(worker_id, 40) {
+            if agy_output_is_live(&output) {
+                return Ok(Liveness::Live);
+            }
+        }
+
+        let alive = backend.is_alive(worker_id)?;
+        if alive {
+            Ok(Liveness::Indeterminate)
+        } else {
+            Ok(Liveness::Dead)
+        }
+    }
+}
+
 mod opencode_markers {
     /// The opencode banner / tool name. The single most reliable proof the
     /// binary launched — it appears in the startup preamble, the version
@@ -3264,6 +3312,57 @@ mod tests {
         let ghost = cosmon_core::id::WorkerId::new("ghost-opencode").unwrap();
 
         let probe = OpencodeProbe;
+        assert_eq!(probe.observe(&backend, &ghost).unwrap(), Liveness::Dead);
+        assert_probe_refuses_dead_worker(&probe, &backend, &ghost);
+    }
+
+    #[test]
+    fn agy_output_is_live_on_init_event() {
+        let output = "some unrelated text\n{\"event\":\"init\",\"conversation_id\":\"123\",\"init\":{\"model\":\"gemini\"}}\n";
+        assert!(agy_output_is_live(output));
+    }
+
+    #[test]
+    fn agy_output_not_live_on_unrelated_json() {
+        assert!(!agy_output_is_live("{\"event\":\"step_update\"}"));
+        assert!(!agy_output_is_live("{\"name\":\"test\"}"));
+        assert!(!agy_output_is_live("plain text"));
+        assert!(!agy_output_is_live(""));
+    }
+
+    #[test]
+    fn agy_probe_observes_live_on_init_event() {
+        use crate::MockBackend;
+
+        let backend = MockBackend::new();
+        let agent = cosmon_core::transport::AgentDefinition {
+            id: cosmon_core::id::AgentId::new("agy-live").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "agy".to_owned(),
+            args: vec![],
+            cwd: None,
+        };
+        let worker = backend
+            .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
+            .unwrap();
+        backend.set_canned_output("{\"event\":\"init\",\"conversation_id\":\"123\",\"init\":{}}\n");
+
+        let probe = AgyProbe;
+        assert_eq!(
+            probe.observe(&backend, &worker.id).unwrap(),
+            Liveness::Live,
+            "an agy init event is positive evidence of liveness"
+        );
+    }
+
+    #[test]
+    fn agy_probe_refuses_dead_worker() {
+        use crate::MockBackend;
+
+        let backend = MockBackend::new();
+        let ghost = cosmon_core::id::WorkerId::new("ghost-agy").unwrap();
+
+        let probe = AgyProbe;
         assert_eq!(probe.observe(&backend, &ghost).unwrap(), Liveness::Dead);
         assert_probe_refuses_dead_worker(&probe, &backend, &ghost);
     }

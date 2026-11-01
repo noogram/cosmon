@@ -26,6 +26,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agy;
 pub mod aider;
 pub mod beads;
 pub mod briefing_delivery;

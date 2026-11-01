@@ -390,6 +390,12 @@ pub fn default_registry() -> PaneSignatureRegistry {
             "bun".to_owned(),
         ],
     );
+    // `agy` (Google Antigravity CLI) installs as `agy`. External-CLI sibling of
+    // opencode. The binary name is the signature.
+    r.register(
+        crate::agy::ADAPTER_NAME,
+        vec![crate::agy::ADAPTER_NAME.to_owned()],
+    );
     // In-process Direct-API adapters (ADR-100). Single sentinel each;
     // dispatch site reads the sentinel to skip tmux readiness.
     r.register("openai", vec!["openai".to_owned()]);
@@ -693,6 +699,13 @@ mod tests {
         // Codex must not silently collide with claude or aider.
         assert!(!r.matches(crate::codex::ADAPTER_NAME, "claude"));
         assert!(!r.matches(crate::codex::ADAPTER_NAME, "aider"));
+    }
+
+    #[test]
+    fn default_registry_knows_agy_signatures() {
+        let r = default_registry();
+        assert!(r.matches(crate::agy::ADAPTER_NAME, "agy"));
+        assert!(!r.matches(crate::agy::ADAPTER_NAME, "opencode"));
     }
 
     /// C4 (PR-3): the default registry must match every variant of
