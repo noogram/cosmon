@@ -490,6 +490,24 @@ test "${CODEX_SESSION_ID+x}" != x
 }
 
 #[test]
+fn launcher_clears_the_inherited_agy_native_variable_before_provider_entry() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    provider(
+        tmp.path(),
+        "agy",
+        r#"
+test "${ANTIGRAVITY_CONVERSATION_ID+x}" != x
+"#,
+    );
+    success(
+        launch(tmp.path(), "agy")
+            .env("ANTIGRAVITY_CONVERSATION_ID", "stale-native-conversation")
+            .output()
+            .expect("launch with stale native identity"),
+    );
+}
+
+#[test]
 fn codex_native_environment_replaces_the_launch_identity_for_callbacks() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
