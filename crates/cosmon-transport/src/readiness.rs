@@ -1532,15 +1532,17 @@ mod opencode_markers {
     pub const MODEL: &str = "model:";
     /// The session/share line opencode prints when it starts a run.
     pub const SHARE: &str = "share:";
-    /// The mode line opencode ≥ 2.2.5 prints as its run preamble instead of
-    /// the older labelled lines above: `> build · gemini-3.1-pro-preview`.
-    /// The mode word varies across releases and configurations (build, plan,
-    /// …), so the marker is the middle-dot separator between the mode and the
-    /// model — rare in a worker pane, and stable where the surrounding words
-    /// are not. Measured on opencode 2.2.5 (2026-10-31): a real run in a tmux
-    /// pane prints *only* this line and the tool arrows, none of the older
-    /// markers.
-    pub const MODE_LINE: &str = " · ";
+    /// Line prefix of the mode line opencode ≥ 2.2.5 prints as its run
+    /// preamble instead of the older labelled lines above:
+    /// `> build · gemini-3.1-pro-preview`. Measured on opencode 2.2.5
+    /// (2026-10-31): a real run in a tmux pane prints *only* this line and
+    /// the tool arrows, none of the older markers.
+    pub const MODE_PREFIX: &str = "> ";
+    /// Separator between the mode word and the model in that line. On its
+    /// own it is far too common (status bars, lists, error text), so it only
+    /// counts inside a full `> <mode> · <model>` line — see
+    /// [`super::is_opencode_mode_line`].
+    pub const MODE_SEPARATOR: &str = " · ";
 }
 
 /// `true` when raw terminal `output` carries positive evidence that a live
@@ -1560,7 +1562,21 @@ pub fn opencode_output_is_live(output: &str) -> bool {
         || haystack.contains(opencode_markers::WORKDIR)
         || haystack.contains(opencode_markers::MODEL)
         || haystack.contains(opencode_markers::SHARE)
-        || haystack.contains(opencode_markers::MODE_LINE)
+        || haystack.lines().any(is_opencode_mode_line)
+}
+
+/// `true` when `line` is the opencode ≥ 2.2.5 run preamble:
+/// `> <mode> · <model>` — a `> ` prefix, a single non-empty mode word, the
+/// ` · ` separator, then a non-empty model token. Anything else containing
+/// a middle dot (`Ready · 3 files`) is not opencode output.
+fn is_opencode_mode_line(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix(opencode_markers::MODE_PREFIX) else {
+        return false;
+    };
+    let Some((mode, model)) = rest.split_once(opencode_markers::MODE_SEPARATOR) else {
+        return false;
+    };
+    !mode.is_empty() && !mode.contains(char::is_whitespace) && !model.trim().is_empty()
 }
 
 /// The `opencode run` [`LiveProbe`] — opencode's implementation of the
@@ -3160,6 +3176,19 @@ mod tests {
             "> build · gemini-3.1-pro-preview\n"
         ));
         assert!(opencode_output_is_live("> plan · gemini-3.5-flash\nOK\n"));
+    }
+
+    #[test]
+    fn opencode_mode_line_requires_the_full_preamble_shape() {
+        // A middle dot alone (status bar, list, error text) is not evidence.
+        assert!(!opencode_output_is_live("Ready · 3 files\n"));
+        // `> ` with no separator.
+        assert!(!opencode_output_is_live("> build\n"));
+        // Separator present but the model is empty.
+        assert!(!opencode_output_is_live("> plan · \n"));
+        assert!(!opencode_output_is_live("> plan ·  \n"));
+        // Empty mode word.
+        assert!(!opencode_output_is_live(">  · gemini\n"));
     }
 
     #[test]

@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- Tighten the opencode liveness probe: the >= 2.2.5 preamble now counts only as a full `> <mode> · <model>` line, not any text containing ` · `.
+
 - Add `agy` (Google Antigravity CLI) as a third interactive pilot provider in `cs sessions launch`, clearing an inherited `ANTIGRAVITY_CONVERSATION_ID` and recognising it as a native caller identity.
 
 - Add container witnesses for mission harvest grants and remote harvest refusals. (#128)
