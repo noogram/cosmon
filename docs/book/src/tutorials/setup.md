@@ -203,7 +203,7 @@ Go to [Your first molecule](./first-molecule.md) to create and run one unit of
 tracked work end to end.
 
 > **You do not have to type `cs` by hand.** If you already work inside an
-> agentic coding CLI (Claude Code, Codex, gemini-cli, opencode, aider, …), one
+> agentic coding CLI (Claude Code, Codex, gemini-cli, opencode, agy, aider, …), one
 > line in its context file lets you drive the same cycle in plain English:
 > *"nucleate a task to … , then tackle it and wait"*. See
 > [Pilot cosmon in natural language](../how-to/pilot-in-natural-language.md).

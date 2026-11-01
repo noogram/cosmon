@@ -6,6 +6,10 @@ same three cosmon fields into each harness's native provider configuration,
 injects the named key only into that worker's tmux session, and keeps the key
 out of the molecule state, event journal, and pane command.
 
+The gateway binding exists for these two adapters only. `cs tackle --adapter
+agy` ignores an `[adapters.agy]` gateway row: agy runs with its own login and
+configuration (see [`opencode` and `agy` workers](../book/src/explanation/adapter.md)).
+
 Use a dedicated variable name per person. The TOML records the variable name,
 never its value.
 
@@ -70,6 +74,10 @@ client. The gateway must support streamed chat-completion chunks. Tool calling
 is owned by OpenCode: the model, gateway, and compatible provider package must
 preserve tool-call fields. A successful loopback wiring test does not establish
 that an arbitrary hosted model is a capable coding agent.
+
+A pinned model reaches `opencode run` through `--model`, so it is dispatched
+through `cs tackle`. The in-process executor behind the RPP tackle route
+refuses a pinned opencode dispatch with `501 tackle_unsupported_model`.
 
 Cosmon does not currently parse OpenCode's session database or statistics into
 `usage_observed`. Absence of a cosmon usage record means unobserved, not zero;

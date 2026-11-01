@@ -159,13 +159,18 @@ that field read as v1 without rewrite.
 
 | Capability | CLI | Native UI | Remote service |
 |---|---|---|---|
-| Launch a pilot whose hooks and tool subprocesses share one identity | `cs sessions launch <claude\|codex> -- <ARGS>` mints a fresh anonymous `COSMON_SESSION_ID` and equal `COSMON_SESSION_LAUNCH_ID` marker before starting the provider executable | No provider launch control audited | No provider launch endpoint added |
+| Launch a pilot whose hooks and tool subprocesses share one identity | `cs sessions launch <claude\|codex\|agy> -- <ARGS>` mints a fresh anonymous `COSMON_SESSION_ID` and equal `COSMON_SESSION_LAUNCH_ID` marker before starting the provider executable; for `agy` it also clears an inherited `ANTIGRAVITY_CONVERSATION_ID` | No provider launch control audited | No provider launch endpoint added |
 
 Codex tool subprocesses use native `CODEX_THREAD_ID` / `CODEX_SESSION_ID`
 identity before a launch marker. Both exports must agree when present, and a
 Codex callback's `thread-id` must agree with them; disagreement refuses the
 identity and publishes no row. Presence, takeover checks and lifecycle guards
 share this resolution. Workers retain their dispatch identity.
+
+An agy tool subprocess uses native `ANTIGRAVITY_CONVERSATION_ID` identity in the
+same position: before a launch marker, after an explicit override. An agy
+callback's `conversation_id` must agree with the variable when both are present;
+disagreement refuses the identity.
 
 Every launch replaces inherited pilot identity and clears inherited Codex native
 ids, so the provider supplies its own identity. The fresh anonymous marked id is
@@ -423,6 +428,8 @@ It is scoped to the patrol dead-worker policy; it is not a full command inventor
 | Configure the grace before a patrol dead-worker verdict | `cs patrol --dead-worker-grace-secs <seconds>`; default 120 | No control found in the native apps | No equivalent action found |
 | Resolve a codex update menu and restart after installation | `[adapters.codex].update = "auto"` (default) accepts the update and re-tackles in place after the success notice; `skip` declines it; `operator` pages without a key | No update-policy control audited in the native apps | No equivalent action found |
 | Dispatch an external CLI worker through a per-galaxy compatible gateway | `[adapters.codex]` and `[adapters.opencode]` carry `base_url`, `api_key_env`, and `default_model`; `cs tackle` injects native per-process provider configuration without writing either harness's global config | No gateway editor audited in the native apps | Status surfaces show the selected adapter/model; credential values remain absent |
+| Dispatch a one-shot external CLI worker (`opencode`, `agy`) | `cs tackle <id> --adapter opencode\|agy [--model M]`; `opencode` runs `opencode run [--model M] '<prompt>'`, `agy` runs `agy --print-timeout 0 --output-format stream-json [--model M] --dangerously-skip-permissions -p '<prompt>'` and tees the stream to `agy-stream.jsonl` in the molecule directory | No adapter picker audited in the native apps | Status surfaces show the selected adapter/model; the realized agy model is not recorded |
+| Choose whether a finished one-shot worker merges without review | `[harvest] on_pane_died = "merge"` (default) runs `cs done` from the `pane-died` hook; `"mark"` records the exit and leaves the molecule in `cs status` / `cs peek --phase harvestable` | No control found in the native apps | No equivalent action found |
 | Scan live panes for blocking dialogues | Every `cs patrol` run scans by default; `--auto-confirm-safe` remains opt-in | No dialogue scan control found in the native apps | No equivalent action found |
 
 The dead-worker policy and dialogue scan are applied by the patrol command.

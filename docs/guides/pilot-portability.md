@@ -336,6 +336,15 @@ inspects the harness. Each harness needs exactly one capability: emit the gestur
 | **aider** | yes (`/run` shell command) | yes (`/run curl …`) | "/run cs tackle <id> --json" | drives all 3 modes |
 | **gemini-cli** | yes (shell execution) | yes (`curl` via shell) | same | drives all 3 modes |
 
+`agy` (Google Antigravity CLI) is not a row of this matrix: its shell and HTTP
+behaviour against the three modes was not run. What is established for it is
+local identity only: `cs sessions launch agy` mints the pilot identity, and a
+`cs` command inside the session resolves it from `ANTIGRAVITY_CONVERSATION_ID`
+when agy exports it, else from the launch marker (see
+[Pilot cosmon in natural language](../book/src/how-to/pilot-in-natural-language.md)).
+That identity belongs to the Aperture axis; running agy as a worker
+(`cs tackle --adapter agy`) is the Valence axis and does not depend on it.
+
 The uniformity is itself the evidence for decoupling (ADR-125 §4): the gesture
 string carries no information about who emitted it, so the piloting harness
 **cannot** leak into adapter selection — there is no parameter through which such

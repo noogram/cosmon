@@ -15,7 +15,7 @@ surface, once, in a single line of config.
 
 ## The idea in one picture
 
-An agentic CLI (Claude Code, Codex, gemini-cli, opencode, aider, …) reads a
+An agentic CLI (Claude Code, Codex, gemini-cli, opencode, agy, aider, …) reads a
 context file in your repository when it starts. If that file says *"to operate
 cosmon, run `cs help`"*, the agent discovers the whole command surface on its
 own, and your English turns into the right `cs` invocations.
@@ -161,6 +161,47 @@ Cosmon does not integrate with them individually and does not detect which one
 you are using. It exposes `cs help`, and they read it. Support is therefore a
 property of the CLI (does it read a context file? can it run a shell command?),
 not something cosmon maintains per tool.
+
+### Starting an agy pilot with its own identity
+
+Cosmon does have one launch command for pilots, for the providers it can
+resolve a caller identity for: `claude`, `codex` and `agy` (Google Antigravity
+CLI).
+
+```sh
+cs sessions launch agy -- <agy arguments>
+```
+
+It replaces itself with the `agy` executable found on `PATH` (on Unix, through
+`exec`, so agy keeps its own signals, terminal and exit status) and passes
+everything after `--` unchanged. Before starting agy it:
+
+- sets `COSMON_SESSION_ID` to a fresh anonymous `pilot-…` identity and sets
+  `COSMON_SESSION_LAUNCH_ID` to the same value, so hooks and the tools agy
+  runs share one identity;
+- removes `COSMON_PARENT_MOL_ID`, `COSMON_WORKER_ID`, `CLAUDE_SESSION_ID`,
+  `CODEX_THREAD_ID`, `CODEX_SESSION_ID` and `ANTIGRAVITY_CONVERSATION_ID` from
+  the environment, so a new pilot is not taken for the worker or session that
+  started it.
+
+A `cs` command run from inside that agy session resolves its caller identity
+as follows, taking the first rule that applies:
+
+1. If `ANTIGRAVITY_CONVERSATION_ID` is set in the environment of the `cs`
+   process, it is the identity (an explicit override, if given, wins over it).
+   When the command is an agy callback that carries its own conversation id and
+   that id differs from the variable, `cs` refuses to resolve an identity
+   instead of choosing one.
+2. Otherwise an explicit override is used.
+3. Otherwise the `COSMON_SESSION_LAUNCH_ID` marker is used, when it is set and
+   equal to `COSMON_SESSION_ID`.
+4. Otherwise the callback's conversation id, if there is one.
+
+Because launch clears `ANTIGRAVITY_CONVERSATION_ID`, a command that agy runs
+without exporting that variable falls back to the launch identity. Inside a
+cosmon worker (a nonempty `COSMON_PARENT_MOL_ID`) none of this applies: the
+identity is the worker's dispatch `COSMON_SESSION_ID`, and inherited native
+variables are not used.
 
 > This is a different axis from `--adapter`. Here an agentic CLI drives cosmon
 > *from the outside*, translating your English into `cs` commands. The

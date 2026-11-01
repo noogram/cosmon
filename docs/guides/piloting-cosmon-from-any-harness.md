@@ -258,6 +258,22 @@ The native home. Two things make it the richest aperture:
 
 ---
 
+### 3.6 agy (Google Antigravity CLI)
+
+Cosmon launches `agy` as a pilot through `cs sessions launch agy -- <ARGS>`,
+which mints a fresh anonymous `COSMON_SESSION_ID` plus an equal
+`COSMON_SESSION_LAUNCH_ID` marker and clears `ANTIGRAVITY_CONVERSATION_ID`,
+`COSMON_PARENT_MOL_ID`, `COSMON_WORKER_ID`, `CLAUDE_SESSION_ID`,
+`CODEX_THREAD_ID` and `CODEX_SESSION_ID` before `exec`ing `agy`. When a `cs`
+command later sees `ANTIGRAVITY_CONVERSATION_ID`, that agy conversation id is
+its caller identity; a callback whose conversation id differs from it is
+refused. The step-by-step rules are in
+[Pilot cosmon in natural language](../book/src/how-to/pilot-in-natural-language.md).
+
+This guide has not measured which context file agy reads, so §4 makes no claim
+about it for agy. Running agy as a *worker* is a separate matter: see the
+`agy` section of [Agent adapters](../book/src/explanation/adapter.md).
+
 ## 4. The universal skill — `AGENTS.md`, the symlink, and why `cs` *is* the skill
 
 Here is the deepest point in the guide, and the one worth slowing down for.
