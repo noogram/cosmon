@@ -116,6 +116,11 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub harvest_authority: HarvestAuthorityConfig,
 
+    /// Harvest trigger policy — what the tmux `pane-died` hook does once it
+    /// has recorded the worker's exit. See [`HarvestConfig`].
+    #[serde(default)]
+    pub harvest: HarvestConfig,
+
     /// Scope-guard policy — the warn-vs-abort knob for the `cs done`
     /// change-perimeter gate (P3 of `task-20260712-3819`). A molecule
     /// declares its allowed perimeter with `--var scope_allow=<globs>`;
@@ -1567,6 +1572,41 @@ impl ProjectConfig {
                 .to_string()
         })
     }
+}
+
+/// What `cs harvest --from-pane-died` does after it has recorded the exit.
+///
+/// The value is parsed when the galaxy config is loaded, so an unknown value
+/// is refused there rather than silently treated as the default.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum OnPaneDied {
+    /// Record `WorkerExited`, then run `cs done` (merge, teardown, archive).
+    /// The default, kept for compatibility with galaxies that predate the
+    /// setting.
+    #[default]
+    Merge,
+    /// Record `WorkerExited`, then stop. The molecule stays completed and
+    /// unmerged, so it is listed by `cs status` and
+    /// `cs peek --phase harvestable` until the pilot runs `cs done`.
+    Mark,
+}
+
+/// Harvest trigger policy, the `[harvest]` section of `.cosmon/config.toml`.
+///
+/// A non-interactive worker (`opencode run`, exec modes) ends its pane as
+/// soon as its work ends, so under `merge` a finished molecule is merged with
+/// no pilot check. A galaxy that wants that check sets `mark`.
+///
+/// ```toml
+/// [harvest]
+/// on_pane_died = "mark"   # "merge" (default) | "mark"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HarvestConfig {
+    /// Action taken by the `pane-died` hook after recording the exit.
+    #[serde(default)]
+    pub on_pane_died: OnPaneDied,
 }
 
 /// Worker behavior configuration.
@@ -3728,5 +3768,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.self_reference_guard.max_depth, 5);
+    }
+
+    #[test]
+    fn harvest_on_pane_died_defaults_to_merge_and_parses_mark() {
+        let absent: ProjectConfig = toml::from_str("").unwrap();
+        assert_eq!(absent.harvest.on_pane_died, OnPaneDied::Merge);
+        let mark: ProjectConfig = toml::from_str("[harvest]\non_pane_died = \"mark\"\n").unwrap();
+        assert_eq!(mark.harvest.on_pane_died, OnPaneDied::Mark);
+        let merge: ProjectConfig = toml::from_str("[harvest]\non_pane_died = \"merge\"\n").unwrap();
+        assert_eq!(merge.harvest.on_pane_died, OnPaneDied::Merge);
+    }
+
+    #[test]
+    fn harvest_on_pane_died_unknown_value_is_refused() {
+        let err = ProjectConfig::parse("[harvest]\non_pane_died = \"merg\"\n").unwrap_err();
+        assert!(err.to_string().contains("merg"), "{err}");
     }
 }

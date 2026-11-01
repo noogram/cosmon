@@ -55,6 +55,14 @@ coauthor_email   = "noreply@noogram.org"
 # contact      = "hello@noogram.org"
 # authors_line = "Noogram <hello@noogram.org>"
 
+[harvest]
+# What the tmux pane-died hook does after recording the worker's exit.
+# "merge" (default): run `cs done`. "mark": record only; the molecule stays
+# completed and listed by `cs status` / `cs peek --phase harvestable` until the
+# pilot runs `cs done`. A non-interactive worker's pane dies when its work
+# ends, so "merge" would land it with no pilot check.
+on_pane_died = "mark"
+
 [hooks]
 # Run after `cs done` successfully merges a worker branch.
 # Keeps the `cs` binary on disk in sync with the freshly-landed code.

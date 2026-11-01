@@ -311,7 +311,7 @@ fn apply_remedy(
                 Ok(O::ReceiptUnknown) => ApplyResult::Skipped(
                     "supervised worker exit is unknown; preserve for pilot resolution".to_owned(),
                 ),
-                Ok(O::AlreadyMerged | O::NotCompleted | O::DryRun) => {
+                Ok(O::AlreadyMerged | O::NotCompleted | O::DryRun | O::Marked) => {
                     ApplyResult::Success("already harvested (no-op)".to_owned())
                 }
                 Ok(O::HarvestFailed) | Err(_) => {
