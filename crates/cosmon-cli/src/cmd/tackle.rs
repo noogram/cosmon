@@ -4978,6 +4978,17 @@ pub(super) fn spawn_and_prompt(
             &mut terminal,
         )
         .map(|()| SpawnOutcome::default()),
+        "agy" => spawn_agy_and_prompt(
+            backend,
+            wid,
+            session_name,
+            worktree_path,
+            prompt,
+            adapter_entry,
+            preferred_model,
+            &mut terminal,
+        )
+        .map(|()| SpawnOutcome::default()),
         "openai" => spawn_openai_session(
             wid,
             session_name,
@@ -5107,8 +5118,11 @@ pub(super) fn adapter_uses_tmux(adapter: &ValidatedAdapterName) -> bool {
     // variant — so the answer here is also `true`. `opencode` is the
     // fourth, on the same footing (delib-20260615-73f9 / ADR-125,
     // task-20260615-556a) — an external CLI in a pane, supervised through
-    // `pane-died`, not a Direct-API in-process loop.
-    matches!(adapter.as_str(), "claude" | "aider" | "codex" | "opencode")
+    // `pane-died`, not a Direct-API in-process loop. agy is the fifth.
+    matches!(
+        adapter.as_str(),
+        "claude" | "aider" | "codex" | "opencode" | "agy"
+    )
 }
 
 /// Does this adapter finish its agent loop before `cs tackle` returns?
@@ -7725,6 +7739,27 @@ fn opencode_session_config(
     }
 }
 
+fn agy_session_config(
+    socket: &str,
+    session_name: &str,
+    worktree_path: &std::path::Path,
+    prompt: &str,
+    environment: Vec<(String, String)>,
+    preferred_model: Option<&str>,
+) -> cosmon_transport::agy::AgySessionConfig {
+    cosmon_transport::agy::AgySessionConfig {
+        socket: socket.to_owned(),
+        session_name: session_name.to_owned(),
+        work_dir: worktree_path.to_string_lossy().into_owned(),
+        binary: std::path::PathBuf::from("agy"),
+        prompt: Some(prompt.to_owned()),
+        model: preferred_model.map(str::to_owned),
+        telemetry: None,
+        pre_existing_worker: None,
+        environment,
+    }
+}
+
 /// opencode branch of [`spawn_and_prompt`].
 ///
 /// opencode (sst/opencode) is the external-CLI sibling of codex — a
@@ -7811,6 +7846,72 @@ fn spawn_opencode_and_prompt(
             let _ = backend.terminate(wid);
             Err(anyhow::anyhow!(
                 "cs tackle: opencode readiness wait failed for {session_name}: {e}. \
+                 Inspect with `tmux -L {} capture-pane -pS - -t {session_name}`",
+                backend.socket()
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_agy_and_prompt(
+    backend: &TmuxBackend,
+    wid: &cosmon_core::id::WorkerId,
+    session_name: &str,
+    worktree_path: &std::path::Path,
+    prompt: &str,
+    adapter_entry: Option<&AdapterEntry>,
+    preferred_model: Option<&str>,
+    terminal: &mut Option<cosmon_core::terminal::TerminalIdentity>,
+) -> anyhow::Result<()> {
+    use cosmon_transport::agy;
+    use cosmon_transport::readiness::LiveProbe as _;
+
+    let gateway = external_gateway_launch_from("agy", adapter_entry, preferred_model, |name| {
+        std::env::var(name).ok()
+    })?;
+    let effective_model = gateway.as_ref().map_or_else(
+        || preferred_model.map(str::to_owned),
+        |value| Some(value.model.clone()),
+    );
+    let environment = gateway.map_or_else(Vec::new, |value| value.environment);
+    let config = agy_session_config(
+        backend.socket(),
+        session_name,
+        worktree_path,
+        prompt,
+        environment,
+        effective_model.as_deref(),
+    );
+
+    let mol_dir = std::env::var("COSMON_MOL_DIR")
+        .map_or_else(|_| worktree_path.to_path_buf(), std::path::PathBuf::from);
+
+    *terminal = agy::spawn_agy_session_witnessed(&config, &mol_dir)
+        .map_err(|e| anyhow::anyhow!("cs tackle: agy spawn failed: {e}"))?;
+
+    let probe = cosmon_transport::readiness::AgyProbe;
+    match probe.await_live(
+        backend,
+        wid,
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_millis(200),
+    ) {
+        Ok(cosmon_transport::readiness::Liveness::Live) => Ok(()),
+        Ok(other) => {
+            let _ = backend.terminate(wid);
+            Err(anyhow::anyhow!(
+                "cs tackle: agy session {session_name} never produced live \
+                 output within 30s (last verdict={other}). Treating as a failed \
+                 spawn; tearing down. Inspect with \
+                 `tmux -L {} capture-pane -pS - -t {session_name}`",
+                backend.socket()
+            ))
+        }
+        Err(e) => {
+            let _ = backend.terminate(wid);
+            Err(anyhow::anyhow!(
+                "cs tackle: agy readiness wait failed for {session_name}: {e}. \
                  Inspect with `tmux -L {} capture-pane -pS - -t {session_name}`",
                 backend.socket()
             ))

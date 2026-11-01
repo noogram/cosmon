@@ -275,6 +275,12 @@ const BUILT_IN_AXES: &[(&str, SupervisionMode, LoopOwnership, RuntimeOwnership)]
         RuntimeOwnership::Vendor,
     ),
     (
+        "agy",
+        SupervisionMode::TmuxPane,
+        LoopOwnership::External,
+        RuntimeOwnership::Vendor,
+    ),
+    (
         "openai",
         SupervisionMode::InProcess,
         LoopOwnership::Cosmon,
@@ -359,6 +365,7 @@ pub fn built_in_adapter_names() -> &'static [&'static str] {
         "aider",
         "codex",
         "opencode",
+        "agy",
         "openai",
         "anthropic",
         "llama-cpp",
@@ -632,6 +639,10 @@ mod tests {
         );
         assert_eq!(
             axes_for_built_in("opencode"),
+            Some((SupervisionMode::TmuxPane, LoopOwnership::External))
+        );
+        assert_eq!(
+            axes_for_built_in("agy"),
             Some((SupervisionMode::TmuxPane, LoopOwnership::External))
         );
         assert_eq!(
