@@ -372,6 +372,94 @@ class ComposeStack:
         self.reload_bindings()
         return subject
 
+    # -- collaboration (issue #147) -----------------------------------
+
+    @staticmethod
+    def _with_allowed(text: str, scopes: Tuple[str, ...]) -> str:
+        """``text`` with its one ``[scopes] allowed`` row replaced by ``scopes``.
+
+        Exactly one row must match: a binding whose scope row this does not
+        recognise must fail here, not grant something else silently.
+        """
+        row = re.compile(r"^allowed = \[.*\]$", re.M)
+        if len(row.findall(text)) != 1:
+            raise AssertionError("the binding does not have exactly one `allowed = [...]` row")
+        quoted = ", ".join(f'"{scope}"' for scope in scopes)
+        return row.sub(lambda _m: f"allowed = [{quoted}]", text)
+
+    def _primary_binding(self) -> Path:
+        return (
+            self.cfg.staged_deploy / "state" / "nucleons"
+            / f"nuc-{self.cfg.noyau}" / "oidc-identity.toml"
+        )
+
+    def set_primary_scopes(self, scopes: Tuple[str, ...]) -> None:
+        """Operator gesture: set the scopes the primary identity binding grants."""
+        binding = self._primary_binding()
+        binding.write_text(self._with_allowed(binding.read_text(encoding="utf-8"), scopes),
+                           encoding="utf-8")
+
+    def add_identity(self, tag: str, sub: str, scopes: Tuple[str, ...]) -> None:
+        """Admit one more ``sub`` to the SAME tenant, with exactly ``scopes``.
+
+        The cross-machine contract keeps one tenant and one authoritative host
+        (O2); a second machine is a second admitted identity of that tenant,
+        written as a second nucleon binding the way
+        :meth:`grant_harvest_only_identity` writes its own. The caller
+        publishes the change with :meth:`reload_bindings`.
+        """
+        original = self._primary_binding()
+        text = original.read_text(encoding="utf-8")
+        old_id = f'nucleon_id = "nuc-{self.cfg.noyau}"'
+        old_sub = f'sub = "{self.cfg.idp_sub}"'
+        if text.count(old_id) != 1 or text.count(old_sub) != 1:
+            raise AssertionError("the source binding changed; cannot clone an identity from it")
+        new_id = f"nuc-{self.cfg.noyau}-{tag}"
+        text = text.replace(old_id, f'nucleon_id = "{new_id}"').replace(old_sub, f'sub = "{sub}"')
+        text = self._with_allowed(text, scopes)
+        target = original.parent.parent / new_id / "oidc-identity.toml"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    def service_exec(self, *argv: str, check: bool = True, workdir: Optional[str] = None,
+                     stdin: Optional[str] = None,
+                     record_response: bool = True) -> subprocess.CompletedProcess:
+        """Run a command **inside the service container**, as the service uid.
+
+        This is the host operator's hand on the authoritative host: bindings
+        and work scopes are provisioned here with the shipped ``cs`` verbs,
+        and the host store is read here, never through the HTTP surface.
+        """
+        args = ["exec", "-T"]
+        if workdir:
+            args += ["-w", workdir]
+        args += ["rpp-adapter", *argv]
+        cmd = ["docker", "compose", "-p", self.cfg.project, *self._compose_file_args(), *args]
+        started = time.time()
+        proc = _run(cmd, env=self._compose_env(), input=stdin)
+        self.recorder.exchange(
+            step="service exec " + " ".join(argv[:3]),
+            request="service$ " + " ".join(argv),
+            response=proc.stdout if record_response else "<not recorded: secret>",
+            rc=proc.returncode, started=started, stderr=proc.stderr,
+        )
+        if check and proc.returncode != 0:
+            raise AssertionError(
+                f"`{' '.join(argv)}` failed in the service container (rc={proc.returncode})\n"
+                f"stdout: {proc.stdout[-1500:]}\nstderr: {proc.stderr[-1500:]}"
+            )
+        return proc
+
+    def operator_cs(self, *argv: str, check: bool = True) -> subprocess.CompletedProcess:
+        """``cs <argv>`` in the tenant tree inside the service container."""
+        return self.service_exec("cs", *argv, check=check,
+                                 workdir=f"/cosmon/galaxies/{self.cfg.noyau}")
+
+    @property
+    def network(self) -> str:
+        """The compose network a second client joins to reach ``rpp-adapter``."""
+        return f"{self.cfg.project}_rpp-net"
+
     def reload_bindings(self) -> None:
         """Publish host-staged identity changes through the admin reload."""
         request = urllib.request.Request(

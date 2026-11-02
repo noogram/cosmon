@@ -23,6 +23,8 @@ this stage.
 
 - `cs tackle`: The `agy` adapter (Google Antigravity CLI) is now supported alongside `claude`, `aider`, `codex`, and `opencode`. The pane command is portable POSIX sh (no `set -o pipefail`, which dash rejects): agy's status is written to `agy-exit.code` in the molecule directory and the pipeline exits with it.
 
+- Add the issue #147 W4 acceptance run `tests/e2e/test_work_exchange.py`: two `cosmon-remote` clients with distinct OIDC identities (the second in its own container, no bind mount) exchange `work` messages through the compose stack, each verdict judged on the host store read inside the service container.
+
 - Tighten the opencode liveness probe: the >= 2.2.5 preamble now counts only as a full `> <mode> · <model>` line, not any text containing ` · `.
 
 - Add `[harvest] on_pane_died = "merge" | "mark"` to `.cosmon/config.toml`: `mark` makes the `pane-died` hook record the worker exit without running `cs done`, leaving the molecule in the harvest queue; an unknown value is refused when the config loads. Default stays `merge`.
