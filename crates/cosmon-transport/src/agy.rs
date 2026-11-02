@@ -136,16 +136,27 @@ pub fn spawn_agy_session_witnessed(
 
 /// Build the shell command line for tmux.
 ///
-/// The pipeline runs under `set -o pipefail` so the pane's exit status is
-/// agy's, not `tee`'s, and agy is launched through `env -u
-/// ANTIGRAVITY_CONVERSATION_ID` so a value inherited from the tmux server
-/// environment never reaches it.
+/// The command is portable POSIX sh (dash, bash, zsh, macOS `/bin/sh`); it
+/// does not use `set -o pipefail`, which dash rejects (the pane would exit 2
+/// before agy starts). Instead agy's status is captured explicitly: agy runs
+/// in a `{ …; }` group whose last act is `echo $?` into `agy-exit.code` in the
+/// molecule directory, the group's output is piped to `tee`, and the pane
+/// finally runs `exit "$(cat agy-exit.code)"`. The pane's exit status is
+/// therefore agy's, not `tee`'s. A stale code file from an earlier run is
+/// removed first, and a missing file (group killed before `echo`) makes
+/// `exit` fail with a non-zero status rather than read as success. agy is
+/// launched through `env -u ANTIGRAVITY_CONVERSATION_ID` so a value inherited
+/// from the tmux server environment never reaches it.
 ///
-/// Shape: `set -o pipefail; env -u ANTIGRAVITY_CONVERSATION_ID agy --print-timeout 0 --output-format stream-json [--model <model>] --dangerously-skip-permissions -p '<prompt>' 2>&1 | tee -a "$COSMON_MOL_DIR/agy-stream.jsonl"`
+/// Shape: `rm -f '<mol>/agy-exit.code'; { env -u ANTIGRAVITY_CONVERSATION_ID agy --print-timeout 0 --output-format stream-json [--model <model>] --dangerously-skip-permissions -p '<prompt>' 2>&1; echo $? > '<mol>/agy-exit.code'; } | tee -a '<mol>/agy-stream.jsonl'; exit "$(cat '<mol>/agy-exit.code')"`
 #[must_use]
 pub fn build_agy_command(config: &AgySessionConfig, mol_dir: &Path) -> String {
+    let quote = |p: std::path::PathBuf| p.to_string_lossy().replace('\'', "'\\''");
+    let exit_code = quote(mol_dir.join("agy-exit.code"));
+    let receipt = quote(mol_dir.join("agy-stream.jsonl"));
+
     let mut cmd = format!(
-        "set -o pipefail; env -u {NATIVE_IDENTITY_VAR} {}",
+        "rm -f '{exit_code}'; {{ env -u {NATIVE_IDENTITY_VAR} {}",
         shell_escape(&config.binary.to_string_lossy())
     );
     cmd.push_str(" --print-timeout 0 --output-format stream-json");
@@ -163,9 +174,10 @@ pub fn build_agy_command(config: &AgySessionConfig, mol_dir: &Path) -> String {
         let _ = write!(cmd, "'{escaped}'");
     }
 
-    let receipt = mol_dir.join("agy-stream.jsonl");
-    let escaped_receipt = receipt.to_string_lossy().replace('\'', "'\\''");
-    let _ = write!(cmd, " 2>&1 | tee -a '{escaped_receipt}'");
+    let _ = write!(
+        cmd,
+        " 2>&1; echo $? > '{exit_code}'; }} | tee -a '{receipt}'; exit \"$(cat '{exit_code}')\""
+    );
 
     cmd
 }
@@ -283,22 +295,58 @@ mod tests {
     }
 
     #[test]
-    fn command_enables_pipefail_before_the_pipeline() {
+    fn command_is_posix_sh_without_pipefail() {
         let cmd = build_agy_command(&cfg("agy"), Path::new("/m"));
-        assert!(cmd.starts_with("set -o pipefail; "), "{cmd}");
+        assert!(!cmd.contains("pipefail"), "{cmd}");
+        assert!(cmd.contains("echo $? > '/m/agy-exit.code'"), "{cmd}");
+        assert!(cmd.ends_with("exit \"$(cat '/m/agy-exit.code')\""), "{cmd}");
+    }
+
+    /// Run the built pipeline under `shell` and return its exit code.
+    /// `None` when the shell is not installed (prints a note).
+    fn run_under(shell: &str, binary: &str, tag: &str) -> Option<i32> {
+        let dir =
+            std::env::temp_dir().join(format!("agy it's {tag}-{shell}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cmd = build_agy_command(&cfg(binary), &dir);
+        let status = match std::process::Command::new(shell)
+            .args(["-c", &cmd])
+            .status()
+        {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("note: skipping {shell} case: {e}");
+                let _ = std::fs::remove_dir_all(&dir);
+                return None;
+            }
+        };
+        let _ = std::fs::remove_dir_all(&dir);
+        status.code()
+    }
+
+    fn exit3_script() -> String {
+        let p = std::env::temp_dir().join(format!("agy-exit3-{}.sh", std::process::id()));
+        std::fs::write(&p, "#!/bin/sh\nexit 3\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        p.to_string_lossy().into_owned()
     }
 
     #[test]
     fn pipeline_exit_status_is_agys_not_tees() {
-        let dir = std::env::temp_dir().join(format!("agy-pipefail-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let cmd = build_agy_command(&cfg("false"), &dir);
-        let status = std::process::Command::new("sh")
-            .args(["-c", &cmd])
-            .status()
-            .unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(status.code(), Some(1), "failed agy must not read as exit 0");
+        let script = exit3_script();
+        for shell in ["sh", "dash"] {
+            if let Some(code) = run_under(shell, "false", "f") {
+                assert_eq!(code, 1, "{shell}: false must read as 1");
+            }
+            if let Some(code) = run_under(shell, &script, "s") {
+                assert_eq!(code, 3, "{shell}: script exit 3 must read as 3");
+            }
+        }
+        let _ = std::fs::remove_file(&script);
     }
 
     #[test]
