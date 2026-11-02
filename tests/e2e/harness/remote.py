@@ -36,8 +36,13 @@ from .record import Recorder
 class RemoteCli:
     """A `cosmon-remote` invocation surface bound to one tenant profile."""
 
-    def __init__(self, cfg: E2EConfig, binary: Path, recorder: Recorder, slot: str = "default") -> None:
+    def __init__(self, cfg: E2EConfig, binary: Path, recorder: Recorder, slot: str = "default",
+                 sub: Optional[str] = None) -> None:
         self.cfg = cfg
+        #: The ``sub`` this profile is configured for. Defaults to the
+        #: mock IdP's own subject, so every existing caller is unchanged;
+        #: a second client slot names another one.
+        self.sub = sub or cfg.idp_sub
         self.binary = binary
         self.recorder = recorder
         # One $HOME per test set. A credential minted before a reinit is
@@ -76,13 +81,25 @@ class RemoteCli:
         }
 
     def run(self, *args: str, step: Optional[str] = None, timeout: int = 300,
-            token_override: Optional[str] = None) -> subprocess.CompletedProcess:
-        """Invoke the CLI, record the exchange, return the process."""
-        cmd = [str(self.binary), "--profile", "e2e", *args]
+            token_override: Optional[str] = None,
+            stdin: Optional[str] = None,
+            bearer_flag: Optional[str] = None) -> subprocess.CompletedProcess:
+        """Invoke the CLI, record the exchange, return the process.
+
+        ``stdin`` is handed to the process and is never recorded: it is
+        how a host-issued secret (an attachment proof) reaches the client
+        without entering argv.
+        """
+        # `bearer_flag` presents a bearer with `--token` instead of the env var:
+        # the env var selects the static-bearer credential backend, which has
+        # nowhere to keep an attachment proof, so `work` commands need the flag.
+        flag = ["--token", bearer_flag] if bearer_flag else []
+        cmd = [str(self.binary), "--profile", "e2e", *flag, *args]
         started = time.time()
         interactive = "harvest" in args and ("init" in args or "grant" in args)
         proc = self._run_signer(cmd, timeout) if interactive else subprocess.run(
-            cmd, capture_output=True, text=True, env=self._env(token_override), timeout=timeout
+            cmd, capture_output=True, text=True, env=self._env(token_override), timeout=timeout,
+            input=stdin,
         )
         self.recorder.exchange(
             step=step or " ".join(args[:2]) or "cosmon-remote",
@@ -133,9 +150,12 @@ class RemoteCli:
         return subprocess.CompletedProcess(cmd, os.waitstatus_to_exitcode(status), output, "")
 
     def json(self, *args: str, step: Optional[str] = None,
-             token_override: Optional[str] = None) -> Tuple[int, Any, str]:
+             token_override: Optional[str] = None,
+             stdin: Optional[str] = None,
+             bearer_flag: Optional[str] = None) -> Tuple[int, Any, str]:
         """Invoke with ``--json`` and parse. Returns (rc, parsed|None, stderr)."""
-        proc = self.run("--json", *args, step=step, token_override=token_override)
+        proc = self.run("--json", *args, step=step, token_override=token_override, stdin=stdin,
+                        bearer_flag=bearer_flag)
         try:
             parsed = json.loads(proc.stdout)
         except ValueError:
@@ -149,7 +169,7 @@ class RemoteCli:
         cfg = self.cfg
         steps = [
             ("config init", ("config", "init", "e2e", cfg.host_url)),
-            ("config sub", ("config", "set", "sub", cfg.idp_sub)),
+            ("config sub", ("config", "set", "sub", self.sub)),
             # The CLIENT's audience is a falsification seam of its own:
             # moving it away from the server-side pin must break login.
             ("config aud", ("config", "set", "aud", cfg.client_audience)),
