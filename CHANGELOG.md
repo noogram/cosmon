@@ -21,7 +21,7 @@ this stage.
 
 ### Added
 
-- `cs tackle`: The `agy` adapter (Google Antigravity CLI) is now supported alongside `claude`, `aider`, `codex`, and `opencode`.
+- `cs tackle`: The `agy` adapter (Google Antigravity CLI) is now supported alongside `claude`, `aider`, `codex`, and `opencode`. The pane command is portable POSIX sh (no `set -o pipefail`, which dash rejects): agy's status is written to `agy-exit.code` in the molecule directory and the pipeline exits with it.
 
 - Tighten the opencode liveness probe: the >= 2.2.5 preamble now counts only as a full `> <mode> · <model>` line, not any text containing ` · `.
 

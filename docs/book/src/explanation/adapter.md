@@ -91,14 +91,18 @@ cs tackle <molecule-id> --adapter agy [--model <model>]
 Cosmon runs this pipeline in the pane:
 
 ```text
-set -o pipefail; env -u ANTIGRAVITY_CONVERSATION_ID agy --print-timeout 0 \
-  --output-format stream-json [--model <model>] --dangerously-skip-permissions \
-  -p '<prompt>' 2>&1 | tee -a <molecule dir>/agy-stream.jsonl
+rm -f '<mol dir>/agy-exit.code'; { env -u ANTIGRAVITY_CONVERSATION_ID agy \
+  --print-timeout 0 --output-format stream-json [--model <model>] \
+  --dangerously-skip-permissions -p '<prompt>' 2>&1; \
+  echo $? > '<mol dir>/agy-exit.code'; } | tee -a '<mol dir>/agy-stream.jsonl'; \
+  exit "$(cat '<mol dir>/agy-exit.code')"
 ```
 
 Each part has a reason:
 
-- `set -o pipefail` makes the pane's exit status agy's, not `tee`'s.
+- `echo $? > …/agy-exit.code` and the final `exit "$(cat …)"` make the pane's
+  exit status agy's, not `tee`'s. The command avoids `set -o pipefail`, which
+  dash rejects, so it runs under any POSIX `sh`.
 - `env -u ANTIGRAVITY_CONVERSATION_ID` keeps a conversation id inherited from
   the tmux server environment from reaching the worker, so the worker does not
   take over a caller identity that belongs to another agy session. An explicit
@@ -109,7 +113,7 @@ Each part has a reason:
 - `--dangerously-skip-permissions` approves tool permissions automatically.
   An unattended agy worker therefore runs tools without asking. Run it only
   on work and in a worktree where that is acceptable.
-- `2>&1 | tee -a …/agy-stream.jsonl` shows progress in the pane and appends the
+- `| tee -a …/agy-stream.jsonl` shows progress in the pane and appends the
   stream to a receipt in the **molecule directory**, not in the worktree, so
   the receipt survives `cs done` removing the worktree.
 
