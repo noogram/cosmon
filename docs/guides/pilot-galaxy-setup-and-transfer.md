@@ -51,6 +51,8 @@ uninstall --provider claude --user`. Existing foreign hooks are left untouched,
 and an existing Codex `notify` held by another program is chained behind rather
 than replaced.
 
+There is no hook installer for agy: its hooks cannot be declared per session, and cosmon never writes its real configuration. Instead, tools in an agy session see the `ANTIGRAVITY_CONVERSATION_ID` environment variable, which identifies the session natively.
+
 The hooks are not part of `cs sessions launch`, which only mints the session
 identity. They must already be installed when the new session starts. Outside a
 cosmon galaxy a hook succeeds and writes nothing.
@@ -87,7 +89,7 @@ is the contract it relies on.
    from the draft.
 
 2. **Pupitre opens the target provider from a first-prompt file.** It starts
-   `cs sessions launch <claude|codex> -- <ARGS>`, which mints a fresh anonymous
+   `cs sessions launch <claude|codex|agy> -- <ARGS>`, which mints a fresh anonymous
    `COSMON_SESSION_ID` shared by the hooks and by the tools the session runs.
    The first prompt comes from the file and tells the session which mission to
    join.
