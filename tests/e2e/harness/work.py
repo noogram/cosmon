@@ -114,7 +114,7 @@ class ContainerCli:
     ``tests/e2e/client.Dockerfile``); nothing here reimplements the client.
     """
 
-    HOME = "/home/client"
+    HOME = "/home/tester"
     SERVICE_URL = "http://rpp-adapter:8443"
 
     def __init__(self, cfg: E2EConfig, recorder: Recorder, name: str, network: str,

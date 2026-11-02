@@ -24,7 +24,7 @@ FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates libdbus-1-3 libssl3 \
  && rm -rf /var/lib/apt/lists/* \
- && useradd --create-home --home-dir /home/client --uid 10001 client
+ && useradd --create-home --home-dir /home/tester --uid 10001 tester
 COPY --from=client-builder /work/target/release/cosmon-remote /usr/local/bin/cosmon-remote
-USER client
-WORKDIR /home/client
+USER tester
+WORKDIR /home/tester
