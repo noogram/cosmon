@@ -4620,7 +4620,11 @@ fn report_merge_failure(
         if let Some(error) = dirty_probe_error {
             println!("  dirty checkout probe failed: {error}");
         }
-        println!("  base branch unchanged — no merge commit was created.");
+        if outcome == "post_merge_compile_gate_refused" {
+            println!("  base branch restored to its pre-merge revision.");
+        } else {
+            println!("  base branch unchanged — no merge commit was created.");
+        }
         println!("  branch, worktree, and tmux session are preserved.");
         if outcome == "merge_failed" {
             println!("  merge error:");
@@ -6744,6 +6748,7 @@ fn refuse_post_merge_and_rollback(
         Some(remedy) => format!("{reason}\n{remedy}"),
         None => reason.clone(),
     };
+    let reported = actions_after_rollback(actions);
     report_merge_failure(
         ctx,
         repo_root,
@@ -6751,9 +6756,37 @@ fn refuse_post_merge_and_rollback(
         "post_merge_compile_gate_refused",
         &[],
         &recovery,
-        actions,
+        &reported,
     );
     anyhow::anyhow!(reason)
+}
+
+/// Action label that replaces the plain `merged` entry once the post-merge
+/// gate has rolled the merge back.
+pub(crate) const MERGE_ROLLED_BACK_ACTION: &str =
+    "merge rolled back by post-merge gate (NOT merged)";
+
+/// Rewrite the action list of a merge the post-merge gate rolled back.
+///
+/// `git merge` succeeds before the gate runs, so `merged` (or
+/// `merged_after_N_escalation(s)`) is already in `actions` when the refusal
+/// fires. Printed under a rollback headline it read as a landed merge, and a
+/// pilot believed it. Every merge-landed label is replaced by
+/// [`MERGE_ROLLED_BACK_ACTION`]; other labels (escalations, hooks) are kept.
+fn actions_after_rollback(actions: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(actions.len());
+    for a in actions {
+        let landed =
+            a == "merged" || (a.starts_with("merged_after_") && a.ends_with("escalation(s)"));
+        if landed {
+            if !out.iter().any(|x| x == MERGE_ROLLED_BACK_ACTION) {
+                out.push(MERGE_ROLLED_BACK_ACTION.to_owned());
+            }
+        } else {
+            out.push(a.clone());
+        }
+    }
+    out
 }
 
 /// The outcome of the cargo-metadata auto-detect rung (rung 2 of the cascade).

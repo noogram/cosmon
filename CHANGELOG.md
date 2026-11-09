@@ -39,6 +39,10 @@ this stage.
 
 - Bot readers durably stop after HTTP/API 409 until an explicit local reconciliation; fenced and transferred sources cannot reconcile. (#146)
 
+### Fixed
+
+- `cs done`: a merge rolled back by the post-merge gate is no longer listed as `merged` in the action list (text and `--json`); it reads `merge rolled back by post-merge gate (NOT merged)`, and the footer says the base branch was restored. Exit code (1) and the molecule staying harvestable are now pinned by tests.
+
 ## [0.8.0] — 2026-10-30
 
 ### Breaking changes and operator actions on upgrade
