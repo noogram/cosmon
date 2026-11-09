@@ -142,7 +142,7 @@ members = [
 # (gnu-vs-musl, the missing connector) shipped because nothing checked.
 # See task-20260610-ccce version-cut-report.md for the library audit table.
 version = "0.8.0"
-rust-version = "1.88"
+rust-version = "1.89"
 # Default cosmon licence is AGPL-3.0-only (core, runtime, end-to-end binaries).
 # Frontier crates (libs/SDKs that a third party would `cargo add`) override
 # `license = "Apache-2.0"` in their own [package] section.
@@ -214,7 +214,8 @@ cosmon-transport = { path = "crates/cosmon-transport" }
 cosmon-process-witness = { path = "crates/cosmon-process-witness" }
 neurion-core = { path = "crates/neurion-core" }
 topon-core = { path = "crates/topon-core" }
-rusqlite = { version = "0.35", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+rmcp = { version = "3.9.0", features = ["server", "transport-streamable-http-server"] }
 dirs = "6"
 ignore = "0.4"
 globset = "0.4"

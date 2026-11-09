@@ -56,7 +56,7 @@ cs --version
 
 The tap formula points at these very tarballs; `brew` checks the same digests.
 
-**From source** (any platform with a Rust toolchain, MSRV 1.88):
+**From source** (any platform with a Rust toolchain, MSRV 1.89):
 
 ```bash
 cargo install --git https://github.com/noogram/cosmon.git --locked cosmon-cli

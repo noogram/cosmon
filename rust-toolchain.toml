@@ -1,11 +1,12 @@
 # Pinned toolchain for the cosmon workspace.
 #
 # `channel = "stable"` intentionally tracks the latest stable — combined
-# with `rust-version = "1.88"` in the root Cargo.toml, the MSRV floor is
-# enforced while day-to-day builds pick up patch fixes from stable.
+# with `rust-version = "1.89"` in the root Cargo.toml, this declares the
+# minimum toolchain while day-to-day builds pick up patch fixes from stable.
 #
 # MSRV bumped 1.82 → 1.88 on 2026-04-22 (ADR-065) to unlock matrix-sdk
 # 0.16 (requires rustc 1.88 + edition 2024).
+# Bumped to 1.89 for patched rusqlite 0.41.1 (ADR-189).
 #
 # Components are the minimum needed to run the DoD gates:
 #   cargo fmt --all -- --check           (rustfmt)

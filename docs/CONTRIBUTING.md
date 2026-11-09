@@ -191,7 +191,7 @@ These are enforced by CI and non-negotiable:
 | `pub(crate)` for internal helpers | Code review |
 | Explicit re-exports in `lib.rs` | Code review |
 | Workspace deps centralized | CI: `cargo deny` |
-| MSRV: `rust-version = "1.82"` | CI: toolchain check |
+| MSRV: `rust-version = "1.89"` | Declared toolchain floor (ADR-189) |
 | `cargo deny` for licenses + supply chain | CI step |
 
 ## Git Rules
