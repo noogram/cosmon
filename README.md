@@ -145,7 +145,7 @@ brew install noogram/tap/cosmon
 
 ### From source
 
-Building locally needs the Rust toolchain (MSRV **1.88**). On **Linux (glibc)**
+Building locally needs the Rust toolchain (MSRV **1.89**). On **Linux (glibc)**
 the build links the Secret Service keyring backend through `libdbus`, so install
 the system headers first. macOS and Windows need nothing extra, and the
 prebuilt Linux binaries above are static musl, so this applies only when you

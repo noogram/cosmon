@@ -41,6 +41,8 @@ this stage.
 
 ### Fixed
 
+- Upgrade bundled SQLite through rusqlite 0.41.1 and the MCP transport to rmcp 3.9.0, clearing RUSTSEC-2026-0459 and RUSTSEC-2026-0462; source builds now require Rust 1.89 (ADR-189).
+
 - `cs done`: a merge rolled back by the post-merge gate is no longer listed as `merged` in the action list (text and `--json`); it reads `merge rolled back by post-merge gate (NOT merged)`, and the footer says the base branch was restored. Exit code (1) and the molecule staying harvestable are now pinned by tests.
 
 ## [0.8.0] — 2026-10-30

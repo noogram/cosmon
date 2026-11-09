@@ -24,10 +24,7 @@ cosmon-transport.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-rmcp = { version = "1", features = [
-    "server",
-    "transport-streamable-http-server",
-] }
+rmcp.workspace = true
 schemars = "0.8"
 tokio = { version = "1", features = ["full"] }
 

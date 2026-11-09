@@ -70,9 +70,9 @@ pub type CosmonHttpService = StreamableHttpService<CosmonService, LocalSessionMa
 /// (correlating a client's message stream via `Mcp-Session-Id`). Per the
 /// panel's D1 reconciliation, this session must never cache authorization
 /// or tenant state — those are re-derived per request by the host gate.
-/// `stateful_mode` stays on (the default) so both Claude Desktop and
-/// claude.ai's Streamable-HTTP clients are served; a session lost to a
-/// redeploy is re-established rather than hard-404'd.
+/// `legacy_session_mode` stays on (the default) for existing Streamable-HTTP
+/// clients; clients negotiating protocol version 2026-07-28 or later use
+/// stateless transport as required by that protocol.
 ///
 /// A fresh [`CosmonService`] is minted per logical session by the factory
 /// closure via [`CosmonService::new_remote`].

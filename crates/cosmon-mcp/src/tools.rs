@@ -36,8 +36,8 @@ use cosmon_state::{EnergyTracker, MoleculeData, MoleculeFilter, StateStore};
 use rmcp::{
     handler::server::{tool::ToolCallContext, tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
-        ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+        PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
     },
     schemars,
     service::RequestContext,
@@ -888,7 +888,7 @@ impl CosmonService {
             "warnings": warnings,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -966,7 +966,7 @@ impl CosmonService {
             "warnings": outcome.warnings,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -1076,7 +1076,7 @@ impl CosmonService {
             output.insert("temperature".to_owned(), serde_json::json!(temperature));
         }
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&serde_json::Value::Object(output)).unwrap_or_default(),
         )]))
     }
@@ -1142,7 +1142,7 @@ impl CosmonService {
             },
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -1195,7 +1195,7 @@ impl CosmonService {
             "message_length": params.message.len(),
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -1248,7 +1248,7 @@ impl CosmonService {
         )
         .map_err(|e| McpError::internal_error(format!("failed to write: {e}"), None))?;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&status_json).unwrap_or_default(),
         )]))
     }
@@ -1300,7 +1300,7 @@ impl CosmonService {
             "description": params.description,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -1347,7 +1347,7 @@ impl CosmonService {
             "frozen_at_step": mol_data.current_step,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -1396,7 +1396,7 @@ impl CosmonService {
             "resumed_at_step": mol_data.current_step,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -1486,7 +1486,7 @@ impl CosmonService {
             "collapsed_at_step": collapsed_at_step,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -1584,7 +1584,7 @@ impl CosmonService {
             serde_json::to_string_pretty(&results).unwrap_or_default()
         };
 
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(output)]))
     }
 
     // -----------------------------------------------------------------------
@@ -1664,7 +1664,7 @@ impl CosmonService {
         ) {
             Ok(outcome) => {
                 let output = render_wait_outcome_json(&outcome);
-                Ok(CallToolResult::success(vec![Content::text(
+                Ok(CallToolResult::success(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&output).unwrap_or_default(),
                 )]))
             }
@@ -1832,7 +1832,7 @@ impl CosmonService {
                 "Use cosmon_evolve to advance each product."
             ],
         });
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -1986,7 +1986,7 @@ impl CosmonService {
                 format!("Use cosmon_observe on '{}' to see the product's first step.", nuc.id),
             ],
         });
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -2042,7 +2042,7 @@ impl CosmonService {
             "to": to_kind.to_string(),
             "reason": params.reason,
         });
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -2129,7 +2129,7 @@ impl CosmonService {
             "results": results,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -2152,7 +2152,7 @@ impl CosmonService {
 
         let output = molecule_to_json(&mol_data);
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -2208,7 +2208,7 @@ impl CosmonService {
             "molecules": page,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -2243,7 +2243,7 @@ impl CosmonService {
             },
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -2309,7 +2309,7 @@ impl CosmonService {
             }
         };
 
-        Ok(CallToolResult::success(vec![Content::text(output)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(output)]))
     }
 
     /// System statistics: molecule counts by status, formulas in use, average step progress.
@@ -2409,7 +2409,7 @@ impl CosmonService {
             "newest_created": newest.map(|t| t.to_rfc3339()),
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -2477,7 +2477,7 @@ impl CosmonService {
             "groups": groups,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -2555,7 +2555,7 @@ impl CosmonService {
             "budget": budget_info,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -2637,7 +2637,7 @@ impl CosmonService {
             "templates": templates,
         });
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
         )]))
     }
@@ -2896,8 +2896,8 @@ fn aggregate_groups(groups: &HashMap<String, Vec<&MoleculeData>>) -> Vec<serde_j
 // ---------------------------------------------------------------------------
 
 impl ServerHandler for CosmonService {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(INSTRUCTIONS)
     }
 
@@ -2922,7 +2922,7 @@ impl ServerHandler for CosmonService {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         let pin = context
             .extensions
             .get::<http::request::Parts>()
@@ -2939,11 +2939,9 @@ impl ServerHandler for CosmonService {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> {
-        std::future::ready(Ok(ListToolsResult {
-            tools: self.tool_router.list_all(),
-            meta: None,
-            next_cursor: None,
-        }))
+        std::future::ready(Ok(ListToolsResult::with_all_items(
+            self.tool_router.list_all(),
+        )))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {

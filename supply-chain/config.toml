@@ -126,6 +126,11 @@ criteria = "safe-to-deploy"
 version = "17.3.0"
 criteria = "safe-to-run"
 
+[[exemptions.base64]]
+version = "0.23.1"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
+
 [[exemptions.base64ct]]
 version = "1.8.3"
 criteria = "safe-to-deploy"
@@ -149,6 +154,11 @@ criteria = "safe-to-deploy"
 [[exemptions.block-buffer]]
 version = "0.10.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.block-buffer]]
+version = "0.12.1"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
 
 [[exemptions.block-padding]]
 version = "0.3.3"
@@ -274,6 +284,11 @@ criteria = "safe-to-run"
 version = "0.9.6"
 criteria = "safe-to-deploy"
 
+[[exemptions.const-oid]]
+version = "0.10.2"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
+
 [[exemptions.constant_time_eq]]
 version = "0.4.2"
 criteria = "safe-to-deploy"
@@ -326,6 +341,11 @@ criteria = "safe-to-deploy"
 version = "0.1.7"
 criteria = "safe-to-deploy"
 
+[[exemptions.crypto-common]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
+
 [[exemptions.ctrlc]]
 version = "3.5.2"
 criteria = "safe-to-deploy"
@@ -342,13 +362,28 @@ criteria = "safe-to-deploy"
 version = "0.23.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.darling]]
+version = "0.24.1"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
+
 [[exemptions.darling_core]]
 version = "0.23.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.darling_core]]
+version = "0.24.1"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
+
 [[exemptions.darling_macro]]
 version = "0.23.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.darling_macro]]
+version = "0.24.1"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
 
 [[exemptions.dashmap]]
 version = "6.1.0"
@@ -381,6 +416,11 @@ criteria = "safe-to-deploy"
 [[exemptions.digest]]
 version = "0.10.7"
 criteria = "safe-to-deploy"
+
+[[exemptions.digest]]
+version = "0.11.3"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
 
 [[exemptions.dirs]]
 version = "6.0.0"
@@ -554,9 +594,15 @@ criteria = "safe-to-deploy"
 version = "0.15.5"
 criteria = "safe-to-deploy"
 
-[[exemptions.hashlink]]
-version = "0.10.0"
+[[exemptions.hashbrown]]
+version = "0.17.1"
 criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
+
+[[exemptions.hashlink]]
+version = "0.12.2"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
 
 [[exemptions.heck]]
 version = "0.5.0"
@@ -589,6 +635,11 @@ criteria = "safe-to-deploy"
 [[exemptions.httparse]]
 version = "1.10.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.hybrid-array]]
+version = "0.4.10"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
 
 [[exemptions.hyper]]
 version = "1.9.0"
@@ -751,8 +802,9 @@ version = "0.1.15"
 criteria = "safe-to-deploy"
 
 [[exemptions.libsqlite3-sys]]
-version = "0.33.0"
+version = "0.39.1"
 criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
 
 [[exemptions.linkme]]
 version = "0.3.36"
@@ -1093,16 +1145,23 @@ version = "0.17.14"
 criteria = "safe-to-deploy"
 
 [[exemptions.rmcp]]
-version = "1.8.0"
+version = "3.9.0"
 criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
 
 [[exemptions.rmcp-macros]]
-version = "1.8.0"
+version = "3.9.0"
 criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
 
 [[exemptions.roff]]
 version = "1.1.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.rsqlite-vfs]]
+version = "0.1.1"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
 
 [[exemptions.rstest]]
 version = "0.26.1"
@@ -1113,8 +1172,9 @@ version = "0.26.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.rusqlite]]
-version = "0.35.0"
+version = "0.41.1"
 criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
 
 [[exemptions.rust-multipart-rfc7578_2]]
 version = "0.8.0"
@@ -1258,6 +1318,11 @@ criteria = "safe-to-deploy"
 version = "0.10.9"
 criteria = "safe-to-deploy"
 
+[[exemptions.sha2]]
+version = "0.11.1"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
+
 [[exemptions.sharded-slab]]
 version = "0.1.7"
 criteria = "safe-to-deploy"
@@ -1310,9 +1375,15 @@ criteria = "safe-to-deploy"
 version = "0.7.3"
 criteria = "safe-to-deploy"
 
-[[exemptions.sse-stream]]
-version = "0.2.3"
+[[exemptions.sqlite-wasm-rs]]
+version = "0.5.5"
 criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
+
+[[exemptions.sse-stream]]
+version = "0.2.6"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
 
 [[exemptions.stable_deref_trait]]
 version = "1.2.1"
@@ -1337,6 +1408,11 @@ criteria = "safe-to-deploy"
 [[exemptions.syn]]
 version = "2.0.117"
 criteria = "safe-to-deploy"
+
+[[exemptions.syn]]
+version = "3.0.10"
+criteria = "safe-to-deploy"
+notes = "Unaudited; pulled by the rusqlite 0.41 / rmcp 3.9 security update (RUSTSEC-2026-0459/0462); independent review pending. This exemption is not an audit."
 
 [[exemptions.sync_wrapper]]
 version = "1.0.2"

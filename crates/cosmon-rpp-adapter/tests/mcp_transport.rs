@@ -258,6 +258,119 @@ async fn mcp_post_with_valid_bearer_passes_the_gate() {
     );
 }
 
+/// Exercise the protocol behind the bearer gate, including the legacy session
+/// handshake used by existing Streamable-HTTP clients.
+#[tokio::test]
+async fn mcp_initialize_then_list_tools() -> Result<(), Box<dyn std::error::Error>> {
+    async fn post(
+        app: &axum::Router,
+        jwt: &str,
+        session: Option<&str>,
+        body: Body,
+    ) -> Result<axum::response::Response, Box<dyn std::error::Error>> {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("host", "cosmon.example")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("Authorization", format!("Bearer {jwt}"));
+        if let Some(session) = session {
+            request = request
+                .header("mcp-session-id", session)
+                .header("mcp-protocol-version", "2025-03-26");
+        }
+        Ok(tokio::time::timeout(
+            Duration::from_secs(10),
+            app.clone().oneshot(request.body(body)?),
+        )
+        .await??)
+    }
+
+    async fn message(
+        response: axum::response::Response,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(10),
+            axum::body::to_bytes(response.into_body(), 1 << 20),
+        )
+        .await??;
+        for line in std::str::from_utf8(&bytes)?.lines() {
+            if let Some(data) = line.strip_prefix("data:") {
+                // rmcp sends an empty SSE priming event before the response.
+                let data = data.trim();
+                if !data.is_empty() {
+                    return Ok(serde_json::from_str(data)?);
+                }
+            }
+        }
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let security_dir = tempfile::tempdir()?;
+    let app = router(make_state(
+        &oidc,
+        &TenantWorkspaces::new(),
+        vec![("sub-a", "nuc-a", "a", "cosmon-rpp-a")],
+        security_dir.path(),
+    ));
+    let jwt = oidc.issue(&IssueJwt {
+        subject: "sub-a",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &["cosmon:molecule:read"],
+        lifetime_secs: Some(60),
+        jti: Some("jti-mcp-handshake"),
+    });
+
+    let response = post(&app, &jwt, None, initialize_body()).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let session = response
+        .headers()
+        .get("mcp-session-id")
+        .ok_or("initialize did not establish a legacy MCP session")?
+        .to_str()?
+        .to_owned();
+    let initialized = message(response).await?;
+    assert_eq!(initialized["id"], 1);
+    assert_eq!(initialized["result"]["protocolVersion"], "2025-03-26");
+    assert!(initialized["result"]["capabilities"]["tools"].is_object());
+
+    let response = post(
+        &app,
+        &jwt,
+        Some(&session),
+        Body::from(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let response = post(
+        &app,
+        &jwt,
+        Some(&session),
+        Body::from(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = message(response).await?;
+    assert_eq!(listed["id"], 2);
+    let tools = listed["result"]["tools"]
+        .as_array()
+        .ok_or("tools/list did not return a tool catalog")?;
+    assert!(tools.iter().any(|tool| tool["name"] == "cosmon_observe"));
+    for tool in tools {
+        assert!(tool["inputSchema"].is_object());
+        assert!(!cosmon_mcp::DENY_REMOTE_TOOLS
+            .contains(&tool["name"].as_str().ok_or("tool has no name")?));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // F3-1 (task-20260712-0294) — per-tool scope enforcement at the /mcp gate.
 //
