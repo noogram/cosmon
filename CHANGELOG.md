@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-11-09
+
 ### Added
 
 - `cs tackle`: The `agy` adapter (Google Antigravity CLI) is now supported alongside `claude`, `aider`, `codex`, and `opencode`. The pane command is portable POSIX sh (no `set -o pipefail`, which dash rejects): agy's status is written to `agy-exit.code` in the molecule directory and the pipeline exits with it.
@@ -4807,7 +4809,8 @@ release **is**, not how it was built.
   `#![deny(missing_docs)]` on the core, and CI gates on build, test, clippy,
   and fmt.
 
-[Unreleased]: https://github.com/noogram/cosmon/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/noogram/cosmon/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/noogram/cosmon/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/noogram/cosmon/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/noogram/cosmon/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/noogram/cosmon/compare/v0.7.1...v0.7.2
