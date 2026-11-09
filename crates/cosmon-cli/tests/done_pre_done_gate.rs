@@ -1181,3 +1181,247 @@ fn delegated_command_egress_refused_on_unenforceable_exposed_host() {
         "main must be reset when the delegated command is refused fail-closed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Post-merge gate rollback must read as a failure (not as a landed merge).
+//
+// `git merge` succeeds before the post-merge gate runs, so the action list
+// already holds `merged` when the gate refuses. A pilot read "• merged" under
+// the rollback headline and believed the work had landed. These tests pin, on
+// the real `cs done` path, the three properties of a rolled-back merge.
+// ---------------------------------------------------------------------------
+
+/// Nucleate a `task-work` molecule left `pending`; [`complete_molecule`]
+/// finishes it once the repo has a base commit.
+fn nucleate_pending(repo: &Path) -> String {
+    let nuc = cs_isolated(repo)
+        .args(["--json", "nucleate", "task-work", "--var", "topic=rollback"])
+        .output()
+        .expect("cs nucleate");
+    assert!(nuc.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&nuc.stdout).unwrap();
+    v["id"].as_str().expect("nucleate id").to_owned()
+}
+
+/// Complete a molecule, the state a finished worker leaves behind (the harvest
+/// queue holds exactly these). Needs a base commit for the mindguard diff.
+fn complete_molecule(repo: &Path, mol_id: &str) {
+    let done = cs_isolated(repo)
+        .args(["complete", mol_id, "--reason", "integration test"])
+        .output()
+        .expect("cs complete");
+    assert!(
+        done.status.success(),
+        "complete failed: {}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+}
+
+/// Two-member workspace plus a member test that reaches a file outside every
+/// member through `#[path]`, so the gate returns `Unverified { expected: true }`
+/// (fail-closed) and rolls the merge back. Returns `(mol_id, branch, main_before)`.
+fn stage_out_of_member_rollback(repo: &Path, completed: bool) -> (String, String, String) {
+    setup_repo_with_config(repo, "");
+    // `peek` and `status` need a parseable fleet (the shared fixture writes `{}`).
+    fs::write(
+        repo.join(".cosmon/state/fleet.json"),
+        "{\"repos\":{},\"workers\":{}}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("lib/src")).unwrap();
+    fs::write(
+        repo.join("lib/Cargo.toml"),
+        "[package]\nname = \"done-gate-lib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(repo.join("lib/src/lib.rs"), "pub fn ok() {}\n").unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\", \"lib\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+
+    let mol_id = if completed {
+        nucleate_pending(repo)
+    } else {
+        nucleate_terminal(repo)
+    };
+    // `lib` rides on the base commit that `stage_clean_merge` makes.
+    git_ok(repo, &["add", "lib"]);
+    let (branch, main_before) = stage_clean_merge(repo, &mol_id);
+    if completed {
+        complete_molecule(repo, &mol_id);
+    }
+
+    git_ok(repo, &["checkout", "-q", &branch]);
+    fs::create_dir_all(repo.join("tests/support")).unwrap();
+    fs::create_dir_all(repo.join("app/tests")).unwrap();
+    fs::write(repo.join("tests/support/fixtures.rs"), "pub fn f() {}\n").unwrap();
+    fs::write(
+        repo.join("app/tests/uses_fixture.rs"),
+        "#[path = \"../../tests/support/fixtures.rs\"]\nmod fixtures;\n#[test]\nfn t() { fixtures::f(); }\n",
+    )
+    .unwrap();
+    git_ok(repo, &["add", "tests/support", "app/tests"]);
+    git_ok(
+        repo,
+        &["commit", "-qm", "test using an out-of-member fixture"],
+    );
+    git_ok(repo, &["checkout", "-q", "main"]);
+    (mol_id, branch, main_before)
+}
+
+/// Property 1: the action list (text and JSON) never says plain `merged` for a
+/// merge the post-merge gate rolled back.
+///
+/// FALSIFIER: removing the `actions_after_rollback` rewrite in
+/// `refuse_post_merge_and_rollback` reddens this — `merged` is back in both.
+#[test]
+fn rolled_back_merge_is_never_reported_as_merged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let (mol_id, _branch, _before) = stage_out_of_member_rollback(repo, false);
+
+    let json = cs_isolated(repo)
+        .args(["--json", "done", &mol_id, "--no-auto-propel"])
+        .output()
+        .expect("cs done --json");
+    let out = String::from_utf8_lossy(&json.stdout);
+    let v: serde_json::Value = serde_json::from_str(out.trim()).expect("one JSON object");
+    assert_eq!(v["outcome"], "post_merge_compile_gate_refused", "{out}");
+    let actions: Vec<&str> = v["actions"]
+        .as_array()
+        .expect("actions array")
+        .iter()
+        .filter_map(|a| a.as_str())
+        .collect();
+    assert!(
+        !actions.iter().any(|a| a.starts_with("merged")),
+        "a rolled-back merge must not carry a `merged` action: {actions:?}"
+    );
+    assert!(
+        actions
+            .iter()
+            .any(|a| a.contains("rolled back by post-merge gate")),
+        "the action list must say the post-merge gate rolled the merge back: {actions:?}"
+    );
+
+    let text = cs_isolated(repo)
+        .args(["done", &mol_id, "--no-auto-propel"])
+        .output()
+        .expect("cs done");
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        !stdout
+            .lines()
+            .any(|l| l.trim_start().starts_with("• merged")),
+        "text output must not list `• merged` under a rollback.\n{stdout}"
+    );
+    assert!(
+        stdout.contains("• merge rolled back by post-merge gate"),
+        "text output must list the rollback as an action.\n{stdout}"
+    );
+}
+
+/// Property 2: `cs done` exits non-zero when the post-merge gate rolls the
+/// merge back, and base is back at its pre-merge revision.
+///
+/// FALSIFIER: making `refuse_post_merge_and_rollback` return `Ok` (or the
+/// caller swallow its error) reddens the exit-code assertion.
+#[test]
+fn rolled_back_merge_exits_nonzero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let (mol_id, _branch, main_before) = stage_out_of_member_rollback(repo, false);
+
+    let done = cs_isolated(repo)
+        .args(["done", &mol_id, "--no-auto-propel"])
+        .output()
+        .expect("cs done");
+    assert_eq!(
+        done.status.code(),
+        Some(1),
+        "a rolled-back merge must exit 1.\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&done.stdout),
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let main_after = String::from_utf8_lossy(&git(repo, &["rev-parse", "main"]).stdout)
+        .trim()
+        .to_owned();
+    assert_eq!(
+        main_after, main_before,
+        "main must be back at its pre-merge revision"
+    );
+}
+
+/// Property 3: after the rollback the molecule is still harvestable. Its state
+/// is unchanged, branch kept, and once the cause is fixed `cs done` succeeds.
+///
+/// FALSIFIER: letting the refusal path advance the molecule to a state `done`
+/// rejects, or delete its branch, reddens the rerun.
+#[test]
+fn rolled_back_merge_leaves_molecule_harvestable_and_rerunnable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let (mol_id, branch, _before) = stage_out_of_member_rollback(repo, true);
+
+    let status_of = |repo: &Path| -> String {
+        let o = cs_isolated(repo)
+            .args(["--json", "observe", &mol_id])
+            .output()
+            .expect("cs observe");
+        let v: serde_json::Value = serde_json::from_slice(&o.stdout).expect("observe json");
+        v["status"].as_str().unwrap_or("?").to_owned()
+    };
+    let status_before = status_of(repo);
+
+    let done = cs_isolated(repo)
+        .args(["done", &mol_id, "--no-auto-propel"])
+        .output()
+        .expect("cs done");
+    assert!(!done.status.success());
+    assert_eq!(
+        status_of(repo),
+        status_before,
+        "the refusal must not change the molecule's state"
+    );
+    assert!(
+        git(repo, &["rev-parse", "--verify", &branch])
+            .status
+            .success(),
+        "the branch must survive the rollback"
+    );
+    let peek = cs_isolated(repo)
+        .args(["peek", "--phase", "harvestable", "--json"])
+        .output()
+        .expect("cs peek");
+    assert!(
+        String::from_utf8_lossy(&peek.stdout).contains(&mol_id),
+        "the molecule must be listed as harvestable.\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&peek.stdout),
+        String::from_utf8_lossy(&peek.stderr)
+    );
+
+    // Fix the cause: drop the out-of-member fixture use from the branch.
+    git_ok(repo, &["checkout", "-q", &branch]);
+    git_ok(repo, &["rm", "-q", "-r", "tests/support", "app/tests"]);
+    git_ok(repo, &["commit", "-qm", "drop out-of-member fixture"]);
+    git_ok(repo, &["checkout", "-q", "main"]);
+
+    let rerun = cs_isolated(repo)
+        .args(["done", &mol_id, "--no-auto-propel"])
+        .output()
+        .expect("cs done rerun");
+    assert!(
+        rerun.status.success(),
+        "rerun after the fix must succeed.\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&rerun.stdout),
+        String::from_utf8_lossy(&rerun.stderr)
+    );
+    assert!(
+        git(repo, &["cat-file", "-e", "main:worker.txt"])
+            .status
+            .success(),
+        "after the rerun the worker content is on main"
+    );
+}
