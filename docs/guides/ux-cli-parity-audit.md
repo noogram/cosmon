@@ -147,6 +147,15 @@ true`) as with `cs collapse`, instead of an error, and the collapse now writes
 `log.md` and the `EventV2` records, releases the process record, and is
 refused on a leased mission.
 
+## Explicit pilot-mailbox acknowledgment (issue #212, W5 increment 1)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Acknowledge one envelope separately from reading the mailbox | `cs sessions ack <key> [--session <SID>] [--json]` writes through the existing mailbox acknowledgment writer; duplicates exit successfully without writing, and unknown keys are refused | No separate acknowledgment control audited | S-ACK remains specified for W7; no route added |
+
+`inbox` still acknowledges the messages it prints; `inbox --peek` does not.
+Acknowledgment records consumption only and grants no lifecycle authority.
+
 ## Codex live lifecycle observations (issue #193)
 
 | Capability | CLI | Native UI | Remote service |

@@ -80,6 +80,7 @@ sessions attach
 sessions peers
 sessions send
 sessions inbox
+sessions ack
 sessions checkpoint
 sessions checkpoint publish
 sessions checkpoint stage
