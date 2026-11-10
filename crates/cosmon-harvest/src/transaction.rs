@@ -8353,6 +8353,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn actions_after_rollback_replaces_escalated_merge_labels() {
+        for retries in [1, 2, 10] {
+            let actions = vec![
+                "pre_done hook passed".to_owned(),
+                format!("merged_after_{retries}_escalation(s)"),
+                "worker preserved".to_owned(),
+            ];
+            assert_eq!(
+                actions_after_rollback(&actions),
+                vec![
+                    "pre_done hook passed",
+                    "merge rolled back by post-merge gate (NOT merged)",
+                    "worker preserved",
+                ],
+                "a merge after {retries} escalation(s) was rolled back"
+            );
+        }
+    }
+
+    #[test]
+    fn actions_after_rollback_deduplicates_merge_labels_and_keeps_other_actions() {
+        let actions: Vec<String> = [
+            "merged_after_pending",
+            "manual_escalation(s)",
+            "merged_after_1_escalation(s)",
+            "merged",
+            "merged_after_2_escalation(s)",
+            "worker preserved",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(
+            actions_after_rollback(&actions),
+            vec![
+                "merged_after_pending",
+                "manual_escalation(s)",
+                "merge rolled back by post-merge gate (NOT merged)",
+                "worker preserved",
+            ]
+        );
+    }
+
+    #[test]
     fn warns_only_for_nonempty_output_on_an_empty_branch() {
         let warning = spore_output_warning(true, "/spore/output", 2);
         assert!(warning.as_deref().is_some_and(|message| {

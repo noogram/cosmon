@@ -1354,6 +1354,40 @@ fn rolled_back_merge_exits_nonzero() {
     );
 }
 
+/// A rollback restores the base after creating a merge commit; its footer must
+/// not claim that no merge commit was created.
+#[test]
+fn rolled_back_merge_footer_reports_base_restored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let (mol_id, _branch, main_before) = stage_out_of_member_rollback(repo, false);
+
+    let done = cs_isolated(repo)
+        .args(["done", &mol_id, "--no-auto-propel"])
+        .output()
+        .expect("cs done");
+    let stdout = String::from_utf8_lossy(&done.stdout);
+    let stderr = String::from_utf8_lossy(&done.stderr);
+    assert_eq!(done.status.code(), Some(1), "{stdout}\n{stderr}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.trim() == "base branch restored to its pre-merge revision."),
+        "the rollback footer must report restoration.\n{stdout}\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("base branch unchanged — no merge commit was created"),
+        "the pre-merge refusal footer must not describe a rollback.\n{stdout}"
+    );
+    let main_after = String::from_utf8_lossy(&git(repo, &["rev-parse", "main"]).stdout)
+        .trim()
+        .to_owned();
+    assert_eq!(
+        main_after, main_before,
+        "the reported restoration must be real"
+    );
+}
+
 /// Property 3: after the rollback the molecule is still harvestable. Its state
 /// is unchanged, branch kept, and once the cause is fixed `cs done` succeeds.
 ///

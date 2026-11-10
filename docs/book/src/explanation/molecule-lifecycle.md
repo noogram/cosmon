@@ -132,6 +132,18 @@ and inspects the feature branch against the base branch.
    for the worker's code commit, and it does not turn a cross-galaxy empty
    branch into a commit.
 
+Before teardown, the post-merge integrity gate checks the merged tree. If the
+gate refuses it, `cs done` rolls the merge back and exits with code **1**. The
+action list in text and `--json` output reports
+`merge rolled back by post-merge gate (NOT merged)`, including when the merge
+succeeded after escalations. The text footer reads
+`base branch restored to its pre-merge revision.`
+
+The molecule stays harvestable: its status is unchanged, and its branch,
+worktree, and tmux session are preserved. Fix the cause of the gate refusal on
+the worker's branch, then rerun `cs done <id>`. Use
+`cs peek --phase harvestable` to see molecules awaiting harvesting.
+
 The ordering prevents both common misconceptions: a worker's same-galaxy code
 is committed before harvesting, and a cross-galaxy worker's code has already
 been committed in its target galaxy. Harvesting integrates only the former.
