@@ -27,6 +27,8 @@ this stage.
 
 - `cs done` refuses overlapping uncommitted base-checkout edits before attempting a merge, names the files and asks the pilot to commit or stash them, and preserves the harvestable molecule; unrelated unstaged edits remain allowed (dirty-base preflight requires Git 2.38+).
 
+- Work messages now show `delivery_state=exhausted` in local and remote work lists when delivery attempts are used up; pulls keep serving other messages and acknowledgment preserves the exhaustion history.
+
 ## [0.9.0] — 2026-11-09
 
 ### Added

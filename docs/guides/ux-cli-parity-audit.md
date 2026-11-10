@@ -26,7 +26,7 @@ the existing refusal message. No UI control or remote route changes.
 
 | Capability | Local CLI | Remote CLI / API |
 |---|---|---|
-| Inspect roster and revision | `cs work list` | `cosmon-remote work list`; `GET /v1/work/{owner}` |
+| Inspect message stages and delivery state; remote list also includes seats and revision | `cs work list` | `cosmon-remote work list`; `GET /v1/work/{owner}` |
 | Send bounded evidence | `cs work send` | `cosmon-remote work send`; `POST /v1/work/{owner}/messages` |
 | Peek without delivery observations | `cs work inbox --peek` | `cosmon-remote work inbox --peek`; `GET /v1/work/{owner}/inbox` |
 | Pull at an explicit safe point | `cs work inbox` | `cosmon-remote work inbox`; `POST /v1/work/{owner}/inbox` |
@@ -35,8 +35,14 @@ the existing refusal message. No UI control or remote route changes.
 The host derives the seat from the operator-provisioned binding and checks
 its attachment proof; the request never selects a sender. Unknown request
 fields are refused. Every response names its schema version, server receipt
-time and scope revision. Inbox messages and outgoing acknowledgment receipts
-remain separate; a result is a new message linked by reply, never an ack.
+time and scope revision. W-LIST returns paginated seat and message metadata;
+`messages` reports each key's derived `delivery_state` as `pending` or
+`exhausted`. Exhaustion uses the envelope's frozen attempt maximum per
+adapter, not a sum across adapters, and stays visible after ack or expiry.
+The same offset and limit page the independently sorted seat and message
+collections; `next_offset` continues until both are exhausted. Inbox messages
+and outgoing acknowledgment receipts remain separate; a result is a new
+message linked by reply, never an ack.
 Writes recheck binding revision and revocation at commit. Declaration and
 binding management stay host-local. No collaboration route starts a command,
 molecule or worker, changes a lifecycle, or acquires a lease. W4 provides no

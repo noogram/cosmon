@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum WorkCmd {
-    #[command(about = format!("Read the bound roster ({})", canon::GET_V1_WORK_OWNER.label()))]
+    #[command(about = format!("Read the bound roster and message delivery state ({})", canon::GET_V1_WORK_OWNER.label()))]
     List {
         owner: String,
         #[arg(long, default_value_t = 0)]

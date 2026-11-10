@@ -68,6 +68,61 @@ fn declare(dir: &Path) {
 }
 
 #[test]
+fn exhausted_message_is_visible_to_sender_and_owner_and_never_offered_again() {
+    let fixture = fixture();
+    let dir = fixture.path();
+    ok(
+        dir,
+        None,
+        &[
+            "work",
+            "declare",
+            OWNER,
+            "--seat",
+            &format!("a={A}"),
+            "--seat",
+            &format!("b={B}"),
+            "--max-delivery-attempts",
+            "1",
+        ],
+    );
+    ok(
+        dir,
+        Some(A),
+        &[
+            "work", "send", "--to", "b", "--text", "finding", "--key", "last",
+        ],
+    );
+    let inbox: serde_json::Value =
+        serde_json::from_str(&ok(dir, Some(B), &["--json", "work", "inbox"])).expect("inbox JSON");
+    assert_eq!(inbox[0]["envelope"]["key"], "last");
+    let state = dir.join(".cosmon/state");
+    let receipts = mol_dir(&state, OWNER).join("work/receipts/last.jsonl");
+    let before = fs::read(&receipts).expect("receipts");
+    for caller in [None, Some(A)] {
+        let listed = ok(dir, caller, &["--json", "work", "list", OWNER]);
+        println!("work list: {listed}");
+        let listed: serde_json::Value = serde_json::from_str(&listed).expect("list JSON");
+        assert_eq!(listed["envelopes"]["last"]["delivery_state"], "exhausted");
+    }
+    let human = ok(dir, None, &["work", "list", OWNER]);
+    assert!(human.contains("delivery=exhausted"), "{human}");
+    let inbox = ok(dir, Some(B), &["--json", "work", "inbox"]);
+    assert_eq!(inbox.trim(), "[]");
+    assert_eq!(fs::read(&receipts).expect("receipts"), before);
+    ok(dir, Some(B), &["work", "ack", "last", "--considered"]);
+    let listed: serde_json::Value =
+        serde_json::from_str(&ok(dir, None, &["--json", "work", "list", OWNER]))
+            .expect("list JSON");
+    assert_eq!(listed["envelopes"]["last"]["delivery_state"], "exhausted");
+    assert_eq!(
+        listed["envelopes"]["last"]["consumed"]["disposition"],
+        "considered"
+    );
+    assert_eq!(ok(dir, Some(B), &["--json", "work", "inbox"]).trim(), "[]");
+}
+
+#[test]
 fn work_help_lists_the_verbs() {
     let output = Command::new(env!("CARGO_BIN_EXE_cs"))
         .args(["help", "work"])

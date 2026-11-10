@@ -113,7 +113,7 @@ model received or considered the content.
 
 | ID | Verb | Route | Scope | CLI counterpart | Writer | Limit | Retry | Effect perimeter | Phase |
 |---|---|---|---|---|---|---|---|---|---|
-| W-LIST | work list | `GET /v1/work/{owner}` | `cosmon:work:read` | `cs work list` | `owner-store` | page 100 seats | safe-repeat | read-only | W4 |
+| W-LIST | work list | `GET /v1/work/{owner}` | `cosmon:work:read` | `cs work list` | `owner-store` | page 100 seats and 100 message states | safe-repeat | read-only | W4 |
 | W-SEND | work send | `POST /v1/work/{owner}/messages` | `cosmon:work:write` | `cs work send` | `owner-store` | budget.max_payload_bytes, budget.max_messages_per_seat, budget.max_bytes_per_seat | idempotent-key | advisory-write | W4 |
 | W-PEEK | work inbox peek | `GET /v1/work/{owner}/inbox` | `cosmon:work:read` | `cs work inbox --peek` | `owner-store` | page 100 envelopes, 1048576 response bytes | safe-repeat | read-only | W4 |
 | W-PULL | work inbox pull | `POST /v1/work/{owner}/inbox` | `cosmon:work:read` | `cs work inbox` | `owner-store` | page 100 envelopes, budget.max_delivery_attempts | bounded-redelivery | observation-write | W4 |
@@ -143,6 +143,29 @@ authority transfer (the host-local lease ledger, reached by no route here).
 
 ### Fields
 
+- **List** returns the roster and paginated message metadata under `messages`
+  (`key`, `delivery_state`) to every admitted member of the work. This is
+  work-scoped metadata visibility; payload delivery remains recipient-bound.
+  The same `offset` and `limit` apply independently
+  to seats sorted by seat name and messages sorted by key; `next_offset` is
+  present until both collections are traversed. Each page reads current records;
+  offsets do not provide a snapshot across concurrent submissions. No message
+  payload is returned. Unreadable or unsound message evidence refuses the list
+  with a custody or corrupt-evidence error rather than certifying partial states.
+  Local `cs work list` includes `delivery_state` in each envelope projection
+  and `delivery=...` in text output; `cosmon-remote work list` shows the W-LIST
+  response.
+- **Delivery state** is `pending` until an adapter's durable attempt count
+  reaches the envelope's frozen `max_delivery_attempts`, then `exhausted`.
+  Counts are per adapter, not summed across adapters. Once any adapter reaches
+  the bound, no adapter offers that message again. This state is derived from
+  existing receipts, with no new canonical record, and remains visible after
+  consumption or expiry. It is independent of admission, context delivery,
+  consumption and expiry: `pending` alone does not imply deliverability.
+  An exhausted message does not block delivery of other messages; the pull
+  succeeds with those still deliverable, or an empty list. It never returns
+  `budget_exhausted` for delivery-attempt exhaustion.
+
 - **Send** carries `scope_revision`, `recipient`, `idempotency_key`,
   `sender_time` (advisory), optional `reply_to`, `phase`, `confidentiality`,
   `ttl_secs`, and the payload. The sender is never a field. The canonical
@@ -163,7 +186,10 @@ authority transfer (the host-local lease ledger, reached by no route here).
   (`considered`, `deferred` or `rejected`), an optional `reply` key and an
   optional note. It is bound to the recipient seat, the key and the digest, and
   is durable before success is returned. A second ack of a consumed envelope is
-  a duplicate and changes nothing.
+  a duplicate and changes nothing. An exhausted message may still be acknowledged
+  as evidence of consumption; the acknowledgment does not reset delivery attempts
+  or make the message deliverable again. Existing expiry rules still apply
+  (the remote route refuses acknowledgments after expiry).
 - **Responses** carry the server receipt time (client time is advisory), the
   current scope revision and a schema version. Unknown request fields are
   refused. DTOs are additive and versioned; old records default on read.
@@ -210,7 +236,7 @@ added by amendment, never reused for another meaning.
 | unknown_envelope | 404 | The key, reply or message names no envelope of this work. |
 | unknown_work | 404 | The owner names no declared work visible to the binding. |
 | payload_too_large | 413 | Payload or note exceeds its limit. |
-| budget_exhausted | 429 | The seat used its message, byte or delivery-attempt allowance. |
+| budget_exhausted | 429 | The seat used its message or byte allowance. |
 | envelope_expired | 410 | The envelope's lifetime ended before the operation. |
 | digest_mismatch | 422 | The supplied digest does not match the stored payload. |
 | evidence_unreadable | 422 | Referenced evidence is missing, unreadable or fails its digest. |
@@ -292,6 +318,12 @@ envelopes and receipts with its own admission boundary and its own custodians.
 This contract does not provide it: it refuses a second tenant, a second
 person and any residence other than the one authoritative host, and it
 mounts no route that the relay would have to inherit.
+
+**2026-11-10 amendment (operator decision).** Delivery-attempt exhaustion is
+per-message `exhausted` metadata in W-LIST and local work-list output, derived
+from durable observations. HTTP 429 `budget_exhausted` is reserved for the
+seat's message and byte allowances. An exhausted message remains
+acknowledgeable without reopening delivery.
 
 **Amendments**, recorded in the ADRs themselves:
 

@@ -3980,7 +3980,7 @@ components:
         receipt: {type: object, description: Present only when this acknowledgment was newly recorded.}
     WorkListResponse:
       type: object
-      required: [schema_version, received_at, scope_revision, seats]
+      required: [schema_version, received_at, scope_revision, seats, messages]
       properties:
         schema_version: {type: integer, const: 1}
         received_at: {type: string, format: date-time}
@@ -3998,6 +3998,19 @@ components:
               molecule: {type: string}
               required: {type: boolean}
               provider_requirement: {type: string}
+        messages:
+          type: array
+          maxItems: 100
+          description: Message metadata sorted by key; offset/limit apply independently to seats and messages. No payload is returned.
+          items:
+            type: object
+            required: [key, delivery_state]
+            properties:
+              key: {type: string, maxLength: 80}
+              delivery_state:
+                type: string
+                enum: [pending, exhausted]
+                description: Derived from durable per-adapter attempt counts and the envelope-frozen bound. Any adapter reaching the bound exhausts delivery across adapters. Ack and expiry do not reset it.
         next_offset: {type: [integer, "null"], minimum: 0}
     WorkEnvelope:
       type: object

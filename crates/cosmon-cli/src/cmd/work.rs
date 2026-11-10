@@ -17,8 +17,8 @@ use cosmon_core::advisory_attempt::AdvisorySeatId;
 use cosmon_core::id::MoleculeId;
 use cosmon_core::work_message::{
     render_for_context, Admission, AdmittedWorkCaller, Confidentiality, ContextObservation,
-    DeliveryAdapter, Disposition, MessageBudget, MessageKey, SeatDecl, SenderEvidence,
-    WorkMessageStore, WorkProjection, WorkScope, WORK_MESSAGE_SCHEMA_VERSION,
+    DeliveryAdapter, DeliveryState, Disposition, MessageBudget, MessageKey, SeatDecl,
+    SenderEvidence, WorkMessageStore, WorkProjection, WorkScope, WORK_MESSAGE_SCHEMA_VERSION,
 };
 use cosmon_state::work_message::FileWorkMessageStore;
 use cosmon_state::work_ops::{
@@ -84,7 +84,7 @@ enum Verb {
     Inbox(InboxArgs),
     /// Report how this member treated a received message
     Ack(AckArgs),
-    /// Rebuild the owner's message stages from canonical evidence
+    /// Rebuild the owner's message stages and delivery state from canonical evidence
     List(ListArgs),
 }
 
@@ -172,7 +172,7 @@ struct AckArgs {
 struct ListArgs {
     /// Owner molecule; defaults to the caller's declared work.
     owner: Option<String>,
-    /// Only envelopes still pending for a recipient.
+    /// Only unexpired envelopes without a consumption report.
     #[arg(long, conflicts_with = "open")]
     pending: bool,
     /// Only envelopes without a consumption report.
@@ -645,8 +645,12 @@ fn list(ctx: &Context, args: &ListArgs) -> Result<()> {
                     Disposition::Rejected => "rejected",
                 });
             let expired = if view.expired { "expired" } else { "—" };
+            let delivery = match view.delivery_state {
+                DeliveryState::Pending => "pending",
+                DeliveryState::Exhausted => "exhausted",
+            };
             println!(
-                "{} {} → {}  admitted={admitted}  attempts={}  context={delivered}  consumed={consumed}  expired={expired}",
+                "{} {} → {}  admitted={admitted}  attempts={}  delivery={delivery}  context={delivered}  consumed={consumed}  expired={expired}",
                 view.envelope.key,
                 view.envelope.sender,
                 view.envelope.recipient,

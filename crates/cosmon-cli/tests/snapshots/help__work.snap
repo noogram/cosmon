@@ -31,7 +31,7 @@ Commands:
   send     Admit bounded evidence from this member to another seat
   inbox    Pull messages addressed to this member at a safe point
   ack      Report how this member treated a received message
-  list     Rebuild the owner's message stages from canonical evidence
+  list     Rebuild the owner's message stages and delivery state from canonical evidence
 
 Options:
       --config <PATH>

@@ -1096,7 +1096,7 @@ worker).
 * `send` — Admit bounded evidence from this member to another seat
 * `inbox` — Pull messages addressed to this member at a safe point
 * `ack` — Report how this member treated a received message
-* `list` — Rebuild the owner's message stages from canonical evidence
+* `list` — Rebuild the owner's message stages and delivery state from canonical evidence
 
 
 
@@ -1186,7 +1186,7 @@ Report how this member treated a received message
 
 ## `cs work list`
 
-Rebuild the owner's message stages from canonical evidence
+Rebuild the owner's message stages and delivery state from canonical evidence
 
 **Usage:** `cs work list [OPTIONS] [OWNER]`
 
@@ -1196,7 +1196,7 @@ Rebuild the owner's message stages from canonical evidence
 
 ###### **Options:**
 
-* `--pending` — Only envelopes still pending for a recipient
+* `--pending` — Only unexpired envelopes without a consumption report
 * `--open` — Only envelopes without a consumption report
 
 
