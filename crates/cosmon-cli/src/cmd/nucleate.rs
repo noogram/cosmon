@@ -1612,6 +1612,7 @@ fn nucleate_and_persist(
             .join(result.id.as_str());
 
         write_briefing(&dir, formula, &result)?;
+        cosmon_state::briefing_render::record_rendered_briefing(&dir)?;
         // NO committee-posture delivery here, and the absence is the point.
         //
         // A `deliver_committee_posture_reference(&dir, …)` call sat on this

@@ -2,6 +2,16 @@
 
 # CLI and UI parity audit
 
+## Briefing edits on step changes
+
+The shared evolve operation preserves a briefing that differs from its last
+render as `briefing.md.edited-<step>` (one-based). CLI warnings name that file
+and recommend `--var-file key=path` at nucleation. Unchanged briefings produce
+no backup or warning. Identical backups are reused on retry; different bytes
+at the same backup path refuse before the recorded step advances. Legacy
+molecules without a render digest conservatively keep their current briefing.
+The API uses the same preservation operation; no UI control changes.
+
 ## Visual surface completion
 
 `cs complete` keeps refusing a touched visual surface without a recent GREEN

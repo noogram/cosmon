@@ -29,6 +29,7 @@ pub mod advisory_attempt;
 pub mod archive;
 pub mod attestor_log;
 pub mod avatar;
+pub mod briefing_render;
 pub mod briefing_seal;
 pub mod collaboration;
 pub mod event_log;
