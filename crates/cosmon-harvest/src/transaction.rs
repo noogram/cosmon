@@ -5343,7 +5343,7 @@ fn try_merge_branch_target_with_subject(
                 .join("\n");
             let molecule = branch.strip_prefix("feat/").unwrap_or(branch);
             return MergeOutcome::Error(format!(
-                "uncommitted changes in the base checkout overlap files the merge would write:\n{listing}\n\n\
+                "uncommitted local changes in the base checkout overlap files the merge would write:\n{listing}\n\n\
                  commit or stash these changes in {}, then rerun `cs done {molecule}`.",
                 repo_root.display()
             ));
