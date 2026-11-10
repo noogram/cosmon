@@ -192,6 +192,8 @@ SEE ALSO: cs complete (state transition only), cs tackle (counterpart).
 
    `merge` (default) creates a merge commit (`git merge --no-ff`) so parallel workers can land independently even when main has moved. `ff-only` preserves a strictly linear history and refuses anything that is not a fast-forward; it is refused when native attribution is configured because a fast-forward creates no trailer carrier.
 
+   Both strategies refuse overlapping uncommitted changes in the base checkout before merging. Commit or stash the named files, then rerun `cs done`. The dirty-base preflight requires Git 2.38 or newer.
+
   Default value: `merge`
 
   Possible values:

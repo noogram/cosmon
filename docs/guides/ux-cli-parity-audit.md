@@ -356,7 +356,7 @@ private signing key enters the service or a worker through these commands.
 
 | Capability | CLI | Native UI | Remote service |
 |---|---|---|---|
-| Explain a failed merge | `cs done` prints the merge error and dirty checkout paths; JSON includes `error` and `dirty_paths` | No equivalent diagnostic view audited | The harvest response retains the transaction error; no dirty-path projection audited |
+| Explain a failed merge | `cs done` refuses overlapping uncommitted base-checkout edits before `git merge`, names each path and asks the pilot to commit or stash the changes; unrelated unstaged edits are allowed. Dirty-base preflight requires Git 2.38+. Text prints the diagnosis; JSON includes `error` and `dirty_paths` | No equivalent diagnostic view audited | The harvest response retains the transaction error; no dirty-path projection audited |
 | Finish a harvest in a project with tracked archive state | `cs done` commits eligible archive, event, and frontier changes after teardown and skips ignored molecule directories without an artifact warning | No equivalent action audited | The shared harvest transaction applies the same state commit |
 
 The dirty-path list is a checkout observation at the failure report. It may
