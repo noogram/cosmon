@@ -24,7 +24,7 @@
 //!
 //! # The rule
 //!
-//! For every `fs::write` in `crates/cosmon-cli/src` whose target is
+//! For every `fs::write` or `write_generated_briefing` call whose target is
 //! `briefing.md`, outside `#[cfg(test)]` modules, one of:
 //!
 //! - a `deliver_committee_posture_reference` call follows within
@@ -94,7 +94,7 @@ fn production_lines(src: &str) -> Vec<(usize, &str)> {
     out
 }
 
-/// Does this `fs::write(` call target `briefing.md`?
+/// Does this write call target `briefing.md`?
 ///
 /// The path argument is not always on the call's own line — `cs complete`
 /// wraps it onto the next one — so the decision reads a small trailing window.
@@ -104,13 +104,18 @@ fn targets_briefing(lines: &[(usize, &str)], at: usize) -> bool {
         .any(|(_, text)| text.contains("briefing_path") || text.contains("\"briefing.md\""))
 }
 
+/// Recognize both raw writes and the atomic generated-briefing entry point.
+fn is_write_call(text: &str) -> bool {
+    text.contains("fs::write(") || text.contains("write_generated_briefing(")
+}
+
 /// Every production write of `briefing.md` in `src` that neither delivers the
 /// pointer nor carries an exemption marker.
 fn unguarded_writes(src: &str, file: &str) -> Vec<Write> {
     let lines = production_lines(src);
     let mut offenders = Vec::new();
     for (idx, (lineno, text)) in lines.iter().enumerate() {
-        if !text.contains("fs::write(") || !targets_briefing(&lines, idx) {
+        if !is_write_call(text) || !targets_briefing(&lines, idx) {
             continue;
         }
         let delivers = lines[idx..(idx + DELIVERY_WINDOW).min(lines.len())]
@@ -184,7 +189,7 @@ fn all_briefing_writes() -> Vec<Write> {
             fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let lines = production_lines(&src);
         for (idx, (lineno, text)) in lines.iter().enumerate() {
-            if text.contains("fs::write(") && targets_briefing(&lines, idx) {
+            if is_write_call(text) && targets_briefing(&lines, idx) {
                 found.push(format!("{name}:{lineno}"));
             }
         }
@@ -296,4 +301,15 @@ fn test_modules_are_skipped_and_cfg_test_functions_are_not() {
         1,
         "a `#[cfg(test)] fn` is not a module; everything after it is still production code"
     );
+}
+
+#[test]
+fn generated_writer_calls_remain_subject_to_posture_delivery() {
+    let unguarded = "fn rewrite(briefing_path: &Path) {\n    \
+                     cosmon_state::briefing_render::write_generated_briefing(briefing_path, \"new\")?;\n}\n";
+    assert_eq!(unguarded_writes(unguarded, "synthetic.rs").len(), 1);
+    let guarded = "fn rewrite(briefing_path: &Path) {\n    \
+                   cosmon_state::briefing_render::write_generated_briefing(briefing_path, \"new\")?;\n    \
+                   deliver_committee_posture_reference(mol_dir, briefing_path)?;\n}\n";
+    assert!(unguarded_writes(guarded, "synthetic.rs").is_empty());
 }

@@ -10,7 +10,9 @@ and recommend `--var-file key=path` at nucleation. Unchanged briefings produce
 no backup or warning. Identical backups are reused on retry; different bytes
 at the same backup path refuse before the recorded step advances. Legacy
 molecules without a render digest conservatively keep their current briefing.
-The API uses the same preservation operation; no UI control changes.
+Step renders and generated posture additions replace the live file atomically,
+so an existing hard-linked backup also keeps its bytes. The API uses the same
+preservation operation; no UI control changes.
 
 ## Visual surface completion
 

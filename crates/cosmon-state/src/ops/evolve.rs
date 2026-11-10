@@ -567,10 +567,13 @@ Use --var-file key=path at nucleation to pass durable task content.",
     let briefing_path = mol_dir.join("briefing.md");
     if let Some(ref briefing) = outcome.briefing {
         let task = cosmon_core::briefing::render_task(&updated.variables);
-        std::fs::write(&briefing_path, format!("{task}{briefing}"))
-            .map_err(|e| EvolveError::Effect(format!("failed to write briefing.md: {e}")))?;
+        crate::briefing_render::write_generated_briefing(
+            &briefing_path,
+            format!("{task}{briefing}"),
+        )
+        .map_err(|e| EvolveError::Effect(format!("failed to write briefing.md: {e}")))?;
     } else {
-        std::fs::write(
+        crate::briefing_render::write_generated_briefing(
             &briefing_path,
             "# Molecule Briefing\n\n**Status:** COMPLETED\n\nAll steps have been completed.\n",
         )
@@ -859,7 +862,7 @@ pub fn deliver_committee_posture_reference(
     body.push_str(reference);
     // committee-posture: exempt — this write IS the delivery; calling itself
     // would recurse, and the idempotence check above already ran.
-    std::fs::write(briefing_path, body).map_err(|e| {
+    crate::briefing_render::write_generated_briefing(briefing_path, body).map_err(|e| {
         std::io::Error::new(
             e.kind(),
             format!("failed to deliver committee-posture pointer into briefing.md: {e}"),

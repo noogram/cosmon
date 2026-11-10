@@ -97,3 +97,15 @@ fn matches_render(mol_dir: &Path, bytes: &[u8]) -> io::Result<bool> {
         Err(e) => Err(e),
     }
 }
+
+/// Replace a generated briefing without truncating a hard-linked saved copy.
+///
+/// Step rendering and generated additions use a fresh file, so an existing
+/// backup that aliases the old briefing retains its bytes and modification time.
+///
+/// # Errors
+///
+/// Returns an I/O error if the replacement cannot be written and installed.
+pub fn write_generated_briefing(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    crate::work_message::write_atomic(path, contents.as_ref())
+}

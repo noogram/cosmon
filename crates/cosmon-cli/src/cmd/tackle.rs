@@ -5395,9 +5395,12 @@ Use --var-file key=path at nucleation to pass durable task content.",
     let briefing_path = molecule_dir.join("briefing.md");
     if let Some(briefing) = outcome.briefing {
         let task = cosmon_core::briefing::render_task(&updated.variables);
-        fs::write(&briefing_path, format!("{task}{briefing}"))?;
+        cosmon_state::briefing_render::write_generated_briefing(
+            &briefing_path,
+            format!("{task}{briefing}"),
+        )?;
     } else {
-        fs::write(
+        cosmon_state::briefing_render::write_generated_briefing(
             &briefing_path,
             "# Molecule Briefing\n\n**Status:** COMPLETED\n\nAll steps have been completed.\n",
         )?;
@@ -15745,6 +15748,12 @@ needs = ["answer"]
         assert_eq!(
             std::fs::read(molecule_dir.join("briefing.md.edited-1")).unwrap(),
             hand_edit,
+        );
+        assert!(
+            std::fs::read_to_string(molecule_dir.join("briefing.md"))
+                .unwrap()
+                .contains("Run the gate."),
+            "direct-worker acceptance must render the next step as well as preserve the old bytes",
         );
         let reloaded = store.load_molecule(&mol.id).unwrap();
         assert_eq!(

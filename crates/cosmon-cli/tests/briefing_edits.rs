@@ -108,6 +108,22 @@ acceptance = "Done"
     }
 }
 
+fn write_fleet_template(galaxy: &Galaxy) {
+    fs::write(
+        galaxy.root.path().join(".cosmon/fleet.toml"),
+        r#"fleet = "briefing-fallback"
+version = 1
+
+[[agents]]
+name = "edit-test"
+role = "implementation"
+clearance = "write"
+prompt = "Fleet role retained."
+"#,
+    )
+    .unwrap();
+}
+
 fn command(root: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cs"));
     command
@@ -356,6 +372,7 @@ fn unreadable_briefing_or_digest_refuses_the_advance() {
 #[test]
 fn invalid_utf8_briefing_is_not_treated_as_missing_during_tackle() {
     let galaxy = Galaxy::new();
+    write_fleet_template(&galaxy);
     let edited = b"Pilot's non-UTF-8 edit: \xff\n";
     fs::write(galaxy.briefing(), edited).unwrap();
     fs::write(
@@ -395,4 +412,78 @@ fn readonly_digest_does_not_leave_a_committed_step_reported_as_failed() {
     assert!(state["pending_step"].is_null());
     success(&galaxy.advance());
     assert!(galaxy.backups().is_empty());
+}
+
+#[test]
+fn missing_briefing_uses_the_fleet_fallback_without_a_later_edit_warning() {
+    let galaxy = Galaxy::new();
+    write_fleet_template(&galaxy);
+    fs::remove_file(galaxy.briefing()).unwrap();
+    let output = command(galaxy.root.path())
+        .args([
+            "tackle",
+            &galaxy.id,
+            "--dry-run",
+            "--no-worktree",
+            "--adapter",
+            "codex",
+            "--model",
+            "gpt-6.1-sol",
+        ])
+        .output()
+        .unwrap();
+    success(&output);
+    assert!(fs::read_to_string(galaxy.briefing())
+        .unwrap()
+        .contains("Fleet role retained."));
+    let output = galaxy.advance();
+    success(&output);
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("warning:"));
+    assert!(galaxy.backups().is_empty());
+}
+
+/// The shared append API is also callable without tackle's input read guard.
+#[test]
+fn posture_delivery_handles_missing_input_and_refuses_unreadable_bytes() {
+    let galaxy = Galaxy::new();
+    fs::write(
+        galaxy.molecule.join("committee-posture.md"),
+        "Reviewer contract",
+    )
+    .unwrap();
+    fs::remove_file(galaxy.briefing()).unwrap();
+    cosmon_state::ops::evolve::deliver_committee_posture_reference(
+        &galaxy.molecule,
+        &galaxy.briefing(),
+    )
+    .unwrap();
+    assert!(fs::read_to_string(galaxy.briefing())
+        .unwrap()
+        .contains("committee-posture.md"));
+    let invalid = b"Pilot's unreadable bytes must remain: \xff\n";
+    fs::write(galaxy.briefing(), invalid).unwrap();
+    assert!(
+        cosmon_state::ops::evolve::deliver_committee_posture_reference(
+            &galaxy.molecule,
+            &galaxy.briefing(),
+        )
+        .is_err()
+    );
+    assert_eq!(fs::read(galaxy.briefing()).unwrap(), invalid);
+}
+#[cfg(unix)]
+#[test]
+fn existing_hardlinked_backup_is_not_modified_by_the_new_render() {
+    let galaxy = Galaxy::new();
+    let edited = b"Pilot's exact edit, already kept under the backup name.\n";
+    fs::write(galaxy.briefing(), edited).unwrap();
+    let backup = galaxy.molecule.join("briefing.md.edited-1");
+    fs::hard_link(galaxy.briefing(), &backup).unwrap();
+    let modified = fs::metadata(&backup).unwrap().modified().unwrap();
+    success(&galaxy.advance());
+    assert_eq!(fs::read(&backup).unwrap(), edited);
+    assert_eq!(fs::metadata(&backup).unwrap().modified().unwrap(), modified);
+    assert!(fs::read_to_string(galaxy.briefing())
+        .unwrap()
+        .contains("Do the second step."));
 }
