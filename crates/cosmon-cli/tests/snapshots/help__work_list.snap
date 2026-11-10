@@ -2,12 +2,12 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Rebuild the owner's message stages and delivery state from canonical evidence
+List message stages and delivery state for messages you sent or receive
 
 Usage: cs work list [OPTIONS] [OWNER]
 
 Arguments:
-  [OWNER]  Owner molecule; defaults to the caller's declared work
+  [OWNER]  Owner of the caller's declared work; defaults to that work
 
 Options:
       --config <PATH>  Path to the state directory (default: the galaxy's .cosmon/state/)

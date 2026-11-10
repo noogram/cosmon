@@ -3,7 +3,7 @@ Explicit advisory work messages; no lifecycle authority
 Usage: cosmon-remote work [OPTIONS] <COMMAND>
 
 Commands:
-  list         Read the bound roster and message delivery state (`GET /v1/work/{owner}`)
+  list         Read the bound roster and your message delivery state (`GET /v1/work/{owner}`)
   send         Admit advisory evidence (`POST /v1/work/{owner}/messages`)
   inbox        Pull at an explicit safe point (`POST /v1/work/{owner}/inbox`); --peek uses `GET /v1/work/{owner}/inbox`
   ack          Record consideration, separately from a result (`POST /v1/work/{owner}/messages/{key}/ack`)

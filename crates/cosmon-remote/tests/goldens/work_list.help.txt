@@ -1,4 +1,4 @@
-Read the bound roster and message delivery state (`GET /v1/work/{owner}`)
+Read the bound roster and your message delivery state (`GET /v1/work/{owner}`)
 
 Usage: cosmon-remote work list [OPTIONS] <OWNER>
 

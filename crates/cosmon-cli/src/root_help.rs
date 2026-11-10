@@ -80,8 +80,8 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              with 'cs work declare <owner> --seat a=<molecule> --seat b=<molecule>'. \
              Members use 'cs work send --to <seat> --text <evidence>', \
              'cs work inbox', and 'cs work ack <key> --considered|--deferred|--rejected'. \
-             'cs work list <owner>' reconstructs each message stage from the \
-             owner's canonical evidence. Messages and receipts never advance \
+             'cs work list <owner>' shows stages for messages the calling member \
+             sent or received, from canonical evidence. Messages and receipts never advance \
              a molecule or grant lifecycle authority.\n\n\
              COLLABORATE — 'cs sessions' vs 'cs work'. Two commands cover two \
              different shapes of collaboration; pick by what you are actually \

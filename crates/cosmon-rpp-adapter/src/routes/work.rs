@@ -262,9 +262,16 @@ pub(crate) async fn list(
     let records = FileWorkMessageStore::new(door.dir.clone())
         .load_all()
         .map_err(work_error)?;
-    let projection = fold_records(&scope, &records, now)
+    let mut projection = fold_records(&scope, &records, now)
         .map_err(|_| api(StatusCode::INTERNAL_SERVER_ERROR, "corrupt_evidence"))?;
     require_sound_projection(&projection)?;
+    let caller = door
+        .admitted
+        .work_caller()
+        .ok_or_else(|| api(StatusCode::FORBIDDEN, "binding_missing"))?;
+    projection
+        .envelopes
+        .retain(|_, view| view.envelope.is_visible_to(caller.seat()));
     let mut body = response(&scope, now)?;
     body["owner"] = json!(scope.owner);
     body["budget"] = json!(scope.budget);

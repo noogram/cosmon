@@ -562,7 +562,7 @@ async fn configured_extra_seat_and_work_operations_have_no_control_effects() {
 }
 
 #[tokio::test]
-async fn work_members_can_list_delivery_metadata_without_receiving_peer_payloads() {
+async fn third_seat_cannot_list_peer_message_metadata() {
     let fx = fixture(&["cto", "mado", "reviewer"], 10).await;
     let (status, sent) = fx
         .request(
@@ -576,10 +576,18 @@ async fn work_members_can_list_delivery_metadata_without_receiving_peer_payloads
     assert!(status.is_success(), "{sent}");
     let (status, listed) = fx.request("reviewer", "GET", "", None, true).await;
     assert_eq!(status, StatusCode::OK, "{listed}");
-    assert_eq!(
-        listed["messages"],
-        json!([{"key":"peer", "delivery_state":"pending"}])
-    );
+    println!("third seat W-LIST: {listed}");
+    assert_eq!(listed["seats"].as_object().unwrap().len(), 3);
+    assert_eq!(listed["messages"], json!([]));
+    assert!(!listed.to_string().contains("peer"));
+    for participant in ["mado", "cto"] {
+        let (status, listed) = fx.request(participant, "GET", "", None, true).await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        assert_eq!(
+            listed["messages"],
+            json!([{"key":"peer", "delivery_state":"pending"}])
+        );
+    }
     let (status, pulled) = fx
         .request("reviewer", "POST", "/inbox", Some(fx.pull()), true)
         .await;
@@ -591,6 +599,74 @@ async fn work_members_can_list_delivery_metadata_without_receiving_peer_payloads
         .receipts
         .iter()
         .all(|receipt| !matches!(receipt.stage, Stage::DeliveryAttempted { .. })));
+}
+
+#[tokio::test]
+async fn message_visibility_is_applied_before_pagination_and_continuation() {
+    let fx = fixture(&["cto", "mado", "reviewer"], 10).await;
+    for key in ["hidden-0", "hidden-1", "hidden-2", "hidden-3"] {
+        let (status, sent) = fx
+            .request(
+                "mado",
+                "POST",
+                "/messages",
+                Some(fx.send(key, "cto", "hidden")),
+                true,
+            )
+            .await;
+        assert!(status.is_success(), "{sent}");
+    }
+    let (status, sent) = fx
+        .request(
+            "reviewer",
+            "POST",
+            "/messages",
+            Some(fx.send("z-visible", "cto", "visible")),
+            true,
+        )
+        .await;
+    assert!(status.is_success(), "{sent}");
+    let before = FileWorkMessageStore::new(fx.owner_dir.clone())
+        .load_all()
+        .unwrap()
+        .receipts;
+    for offset in 0..3 {
+        let (status, listed) = fx
+            .request(
+                "reviewer",
+                "GET",
+                &format!("?offset={offset}&limit=1"),
+                None,
+                true,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        assert_eq!(listed["seats"].as_object().unwrap().len(), 1);
+        assert_eq!(
+            listed["messages"],
+            if offset == 0 {
+                json!([{"key":"z-visible", "delivery_state":"pending"}])
+            } else {
+                json!([])
+            }
+        );
+        assert_eq!(
+            listed["next_offset"],
+            if offset < 2 {
+                json!(offset + 1)
+            } else {
+                Value::Null
+            }
+        );
+        assert!(!listed.to_string().contains("hidden-"));
+    }
+    assert_eq!(
+        FileWorkMessageStore::new(fx.owner_dir)
+            .load_all()
+            .unwrap()
+            .receipts,
+        before
+    );
 }
 
 #[tokio::test]

@@ -157,13 +157,14 @@ BRIEF_B
     if ((a_exit != 0 || b_exit != 0)); then
         record_failure "$label wait" "$case_dir/{a,b}.wait.log" 'one or both members did not reach a terminal state within the bounded wait'
     fi
-    if ! (cd "$project" && "$cs_bin" --json work list "$owner") > "$case_dir/work.json" 2>> "$log"; then
+    if ! (cd "$project" && COSMON_MOL_DIR="$state/$a" "$cs_bin" --json work list "$owner") > "$case_dir/work.json" 2>> "$log"; then
         record_failure "$label projection" "$log" 'work list failed'
         return 1
     fi
     local empty_home
     empty_home=$(mktemp -d "$case_dir/empty.XXXXXX")
-    if ! (cd "$project" && HOME="$empty_home" CLAUDE_CONFIG_DIR="$empty_home" CODEX_HOME="$empty_home" "$cs_bin" --json work list "$owner") > "$case_dir/work-no-provider-history.json" 2>> "$log"; then
+    if ! (cd "$project" && COSMON_MOL_DIR="$state/$a" \
+        HOME="$empty_home" CLAUDE_CONFIG_DIR="$empty_home" CODEX_HOME="$empty_home" "$cs_bin" --json work list "$owner") > "$case_dir/work-no-provider-history.json" 2>> "$log"; then
         record_failure "$label recovery" "$log" 'work list failed with empty provider homes'
     elif ! cmp -s "$case_dir/work.json" "$case_dir/work-no-provider-history.json"; then
         record_failure "$label recovery" "$case_dir/work-no-provider-history.json" 'projection changed without provider history'

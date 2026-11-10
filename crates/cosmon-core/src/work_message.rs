@@ -407,6 +407,15 @@ pub struct Envelope {
 }
 
 impl Envelope {
+    /// Whether this seat sent or receives the message.
+    ///
+    /// List boundaries use this relation before pagination so other work
+    /// members cannot read the message's metadata.
+    #[must_use]
+    pub fn is_visible_to(&self, seat: &AdvisorySeatId) -> bool {
+        &self.sender == seat || &self.recipient == seat
+    }
+
     /// Whether the envelope has passed its expiry at `now`.
     #[must_use]
     pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {

@@ -1518,7 +1518,7 @@ pub const WORK: &str = "EXAMPLES:
   cs work send --to review --text 'finding: the retry loop never backs off'
   cs work inbox                                                # pull what is addressed to me
   cs work ack <key> --considered                               # or --deferred / --rejected
-  cs work list <owner>                                         # every message's stage, from evidence
+  cs work list <owner>                                         # messages I sent or received
 
 RECIPE — implementer + cross-vendor reviewer (book: how-to/pair-implementer-and-reviewer):
   1. Launch. Nucleate the implementer, then the reviewer with the
@@ -1533,17 +1533,18 @@ RECIPE — implementer + cross-vendor reviewer (book: how-to/pair-implementer-an
      numbered items, constraints, deliverables. Read `cs work inbox` at
      each milestone and ack. Send `--phase final` to `review`, naming the
      final sha, before `cs complete`. Notes go to a per-molecule path.
-  3. Reviewer brief: find the peer with `cs work list` (or the impl id
-     variable); challenge at each milestone with `cs work send --to impl`;
+  3. Reviewer brief: use the impl id from the brief to identify the peer;
+     challenge at each milestone with `cs work send --to impl`;
      3-6 task-specific checks; recompute one number independently from
      saved outputs; every verdict names the impl sha it reviewed; do not
      `cs complete` until the impl sent `final` or is terminal.
   4. Steer with `cs whisper` to each seat, never with `cs work send`: a
      roster message can be acked --rejected, a steering order must not be.
      A real stop is `cs collapse`.
-  5. Watch with `cs work list <owner>` and `cs observe <seat>`. An impl
-     that is collapsed while the reviewer is live, or a reviewer that is
-     completed against an older impl sha, is yours to decide on.
+  5. Watch lifecycle with `cs observe <seat>`. From a declared seat,
+     `cs work list` shows its sent and received messages. An impl that is
+     collapsed while the reviewer is live, or a reviewer completed against
+     an older impl sha, is yours to decide on.
   6. When the implementer terminates, read its reason kind. A worker that
      finished but could not pass the gates for an infrastructure cause
      collapses with `--reason-kind verification_blocked --reason 'work

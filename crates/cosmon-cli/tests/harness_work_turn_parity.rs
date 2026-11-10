@@ -199,7 +199,7 @@ fn messages_arm_delivers_work_input_and_molecule_context() {
         "the shell tool must see the worker's own molecule directory"
     );
 
-    let listed = cs_ok(root, None, &["--json", "work", "list", &owner]);
+    let listed = cs_ok(root, Some(&owner_dir), &["--json", "work", "list", &owner]);
     let listed: serde_json::Value = serde_json::from_str(&listed).expect("list json");
     let view = &listed["envelopes"]["ev-1"];
     assert_eq!(

@@ -87,7 +87,7 @@ table confers lifecycle, harvest, spawn or lease rights.
 
 | Scope | Grants | Implies |
 |---|---|---|
-| `cosmon:work:read` | List a work's roster and revision metadata the caller may see; peek at or pull its own inbox | - |
+| `cosmon:work:read` | List a work's roster and revision, plus metadata for messages sent or received by the admitted caller seat; peek at or pull its own inbox | - |
 | `cosmon:work:write` | Send a message and acknowledge one addressed to the caller's seat | `cosmon:work:read` |
 | `cosmon:sessions:read` | List authorized peers, pull pilot messages, read checkpoints and takeover requests | - |
 | `cosmon:sessions:write` | Attach, heartbeat, detach, send and acknowledge pilot messages, publish checkpoints, request takeover | `cosmon:sessions:read` |
@@ -144,17 +144,22 @@ authority transfer (the host-local lease ledger, reached by no route here).
 ### Fields
 
 - **List** returns the roster and paginated message metadata under `messages`
-  (`key`, `delivery_state`) to every admitted member of the work. This is
-  work-scoped metadata visibility; payload delivery remains recipient-bound.
-  The same `offset` and `limit` apply independently
-  to seats sorted by seat name and messages sorted by key; `next_offset` is
-  present until both collections are traversed. Each page reads current records;
+  (`key`, `delivery_state`). Roster visibility is unchanged. Message metadata
+  is limited to messages whose sender or recipient is the admitted caller
+  seat; no owner or unrelated-member exception applies. Filter messages by
+  caller seat before pagination. The same `offset` and `limit` apply
+  independently to seats sorted by seat name and visible messages sorted by
+  key. `next_offset` points to the next page while either collection has more
+  entries, and is null otherwise. Each page reads current records;
   offsets do not provide a snapshot across concurrent submissions. No message
-  payload is returned. Unreadable or unsound message evidence refuses the list
-  with a custody or corrupt-evidence error rather than certifying partial states.
-  Local `cs work list` includes `delivery_state` in each envelope projection
-  and `delivery=...` in text output; `cosmon-remote work list` shows the W-LIST
-  response.
+  payload is returned. Unreadable or unsound message records refuse W-LIST
+  with a custody or corrupt-evidence error.
+  Local `cs work list` requires the current member identity even when `owner`
+  is explicit, and is restricted to that member's declared work and messages
+  sent or received by that member. It includes `delivery_state` in each
+  envelope projection and `delivery=...` in text output, without payload.
+  Local diagnostics are limited to findings attributable to visible messages.
+  `cosmon-remote work list` shows the W-LIST response.
 - **Delivery state** is `pending` until an adapter's durable attempt count
   reaches the envelope's frozen `max_delivery_attempts`, then `exhausted`.
   Counts are per adapter, not summed across adapters. Once any adapter reaches
@@ -310,8 +315,7 @@ the order above.
 
 **With W3.** The route table maps onto `WorkOperations` without a new custody
 path: one lock covers scope, quota and admission; `AdmittedWorkCaller` is
-built only by the admission boundary; local callers and their records are
-unchanged.
+built only by the admission boundary. Canonical local records are unchanged.
 
 **With a later cross-person relay.** The relay reuses the same operations,
 envelopes and receipts with its own admission boundary and its own custodians.
@@ -324,6 +328,12 @@ per-message `exhausted` metadata in W-LIST and local work-list output, derived
 from durable observations. HTTP 429 `budget_exhausted` is reserved for the
 seat's message and byte allowances. An exhausted message remains
 acknowledgeable without reopening delivery.
+
+**2026-11-10 amendment (operator decision).** W-LIST message metadata and
+local work-list messages are visible only to their sender and recipient seats.
+W-LIST filters messages before pagination; roster visibility and pagination
+remain unchanged. Local listing requires current member identity, including
+when the owner is explicit.
 
 **Amendments**, recorded in the ADRs themselves:
 

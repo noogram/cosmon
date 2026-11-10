@@ -5,7 +5,7 @@
 //! This command only reads and writes the owner's `work/` evidence and member
 //! reference files. It never calls a molecule lifecycle operation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,10 +17,11 @@ use cosmon_core::advisory_attempt::AdvisorySeatId;
 use cosmon_core::id::MoleculeId;
 use cosmon_core::work_message::{
     render_for_context, Admission, AdmittedWorkCaller, Confidentiality, ContextObservation,
-    DeliveryAdapter, DeliveryState, Disposition, MessageBudget, MessageKey, SeatDecl,
-    SenderEvidence, WorkMessageStore, WorkProjection, WorkScope, WORK_MESSAGE_SCHEMA_VERSION,
+    DeliveryAdapter, DeliveryState, Disposition, MessageBudget, MessageKey, ProjectionFinding,
+    SeatDecl, SenderEvidence, WorkMessageStore, WorkProjection, WorkScope,
+    WORK_MESSAGE_SCHEMA_VERSION,
 };
-use cosmon_state::work_message::FileWorkMessageStore;
+use cosmon_state::work_message::{FileWorkMessageStore, PayloadIntegrityFinding};
 use cosmon_state::work_ops::{
     AcknowledgeOutcome, AcknowledgeRequest, PullRequest, SendRequest, WorkOperations,
 };
@@ -46,8 +47,9 @@ another.
 The owning molecule declares a finite seat roster once (`declare`); each
 member then sends bounded evidence to another seat (`send`), pulls what is
 addressed to it (`inbox`), and reports how it treated a message
-(`ack`). `list` rebuilds every message's stage — admitted, delivered,
-consumed — from canonical evidence, for any member or for the owner.
+(`ack`). `list` rebuilds stages — admitted, delivered, consumed — from
+canonical evidence for messages the calling member sent or receives.
+Listing requires that member's identity, including with an explicit owner.
 
 Remote exchange uses `cosmon-remote work list/send/inbox/ack` against the
 host RPP with an operator-provisioned seat binding and attachment proof.
@@ -84,7 +86,7 @@ enum Verb {
     Inbox(InboxArgs),
     /// Report how this member treated a received message
     Ack(AckArgs),
-    /// Rebuild the owner's message stages and delivery state from canonical evidence
+    /// List message stages and delivery state for messages you sent or receive
     List(ListArgs),
 }
 
@@ -170,7 +172,7 @@ struct AckArgs {
 
 #[derive(ClapArgs)]
 struct ListArgs {
-    /// Owner molecule; defaults to the caller's declared work.
+    /// Owner of the caller's declared work; defaults to that work.
     owner: Option<String>,
     /// Only unexpired envelopes without a consumption report.
     #[arg(long, conflicts_with = "open")]
@@ -591,16 +593,44 @@ fn ack(ctx: &Context, args: &AckArgs) -> Result<()> {
     Ok(())
 }
 
-fn list(ctx: &Context, args: &ListArgs) -> Result<()> {
-    let owner = match &args.owner {
-        Some(owner) => parse_id(owner)?,
-        None => caller_member(ctx)?.scope.owner,
-    };
-    let store = FileWorkMessageStore::new(existing_molecule_dir(ctx, &owner)?);
-    let reconstruction = store.reconstruct(Utc::now())?;
+fn member_listing(member: &Member) -> Result<(WorkProjection, Vec<String>)> {
+    let reconstruction = member.store.reconstruct(Utc::now())?;
     let mut projection = reconstruction
         .projection
         .ok_or_else(|| refuse("work scope is not declared"))?;
+    projection
+        .envelopes
+        .retain(|_, view| view.envelope.is_visible_to(member.caller.seat()));
+    let visible_keys: BTreeSet<_> = projection.envelopes.keys().cloned().collect();
+    projection.findings.retain(|finding| match finding {
+        ProjectionFinding::OrphanReceipt { key }
+        | ProjectionFinding::ReceiptDigestMismatch { key }
+        | ProjectionFinding::ConsumptionByNonRecipient { key }
+        | ProjectionFinding::EarlierRevision { key }
+        | ProjectionFinding::RecipientNotBound { key } => visible_keys.contains(key),
+    });
+    let findings = reconstruction
+        .findings
+        .iter()
+        .filter(|finding| match finding {
+            PayloadIntegrityFinding::Missing { key, .. }
+            | PayloadIntegrityFinding::DigestMismatch { key, .. }
+            | PayloadIntegrityFinding::UnsafePayload { key } => visible_keys.contains(key),
+            PayloadIntegrityFinding::OrphanPayload { .. } => false,
+        })
+        .map(|finding| format!("{finding:?}"))
+        .collect();
+    Ok((projection, findings))
+}
+
+fn list(ctx: &Context, args: &ListArgs) -> Result<()> {
+    let member = caller_member(ctx)?;
+    if let Some(owner) = &args.owner {
+        if parse_id(owner)? != member.scope.owner {
+            return Err(refuse("owner does not match the caller's declared work"));
+        }
+    }
+    let (mut projection, findings) = member_listing(&member)?;
     if args.pending {
         projection
             .envelopes
@@ -612,11 +642,6 @@ fn list(ctx: &Context, args: &ListArgs) -> Result<()> {
     }
     if ctx.json {
         let mut output = serde_json::to_value(&projection)?;
-        let findings: Vec<_> = reconstruction
-            .findings
-            .iter()
-            .map(|finding| format!("{finding:?}"))
-            .collect();
         if let Some(object) = output.as_object_mut() {
             object.insert(
                 "payload_findings".to_owned(),
@@ -660,8 +685,8 @@ fn list(ctx: &Context, args: &ListArgs) -> Result<()> {
         if projection.envelopes.is_empty() {
             println!("No messages.");
         }
-        for finding in reconstruction.findings {
-            eprintln!("work integrity finding: {finding:?}");
+        for finding in findings {
+            eprintln!("work integrity finding: {finding}");
         }
     }
     Ok(())

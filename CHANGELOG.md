@@ -29,6 +29,8 @@ this stage.
 
 - Work messages now show `delivery_state=exhausted` in local and remote work lists when delivery attempts are used up; pulls keep serving other messages and acknowledgment preserves the exhaustion history.
 
+- W-LIST and local `cs work list` expose message metadata only to its sender or recipient; the work roster remains visible to admitted seats.
+
 ## [0.9.0] — 2026-11-09
 
 ### Added
