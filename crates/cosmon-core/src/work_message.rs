@@ -2146,6 +2146,25 @@ mod tests {
     }
 
     #[test]
+    fn delivery_respects_recorded_expiry_and_clock_advance_since_projection() {
+        let scope = scope();
+        let mut envelope = admitted(&scope, &empty(&scope), submission(&scope, "m1", b"finding"));
+        envelope.expires_at = t(100);
+        let before = fold(&scope, std::slice::from_ref(&envelope), &[], t(20)).unwrap();
+        assert_eq!(
+            deliverable(&before, &seat("b"), DeliveryAdapter::Pull, t(99)).len(),
+            1
+        );
+        // The cached projection is unexpired, but the delivery clock advanced.
+        assert!(deliverable(&before, &seat("b"), DeliveryAdapter::Pull, t(100)).is_empty());
+
+        let expired = receipt(&envelope, 30, Stage::Expired);
+        let after = fold(&scope, &[envelope], &[expired], t(40)).unwrap();
+        // A durable expiry receipt suffices even before the clock deadline.
+        assert!(deliverable(&after, &seat("b"), DeliveryAdapter::Pull, t(40)).is_empty());
+    }
+
+    #[test]
     fn zero_bound_envelope_is_exhausted_without_a_delivery_attempt() {
         let scope = scope();
         let mut envelope = admitted(&scope, &empty(&scope), submission(&scope, "m1", b"finding"));
