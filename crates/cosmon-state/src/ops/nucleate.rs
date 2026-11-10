@@ -537,6 +537,8 @@ fn persist_and_record(
         NucleateError::StoreUnavailable(format!("mkdir molecule_dir {}: {e}", mol_dir.display()))
     })?;
     write_briefing(&mol_dir, formula, result)?;
+    crate::briefing_render::record_rendered_briefing(&mol_dir)
+        .map_err(|e| NucleateError::StoreUnavailable(format!("record briefing render: {e}")))?;
     write_prompt(&mol_dir, formula, result)?;
     write_log(&mol_dir, result)?;
 

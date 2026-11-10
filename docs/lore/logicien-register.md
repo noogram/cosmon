@@ -2,6 +2,15 @@
 
 # Logic register
 
+## Briefing render digest and edited copies
+
+`briefing.md.rendered-blake3` records raw rendered bytes for preservation on a
+step change; `briefing.md.edited-<step>` keeps a diverged file before replacement.
+These are molecule artifacts, retained with the archived molecule, rather than
+lifecycle fields or new transitions. Backup conflicts refuse before the existing
+advance. `CosmonRun.tla` therefore needs no new state or action; binary tests
+check unchanged, edited, retry and collision paths.
+
 ## Issue #151 W8: turn and effect evidence is outside lifecycle state
 
 `harness_turn_recorded` rows are append-only intent and receipt telemetry about

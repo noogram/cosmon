@@ -449,6 +449,19 @@ pub fn evolve(
             });
         }
 
+        // Preserve the old bytes before committing the advance. A backup
+        // collision must leave the molecule on its original step for retry.
+        if let Some(backup) =
+            crate::briefing_render::preserve_briefing_edit(&mol_dir, mol_data.current_step + 1)
+                .map_err(|e| EvolveError::Effect(format!("could not preserve briefing.md: {e}")))?
+        {
+            effects.warn(&format!(
+                "briefing.md changed since its last render (or has no render record); kept {}. \
+Use --var-file key=path at nucleation to pass durable task content.",
+                backup.display(),
+            ));
+        }
+
         let step_id = StepId::new(&outcome.completed_step.id)
             .map_err(|e| EvolveError::StoreUnavailable(e.to_string()))?;
         let mut updated = mol_data;
@@ -554,10 +567,13 @@ pub fn evolve(
     let briefing_path = mol_dir.join("briefing.md");
     if let Some(ref briefing) = outcome.briefing {
         let task = cosmon_core::briefing::render_task(&updated.variables);
-        std::fs::write(&briefing_path, format!("{task}{briefing}"))
-            .map_err(|e| EvolveError::Effect(format!("failed to write briefing.md: {e}")))?;
+        crate::briefing_render::write_generated_briefing(
+            &briefing_path,
+            format!("{task}{briefing}"),
+        )
+        .map_err(|e| EvolveError::Effect(format!("failed to write briefing.md: {e}")))?;
     } else {
-        std::fs::write(
+        crate::briefing_render::write_generated_briefing(
             &briefing_path,
             "# Molecule Briefing\n\n**Status:** COMPLETED\n\nAll steps have been completed.\n",
         )
@@ -571,6 +587,9 @@ pub fn evolve(
     // Runs before the seal so the seal covers the delivered pointer.
     deliver_committee_posture_reference(&mol_dir, &briefing_path)
         .map_err(|e| EvolveError::Effect(e.to_string()))?;
+
+    crate::briefing_render::record_rendered_briefing(&mol_dir)
+        .map_err(|e| EvolveError::Effect(format!("failed to record briefing render: {e}")))?;
 
     // Soft-contract seal of the briefing just written. Defensive: any
     // failure is reported and swallowed, seal emission never blocks an
@@ -826,12 +845,16 @@ pub fn deliver_committee_posture_reference(
         return Ok(());
     }
     let reference = cosmon_core::committee::committee_posture_reference();
-    let current = std::fs::read_to_string(briefing_path).unwrap_or_default();
+    let current = match std::fs::read_to_string(briefing_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
     if current.contains(reference.trim()) {
         // Already delivered this step — stay idempotent.
         return Ok(());
     }
-    let mut body = current;
+    let mut body = current.clone();
     if !body.ends_with('\n') {
         body.push('\n');
     }
@@ -839,12 +862,13 @@ pub fn deliver_committee_posture_reference(
     body.push_str(reference);
     // committee-posture: exempt — this write IS the delivery; calling itself
     // would recurse, and the idempotence check above already ran.
-    std::fs::write(briefing_path, body).map_err(|e| {
+    crate::briefing_render::write_generated_briefing(briefing_path, body).map_err(|e| {
         std::io::Error::new(
             e.kind(),
             format!("failed to deliver committee-posture pointer into briefing.md: {e}"),
         )
-    })
+    })?;
+    crate::briefing_render::record_briefing_addition(mol_dir, current.as_bytes())
 }
 
 /// Compute a [`BriefingSeal`] over `briefing.md`. Returns `None` if the

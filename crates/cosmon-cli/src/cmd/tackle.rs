@@ -1381,9 +1381,12 @@ fn run_with_transport(
     // seat whose briefing was meant to come from `fleet.toml` would find a
     // one-line pointer already on disk and never reach the injector — the seat
     // would carry its adversarial contract and none of its role.
-    let resolved = match fs::read_to_string(&briefing_path).ok() {
-        Some(text) => Some(text),
-        None => try_inject_fleet_briefing(&state_dir, &mol, &briefing_path),
+    let resolved = match fs::read_to_string(&briefing_path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            try_inject_fleet_briefing(&state_dir, &mol, &briefing_path)
+        }
+        Err(e) => return Err(anyhow::anyhow!("failed to read briefing.md: {e}")),
     };
 
     // Committee-posture delivery, on the briefing this dispatch is about to
@@ -3646,7 +3649,14 @@ fn try_inject_fleet_briefing(
     }
     // committee-posture: exempt — the caller (`cs tackle`, step 4) delivers the
     // pointer on the very next statement, on whichever briefing this returns.
-    if fs::write(briefing_path, &briefing).is_ok() {
+    if fs::write(briefing_path, &briefing)
+        .and_then(|()| {
+            cosmon_state::briefing_render::record_rendered_briefing(
+                briefing_path.parent().unwrap_or(Path::new(".")),
+            )
+        })
+        .is_ok()
+    {
         eprintln!("auto-injected briefing from fleet agent \"{}\"", agent.name);
         Some(briefing)
     } else {
@@ -5313,6 +5323,16 @@ fn accept_worker_turn(
                 current.current_step
             );
         }
+        if let Some(backup) = cosmon_state::briefing_render::preserve_briefing_edit(
+            &store.molecule_dir(mol_id),
+            current.current_step + 1,
+        )? {
+            eprintln!(
+                "warning: briefing.md changed since its last render (or has no render record); kept {}. \
+Use --var-file key=path at nucleation to pass durable task content.",
+                backup.display(),
+            );
+        }
         current.completed_steps.push(step_id);
         current.updated_at = Utc::now();
         current.last_progress_at = Some(current.updated_at);
@@ -5375,14 +5395,18 @@ fn accept_worker_turn(
     let briefing_path = molecule_dir.join("briefing.md");
     if let Some(briefing) = outcome.briefing {
         let task = cosmon_core::briefing::render_task(&updated.variables);
-        fs::write(&briefing_path, format!("{task}{briefing}"))?;
+        cosmon_state::briefing_render::write_generated_briefing(
+            &briefing_path,
+            format!("{task}{briefing}"),
+        )?;
     } else {
-        fs::write(
+        cosmon_state::briefing_render::write_generated_briefing(
             &briefing_path,
             "# Molecule Briefing\n\n**Status:** COMPLETED\n\nAll steps have been completed.\n",
         )?;
     }
     super::evolve::deliver_committee_posture_reference(&molecule_dir, &briefing_path)?;
+    cosmon_state::briefing_render::record_rendered_briefing(&molecule_dir)?;
     Ok(())
 }
 
@@ -15700,6 +15724,12 @@ needs = ["answer"]
         )
         .unwrap();
 
+        let molecule_dir = store.molecule_dir(&mol.id);
+        std::fs::write(molecule_dir.join("briefing.md"), "Original render.\n").unwrap();
+        cosmon_state::briefing_render::record_rendered_briefing(&molecule_dir).unwrap();
+        let hand_edit = b"Pilot's edit before direct-worker acceptance.\n";
+        std::fs::write(molecule_dir.join("briefing.md"), hand_edit).unwrap();
+
         accept_worker_turn(
             &store,
             &state_dir,
@@ -15715,6 +15745,16 @@ needs = ["answer"]
         )
         .expect("declared text must advance its current step");
 
+        assert_eq!(
+            std::fs::read(molecule_dir.join("briefing.md.edited-1")).unwrap(),
+            hand_edit,
+        );
+        assert!(
+            std::fs::read_to_string(molecule_dir.join("briefing.md"))
+                .unwrap()
+                .contains("Run the gate."),
+            "direct-worker acceptance must render the next step as well as preserve the old bytes",
+        );
         let reloaded = store.load_molecule(&mol.id).unwrap();
         assert_eq!(
             reloaded.status,

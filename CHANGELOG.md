@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- Step changes preserve edited `briefing.md` bytes as `briefing.md.edited-<step>` and warn with the saved path and `--var-file` guidance; retries never overwrite an existing backup.
+
 - `cs complete`: when `surface_visual` refuses and the galaxy lacks `verify-surface`, show `cs init --upgrade` before the nucleation command.
 
 - `cs done` refuses overlapping uncommitted base-checkout edits before attempting a merge, names the files and asks the pilot to commit or stash them, and preserves the harvestable molecule; unrelated unstaged edits remain allowed (dirty-base preflight requires Git 2.38+).
