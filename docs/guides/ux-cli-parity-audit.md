@@ -2,6 +2,14 @@
 
 # CLI and UI parity audit
 
+## Visual surface completion
+
+`cs complete` keeps refusing a touched visual surface without a recent GREEN
+`verify-surface` witness. If the galaxy lacks the canonical formula, the text
+and JSON refusal name the missing formula and give `cs init --upgrade` before
+`cs nucleate verify-surface --var target=<MOL>`. Galaxies with the formula keep
+the existing refusal message. No UI control or remote route changes.
+
 ## Cross-machine work exchange (issue #147 W4)
 
 | Capability | Local CLI | Remote CLI / API |

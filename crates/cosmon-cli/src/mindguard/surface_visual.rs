@@ -225,10 +225,18 @@ pub(crate) fn gate_with_config(
     if latest_completed.is_some() {
         Ok(())
     } else {
+        let install = if project_root
+            .join(".cosmon/formulas/verify-surface.formula.toml")
+            .is_file()
+        {
+            ""
+        } else {
+            "verify-surface formula is missing; from the galaxy root run cs init --upgrade, then "
+        };
         Err(MindguardError::Refused(format!(
             "molecule {mol_str} touched the visual surface but no \
              verify-surface molecule landed GREEN in the last {} minutes. \
-             Remedy: cs nucleate verify-surface --var target={mol_str}",
+             Remedy: {install}cs nucleate verify-surface --var target={mol_str}",
             config.t_max.num_minutes()
         )))
     }

@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- `cs complete`: when `surface_visual` refuses and the galaxy lacks `verify-surface`, show `cs init --upgrade` before the nucleation command.
+
 ## [0.9.0] — 2026-11-09
 
 ### Added
