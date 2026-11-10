@@ -22,9 +22,11 @@ fn cs() -> Command {
     // task-20260527-f835); clear inheritance so `cs nucleate` does
     // not try to auto-link to a molecule absent from our per-test
     // state store.
-    cmd.env_remove("COSMON_PARENT_MOL_ID")
-        .env_remove("COSMON_MOL_DIR")
-        .env_remove("COSMON_RUNTIME_ACTIVE");
+    for name in cosmon_core::pilot_env::names() {
+        cmd.env_remove(name);
+    }
+    cmd.env_remove("COSMON_RUNTIME_ACTIVE");
+    cmd.env("NO_COLOR", "1");
     cmd
 }
 
@@ -155,6 +157,141 @@ fn cs_complete_refuses_on_surface_touched_without_verify() {
         reloaded.status,
         cosmon_core::molecule::MoleculeStatus::Completed,
         "molecule must NOT be Completed when the gate refused"
+    );
+}
+
+/// An older galaxy must be told to install the witness formula before
+/// nucleating it, and those two commands must actually work in that order.
+#[test]
+fn cs_complete_missing_formula_installs_before_nucleating() {
+    let (tmp, state_dir, mol_id) = setup_surface_touched_project();
+    let formula = tmp
+        .path()
+        .join(".cosmon/formulas/verify-surface.formula.toml");
+    assert!(!formula.exists());
+
+    let out = cs()
+        .args(["complete", &mol_id])
+        .current_dir(tmp.path())
+        .output()
+        .expect("cs complete");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("mindguard surface_visual refused"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("verify-surface formula is missing"),
+        "{stderr}"
+    );
+    let install_at = stderr.find("cs init --upgrade").expect("install command");
+    let nucleate_command = format!("cs nucleate verify-surface --var target={mol_id}");
+    let nucleate_at = stderr.find(&nucleate_command).expect("nucleate command");
+    assert!(install_at < nucleate_at, "{stderr}");
+
+    let json_out = cs()
+        .args(["--json", "complete", &mol_id])
+        .current_dir(tmp.path())
+        .output()
+        .expect("cs --json complete");
+    assert_eq!(json_out.status.code(), Some(0));
+    assert!(json_out.stderr.is_empty());
+    let refusal: serde_json::Value = serde_json::from_slice(&json_out.stdout).expect("JSON");
+    assert_eq!(refusal["mindguard"], "refused");
+    let error = refusal["error"].as_str().expect("refusal error");
+    assert!(
+        error.contains("verify-surface formula is missing"),
+        "{error}"
+    );
+    assert!(
+        error.find("cs init --upgrade").expect("install command")
+            < error.find(&nucleate_command).expect("nucleate command")
+    );
+
+    let refused = cs()
+        .args([
+            "nucleate",
+            "verify-surface",
+            "--var",
+            &format!("target={mol_id}"),
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("nucleate before install");
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("formula not found: verify-surface"));
+
+    let upgrade = cs()
+        .args(["init", "--upgrade"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("cs init --upgrade");
+    assert!(upgrade.status.success(), "{upgrade:?}");
+    assert!(formula.is_file());
+    let nucleate = cs()
+        .args([
+            "--json",
+            "nucleate",
+            "verify-surface",
+            "--var",
+            &format!("target={mol_id}"),
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("nucleate after install");
+    assert!(nucleate.status.success(), "{nucleate:?}");
+    let created: serde_json::Value = serde_json::from_slice(&nucleate.stdout).expect("JSON");
+    let store = cosmon_filestore::FileStore::new(&state_dir);
+    let witness_id = cosmon_core::id::MoleculeId::new(created["id"].as_str().unwrap()).unwrap();
+    let witness = cosmon_state::StateStore::load_molecule(&store, &witness_id).unwrap();
+    assert_eq!(witness.formula_id.as_str(), "verify-surface");
+    assert_eq!(witness.variables["target"], mol_id);
+    let target_id = cosmon_core::id::MoleculeId::new(&mol_id).unwrap();
+    let target = cosmon_state::StateStore::load_molecule(&store, &target_id).unwrap();
+    assert_eq!(
+        target.status,
+        cosmon_core::molecule::MoleculeStatus::Pending
+    );
+}
+
+/// Galaxies that already have the formula retain the complete refusal text.
+#[test]
+fn cs_complete_installed_formula_keeps_existing_remedy() {
+    let (tmp, state_dir, mol_id) = setup_surface_touched_project();
+    let upgrade = cs()
+        .args(["init", "--upgrade"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("cs init --upgrade");
+    assert!(upgrade.status.success(), "{upgrade:?}");
+    assert!(tmp
+        .path()
+        .join(".cosmon/formulas/verify-surface.formula.toml")
+        .is_file());
+
+    let out = cs()
+        .args([
+            "complete",
+            &mol_id,
+            "--ops-dir",
+            state_dir.to_str().unwrap(),
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .expect("cs complete");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!(
+            "✘ mindguard surface_visual refused {mol_id}\n  molecule {mol_id} touched the visual surface but no \
+             verify-surface molecule landed GREEN in the last 60 minutes. \
+             Remedy: cs nucleate verify-surface --var target={mol_id}\n  \
+             note: this is NOT an override case — the gate fired intentionally. \
+             Land the missing verify-surface evidence.\n"
+        )
     );
 }
 
