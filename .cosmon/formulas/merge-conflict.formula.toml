@@ -249,22 +249,17 @@ description = """
 The merge is staged but not committed. Run the project's verification \
 gates IN THE WORKTREE — if any gate fails, the merge is semantically \
 broken even if `git status` is clean. Gates come from \
-`.cosmon/config.toml` `[gates]`; for cosmon itself they are:
-
-    cargo check --workspace
-    cargo test --workspace
-    cargo clippy --workspace -- -D warnings
-    cargo fmt --all -- --check
+`.cosmon/config.toml` `[gates]`. If none are declared, use the project's \
+own test, lint and build gates (see its CLAUDE.md / CONTRIBUTING).
 
 Run them IN ORDER. Stop at the first failure and fix it IN PLACE — a \
 gate failure here is usually one of:
 
-  - Resolution introduced an unused import (clippy) → remove it.
-  - Resolution missed a `use` statement (check) → add it.
+  - Resolution introduced an unused import → remove it.
+  - Resolution missed an import → add it.
   - Resolution changed a signature one test expected → update the test \
     if the new signature is intended; otherwise revisit step 3.
-  - Resolution mis-formatted (fmt) → `cargo fmt --all` (not \
-    `fmt -- --check`).
+  - Resolution mis-formatted code → run the project's formatter.
 
 **Bounded retries on gate failures.** Cap fixes-per-gate at \
 `{{max_retries}}`. If a gate fails `{{max_retries}}` times consecutively, \
@@ -272,16 +267,16 @@ append the failing output to `diagnostic.md` under `## Gate failures` \
 and `cs stuck` with reason `merge-conflict: <gate> failed \
 {{max_retries}} times`. The pilot resumes after operator review.
 
-**No shortcut.** Never `--no-verify` the commit, never `clippy --allow`, \
-never `#[allow(dead_code)]` to paper over a mis-resolution. That is the \
+**No shortcut.** Never `--no-verify` the commit or suppress a check \
+to paper over a mis-resolution. That is the \
 silent-patch antipattern the silence-as-signal ADR forbids.
 
-**Exit criteria.** All four gates pass. The working tree is clean \
+**Exit criteria.** All project gates pass. The working tree is clean \
 (apart from MERGE_HEAD) and every staged change is semantically honored \
 by the compiler and the test suite.
 """
 needs = ["resolve-code"]
-acceptance = "cargo check + test + clippy + fmt all pass in the worktree. No --no-verify, no allow-shortcuts. Gate failures escalated via cs stuck after {{max_retries}} attempts."
+acceptance = "All project verification gates from .cosmon/config.toml [gates] pass in the worktree, or the project's own test, lint and build gates (see its CLAUDE.md / CONTRIBUTING). No --no-verify, no allow-shortcuts. Gate failures escalated via cs stuck after {{max_retries}} attempts."
 
 [[steps]]
 id = "commit"
@@ -332,7 +327,7 @@ Finally, write `MOLECULE_DIR/synthesis.md`:
      will grep for>
 
     ## Gates
-    <cargo check/test/clippy/fmt results>
+    <project verification gate results>
 
     ## Escalated (if any)
     <list of cs stuck calls with reasons>

@@ -872,32 +872,7 @@ pub fn predicted_sandbox_root(
 /// assume any particular toolchain.
 #[must_use]
 pub fn render_gates_instruction(gates: &GatesConfig) -> String {
-    use std::fmt::Write;
-
-    if gates.is_empty() {
-        return "3. Run the project's verification gates \
-                (see .cosmon/config.toml `[gates]` or the project's CLAUDE.md).\n"
-            .to_owned();
-    }
-
-    let labeled: [(&str, &Option<String>); 7] = [
-        ("setup", &gates.setup_command),
-        ("build", &gates.build_command),
-        ("typecheck", &gates.typecheck_command),
-        ("test", &gates.test_command),
-        ("lint", &gates.lint_command),
-        ("format", &gates.format_command),
-        ("doc", &gates.doc_command),
-    ];
-
-    let mut out = String::from(
-        "3. Run the project's verification gates (from .cosmon/config.toml `[gates]`):\n",
-    );
-    for (label, cmd) in labeled {
-        if let Some(cmd) = cmd {
-            let _ = writeln!(out, "   - {label}: `{cmd}`");
-        }
-    }
+    let mut out = format!("3. Run {}", crate::briefing::render_gates(gates));
     if let Some(test_cmd) = &gates.test_command {
         out.push_str(&render_test_stall_guidance(test_cmd));
     }

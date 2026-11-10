@@ -70,4 +70,4 @@ id = "verify"
 title = "Verify and validate"
 description = "Run the project's build, test, lint, and format gates. The prior smoke-dispatch gate is the functional proof; these gates establish code health."
 needs = ["smoke-dispatch"]
-acceptance = "cargo check + test + clippy + fmt all pass"
+acceptance = "All project verification gates pass: the commands declared in .cosmon/config.toml [gates], or the project's own test, lint and build gates (see its CLAUDE.md / CONTRIBUTING)."

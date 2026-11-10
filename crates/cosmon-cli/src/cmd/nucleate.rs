@@ -1611,7 +1611,9 @@ fn nucleate_and_persist(
             .join("molecules")
             .join(result.id.as_str());
 
-        write_briefing(&dir, formula, &result)?;
+        let config_path = cosmon_filestore::resolve_config_path_for_state_dir(store_dir);
+        let config = cosmon_filestore::load_project_config(&config_path).unwrap_or_default();
+        write_briefing(&dir, formula, &result, &config.gates)?;
         cosmon_state::briefing_render::record_rendered_briefing(&dir)?;
         // NO committee-posture delivery here, and the absence is the point.
         //
@@ -1865,6 +1867,7 @@ fn write_briefing(
     mol_dir: &std::path::Path,
     formula: &Formula,
     result: &nucleate::NucleateResult,
+    gates: &cosmon_core::config::GatesConfig,
 ) -> anyhow::Result<()> {
     let mut md = String::new();
     let _ = write!(md, "# Molecule: {}\n\n", result.id);
@@ -1873,6 +1876,9 @@ fn write_briefing(
         let _ = write!(md, "**Assigned to:** {worker}\n\n");
     }
     md.push_str(&cosmon_core::briefing::render_task(&result.variables));
+    md.push_str("## Verification gates\n\nRun ");
+    md.push_str(&cosmon_core::briefing::render_gates(gates));
+    md.push('\n');
     md.push_str("## Steps\n\n");
     for (i, step) in formula.steps.iter().enumerate() {
         let _ = write!(md, "### Step {} — {}\n\n", i + 1, step.title);
