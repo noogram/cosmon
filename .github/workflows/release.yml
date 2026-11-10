@@ -85,10 +85,10 @@ jobs:
           # cross legs build the same source with the same manifests, so one
           # native leg per OS is sufficient coverage for a version string.
           - target: aarch64-apple-darwin
-            os: macos-14         # Apple Silicon
+            os: macos-26         # Apple Silicon (macos-14 retired by GitHub, Nov 2026)
             native: true
           - target: x86_64-apple-darwin
-            os: macos-14         # cross-compiled on Apple Silicon (Intel mac
+            os: macos-26         # cross-compiled on Apple Silicon (Intel mac
                                  # runners are being retired + queue for ~30min+)
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest      # static musl — no libdbus/glibc runtime dep
@@ -553,11 +553,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-latest]
+        os: [macos-26, ubuntu-latest]
     steps:
       # ubuntu-latest runners ship no Homebrew (first live run of this job,
       # v0.2.1: `brew: command not found`, exit 127). Set up Linuxbrew there;
-      # macos-14 has brew preinstalled and setup-homebrew is a fast no-op.
+      # macos-26 has brew preinstalled and setup-homebrew is a fast no-op.
       - name: Set up Homebrew
         uses: Homebrew/actions/setup-homebrew@df4b09108a1de9d6f995fe68f302b3f68bd6d2ef  # master 2026-07
       # Needed for scripts/release-version-conformance.sh + its canon. Checked
