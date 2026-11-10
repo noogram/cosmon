@@ -21,6 +21,8 @@ this stage.
 
 - `cs complete`: when `surface_visual` refuses and the galaxy lacks `verify-surface`, show `cs init --upgrade` before the nucleation command.
 
+- `cs done` refuses overlapping uncommitted base-checkout edits before attempting a merge, names the files and asks the pilot to commit or stash them, and preserves the harvestable molecule; unrelated unstaged edits remain allowed (dirty-base preflight requires Git 2.38+).
+
 ## [0.9.0] — 2026-11-09
 
 ### Added

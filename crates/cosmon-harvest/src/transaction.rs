@@ -164,6 +164,10 @@ pub struct Args {
     /// `ff-only` preserves a strictly linear history and refuses anything
     /// that is not a fast-forward; it is refused when native attribution is
     /// configured because a fast-forward creates no trailer carrier.
+    ///
+    /// Both strategies refuse overlapping uncommitted changes in the base
+    /// checkout before merging. Commit or stash the named files, then rerun
+    /// `cs done`. The dirty-base preflight requires Git 2.38 or newer.
     #[arg(long, value_enum, default_value_t = MergeStrategy::Merge)]
     strategy: MergeStrategy,
 
@@ -5328,6 +5332,28 @@ fn try_merge_branch_target_with_subject(
         return MergeOutcome::Error(format!("flush state dir before merge failed: {e}"));
     }
 
+    // Diagnose local edits before git merge can reject them with an opaque
+    // error. Managed state has already been flushed; unrelated edits stay put.
+    match base_checkout_overlaps(repo_root, merge_target) {
+        Ok(files) if !files.is_empty() => {
+            let listing = files
+                .iter()
+                .map(|path| format!("  {path:?}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let molecule = branch.strip_prefix("feat/").unwrap_or(branch);
+            return MergeOutcome::Error(format!(
+                "uncommitted local changes in the base checkout overlap files the merge would write:\n{listing}\n\n\
+                 commit or stash these changes in {}, then rerun `cs done {molecule}`.",
+                repo_root.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            return MergeOutcome::Error(format!("base checkout preflight failed: {error}"))
+        }
+    }
+
     // Attempt the merge. The flag set depends on strategy.
     //
     // `LC_ALL=C` pins git's stderr to the English locale: we classify the
@@ -5437,6 +5463,83 @@ fn try_merge_branch_target_with_subject(
         }
         Err(e) => MergeOutcome::Error(e.to_string()),
     }
+}
+
+/// Observe local tracked edits against the tree Git would actually merge.
+///
+/// Comparing branch tips alone would flag base-only changes on diverged
+/// histories. `merge-tree` computes the result without touching HEAD, the
+/// index or the worktree; NUL-delimited paths also preserve embedded newlines.
+fn base_checkout_overlaps(repo_root: &Path, merge_target: &str) -> anyhow::Result<Vec<String>> {
+    let observe = |args: &[&str]| -> anyhow::Result<Vec<u8>> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(args)
+            .output()?;
+        anyhow::ensure!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(out.stdout)
+    };
+    let mut dirty = observe(&["diff", "--name-only", "--no-renames", "-z", "HEAD", "--"])?;
+    // Also catch staged edits whose working copy has been restored to HEAD.
+    dirty.extend(observe(&[
+        "diff",
+        "--cached",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        "HEAD",
+        "--",
+    ])?);
+    if dirty.is_empty() {
+        return Ok(Vec::new());
+    }
+    let merged = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args([
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            "-z",
+            "HEAD",
+            merge_target,
+        ])
+        .output()?;
+    // Exit 1 still provides a result tree, with conflict entries. Let the
+    // existing conflict path handle it after ruling out local-edit blockers.
+    anyhow::ensure!(
+        merged.status.success() || merged.status.code() == Some(1),
+        "cannot inspect merge writes (Git 2.38+ is required): {}",
+        String::from_utf8_lossy(&merged.stderr).trim()
+    );
+    let mut fields = merged.stdout.split(|b| *b == 0);
+    let tree = std::str::from_utf8(fields.next().unwrap_or_default())?;
+    anyhow::ensure!(!tree.is_empty(), "git merge-tree returned no tree");
+    let changed = observe(&[
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        "HEAD",
+        tree,
+        "--",
+    ])?;
+    let mut writes: HashSet<&[u8]> = changed.split(|b| *b == 0).collect();
+    // A modify/delete conflict may retain HEAD verbatim in the result tree.
+    // Its conflicted path must still be checked for uncommitted local edits.
+    writes.extend(fields);
+    dirty
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty() && writes.contains(p))
+        .map(|p| String::from_utf8(p.to_vec()).map_err(Into::into))
+        .collect::<anyhow::Result<BTreeSet<_>>>()
+        .map(|paths| paths.into_iter().collect())
 }
 
 /// Is `path` (repo-relative, `/`-separated as git emits it) a *source* path
