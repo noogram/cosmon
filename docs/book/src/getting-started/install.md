@@ -176,7 +176,8 @@ verifies the *same* sha256 digests. Identical bytes, identical provenance.
 ## Route 3: build from source
 
 If you would rather compile it yourself, or you are on a platform outside the
-four release targets, build from the cosmon repository.
+four release targets, build from the cosmon repository. Building requires
+Rust 1.89 or newer.
 
 On **Linux (glibc)** the build links the Secret Service keyring backend through
 `libdbus`, so install the system headers first, otherwise the compile fails at
