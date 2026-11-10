@@ -118,7 +118,7 @@ fn producer_and_merge_formulas_use_the_projects_gates() {
 #[test]
 fn undeclared_gates_refer_to_project_documentation() {
     let dir = galaxy("");
-    let (_, _, text) = nucleate(dir.path(), "task-work");
+    let (id, _, text) = nucleate(dir.path(), "task-work");
     assert!(
         text.contains(
             "## Verification gates\n\nRun the project's own test, lint and build gates \
@@ -127,6 +127,15 @@ fn undeclared_gates_refer_to_project_documentation() {
         "the generated gate section must supply the fallback itself: {text}"
     );
     assert!(!text.contains("cargo"), "{text}");
+
+    let prompt = cs(
+        dir.path(),
+        &["tackle", &id, "--adapter", "claude", "--dry-run"],
+    );
+    assert!(prompt.contains("[gates]"), "{prompt}");
+    assert!(prompt.contains("verification gates"), "{prompt}");
+    assert!(prompt.contains("CLAUDE.md / CONTRIBUTING"), "{prompt}");
+    assert!(!prompt.contains("cargo"), "{prompt}");
 }
 
 #[test]

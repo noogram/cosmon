@@ -16,7 +16,8 @@ use crate::config::GatesConfig;
 pub fn render_gates(gates: &GatesConfig) -> String {
     if gates.is_empty() {
         return "the project's own test, lint and build gates \
-                (see its CLAUDE.md / CONTRIBUTING).\n"
+                (see its CLAUDE.md / CONTRIBUTING).\n\n\
+                Project verification gates: .cosmon/config.toml `[gates]`.\n"
             .to_owned();
     }
 
