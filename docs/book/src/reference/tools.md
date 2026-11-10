@@ -460,6 +460,7 @@ cs pilot (cognitive REPL), cs diverge.
 * `peers` — Who is seated around this session, and which way each one faces
 * `send` — Write one message to another session. Delivered, and consumed, once
 * `inbox` — Read the messages addressed to this session (`--peek` to look without consuming them)
+* `ack` — Acknowledge one mailbox envelope without reading it. Grants no lifecycle authority; duplicate acknowledgments write nothing
 * `checkpoint` — Leave — or read — the note that lets someone else resume this mission
 * `drift` — Compare what two sessions concluded — `AGREE`, `FINDING` or `INCONCLUSIVE`, never a score
 * `takeover` — The controls: who may change the mission, who asked for them, and the signature that hands them over
@@ -647,6 +648,22 @@ Read the messages addressed to this session (`--peek` to look without consuming 
 * `--interval <SECONDS>` — Seconds between polls under `--follow`
 
   Default value: `2`
+
+
+
+## `cs sessions ack`
+
+Acknowledge one mailbox envelope without reading it. Grants no lifecycle authority; duplicate acknowledgments write nothing
+
+**Usage:** `cs sessions ack [OPTIONS] <KEY>`
+
+###### **Arguments:**
+
+* `<KEY>` — Key of the envelope in this session's mailbox
+
+###### **Options:**
+
+* `--session <SID>` — Mailbox to acknowledge. Defaults to `$COSMON_SESSION_ID`
 
 
 

@@ -65,6 +65,7 @@ use chrono::{DateTime, Utc};
 use cosmon_core::id::{MoleculeId, SessionId};
 use cosmon_core::operator_attestation::{GrantChallenge, OperatorGestureVerifier};
 use cosmon_core::pilot_lease::{LeaseDecision, LeaseEpoch, RefusalReason, RequestId};
+use cosmon_core::pilot_message::MessageId;
 use cosmon_core::presence::Presence;
 use cosmon_filestore::{FileStore, PresenceStore};
 use cosmon_filestore::{MinisignOperatorVerifier, TAKEOVER_PUBKEY_ENV, TAKEOVER_PUBKEY_REL};
@@ -148,6 +149,9 @@ pub enum Sub {
     /// Read the messages addressed to this session (`--peek` to look without
     /// consuming them).
     Inbox(InboxArgs),
+    /// Acknowledge one mailbox envelope without reading it. Grants no
+    /// lifecycle authority; duplicate acknowledgments write nothing.
+    Ack(AckArgs),
     /// Leave — or read — the note that lets someone else resume this mission.
     #[command(subcommand)]
     Checkpoint(CheckpointSub),
@@ -352,6 +356,17 @@ pub struct InboxArgs {
     /// Seconds between polls under `--follow`.
     #[arg(long, value_name = "SECONDS", default_value_t = 2)]
     pub interval: u64,
+}
+
+/// Arguments for acknowledging one envelope through the existing mailbox writer.
+#[derive(clap::Args)]
+pub struct AckArgs {
+    /// Key of the envelope in this session's mailbox.
+    #[arg(value_name = "KEY")]
+    pub key: String,
+    /// Mailbox to acknowledge. Defaults to `$COSMON_SESSION_ID`.
+    #[arg(long, value_name = "SID")]
+    pub session: Option<String>,
 }
 
 /// `cs sessions checkpoint <sub>` — the hand-over record of ADR-168 §D5.
@@ -628,6 +643,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         Sub::Peers(a) => run_peers(ctx, a),
         Sub::Send(a) => run_send(ctx, a),
         Sub::Inbox(a) => run_inbox(ctx, a),
+        Sub::Ack(a) => run_ack(ctx, a),
         Sub::Checkpoint(a) => run_checkpoint(ctx, a),
         Sub::Drift(a) => run_drift(ctx, a),
         Sub::Takeover(a) => run_takeover(ctx, a),
@@ -1569,6 +1585,29 @@ fn run_send(ctx: &Context, args: &SendArgs) -> anyhow::Result<()> {
             id = message.id,
             to = message.to.as_str(),
         );
+    }
+    Ok(())
+}
+
+fn run_ack(ctx: &Context, args: &AckArgs) -> anyhow::Result<()> {
+    let sid = presence::resolve_sid_for_poll(&presence::PollArgs {
+        session: args.session.clone(),
+    })?;
+    let key = MessageId::new(args.key.clone())?;
+    let written = presence::mailbox(ctx).ack(&sid, &key, Utc::now())?;
+    if ctx.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "id": key.as_str(),
+                "session": sid.as_str(),
+                "duplicate": !written,
+            })
+        );
+    } else if written {
+        println!("{key} acknowledged in {sid}'s mailbox");
+    } else {
+        println!("{key} already acknowledged in {sid}'s mailbox (duplicate)");
     }
     Ok(())
 }

@@ -890,9 +890,7 @@ pub(crate) fn ack_consumed(
         if body.is_none() {
             continue;
         }
-        if e.read_at.is_none() {
-            mailbox.ack(sid, &e.message.id, now)?;
-        }
+        mailbox.ack(sid, &e.message.id, now)?;
     }
     Ok(())
 }

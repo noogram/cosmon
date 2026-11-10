@@ -131,10 +131,12 @@ model received or considered the content.
 | S-TKREQ | takeover request | `POST /v1/pilot/{mission}/takeover-requests` | `cosmon:sessions:write` | `cs sessions takeover request` | `checkpoint-store` | 1 open request per attachment | idempotent-key | advisory-write | W7 |
 | S-TKGET | takeover show | `GET /v1/pilot/{mission}/takeover-requests/{request}` | `cosmon:sessions:read` | `cs sessions takeover show` | `checkpoint-store` | 1 request | safe-repeat | read-only | W7 |
 
-Of the local counterparts above, `cs presence detach` and `cs sessions ack`
-do not exist today; W5 adds them so each route has an honest local verb, and
-retains every existing local behavior. The local mailbox read acknowledges as it
-reads; W5 adds the separate acknowledgment the pull route needs. The singular `GET /v1/molecules/{id}/session`
+Of the local counterparts above, `cs presence detach` remains to be added by W5.
+`cs sessions ack <key> [--session <SID>] [--json]` now acknowledges one envelope
+separately from reading it. A duplicate succeeds without writing; an unknown
+key is refused. The local mailbox read still acknowledges as it reads, while
+`inbox --peek` reads without acknowledging. The pilot routes remain W7 work.
+The singular `GET /v1/molecules/{id}/session`
 transcript route is unchanged and stays read-only. Three things stay
 distinct: reading a transcript, advisory exchange (everything above) and
 authority transfer (the host-local lease ledger, reached by no route here).

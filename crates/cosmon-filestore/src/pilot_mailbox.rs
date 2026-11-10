@@ -243,20 +243,28 @@ impl PilotMailbox {
 
     /// Record that `sid` consumed `id` at `read_at`.
     ///
-    /// Idempotent: acknowledging an already-acknowledged message appends a
-    /// second line and changes nothing observable, because [`Self::acks`]
-    /// keeps the earliest instant. The file is append-only so that a crash
-    /// mid-write cannot corrupt a prior acknowledgement.
+    /// Returns `true` when recorded, `false` for a duplicate without writing
+    /// another line or changing the first acknowledgment instant. The file
+    /// is append-only so a crash mid-write cannot corrupt a prior record.
     ///
     /// # Errors
     ///
-    /// Returns [`CosmonError::StateStore`] on a filesystem failure.
+    /// Returns [`CosmonError::StateStore`] if `id` is not in `sid`'s mailbox
+    /// or on a filesystem failure. Unknown keys never create acknowledgments.
     pub fn ack(
         &self,
         sid: &SessionId,
         id: &MessageId,
         read_at: DateTime<Utc>,
-    ) -> Result<(), CosmonError> {
+    ) -> Result<bool, CosmonError> {
+        if !self.envelopes(sid)?.iter().any(|e| &e.id == id) {
+            return Err(CosmonError::StateStore {
+                reason: format!("no envelope with key {id} in mailbox {sid}"),
+            });
+        }
+        if self.acks(sid)?.contains_key(id) {
+            return Ok(false);
+        }
         let line = serde_json::to_string(&MessageAck {
             id: id.clone(),
             read_at,
@@ -264,7 +272,8 @@ impl PilotMailbox {
         .map_err(|e| CosmonError::StateStore {
             reason: format!("failed to serialise ack: {e}"),
         })?;
-        append_line(&self.ack_path(sid), &line)
+        append_line(&self.ack_path(sid), &line)?;
+        Ok(true)
     }
 
     /// Remove both mailbox files for `sid`. Used by the presence sweep when a
@@ -379,9 +388,12 @@ mod tests {
         let mb = PilotMailbox::new(dir.path());
         let m = msg("claude", "codex", 1, "aaaa");
         mb.deliver(&m).unwrap();
-        mb.ack(&sid("codex"), &m.id, t0()).unwrap();
-        mb.ack(&sid("codex"), &m.id, t0() + Duration::hours(3))
-            .unwrap();
+        assert!(mb.ack(&sid("codex"), &m.id, t0()).unwrap());
+        let before = fs::read(mb.ack_path(&sid("codex"))).unwrap();
+        assert!(!mb
+            .ack(&sid("codex"), &m.id, t0() + Duration::hours(3))
+            .unwrap());
+        assert_eq!(fs::read(mb.ack_path(&sid("codex"))).unwrap(), before);
         assert_eq!(mb.acks(&sid("codex")).unwrap()[&m.id], t0());
         assert!(mb.pending(&sid("codex"), t0()).unwrap().is_empty());
     }
