@@ -33,6 +33,8 @@ this stage.
 
 - W-LIST and local `cs work list` expose message metadata only to its sender or recipient; the work roster remains visible to admitted seats.
 
+- Dependencies: `rustix` 1.1.4 → 1.1.6 (RUSTSEC-2026-0486); the cargo-vet exemption moves to 1.1.6 and remains unaudited.
+
 ## [0.9.0] — 2026-11-09
 
 ### Added

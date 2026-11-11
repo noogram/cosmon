@@ -1193,8 +1193,9 @@ version = "0.38.44"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustix]]
-version = "1.1.4"
+version = "1.1.6"
 criteria = "safe-to-deploy"
+notes = "Unaudited security update from previously exempted 1.1.4 (RUSTSEC-2026-0486); independent review pending. This exemption is not an audit."
 
 [[exemptions.rustls]]
 version = "0.23.46"
