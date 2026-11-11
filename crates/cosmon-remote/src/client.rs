@@ -1075,7 +1075,9 @@ impl Client {
         Ok(self.http.execute(retry).await?)
     }
 
-    /// Read the bound work roster, with an explicit bounded seat page.
+    /// Read bounded pages of the work roster and the caller's message metadata.
+    ///
+    /// The host lists only messages sent by or addressed to the admitted seat.
     pub async fn work_list(
         &self,
         owner: &str,

@@ -26,7 +26,7 @@ the existing refusal message. No UI control or remote route changes.
 
 | Capability | Local CLI | Remote CLI / API |
 |---|---|---|
-| Inspect roster and revision | `cs work list` | `cosmon-remote work list`; `GET /v1/work/{owner}` |
+| Inspect this member's sent or received message stages and delivery state; remote list also includes the roster and revision | `cs work list` | `cosmon-remote work list`; `GET /v1/work/{owner}` |
 | Send bounded evidence | `cs work send` | `cosmon-remote work send`; `POST /v1/work/{owner}/messages` |
 | Peek without delivery observations | `cs work inbox --peek` | `cosmon-remote work inbox --peek`; `GET /v1/work/{owner}/inbox` |
 | Pull at an explicit safe point | `cs work inbox` | `cosmon-remote work inbox`; `POST /v1/work/{owner}/inbox` |
@@ -35,8 +35,21 @@ the existing refusal message. No UI control or remote route changes.
 The host derives the seat from the operator-provisioned binding and checks
 its attachment proof; the request never selects a sender. Unknown request
 fields are refused. Every response names its schema version, server receipt
-time and scope revision. Inbox messages and outgoing acknowledgment receipts
-remain separate; a result is a new message linked by reply, never an ack.
+time and scope revision. Roster visibility is unchanged. W-LIST message
+metadata is limited to messages sent or received by the admitted caller seat,
+with no owner or unrelated-member exception; the sender/recipient filter is
+applied before pagination. Local `cs work list` requires current member
+identity even when `owner` is explicit, and shows only that member's declared
+work and messages sent or received by that member. Neither list returns
+payload. W-LIST returns paginated seat and message metadata;
+`messages` reports each key's derived `delivery_state` as `pending` or
+`exhausted`. Exhaustion uses the envelope's frozen attempt maximum per
+adapter, not a sum across adapters, and stays visible after ack or expiry.
+The same offset and limit page the independently sorted seat and visible
+message collections; `next_offset` continues while either the unchanged
+roster count or the visible message count has entries beyond that offset.
+Inbox messages and outgoing acknowledgment receipts remain separate; a result
+is a new message linked by reply, never an ack.
 Writes recheck binding revision and revocation at commit. Declaration and
 binding management stay host-local. No collaboration route starts a command,
 molecule or worker, changes a lifecycle, or acquires a lease. W4 provides no
@@ -527,8 +540,8 @@ successfully answered request, not that the model used them.
 
 | Capability | CLI | Native UI | Other CLI views |
 |---|---|---|---|
-| Deliver a work envelope only to the molecule its scope revision bound to the recipient seat | `cs work inbox`, the work hook and the turn-input adapters stop offering an envelope whose revision bound the seat to another molecule; no flag changes | No equivalent delivery control audited | `cs work list` keeps the envelope, with `recipient_bound: false` and a `recipient_not_bound` finding |
-| Settle a declared work in one command | `cs collapse <owner\|member> --with-seats [--reason R] [--reason-kind K]` collapses every live seat through the ordinary collapse path, skips a completed seat and names `cs done <seat>`, merges nothing; exit is non-zero if any seat failed | No equivalent control audited | `cs work list <owner>` and `cs observe <seat>` show the result; no RPP route (the flag is not on the wire) |
+| Deliver a work envelope only to the molecule its scope revision bound to the recipient seat | `cs work inbox`, the work hook and the turn-input adapters stop offering an envelope whose revision bound the seat to another molecule; no flag changes | No equivalent delivery control audited | The sender can still see the envelope in `cs work list`, with `recipient_bound: false` and a `recipient_not_bound` finding |
+| Settle a declared work in one command | `cs collapse <owner\|member> --with-seats [--reason R] [--reason-kind K]` collapses every live seat through the ordinary collapse path, skips a completed seat and names `cs done <seat>`, merges nothing; exit is non-zero if any seat failed | No equivalent control audited | `cs work list` shows the calling seat's messages; `cs observe <seat>` shows the lifecycle result. No RPP route (the flag is not on the wire) |
 | Find infrastructure-blocked collapses | `--reason-kind verification_blocked` is a documented convention; `cs errors --kind verification_blocked` lists them | No equivalent view audited | The label is the worker's claim, not merge-safety evidence |
 
 ## Blocked dependents (issue #118)

@@ -14,8 +14,9 @@ use cosmon_core::advisory_attempt::AdvisorySeatId;
 use cosmon_core::collaboration::{AdmittedCollaborator, CollaborationScope, CollaborationTarget};
 use cosmon_core::id::MoleculeId;
 use cosmon_core::work_message::{
-    fold_with_history, Admission, Confidentiality, ContextObservation, DeliveryAdapter,
-    Disposition, MessageKey, ScopeRevision, Stage, WorkMessageError, WorkMessageStore, WorkScope,
+    fold_records, fold_with_history, Admission, Confidentiality, ContextObservation,
+    DeliveryAdapter, Disposition, MessageKey, ScopeRevision, Stage, WorkMessageError,
+    WorkMessageStore, WorkScope,
 };
 use cosmon_filestore::FileStore;
 use cosmon_hash::Hash;
@@ -243,7 +244,7 @@ fn response(scope: &WorkScope, now: DateTime<Utc>) -> Result<Value, ApiError> {
     )
 }
 
-/// W-LIST: paginated roster metadata visible only to an admitted member.
+/// W-LIST: paginated roster and message delivery states for an admitted member.
 pub(crate) async fn list(
     State(state): State<Arc<AppState>>,
     Path(owner): Path<String>,
@@ -257,7 +258,21 @@ pub(crate) async fn list(
         return Err(invalid());
     }
     let scope = scope(&door)?;
-    let mut body = response(&scope, Utc::now())?;
+    let now = Utc::now();
+    let records = FileWorkMessageStore::new(door.dir.clone())
+        .load_all()
+        .map_err(work_error)?;
+    let mut projection = fold_records(&scope, &records, now)
+        .map_err(|_| api(StatusCode::INTERNAL_SERVER_ERROR, "corrupt_evidence"))?;
+    require_sound_projection(&projection)?;
+    let caller = door
+        .admitted
+        .work_caller()
+        .ok_or_else(|| api(StatusCode::FORBIDDEN, "binding_missing"))?;
+    projection
+        .envelopes
+        .retain(|_, view| view.envelope.is_visible_to(caller.seat()));
+    let mut body = response(&scope, now)?;
     body["owner"] = json!(scope.owner);
     body["budget"] = json!(scope.budget);
     body["seats"] = json!(scope
@@ -266,11 +281,19 @@ pub(crate) async fn list(
         .skip(query.offset)
         .take(limit)
         .collect::<std::collections::BTreeMap<_, _>>());
-    body["next_offset"] = if query.offset.saturating_add(limit) < scope.seats.len() {
-        json!(query.offset.saturating_add(limit))
-    } else {
-        Value::Null
-    };
+    body["messages"] = json!(projection
+        .envelopes
+        .values()
+        .skip(query.offset)
+        .take(limit)
+        .map(|view| json!({"key": view.envelope.key, "delivery_state": view.delivery_state}))
+        .collect::<Vec<_>>());
+    body["next_offset"] =
+        if query.offset.saturating_add(limit) < scope.seats.len().max(projection.envelopes.len()) {
+            json!(query.offset.saturating_add(limit))
+        } else {
+            Value::Null
+        };
     Ok(Json(body))
 }
 

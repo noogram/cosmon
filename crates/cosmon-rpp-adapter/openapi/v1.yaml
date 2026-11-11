@@ -41,9 +41,9 @@ paths:
   /v1/work/{owner}:
     get:
       operationId: listWork
-      summary: List the bound work roster and scope revision.
+      summary: List the bound work roster and caller-visible message delivery metadata.
       tags: [work]
-      description: Requires cosmon:work:read (or write), an exact owner binding and attachment proof. Read-only; no lifecycle or lease effect.
+      description: Requires cosmon:work:read (or write), an exact owner binding and attachment proof. The roster is visible as before; message metadata is limited to messages sent or received by the admitted caller seat, with no owner or unrelated-member exception. Filter messages before pagination. Read-only; no lifecycle or lease effect.
       parameters:
         - {name: cosmon-attachment, in: header, required: true, schema: {type: string}, description: Host-issued attachment identifier.}
         - {name: cosmon-attachment-proof, in: header, required: true, schema: {type: string, writeOnly: true}, description: Secret attachment proof from the private credential store; never record in logs.}
@@ -52,7 +52,7 @@ paths:
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 100}}
       responses:
         "200":
-          description: Bounded roster with current scope metadata.
+          description: Bounded roster with current scope metadata and the caller seat's visible message metadata.
           content:
             application/json:
               schema: {$ref: "#/components/schemas/WorkListResponse"}
@@ -3980,7 +3980,7 @@ components:
         receipt: {type: object, description: Present only when this acknowledgment was newly recorded.}
     WorkListResponse:
       type: object
-      required: [schema_version, received_at, scope_revision, seats]
+      required: [schema_version, received_at, scope_revision, seats, messages]
       properties:
         schema_version: {type: integer, const: 1}
         received_at: {type: string, format: date-time}
@@ -3998,7 +3998,20 @@ components:
               molecule: {type: string}
               required: {type: boolean}
               provider_requirement: {type: string}
-        next_offset: {type: [integer, "null"], minimum: 0}
+        messages:
+          type: array
+          maxItems: 100
+          description: Messages sent or received by the admitted caller seat, filtered before pagination and sorted by key. Offset/limit apply independently to this visible collection and the unchanged roster sorted by seat name. No payload is returned.
+          items:
+            type: object
+            required: [key, delivery_state]
+            properties:
+              key: {type: string, maxLength: 80}
+              delivery_state:
+                type: string
+                enum: [pending, exhausted]
+                description: Derived from durable per-adapter attempt counts and the envelope-frozen bound. Any adapter reaching the bound exhausts delivery across adapters. Ack and expiry do not reset it.
+        next_offset: {type: [integer, "null"], minimum: 0, description: Present while offset plus limit is below either the unchanged roster count or the caller-visible message count.}
     WorkEnvelope:
       type: object
       required: [schema_version, scope_owner, scope_revision, sender, recipient, key, payload_digest, payload_bytes, sender_time, admitted_at, confidentiality, expires_at, max_delivery_attempts, sender_evidence]

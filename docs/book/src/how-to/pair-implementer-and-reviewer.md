@@ -46,8 +46,7 @@ items, constraints and deliverables. Then:
 
 ## 4. Reviewer brief
 
-- Find the peer with `cs work list` (no owner: your own roster), or use the
-  implementer id passed as a variable.
+- Identify the peer using the implementer id passed in the brief.
 - Challenge at each milestone with `cs work send --to impl`.
 - Give 3 to 6 task-specific checks.
 - Recompute one number independently from saved outputs.
@@ -65,9 +64,9 @@ A real stop is `cs collapse`.
 
 ## 6. Watching
 
-`cs work list <owner>` shows each message's stage. `cs observe <seat>` shows a
-seat's molecule. Inside a member, an omitted owner means that member's own
-roster; it is never a fleet-wide view.
+From a declared seat, `cs work list <owner>` shows stages for messages sent
+by or addressed to that seat. Omitting the owner selects that member's
+work. `cs observe <seat>` shows the seat's molecule lifecycle.
 
 - Implementer collapsed while the reviewer is active: decide how to settle
   (section 7).

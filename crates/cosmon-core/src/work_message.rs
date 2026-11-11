@@ -171,7 +171,8 @@ pub struct MessageBudget {
     pub default_ttl_secs: u64,
     /// Minimum wait before an adapter offers the same envelope again.
     pub redeliver_after_secs: u64,
-    /// Most delivery attempts one adapter makes for one envelope.
+    /// Per-adapter attempt bound; reaching it exhausts delivery of the envelope
+    /// across all adapters.
     pub max_delivery_attempts: u32,
 }
 
@@ -398,13 +399,23 @@ pub struct Envelope {
     pub confidentiality: Confidentiality,
     /// After this instant the envelope is listed as expired, never delivered.
     pub expires_at: DateTime<Utc>,
-    /// Per-adapter delivery attempt bound, frozen from the budget.
+    /// Per-adapter attempt bound, frozen from the budget. Once any adapter
+    /// reaches it, the envelope is exhausted for every adapter.
     pub max_delivery_attempts: u32,
     /// How the sender was identified.
     pub sender_evidence: SenderEvidence,
 }
 
 impl Envelope {
+    /// Whether this seat sent or receives the message.
+    ///
+    /// List boundaries use this relation before pagination so other work
+    /// members cannot read the message's metadata.
+    #[must_use]
+    pub fn is_visible_to(&self, seat: &AdvisorySeatId) -> bool {
+        &self.sender == seat || &self.recipient == seat
+    }
+
     /// Whether the envelope has passed its expiry at `now`.
     #[must_use]
     pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
@@ -755,6 +766,9 @@ pub struct EnvelopeView {
     pub admitted: Option<DateTime<Utc>>,
     /// Every delivery attempt, in receipt order.
     pub delivery_attempts: Vec<DeliveryAttemptView>,
+    /// Delivery availability derived from those attempts, independent of
+    /// consumption and expiry. This is never a new canonical receipt.
+    pub delivery_state: DeliveryState,
     /// Context-delivery evidence.
     pub context_delivered: Option<ContextDeliveredView>,
     /// Consumption report.
@@ -773,6 +787,7 @@ impl EnvelopeView {
             envelope,
             admitted: None,
             delivery_attempts: Vec::new(),
+            delivery_state: DeliveryState::Pending,
             context_delivered: None,
             consumed: None,
             expired: false,
@@ -785,6 +800,20 @@ impl EnvelopeView {
             .iter()
             .filter(move |attempt| attempt.adapter == adapter)
     }
+}
+
+/// Whether the envelope's frozen delivery-attempt allowance has been used up.
+///
+/// Counts are per adapter. Once any adapter reaches the bound, changing
+/// adapters cannot reopen delivery. Consumption and expiry remain separate
+/// observations and do not reset this derived state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryState {
+    /// No adapter has reached the attempt bound; other delivery checks apply.
+    Pending,
+    /// An adapter has reached the bound; no adapter may offer this message.
+    Exhausted,
 }
 
 /// A record the fold could not attribute, kept visible instead of dropped.
@@ -1200,9 +1229,32 @@ pub fn fold_with_history(
     Ok(WorkProjection {
         revision,
         budget: scope.budget,
-        envelopes: views,
+        envelopes: project_delivery_exhaustion(views),
         findings,
     })
+}
+
+fn project_delivery_exhaustion(
+    mut views: BTreeMap<MessageKey, EnvelopeView>,
+) -> BTreeMap<MessageKey, EnvelopeView> {
+    for view in views.values_mut() {
+        // Admission rejects zero budgets; retain fail-closed delivery when
+        // reconstructing an old or damaged envelope with a zero bound.
+        if view.envelope.max_delivery_attempts == 0 {
+            view.delivery_state = DeliveryState::Exhausted;
+            continue;
+        }
+        let mut counts = BTreeMap::new();
+        for attempt in &view.delivery_attempts {
+            let count = counts.entry(attempt.adapter).or_insert(0_u32);
+            *count = count.saturating_add(1);
+            if *count >= view.envelope.max_delivery_attempts {
+                view.delivery_state = DeliveryState::Exhausted;
+                break;
+            }
+        }
+    }
+    views
 }
 
 /// Envelopes `adapter` may offer to `seat` now.
@@ -1210,8 +1262,8 @@ pub fn fold_with_history(
 /// An envelope qualifies when it is addressed to `seat`, bound to the
 /// molecule that holds `seat` now (see [`fold_with_history`]), unexpired and
 /// unconsumed, and this adapter either never tried it or last tried it at
-/// least `redeliver_after_secs` ago with fewer than `max_delivery_attempts`
-/// attempts.
+/// least `redeliver_after_secs` ago. An exhausted message is never offered,
+/// even through another adapter.
 #[must_use]
 pub fn deliverable<'a>(
     projection: &'a WorkProjection,
@@ -1227,18 +1279,13 @@ pub fn deliverable<'a>(
         .values()
         .filter(|view| &view.envelope.recipient == seat && view.consumed.is_none())
         .filter(|view| view.recipient_bound)
+        .filter(|view| view.delivery_state == DeliveryState::Pending)
         .filter(|view| !view.expired && !view.envelope.is_expired_at(now))
-        .filter(|view| {
-            let attempts = view.attempts_by(adapter).count();
-            let under_bound = u32::try_from(attempts)
-                .is_ok_and(|count| count < view.envelope.max_delivery_attempts);
-            let rested = match view.attempts_by(adapter).map(|a| a.at).max() {
-                None => true,
-                Some(last) => wait
-                    .and_then(|wait| last.checked_add_signed(wait))
-                    .is_some_and(|ready| now >= ready),
-            };
-            under_bound && rested
+        .filter(|view| match view.attempts_by(adapter).map(|a| a.at).max() {
+            None => true,
+            Some(last) => wait
+                .and_then(|wait| last.checked_add_signed(wait))
+                .is_some_and(|ready| now >= ready),
         })
         .map(|view| &view.envelope)
         .collect()
@@ -1256,7 +1303,8 @@ pub enum Consumption {
 /// Validate a recipient's consumption report for `key`.
 ///
 /// Only the recipient may report. A report after expiry is recorded and
-/// folded as late.
+/// folded as late. An exhausted message remains acknowledgeable: the report
+/// records consumption, preserves exhaustion, and never reopens delivery.
 ///
 /// # Errors
 /// Returns [`WorkMessageError::UnknownEnvelope`], [`WorkMessageError::NotTheRecipient`]
@@ -2104,6 +2152,113 @@ mod tests {
             ),
             Err(WorkMessageError::ReplyToUnknown(key("ghost")))
         );
+    }
+
+    #[test]
+    fn delivery_respects_recorded_expiry_and_clock_advance_since_projection() {
+        let scope = scope();
+        let mut envelope = admitted(&scope, &empty(&scope), submission(&scope, "m1", b"finding"));
+        envelope.expires_at = t(100);
+        let before = fold(&scope, std::slice::from_ref(&envelope), &[], t(20)).unwrap();
+        assert_eq!(
+            deliverable(&before, &seat("b"), DeliveryAdapter::Pull, t(99)).len(),
+            1
+        );
+        // The cached projection is unexpired, but the delivery clock advanced.
+        assert!(deliverable(&before, &seat("b"), DeliveryAdapter::Pull, t(100)).is_empty());
+
+        let expired = receipt(&envelope, 30, Stage::Expired);
+        let after = fold(&scope, &[envelope], &[expired], t(40)).unwrap();
+        // A durable expiry receipt suffices even before the clock deadline.
+        assert!(deliverable(&after, &seat("b"), DeliveryAdapter::Pull, t(40)).is_empty());
+    }
+
+    #[test]
+    fn zero_bound_envelope_is_exhausted_without_a_delivery_attempt() {
+        let scope = scope();
+        let mut envelope = admitted(&scope, &empty(&scope), submission(&scope, "m1", b"finding"));
+        // Admission rejects zero budgets, but old or damaged persisted envelopes
+        // must retain the previous fail-closed offer behavior when read.
+        envelope.max_delivery_attempts = 0;
+        let projection = fold(&scope, &[envelope], &[], t(20)).unwrap();
+        assert!(deliverable(&projection, &seat("b"), DeliveryAdapter::Pull, t(20)).is_empty());
+        let view = projection.envelopes.values().next().unwrap();
+        assert_eq!(
+            serde_json::to_value(view).unwrap()["delivery_state"],
+            "exhausted"
+        );
+    }
+
+    #[test]
+    fn exhaustion_is_derived_per_adapter_and_cannot_be_bypassed_by_another_adapter() {
+        let scope = scope();
+        let envelope = admitted(&scope, &empty(&scope), submission(&scope, "m1", b"finding"));
+        let mut receipts = vec![attempt(&envelope, 30)];
+        let mut other = attempt(&envelope, 31);
+        if let Stage::DeliveryAttempted { adapter, .. } = &mut other.stage {
+            *adapter = DeliveryAdapter::HarnessTurn;
+        }
+        receipts.push(other);
+        let project = |receipts: &[Receipt]| {
+            fold(&scope, std::slice::from_ref(&envelope), receipts, t(100)).unwrap()
+        };
+        let before = project(&receipts);
+        assert_eq!(
+            serde_json::to_value(&before.envelopes[&envelope.key]).unwrap()["delivery_state"],
+            "pending"
+        );
+        assert_eq!(
+            deliverable(&before, &seat("b"), DeliveryAdapter::Pull, t(100)).len(),
+            1
+        );
+        receipts.push(attempt(&envelope, 90));
+        let exhausted = project(&receipts);
+        assert_eq!(
+            serde_json::to_value(&exhausted.envelopes[&envelope.key]).unwrap()["delivery_state"],
+            "exhausted"
+        );
+        for adapter in [
+            DeliveryAdapter::Pull,
+            DeliveryAdapter::HarnessTurn,
+            DeliveryAdapter::CodexPostToolUse,
+            DeliveryAdapter::ClaudePostToolUse,
+        ] {
+            assert!(deliverable(&exhausted, &seat("b"), adapter, t(100)).is_empty());
+        }
+        // Exhaustion is a delivery decision; consumption remains independent evidence.
+        let ack = accept_consumption(
+            &exhausted,
+            &seat("b"),
+            &envelope.key,
+            Disposition::Considered,
+            None,
+            None,
+            t(100),
+        )
+        .unwrap();
+        let Consumption::Record(ack) = ack else {
+            panic!("first ack must be recorded")
+        };
+        receipts.push(ack);
+        let consumed = project(&receipts);
+        assert_eq!(
+            serde_json::to_value(&consumed.envelopes[&envelope.key]).unwrap()["delivery_state"],
+            "exhausted"
+        );
+        assert!(matches!(
+            accept_consumption(
+                &consumed,
+                &seat("b"),
+                &envelope.key,
+                Disposition::Considered,
+                None,
+                None,
+                t(101)
+            )
+            .unwrap(),
+            Consumption::Duplicate(_)
+        ));
+        assert!(deliverable(&consumed, &seat("b"), DeliveryAdapter::Pull, t(101)).is_empty());
     }
 
     #[test]

@@ -535,14 +535,9 @@ class TestWorkExchange:
         """W3: an unacknowledged message is re-offered after ``redeliver_after_secs``,
         at most ``max_delivery_attempts`` times.
 
-        FINDING (recorded in verification.md): once the attempts are used up
-        the pull answers **HTTP 200 with an empty ``messages`` list**, not
-        ``budget_exhausted``. ``budget_exhausted`` (429) is returned for the
-        seat's *message and byte* allowance (see the refusals test), which is
-        what ``work_error`` maps ``SeatBudgetExhausted`` from. The in-process
-        route test (``payload_message_and_delivery_budgets_bound_the_routes``)
-        asserts the same empty-200, so this test pins the behaviour that
-        exists and does not assert a 429 that nothing produces.
+        Once attempts are used up, work list shows ``exhausted`` for the sender
+        and recipient. Pull remains a successful empty response, and a later
+        acknowledgment records consumption without reopening delivery.
         """
         run_round_trip(world, expect)
         remote, pilot, store = world.parties["remote"], world.parties["pilot"], world.store
@@ -579,10 +574,22 @@ class TestWorkExchange:
         expect.equals(store.receipt_bytes(key), before, "and no further observation is written")
         expect.equals(store.stages(key).count("delivery_attempted"), BUDGET["max_delivery_attempts"],
                       "never more than max_delivery_attempts, however often the owner pulls")
-        # The message is still there, un-consumed, and still acknowledgeable.
+        for party in (remote, pilot):
+            rc, listed, err = _call(party, "work", "list", world.owner, step="W3 list exhausted")
+            expect.equals(rc, 0, f"list exhausted: {err[-300:]}")
+            states = {message["key"]: message["delivery_state"] for message in listed["messages"]}
+            expect.equals(states.get(key), "exhausted", "work list exposes delivery exhaustion")
+        expect.equals(store.receipt_bytes(key), before, "listing writes no observation")
+        # A consumption report preserves the independently derived exhaustion.
         rc, acked, err = _ack(world, pilot, key, digest, step="W3 ack after exhaustion")
         expect.equals(rc, 0, f"an exhausted message can still be acknowledged: {err[-300:]}")
         expect.equals(store.stages(key)[-1], "consumed", "and the host records it")
+        rc, listed, err = _call(remote, "work", "list", world.owner, step="W3 list after ack")
+        expect.equals(rc, 0, f"list after ack: {err[-300:]}")
+        states = {message["key"]: message["delivery_state"] for message in listed["messages"]}
+        expect.equals(states.get(key), "exhausted", "ack does not reset delivery exhaustion")
+        offered, _ = pull("W3 pull after ack")
+        expect.equals(offered, [], "ack never reopens delivery")
 
     def test_04a_scope_missing_is_checked_before_anything_is_read(self, world: World, cfg, recorder, expect):
         """W4: a token without ``cosmon:work:write`` is refused ``scope_missing`` (403),

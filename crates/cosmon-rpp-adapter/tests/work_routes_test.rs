@@ -562,6 +562,205 @@ async fn configured_extra_seat_and_work_operations_have_no_control_effects() {
 }
 
 #[tokio::test]
+async fn third_seat_cannot_list_peer_message_metadata() {
+    let fx = fixture(&["cto", "mado", "reviewer"], 10).await;
+    let (status, sent) = fx
+        .request(
+            "mado",
+            "POST",
+            "/messages",
+            Some(fx.send("peer", "cto", "private payload")),
+            true,
+        )
+        .await;
+    assert!(status.is_success(), "{sent}");
+    let (status, listed) = fx.request("reviewer", "GET", "", None, true).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    println!("third seat W-LIST: {listed}");
+    assert_eq!(listed["seats"].as_object().unwrap().len(), 3);
+    assert_eq!(listed["messages"], json!([]));
+    assert!(!listed.to_string().contains("peer"));
+    for participant in ["mado", "cto"] {
+        let (status, listed) = fx.request(participant, "GET", "", None, true).await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        assert_eq!(
+            listed["messages"],
+            json!([{"key":"peer", "delivery_state":"pending"}])
+        );
+    }
+    let (status, pulled) = fx
+        .request("reviewer", "POST", "/inbox", Some(fx.pull()), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pulled}");
+    assert!(pulled["messages"].as_array().unwrap().is_empty());
+    assert!(FileWorkMessageStore::new(fx.owner_dir)
+        .load_all()
+        .unwrap()
+        .receipts
+        .iter()
+        .all(|receipt| !matches!(receipt.stage, Stage::DeliveryAttempted { .. })));
+}
+
+#[tokio::test]
+async fn message_visibility_is_applied_before_pagination_and_continuation() {
+    let fx = fixture(&["cto", "mado", "reviewer"], 10).await;
+    for key in ["hidden-0", "hidden-1", "hidden-2", "hidden-3"] {
+        let (status, sent) = fx
+            .request(
+                "mado",
+                "POST",
+                "/messages",
+                Some(fx.send(key, "cto", "hidden")),
+                true,
+            )
+            .await;
+        assert!(status.is_success(), "{sent}");
+    }
+    let (status, sent) = fx
+        .request(
+            "reviewer",
+            "POST",
+            "/messages",
+            Some(fx.send("z-visible", "cto", "visible")),
+            true,
+        )
+        .await;
+    assert!(status.is_success(), "{sent}");
+    let before = FileWorkMessageStore::new(fx.owner_dir.clone())
+        .load_all()
+        .unwrap()
+        .receipts;
+    for offset in 0..3 {
+        let (status, listed) = fx
+            .request(
+                "reviewer",
+                "GET",
+                &format!("?offset={offset}&limit=1"),
+                None,
+                true,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        assert_eq!(listed["seats"].as_object().unwrap().len(), 1);
+        assert_eq!(
+            listed["messages"],
+            if offset == 0 {
+                json!([{"key":"z-visible", "delivery_state":"pending"}])
+            } else {
+                json!([])
+            }
+        );
+        assert_eq!(
+            listed["next_offset"],
+            if offset < 2 {
+                json!(offset + 1)
+            } else {
+                Value::Null
+            }
+        );
+        assert!(!listed.to_string().contains("hidden-"));
+    }
+    assert_eq!(
+        FileWorkMessageStore::new(fx.owner_dir)
+            .load_all()
+            .unwrap()
+            .receipts,
+        before
+    );
+}
+
+#[tokio::test]
+async fn exhausted_message_does_not_block_fresh_mail_and_list_pages_cover_both_collections() {
+    let mut fx = fixture(&["cto", "mado"], 10).await;
+    fx.scope.budget.max_delivery_attempts = 1;
+    let store = FileWorkMessageStore::new(fx.owner_dir.clone());
+    store.declare(&fx.scope).unwrap();
+    for key in ["one", "two", "three"] {
+        let (status, sent) = fx
+            .request(
+                "mado",
+                "POST",
+                "/messages",
+                Some(fx.send(key, "cto", key)),
+                true,
+            )
+            .await;
+        assert!(status.is_success(), "{sent}");
+        let (status, pulled) = fx
+            .request("cto", "POST", "/inbox", Some(fx.pull()), true)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{pulled}");
+        assert_eq!(pulled["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(pulled["messages"][0]["envelope"]["key"], key);
+    }
+    let before = store.load_all().unwrap().receipts;
+    for reader in ["mado", "cto"] {
+        let mut keys = Vec::new();
+        for offset in 0..3 {
+            let (status, listed) = fx
+                .request(
+                    reader,
+                    "GET",
+                    &format!("?offset={offset}&limit=1"),
+                    None,
+                    true,
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{listed}");
+            assert_eq!(listed["messages"].as_array().unwrap().len(), 1);
+            assert_eq!(listed["messages"][0]["delivery_state"], "exhausted");
+            keys.push(listed["messages"][0]["key"].as_str().unwrap().to_owned());
+            assert_eq!(
+                listed["next_offset"],
+                if offset < 2 {
+                    json!(offset + 1)
+                } else {
+                    Value::Null
+                }
+            );
+        }
+        assert_eq!(keys, ["one", "three", "two"]);
+    }
+    assert_eq!(
+        store.load_all().unwrap().receipts,
+        before,
+        "list is read-only"
+    );
+    let records = store.load_all().unwrap();
+    let first = records
+        .envelopes
+        .iter()
+        .find(|e| e.key.as_str() == "one")
+        .unwrap();
+    let ack = json!({"scope_revision":fx.scope.revision().unwrap(),"payload_digest":first.payload_digest,"disposition":"considered"});
+    for duplicate in [false, true] {
+        let (status, acknowledged) = fx
+            .request("cto", "POST", "/messages/one/ack", Some(ack.clone()), true)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{acknowledged}");
+        assert_eq!(acknowledged["duplicate"], duplicate);
+    }
+    let (status, listed) = fx.request("mado", "GET", "", None, true).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["messages"][0]["delivery_state"], "exhausted");
+    let (status, pulled) = fx
+        .request("cto", "POST", "/inbox", Some(fx.pull()), true)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{pulled}");
+    assert!(pulled["messages"].as_array().unwrap().is_empty());
+    assert_eq!(
+        store
+            .load_all()
+            .unwrap()
+            .receipts
+            .iter()
+            .filter(|r| r.key.as_str() == "one" && matches!(r.stage, Stage::Consumed { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn payload_message_and_delivery_budgets_bound_the_routes() {
     let fx = fixture(&["cto", "mado"], 1).await;
     let (status, body) = fx
@@ -610,6 +809,12 @@ async fn payload_message_and_delivery_budgets_bound_the_routes() {
         body["messages"].as_array().unwrap().is_empty(),
         "delivery attempts exhausted"
     );
+    for reader in ["mado", "cto"] {
+        let (status, listed) = fx.request(reader, "GET", "", None, true).await;
+        assert_eq!(status, StatusCode::OK, "{listed}");
+        println!("W-LIST: {listed}");
+        assert_eq!(listed["messages"][0]["delivery_state"], "exhausted");
+    }
     let records = FileWorkMessageStore::new(fx.owner_dir.clone())
         .load_all()
         .unwrap();
@@ -620,6 +825,28 @@ async fn payload_message_and_delivery_budgets_bound_the_routes() {
             .filter(|r| matches!(r.stage, Stage::DeliveryAttempted { .. }))
             .count(),
         2
+    );
+    let (status, body) = fx
+        .request(
+            "mado",
+            "POST",
+            "/messages",
+            Some(fx.send("after-exhaustion", "cto", "finding")),
+            true,
+        )
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"], "budget_exhausted");
+    let after = FileWorkMessageStore::new(fx.owner_dir.clone())
+        .load_all()
+        .unwrap();
+    assert_eq!(
+        after.envelopes, records.envelopes,
+        "exhaustion does not free message quota"
+    );
+    assert_eq!(
+        after.receipts, records.receipts,
+        "refused send writes no observation"
     );
 }
 

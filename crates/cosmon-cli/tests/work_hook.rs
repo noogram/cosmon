@@ -238,19 +238,12 @@ fn declared_seats_exchange_and_ack_across_hook_adapters() {
             .as_str()
             .expect("context")
             .contains("reply"));
-        let listed = Command::new(env!("CARGO_BIN_EXE_cs"))
-            .current_dir(dir.path())
-            .args([
-                "--config",
-                state.to_str().expect("state"),
-                "--json",
-                "work",
-                "list",
-                OWNER,
-            ])
-            .output()
-            .expect("list");
-        assert!(listed.status.success());
+        let listed = cs(dir.path(), &state, A, &["--json", "work", "list", OWNER]);
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
+        );
         let doc: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("list JSON");
         for key in ["first", "reply"] {
             let view = &doc["envelopes"][key];
