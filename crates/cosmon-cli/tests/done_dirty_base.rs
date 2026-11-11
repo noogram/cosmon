@@ -47,6 +47,9 @@ impl Galaxy {
             worktree: PathBuf::new(),
         };
         g.git_ok(&["init", "-q", "-b", "main"]);
+        g.git_ok(&["config", "user.email", "test@example.com"]);
+        g.git_ok(&["config", "user.name", "Test"]);
+        g.git_ok(&["config", "commit.gpgsign", "false"]);
         fs::create_dir_all(g.repo.join(".cosmon/state")).unwrap();
         fs::create_dir_all(g.repo.join(".cosmon/formulas")).unwrap();
         fs::write(
