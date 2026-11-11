@@ -14,6 +14,16 @@ Step renders and generated posture additions replace the live file atomically,
 so an existing hard-linked backup also keeps its bytes. The API uses the same
 preservation operation; no UI control changes.
 
+## Project verification gates in briefings
+
+`cs nucleate` renders the galaxy's `[gates]` commands in `briefing.md` using
+the same renderer as the worker bootstrap prompt. With no declared commands,
+it refers to the project's CLAUDE.md / CONTRIBUTING. The `task-work`,
+`producer-work`, and `merge-conflict` criteria use project gates rather than
+assuming Rust. No command flags, UI controls or remote routes change.
+`cs init --upgrade` preserves existing formula copies; it only installs
+the revised templates when those files are missing.
+
 ## Visual surface completion
 
 `cs complete` keeps refusing a touched visual surface without a recent GREEN
