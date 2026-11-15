@@ -1048,13 +1048,14 @@ version = "0.11.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.quinn-proto]]
-version = "0.11.18"
+version = "0.11.19"
 criteria = "safe-to-deploy"
-notes = "Unaudited security update from previously exempted 0.11.16; independent review pending. This exemption is not an audit."
+notes = "Unaudited security update from previously exempted 0.11.18 (RUSTSEC-2026-0523, RUSTSEC-2026-0524); independent review pending. This exemption is not an audit."
 
 [[exemptions.quinn-udp]]
-version = "0.5.14"
+version = "0.5.16"
 criteria = "safe-to-deploy"
+notes = "Unaudited security update from previously exempted 0.5.14 (RUSTSEC-2026-0538); independent review pending. This exemption is not an audit."
 
 [[exemptions.r-efi]]
 version = "5.3.0"
