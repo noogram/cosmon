@@ -130,42 +130,50 @@ macro_rules! simple_id {
 
 simple_id!(
     /// Identifies an agent definition (e.g. "witness", "refinery").
-    AgentId, "AgentId"
+    AgentId,
+    "AgentId"
 );
 
 simple_id!(
     /// Identifies a formula (workflow template).
-    FormulaId, "FormulaId"
+    FormulaId,
+    "FormulaId"
 );
 
 simple_id!(
     /// Identifies a running session.
-    SessionId, "SessionId"
+    SessionId,
+    "SessionId"
 );
 
 simple_id!(
     /// Identifies a step within a molecule.
-    StepId, "StepId"
+    StepId,
+    "StepId"
 );
 
 simple_id!(
     /// Identifies a fleet — a group of workers with a shared mission.
-    FleetId, "FleetId"
+    FleetId,
+    "FleetId"
 );
 
 simple_id!(
     /// Identifies a convoy — an ordered group of molecules.
-    ConvoyId, "ConvoyId"
+    ConvoyId,
+    "ConvoyId"
 );
 
 simple_id!(
     /// Identifies a rig (project workspace) in the Gas Town topology.
-    RigId, "RigId"
+    RigId,
+    "RigId"
 );
 
 simple_id!(
     /// Identifies a chamber (bounded-context workspace) in the Gas Town topology.
-    ChamberId, "ChamberId"
+    ChamberId,
+    "ChamberId"
 );
 
 simple_id!(
@@ -175,7 +183,8 @@ simple_id!(
     /// and later resolved by [`crate::event::Event::ClaimVerified`]. The ID is opaque
     /// to cosmon-core — callers (e.g. `cs verify`) choose the generation scheme
     /// (ULID, content-hash, monotonic counter). Only non-emptiness is enforced.
-    ClaimId, "ClaimId"
+    ClaimId,
+    "ClaimId"
 );
 
 simple_id!(
@@ -183,7 +192,8 @@ simple_id!(
     ///
     /// Typically an auto-incremented integer stringified by the `SQLite` adapter,
     /// but the core treats it as an opaque non-empty string.
-    SignalId, "SignalId"
+    SignalId,
+    "SignalId"
 );
 
 simple_id!(
@@ -202,7 +212,8 @@ simple_id!(
     /// govern how concrete IDs are minted from external identities
     /// (MXIDs, JWT `sub`, operator config). Cosmon-core only enforces
     /// the newtype boundary and non-emptiness.
-    NucleonId, "NucleonId"
+    NucleonId,
+    "NucleonId"
 );
 
 // ---------------------------------------------------------------------------
