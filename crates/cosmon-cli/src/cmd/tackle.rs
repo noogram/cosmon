@@ -99,6 +99,16 @@ pub struct Args {
     #[arg(long)]
     pub force: bool,
 
+    /// Succeed without spawning when the molecule already has a live worker
+    /// whose recorded adapter and model match the ones passed here: print
+    /// `already dispatched to <session> (adapter <a>, model <m>)` and exit 0,
+    /// changing nothing. Only `--adapter` / `--model` given explicitly are
+    /// compared. A different adapter or model, or a dead worker, fails as
+    /// without this flag (a dead worker is reclaimed with `--force`).
+    /// Conflicts with `--force`.
+    #[arg(long, conflicts_with = "force")]
+    pub if_needed: bool,
+
     /// Continue the molecule's interrupted in-process (`openai` / `anthropic`)
     /// attempt from its last complete tool-result checkpoint instead of
     /// starting a fresh log. Use with `--force` to thaw a frozen molecule.
@@ -444,6 +454,38 @@ fn refresh_after_dispatch_claim(
     Ok(current)
 }
 
+/// Outcome of `--if-needed` against a molecule that already has a dispatch.
+#[derive(Debug, PartialEq, Eq)]
+enum IfNeededVerdict {
+    /// Live worker, and every explicitly passed adapter/model matches.
+    AlreadyDispatched,
+    /// The recorded worker is gone: the remedy is `--force`.
+    DeadWorker,
+    /// The caller asked for a different adapter or model: today's failure.
+    Mismatch,
+}
+
+/// Decide `--if-needed` from the recorded dispatch, the caller's explicit
+/// `--adapter` / `--model` (a value not passed is not compared) and whether the
+/// recorded worker is alive. A mismatch outranks a dead worker, so a caller who
+/// asked for something else always gets the unchanged claim-lost failure.
+fn if_needed_verdict(
+    process: &cosmon_core::process::MoleculeProcess,
+    adapter: Option<&str>,
+    model: Option<&str>,
+    alive: bool,
+) -> IfNeededVerdict {
+    let adapter_ok = adapter.is_none_or(|a| process.adapter_name.as_deref() == Some(a));
+    let model_ok = model.is_none_or(|m| process.model.as_deref() == Some(m));
+    if !(adapter_ok && model_ok) {
+        IfNeededVerdict::Mismatch
+    } else if alive {
+        IfNeededVerdict::AlreadyDispatched
+    } else {
+        IfNeededVerdict::DeadWorker
+    }
+}
+
 /// Sanitize and validate a user-supplied session name.
 ///
 /// Replaces disallowed characters with hyphens, collapses runs, trims
@@ -694,6 +736,67 @@ fn run_with_transport(
     } else {
         Some(store.acquire_dispatch_lock(&mol_id)?)
     };
+    if dispatch_claim.is_some() && args.if_needed {
+        let current = store.load_molecule(&mol_id)?;
+        let pilot_held = !tackled_by.is_human()
+            && (current.is_human_claimed()
+                || current.tags.iter().any(|tag| tag.as_str() == "hold:pilot"));
+        if let (Some(process), false) = (current.process.as_ref(), pilot_held) {
+            // The same liveness check `--force` relies on below.
+            let fallback;
+            let liveness: &dyn TransportBackend = if let Some(backend) = injected {
+                backend
+            } else {
+                fallback = TmuxBackend::new(super::tmux_socket_name(ctx));
+                &fallback
+            };
+            let alive = liveness.is_alive(&process.worker_id).unwrap_or(false);
+            let adapter = process.adapter_name.as_deref().unwrap_or("unknown");
+            let model = process
+                .model
+                .as_deref()
+                .unwrap_or("adapter default (unrecorded)");
+            match if_needed_verdict(
+                process,
+                args.adapter.as_deref(),
+                args.model.as_deref(),
+                alive,
+            ) {
+                IfNeededVerdict::AlreadyDispatched => {
+                    if ctx.json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "command": "tackle",
+                                "molecule_id": mol_id.as_str(),
+                                "already_dispatched": true,
+                                "session": process.worker_id.to_string(),
+                                "adapter": adapter,
+                                "model": model,
+                            })
+                        );
+                    } else {
+                        println!(
+                            "already dispatched to {} (adapter {adapter}, model {model})",
+                            process.worker_id
+                        );
+                    }
+                    return Ok(());
+                }
+                IfNeededVerdict::DeadWorker => {
+                    return Err(anyhow::anyhow!(
+                        "cs tackle: dispatch claim lost for {}: winning worker {}, adapter {}, \
+                         model {} — that worker is not alive; rerun with --force to reclaim it",
+                        mol_id,
+                        process.worker_id,
+                        adapter,
+                        model
+                    ));
+                }
+                IfNeededVerdict::Mismatch => {}
+            }
+        }
+    }
     if dispatch_claim.is_some() {
         mol = refresh_after_dispatch_claim(&store, &mol, args.force, &tackled_by)?;
     }
@@ -11718,6 +11821,38 @@ mod tests {
     /// directly) means a mutation to the `already_running` gate — e.g.
     /// silently disabling it — is a real, non-vacuous test failure here.
     #[test]
+    fn if_needed_compares_only_what_the_caller_passed() {
+        let process = cosmon_core::process::MoleculeProcess::new(
+            cosmon_core::id::WorkerId::new("w-1").unwrap(),
+            "w-1".to_owned(),
+        )
+        .with_adapter_name("claude")
+        .with_model(Some("m-1"));
+        use IfNeededVerdict::*;
+        assert_eq!(
+            if_needed_verdict(&process, None, None, true),
+            AlreadyDispatched
+        );
+        assert_eq!(
+            if_needed_verdict(&process, Some("claude"), Some("m-1"), true),
+            AlreadyDispatched
+        );
+        assert_eq!(
+            if_needed_verdict(&process, Some("codex"), None, true),
+            Mismatch
+        );
+        assert_eq!(
+            if_needed_verdict(&process, None, Some("m-2"), true),
+            Mismatch
+        );
+        assert_eq!(if_needed_verdict(&process, None, None, false), DeadWorker);
+        assert_eq!(
+            if_needed_verdict(&process, Some("codex"), None, false),
+            Mismatch
+        );
+    }
+
+    #[test]
     fn forced_reclaim_holds_the_lease_across_the_teardown() {
         use cosmon_core::id::AgentId;
         use cosmon_core::transport::{AgentDefinition, RuntimeConfig, TransportBackend as _};
@@ -15354,6 +15489,7 @@ mod tests {
             dry_run: true,
             permission_mode: None,
             force: false,
+            if_needed: false,
             resume: false,
             name: None,
             leaf: false,
@@ -15402,6 +15538,7 @@ mod tests {
                 dry_run: true,
                 permission_mode: None,
                 force: false,
+                if_needed: false,
                 resume: false,
                 name: None,
                 leaf: false,
@@ -15453,6 +15590,7 @@ mod tests {
             dry_run: true,
             permission_mode: None,
             force: false,
+            if_needed: false,
             resume: false,
             name: None,
             leaf: false,
@@ -15495,6 +15633,7 @@ mod tests {
             dry_run: true,
             permission_mode: None,
             force: false,
+            if_needed: false,
             resume: false,
             name: None,
             leaf: false,
@@ -16636,6 +16775,7 @@ prompt = "Custom fleet prompt."
             dry_run: true,
             permission_mode: None,
             force: false,
+            if_needed: false,
             resume: false,
             name: None,
             leaf: false,
@@ -16684,6 +16824,7 @@ prompt = "Custom fleet prompt."
             dry_run: true,
             permission_mode: None,
             force: false,
+            if_needed: false,
             resume: false,
             name: None,
             leaf: true,
@@ -16739,6 +16880,7 @@ prompt = "Custom fleet prompt."
             dry_run: true,
             permission_mode: None,
             force: false,
+            if_needed: false,
             resume: false,
             name: None,
             leaf: false,
