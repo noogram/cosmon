@@ -44,15 +44,24 @@ use std::path::{Path, PathBuf};
 /// so an operator can test against an artifact built anywhere.
 pub const CS_BIN_ENV: &str = "COSMON_TEST_CS_BIN";
 
-/// The directory cargo wrote *this* test binary into: the test executable
-/// lives at `<target>/<profile>/deps/<name>-<hash>`, so its grandparent is
-/// `<target>/<profile>` — where sibling bin targets land.
+/// The directory cargo wrote *this* test binary into.
 fn profile_dir() -> PathBuf {
     let exe = std::env::current_exe().expect("current_exe");
-    exe.parent()
+    profile_dir_of(&exe).expect("test binary lives under <target>/<profile>/{deps,build}")
+}
+
+/// The profile directory (`<target>/<profile>`) a test executable belongs to.
+///
+/// Sibling bin targets land there. Old cargo puts the test executable at
+/// `<target>/<profile>/deps/<name>-<hash>`; newer cargo puts it at
+/// `<target>/<profile>/build/<pkg>/<hash>/out/<name>-<hash>`. Both are covered
+/// by taking the parent of the nearest ancestor named `deps` or `build`.
+fn profile_dir_of(exe: &Path) -> Option<PathBuf> {
+    exe.parent()?
+        .ancestors()
+        .find(|dir| dir.file_name().is_some_and(|n| n == "deps" || n == "build"))
         .and_then(Path::parent)
-        .expect("test binary lives under <target>/<profile>/deps")
-        .to_path_buf()
+        .map(Path::to_path_buf)
 }
 
 /// Resolve the prebuilt `cs` binary, or explain precisely what is missing.
@@ -122,6 +131,22 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The profile directory is found for the old `deps/` layout and for the
+    /// newer `build/<pkg>/<hash>/out/` layout, and a `build` or `deps` higher
+    /// up the path does not capture the answer.
+    #[test]
+    fn profile_dir_is_found_under_both_cargo_layouts() {
+        let old = Path::new("/w/target/debug/deps/smoke-1a2b3c");
+        assert_eq!(profile_dir_of(old), Some(PathBuf::from("/w/target/debug")));
+        let new = Path::new("/w/target/debug/build/cosmon-api/a83d7f91/out/smoke-a83d7f91");
+        assert_eq!(profile_dir_of(new), Some(PathBuf::from("/w/target/debug")));
+        let nested = Path::new("/home/me/build/proj/target/release/build/p/h/out/t-h");
+        assert_eq!(
+            profile_dir_of(nested),
+            Some(PathBuf::from("/home/me/build/proj/target/release"))
+        );
+    }
 
     /// A missing `cs` is a named prerequisite, never an implicit build.
     ///

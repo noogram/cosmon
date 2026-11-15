@@ -67,13 +67,40 @@ fn helper_bin() -> PathBuf {
     }
 }
 
+/// The profile directory (`<target>/<profile>`) a test executable belongs to.
+///
+/// Old cargo puts the executable at `<target>/<profile>/deps/<name>-<hash>`;
+/// newer cargo at `<target>/<profile>/build/<pkg>/<hash>/out/<name>-<hash>`.
+/// Both are covered by the parent of the nearest ancestor named `deps` or
+/// `build`.
+fn profile_dir_of(exe: &Path) -> Option<PathBuf> {
+    exe.parent()?
+        .ancestors()
+        .find(|dir| dir.file_name().is_some_and(|n| n == "deps" || n == "build"))
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+}
+
+/// The profile directory is found under both cargo layouts, and a `build`
+/// higher up the path does not capture the answer.
+#[test]
+fn profile_dir_is_found_under_both_cargo_layouts() {
+    let old = Path::new("/w/target/debug/deps/t-1a2b3c");
+    assert_eq!(profile_dir_of(old), Some(PathBuf::from("/w/target/debug")));
+    let new = Path::new("/w/target/debug/build/cosmon-filestore/94a8c805/out/t-94a8c805");
+    assert_eq!(profile_dir_of(new), Some(PathBuf::from("/w/target/debug")));
+    let nested = Path::new("/home/me/build/proj/target/release/build/p/h/out/t-h");
+    assert_eq!(
+        profile_dir_of(nested),
+        Some(PathBuf::from("/home/me/build/proj/target/release"))
+    );
+}
+
 /// [`helper_bin`] as a `Result`, so the resolution rule itself is testable.
 fn try_helper_bin() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().expect("current_exe");
-    let profile_dir: &Path = exe
-        .parent() // <target>/<profile>/deps
-        .and_then(Path::parent) // <target>/<profile>
-        .expect("test binary lives under <target>/<profile>/deps");
+    let profile_dir =
+        profile_dir_of(&exe).expect("test binary lives under <target>/<profile>/{deps,build}");
     let candidate = profile_dir.join("examples").join("trunk_lock_holder");
     resolve_prebuilt(
         HELPER_BIN_ENV,
