@@ -855,6 +855,11 @@ reason = "integration base branch persisted on the molecule (task-20260725-61fa)
 
 [[flag_only_in_cs]]
 verb = "tackle"
+flag = "--if-needed"
+reason = "idempotent re-dispatch (issue 217) — compares the recorded local worker's liveness, adapter and model under the local dispatch lock. cs-thin dispatches remotely; the server owns the claim and a repeated request is already refused there."
+
+[[flag_only_in_cs]]
+verb = "tackle"
 flag = "--reclaim-derived"
 reason = "pre-spawn disk-pressure check over the local `.worktrees/` tree (issue 61, ADR-178) — it acquires a local flock and deletes local build output. A remote tenant has no local checkout and no worktrees; the bytes it would reclaim do not exist on its side of the wire."
 
