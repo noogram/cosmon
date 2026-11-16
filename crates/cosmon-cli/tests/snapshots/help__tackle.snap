@@ -43,6 +43,9 @@ Options:
       --force
           Boolean flag: reclaim the molecule's live tmux session and respawn the worker. Also thaws a frozen molecule, returning it to `running`. A session left behind by a dead worker is reclaimed without this flag
 
+      --if-needed
+          Succeed without spawning when the molecule already has a live worker whose recorded adapter and model match the ones passed here: print `already dispatched to <session> (adapter <a>, model <m>)` and exit 0, changing nothing. Only `--adapter` / `--model` given explicitly are compared. A different adapter or model, or a dead worker, fails as without this flag (a dead worker is reclaimed with `--force`). Conflicts with `--force`
+
       --resume
           Continue the molecule's interrupted in-process (`openai` / `anthropic`) attempt from its last complete tool-result checkpoint instead of starting a fresh log. Use with `--force` to thaw a frozen molecule.
           
