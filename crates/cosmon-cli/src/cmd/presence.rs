@@ -215,6 +215,17 @@ pub(crate) enum PresenceDetailUpdate {
     Replace(Option<String>),
 }
 
+/// How an internal caller updates the background-task record during a ping.
+#[derive(Default)]
+pub(crate) enum BackgroundUpdate {
+    /// Not a moment that reports background work: keep the existing record.
+    #[default]
+    Preserve,
+    /// A provider turn-end report: replace the record from `(running, kinds)`,
+    /// or clear it when there is no report or nothing is running.
+    Replace(Option<(u32, Vec<String>)>),
+}
+
 /// Arguments for `cs presence ping`.
 #[derive(clap::Args, Default)]
 pub struct PingArgs {
@@ -279,6 +290,9 @@ pub struct PingArgs {
     /// Whether to preserve or replace the redacted notification detail.
     #[arg(skip)]
     pub(crate) detail: PresenceDetailUpdate,
+    /// Whether to preserve or replace the provider-reported background tasks.
+    #[arg(skip)]
+    pub(crate) background: BackgroundUpdate,
 }
 
 /// Arguments for `cs presence ls`.
@@ -583,6 +597,17 @@ pub(crate) fn ping(ctx: &Context, args: &PingArgs) -> anyhow::Result<Presence> {
         detail: match &args.detail {
             PresenceDetailUpdate::Replace(detail) => detail.clone(),
             PresenceDetailUpdate::Preserve => prior.as_ref().and_then(|p| p.detail.clone()),
+        },
+        background_tasks: match &args.background {
+            BackgroundUpdate::Replace(report) => report.as_ref().and_then(|(running, kinds)| {
+                cosmon_core::presence::BackgroundTasks::observe(
+                    prior.as_ref().and_then(|p| p.background_tasks.as_ref()),
+                    *running,
+                    kinds,
+                    now,
+                )
+            }),
+            BackgroundUpdate::Preserve => prior.as_ref().and_then(|p| p.background_tasks.clone()),
         },
         ..Presence::new(
             session_id.clone(),

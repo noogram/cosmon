@@ -1456,6 +1456,7 @@ fn run_attach(ctx: &Context, args: &AttachArgs) -> anyhow::Result<()> {
         lifecycle_sequence: None,
         clear_state: false,
         detail: presence::PresenceDetailUpdate::Preserve,
+        background: presence::BackgroundUpdate::Preserve,
     };
     let presence = presence::ping(ctx, &ping_args)?;
 

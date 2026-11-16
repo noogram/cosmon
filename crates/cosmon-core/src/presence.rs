@@ -252,6 +252,93 @@ pub fn redact_presence_detail(input: &str) -> Option<String> {
     Some(capped)
 }
 
+/// Most distinct background-task kinds a presence record keeps.
+pub const BACKGROUND_KINDS_MAX: usize = 8;
+
+/// Longest background-task kind token a presence record keeps, in characters.
+const BACKGROUND_KIND_MAX_CHARS: usize = 32;
+
+/// Background work a provider reported as still running when the session's
+/// turn ended.
+///
+/// Only a count, the task kinds (`shell`, …) and two timestamps are recorded.
+/// The command line and the description of a task are text the worker wrote
+/// and are never stored: this type has nowhere to hold them.
+///
+/// # Examples
+///
+/// ```
+/// use chrono::{Duration, TimeZone, Utc};
+/// use cosmon_core::presence::BackgroundTasks;
+///
+/// let t0 = Utc.with_ymd_and_hms(2026, 11, 16, 9, 0, 0).unwrap();
+/// let first = BackgroundTasks::observe(None, 1, &["shell".to_owned()], t0).unwrap();
+/// let later = t0 + Duration::minutes(10);
+/// let again = BackgroundTasks::observe(Some(&first), 1, &["shell".to_owned()], later).unwrap();
+/// assert_eq!(again.age(later), Duration::minutes(10));
+/// // Nothing running any more: no record.
+/// assert!(BackgroundTasks::observe(Some(&again), 0, &[], later).is_none());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundTasks {
+    /// How many tasks were running at the last observation. Never zero: a
+    /// session with nothing running carries no record at all.
+    pub running: u32,
+    /// Distinct task kinds, in first-seen order, bounded by
+    /// [`BACKGROUND_KINDS_MAX`]. Plain tokens only.
+    pub kinds: Vec<String>,
+    /// When background work was first seen running in this unbroken stretch.
+    /// This is the start of the clock patrol compares to its ceiling.
+    pub since: DateTime<Utc>,
+    /// When the provider last reported it.
+    pub observed_at: DateTime<Utc>,
+}
+
+impl BackgroundTasks {
+    /// Fold one provider report into the record.
+    ///
+    /// `running` is the number of tasks the report listed as running and
+    /// `kinds` their `type` values. Returns `None` when nothing is running,
+    /// which clears the record. When work was already running, `since` is
+    /// carried from `prior` so the clock measures the whole stretch rather than
+    /// the time since the latest report.
+    #[must_use]
+    pub fn observe(
+        prior: Option<&Self>,
+        running: u32,
+        kinds: &[String],
+        now: DateTime<Utc>,
+    ) -> Option<Self> {
+        if running == 0 {
+            return None;
+        }
+        let mut kept: Vec<String> = Vec::new();
+        for kind in kinds {
+            let plain = !kind.is_empty()
+                && kind.chars().count() <= BACKGROUND_KIND_MAX_CHARS
+                && kind
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            if plain && !kept.contains(kind) && kept.len() < BACKGROUND_KINDS_MAX {
+                kept.push(kind.clone());
+            }
+        }
+        Some(Self {
+            running,
+            kinds: kept,
+            since: prior.map_or(now, |p| p.since),
+            observed_at: now,
+        })
+    }
+
+    /// How long this stretch of background work has been running, never
+    /// negative.
+    #[must_use]
+    pub fn age(&self, now: DateTime<Utc>) -> Duration {
+        (now - self.since).max(Duration::zero())
+    }
+}
+
 /// Chalk-mark left by a live session under
 /// `.cosmon/state/presence/session-<session_id>.json`.
 ///
@@ -373,6 +460,11 @@ pub struct Presence {
     /// [`PRESENCE_DETAIL_MAX_CHARS`], and absent from all other moments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Background work the provider reported as running at the last turn end.
+    /// Absent when none was reported or the provider does not say; absence is
+    /// "unknown", never "idle".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_tasks: Option<BackgroundTasks>,
 }
 
 impl Presence {
@@ -414,6 +506,7 @@ impl Presence {
             lifecycle_source: LifecycleSource::Unavailable,
             lifecycle_sequence: None,
             detail: None,
+            background_tasks: None,
         }
     }
 
@@ -645,5 +738,67 @@ mod tests {
             let back: PilotRole = serde_json::from_str(&json).unwrap();
             assert_eq!(role, back);
         }
+    }
+
+    #[test]
+    fn no_running_background_task_leaves_no_record() {
+        assert_eq!(BackgroundTasks::observe(None, 0, &[], fixed_now()), None);
+        let prior = BackgroundTasks::observe(None, 1, &["shell".into()], fixed_now());
+        assert!(prior.is_some());
+        // The work finished: the record is cleared, not carried.
+        assert_eq!(
+            BackgroundTasks::observe(prior.as_ref(), 0, &[], fixed_now()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_first_observation_starts_the_clock_and_a_later_one_keeps_it() {
+        let t0 = fixed_now();
+        let first = BackgroundTasks::observe(None, 1, &["shell".into()], t0).unwrap();
+        assert_eq!((first.running, first.since, first.observed_at), (1, t0, t0));
+        let t1 = t0 + Duration::minutes(20);
+        let second = BackgroundTasks::observe(Some(&first), 2, &["shell".into()], t1).unwrap();
+        assert_eq!(second.running, 2);
+        assert_eq!(second.since, t0, "continuous work keeps its start");
+        assert_eq!(second.observed_at, t1);
+        assert_eq!(second.age(t1), Duration::minutes(20));
+        // A clock that ran backwards never yields a negative age.
+        assert_eq!(second.age(t0 - Duration::minutes(5)), Duration::zero());
+    }
+
+    #[test]
+    fn only_short_plain_kind_tokens_are_kept() {
+        let kinds: Vec<String> = [
+            "shell",
+            "shell",
+            "monitor",
+            "rm -rf / # worker-written text",
+            "",
+            &"x".repeat(33),
+            "a1",
+            "b2",
+            "c3",
+            "d4",
+            "e5",
+            "f6",
+            "g7",
+        ]
+        .iter()
+        .map(|k| (*k).to_owned())
+        .collect();
+        let rec = BackgroundTasks::observe(None, 3, &kinds, fixed_now()).unwrap();
+        assert_eq!(&rec.kinds[..3], ["shell", "monitor", "a1"]);
+        assert!(rec.kinds.len() <= BACKGROUND_KINDS_MAX);
+        assert!(rec.kinds.iter().all(|k| !k.contains(' ')));
+    }
+
+    #[test]
+    fn a_presence_without_the_field_decodes_and_omits_it_on_the_wire() {
+        let p = sample(fixed_now());
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("background_tasks"));
+        let back: Presence = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.background_tasks, None);
     }
 }

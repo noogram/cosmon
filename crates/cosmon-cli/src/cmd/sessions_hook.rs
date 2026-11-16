@@ -604,15 +604,56 @@ struct HookPayload {
     native_session_id: Option<String>,
     notification_type: Option<String>,
     notification_message: Option<String>,
+    /// Background tasks the provider listed at a turn end. `None` when the
+    /// payload does not carry the field, which means *unknown*.
+    background: Option<BackgroundReport>,
 }
 
-/// Claude's documented hook envelope. Only these three non-conversation
-/// fields are admitted to the presence hook.
+/// What a Claude `Stop` payload says about background work: how many entries
+/// were running and their `type`. The `command` and `description` of an entry
+/// are text the worker wrote; they are never read into this type.
+struct BackgroundReport {
+    running: u32,
+    kinds: Vec<String>,
+}
+
+/// Project Claude's `background_tasks` array onto a [`BackgroundReport`].
+///
+/// Anything that is not an array is unknown (`None`) rather than "nothing
+/// running", so a payload shape this code does not know cannot read as idle.
+fn background_report(value: &serde_json::Value) -> Option<BackgroundReport> {
+    let entries = value.as_array()?;
+    let mut running = 0_u32;
+    let mut kinds = Vec::new();
+    for entry in entries {
+        let Some(entry) = entry.as_object() else {
+            continue;
+        };
+        let is_running = entry
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|s| s.eq_ignore_ascii_case("running"));
+        if !is_running {
+            continue;
+        }
+        running = running.saturating_add(1);
+        if let Some(kind) = entry.get("type").and_then(serde_json::Value::as_str) {
+            kinds.push(kind.to_owned());
+        }
+    }
+    Some(BackgroundReport { running, kinds })
+}
+
+/// Claude's documented hook envelope. Only these non-conversation fields are
+/// admitted to the presence hook. `background_tasks` is held as raw JSON so a
+/// shape this code does not know costs only that field, never the session
+/// identity.
 #[derive(Deserialize)]
 struct ClaudeHookPayload {
     session_id: Option<String>,
     notification_type: Option<String>,
     message: Option<String>,
+    background_tasks: Option<serde_json::Value>,
 }
 
 /// Codex 0.161 legacy `notify` envelope.
@@ -641,6 +682,10 @@ fn hook_payload(provider: HookProvider, payload: &str) -> HookPayload {
                 native_session_id: usable_identity(payload.session_id),
                 notification_type: payload.notification_type,
                 notification_message: payload.message,
+                background: payload
+                    .background_tasks
+                    .as_ref()
+                    .and_then(background_report),
             })
             .unwrap_or_default(),
         HookProvider::Codex => serde_json::from_str::<CodexLegacyNotifyPayload>(payload)
@@ -699,6 +744,27 @@ fn resolve_hook_session_id(
             None
         }
     }
+}
+
+/// How this hook moment updates the recorded background tasks.
+///
+/// Only a Claude `Stop` carries the list. It replaces the record, so a payload
+/// without the field clears it (unknown, not busy); every other moment leaves
+/// the record as it was.
+fn background_update(
+    provider: HookProvider,
+    event: HookEvent,
+    payload: &HookPayload,
+) -> presence::BackgroundUpdate {
+    if !matches!(provider, HookProvider::Claude) || !matches!(event, HookEvent::TurnEnd) {
+        return presence::BackgroundUpdate::Preserve;
+    }
+    presence::BackgroundUpdate::Replace(
+        payload
+            .background
+            .as_ref()
+            .map(|b| (b.running, b.kinds.clone())),
+    )
 }
 
 /// Resolve this session's id and emit its presence heartbeat.
@@ -820,6 +886,7 @@ fn beat_presence(
             state: Some(state),
             lifecycle_source: Some(lifecycle_source),
             detail: presence::PresenceDetailUpdate::Replace(detail),
+            background: background_update(provider, event, payload),
             ..presence::PingArgs::default()
         },
     ) {
@@ -986,5 +1053,166 @@ mod tests {
             text.contains("cs sessions send"),
             "the return path is named"
         );
+    }
+
+    /// The Stop input measured on Claude Code 2.1.325 (2026-11-16) with one
+    /// `run_in_background` shell still running. `command` and `description`
+    /// are worker-written text.
+    const STOP_WITH_BACKGROUND_SHELL: &str = r#"{
+        "session_id": "native-1",
+        "hook_event_name": "Stop",
+        "background_tasks": [
+            {"id": "b1", "type": "shell", "status": "running",
+             "description": "SECRET-DESCRIPTION-7731",
+             "command": "sleep 900 && echo SECRET-COMMAND-5520"}
+        ]
+    }"#;
+
+    fn stop_args(session: &str, payload: &str) -> RunArgs {
+        RunArgs {
+            event: "turn-end".to_owned(),
+            provider: Some("claude".to_owned()),
+            session: Some(session.to_owned()),
+            payload: Some(payload.to_owned()),
+        }
+    }
+
+    fn hook_ctx(dir: &std::path::Path) -> Context {
+        Context {
+            verbose: false,
+            json: false,
+            config: Some(dir.to_path_buf()),
+        }
+    }
+
+    fn stored(dir: &std::path::Path, session: &str) -> cosmon_core::presence::Presence {
+        cosmon_filestore::presence_store::PresenceStore::new(dir)
+            .load(&SessionId::new(session).unwrap())
+            .unwrap()
+            .expect("the hook wrote a presence row")
+    }
+
+    #[test]
+    fn a_stop_payload_with_a_running_shell_yields_one_task_of_kind_shell() {
+        let parsed = hook_payload(HookProvider::Claude, STOP_WITH_BACKGROUND_SHELL);
+        let report = parsed.background.expect("the field was present");
+        assert_eq!(report.running, 1);
+        assert_eq!(report.kinds, ["shell"]);
+        assert_eq!(parsed.native_session_id.as_deref(), Some("native-1"));
+    }
+
+    #[test]
+    fn only_running_entries_count_and_a_missing_or_malformed_field_is_unknown() {
+        let mixed = r#"{"background_tasks":[
+            {"type":"shell","status":"running"},
+            {"type":"shell","status":"completed"},
+            {"type":"monitor","status":"running"},
+            "not an object", {"status":"running"}]}"#;
+        let r = hook_payload(HookProvider::Claude, mixed)
+            .background
+            .unwrap();
+        assert_eq!(
+            (r.running, r.kinds.as_slice()),
+            (3, &["shell".to_owned(), "monitor".to_owned()][..])
+        );
+
+        let empty = hook_payload(HookProvider::Claude, r#"{"background_tasks":[]}"#);
+        assert_eq!(empty.background.map(|b| b.running), Some(0));
+
+        assert!(hook_payload(HookProvider::Claude, r#"{"session_id":"x"}"#)
+            .background
+            .is_none());
+        // A field of the wrong shape must not cost the session its identity.
+        let wrong = hook_payload(
+            HookProvider::Claude,
+            r#"{"session_id":"x","background_tasks":"oops"}"#,
+        );
+        assert!(wrong.background.is_none());
+        assert_eq!(wrong.native_session_id.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn the_stored_record_holds_neither_the_command_nor_the_description() {
+        let dir = tempfile::tempdir().unwrap();
+        run_hook(
+            &hook_ctx(dir.path()),
+            &stop_args("session-bg-1", STOP_WITH_BACKGROUND_SHELL),
+        );
+        let row = stored(dir.path(), "session-bg-1");
+        let bg = row.background_tasks.expect("recorded");
+        assert_eq!(
+            (bg.running, bg.kinds.as_slice()),
+            (1, &["shell".to_owned()][..])
+        );
+
+        let raw = std::fs::read_to_string(
+            dir.path()
+                .join("presence")
+                .join("session-session-bg-1.json"),
+        )
+        .or_else(|_| std::fs::read_to_string(dir.path().join("presence").join("session-bg-1.json")))
+        .unwrap_or_else(|_| {
+            // Whatever the file is called, scan every file the hook wrote.
+            std::fs::read_dir(dir.path().join("presence"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+                .collect::<String>()
+        });
+        assert!(raw.contains("background_tasks"), "{raw}");
+        for forbidden in [
+            "SECRET-COMMAND-5520",
+            "SECRET-DESCRIPTION-7731",
+            "sleep 900",
+        ] {
+            assert!(
+                !raw.contains(forbidden),
+                "presence leaked {forbidden:?}: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_record_keeps_its_start_while_work_continues_and_clears_when_it_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = hook_ctx(dir.path());
+        run_hook(&ctx, &stop_args("session-bg-2", STOP_WITH_BACKGROUND_SHELL));
+        let first = stored(dir.path(), "session-bg-2").background_tasks.unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        run_hook(&ctx, &stop_args("session-bg-2", STOP_WITH_BACKGROUND_SHELL));
+        let second = stored(dir.path(), "session-bg-2").background_tasks.unwrap();
+        assert_eq!(second.since, first.since);
+        assert!(second.observed_at > first.observed_at);
+
+        // Another moment of the same session does not touch the record.
+        let mut working = stop_args("session-bg-2", "{}");
+        working.event = "turn-start".to_owned();
+        run_hook(&ctx, &working);
+        assert!(stored(dir.path(), "session-bg-2")
+            .background_tasks
+            .is_some());
+
+        // The next Stop reports nothing running: cleared.
+        run_hook(
+            &ctx,
+            &stop_args("session-bg-2", r#"{"background_tasks":[]}"#),
+        );
+        assert_eq!(stored(dir.path(), "session-bg-2").background_tasks, None);
+    }
+
+    #[test]
+    fn a_stop_without_the_field_clears_the_record_it_is_unknown_not_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = hook_ctx(dir.path());
+        run_hook(&ctx, &stop_args("session-bg-3", STOP_WITH_BACKGROUND_SHELL));
+        assert!(stored(dir.path(), "session-bg-3")
+            .background_tasks
+            .is_some());
+        run_hook(
+            &ctx,
+            &stop_args("session-bg-3", r#"{"session_id":"native-3"}"#),
+        );
+        assert_eq!(stored(dir.path(), "session-bg-3").background_tasks, None);
     }
 }
