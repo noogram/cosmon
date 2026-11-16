@@ -283,6 +283,82 @@ mod tests {
         );
     }
 
+    /// Issue #213: the scan runs `git log --first-parent`. A molecule's
+    /// `Merge branch 'feat/<id>'` commit that is reachable from `main` only
+    /// through the second parent of another merge was never a landing on the
+    /// trunk, so it must not count. Removing `--first-parent` makes B appear.
+    #[test]
+    fn scan_ignores_a_merge_reachable_only_through_a_second_parent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+
+        // (1) A merges straight onto main, then its branch is deleted.
+        git(&["checkout", "-q", "-b", "feat/task-20260101-aaaa"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "work a"]);
+        git(&["checkout", "-q", "main"]);
+        git(&[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge branch 'feat/task-20260101-aaaa'",
+            "feat/task-20260101-aaaa",
+        ]);
+        git(&["branch", "-q", "-D", "feat/task-20260101-aaaa"]);
+
+        // (2) B merges onto a side branch, which then merges onto main.
+        git(&["checkout", "-q", "-b", "side"]);
+        git(&["checkout", "-q", "-b", "feat/task-20260101-bbbb"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "work b"]);
+        git(&["checkout", "-q", "side"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "side work"]);
+        git(&[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge branch 'feat/task-20260101-bbbb'",
+            "feat/task-20260101-bbbb",
+        ]);
+        git(&["branch", "-q", "-D", "feat/task-20260101-bbbb"]);
+        git(&["checkout", "-q", "main"]);
+        git(&[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge branch 'side'",
+            "side",
+        ]);
+
+        let landed = merged_and_deleted_molecules(repo);
+        assert!(landed.contains("task-20260101-aaaa"), "{landed:?}");
+        assert!(
+            !landed.contains("task-20260101-bbbb"),
+            "a merge reachable only via a second parent is not a landing: {landed:?}"
+        );
+    }
+
     /// A settled molecule is read as finalized; an unsettled one keeps its own flag.
     #[test]
     fn settled_counts_as_archived_and_nothing_else_does() {
