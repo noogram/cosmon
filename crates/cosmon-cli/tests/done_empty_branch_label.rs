@@ -54,7 +54,6 @@ fn rev(repo: &Path, refname: &str) -> String {
         .to_owned()
 }
 
-
 fn setup_repo(repo: &Path) {
     git_ok(repo, &["init", "-q", "-b", "main"]);
     git_ok(repo, &["config", "user.email", "test@example.com"]);
@@ -83,14 +82,28 @@ fn completed_molecule(repo: &Path) -> String {
         .args(["--json", "nucleate", "task-work", "--var", "topic=label"])
         .output()
         .expect("cs nucleate");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let mol_id = v["id"].as_str().expect("nucleate id").to_owned();
     let done = cs_isolated(repo)
-        .args(["complete", &mol_id, "--reason", "test", "--ignore-mindguard"])
+        .args([
+            "complete",
+            &mol_id,
+            "--reason",
+            "test",
+            "--ignore-mindguard",
+        ])
         .output()
         .expect("cs complete");
-    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
     mol_id
 }
 
@@ -99,7 +112,11 @@ fn actions_of_done(repo: &Path, mol_id: &str) -> Vec<String> {
         .args(["--json", "done", mol_id, "--no-auto-propel"])
         .output()
         .expect("cs done");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
     v["actions"]
         .as_array()

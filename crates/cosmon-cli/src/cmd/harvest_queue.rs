@@ -179,7 +179,9 @@ fn merged_and_deleted_molecules(repo_root: &Path) -> HashSet<String> {
 fn merged_molecule_ids(subjects: &str) -> HashSet<String> {
     let mut ids = HashSet::new();
     for subject in subjects.lines() {
-        let subject = subject.rsplit_once(" into ").map_or(subject, |(merged, _)| merged);
+        let subject = subject
+            .rsplit_once(" into ")
+            .map_or(subject, |(merged, _)| merged);
         for (at, _) in subject.match_indices("feat/") {
             let rest = &subject[at + "feat/".len()..];
             let end = rest
@@ -239,7 +241,11 @@ mod tests {
                 .env("GIT_COMMITTER_EMAIL", "test@example.com")
                 .output()
                 .expect("git");
-            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "commit.gpgsign", "false"]);

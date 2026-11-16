@@ -89,18 +89,41 @@ fn setup_repo(repo: &Path) {
 
 fn completed_molecule(repo: &Path) -> String {
     let out = cs_isolated(repo)
-        .args(["--json", "nucleate", "task-work", "--var", "topic=export the message"])
+        .args([
+            "--json",
+            "nucleate",
+            "task-work",
+            "--var",
+            "topic=export the message",
+        ])
         .output()
         .expect("cs nucleate");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let mol_id = v["id"].as_str().expect("nucleate id").to_owned();
     let done = cs_isolated(repo)
-        .args(["complete", &mol_id, "--reason", "test", "--ignore-mindguard"])
+        .args([
+            "complete",
+            &mol_id,
+            "--reason",
+            "test",
+            "--ignore-mindguard",
+        ])
         .output()
         .expect("cs complete");
-    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
-    git_ok(repo, &["checkout", "-q", "-b", &format!("feat/{mol_id}"), "main"]);
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    git_ok(
+        repo,
+        &["checkout", "-q", "-b", &format!("feat/{mol_id}"), "main"],
+    );
     fs::write(repo.join("worker.txt"), "worker\n").unwrap();
     git_ok(repo, &["add", "worker.txt"]);
     git_ok(repo, &["commit", "-qm", "feat: worker deliverable"]);
@@ -145,7 +168,11 @@ fn print_merge_message_changes_no_state() {
         .args(["done", &mol_id, "--print-merge-message"])
         .output()
         .expect("cs done --print-merge-message");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let printed = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -173,7 +200,11 @@ fn printed_message_is_byte_identical_to_the_one_cs_done_writes() {
         .args(["done", &mol_id, "--print-merge-message"])
         .output()
         .expect("print");
-    assert!(printed.status.success(), "{}", String::from_utf8_lossy(&printed.stderr));
+    assert!(
+        printed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&printed.stderr)
+    );
     let file = tmp.path().join("message.txt");
     fs::write(&file, &printed.stdout).unwrap();
 
@@ -193,10 +224,17 @@ fn printed_message_is_byte_identical_to_the_one_cs_done_writes() {
         .args(["done", &mol_id, "--no-auto-propel"])
         .output()
         .expect("cs done");
-    assert!(merged.status.success(), "{}", String::from_utf8_lossy(&merged.stderr));
+    assert!(
+        merged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merged.stderr)
+    );
 
     let by_hand = head_message(&a);
     let by_cs = head_message(&b);
     assert!(by_cs.contains(&format!("Mol-Id: {mol_id}")), "{by_cs}");
-    assert_eq!(by_hand, by_cs, "the two merge messages must be byte-identical");
+    assert_eq!(
+        by_hand, by_cs,
+        "the two merge messages must be byte-identical"
+    );
 }

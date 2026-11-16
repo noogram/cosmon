@@ -84,7 +84,13 @@ fn setup_repo(repo: &Path) {
 /// `Completed` molecule without `--force`.
 fn completed_molecule(repo: &Path) -> String {
     let out = cs_isolated(repo)
-        .args(["--json", "nucleate", "task-work", "--var", "topic=pin the head"])
+        .args([
+            "--json",
+            "nucleate",
+            "task-work",
+            "--var",
+            "topic=pin the head",
+        ])
         .output()
         .expect("cs nucleate");
     assert!(
@@ -95,7 +101,13 @@ fn completed_molecule(repo: &Path) -> String {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let mol_id = v["id"].as_str().expect("nucleate id").to_owned();
     let done = cs_isolated(repo)
-        .args(["complete", &mol_id, "--reason", "test", "--ignore-mindguard"])
+        .args([
+            "complete",
+            &mol_id,
+            "--reason",
+            "test",
+            "--ignore-mindguard",
+        ])
         .output()
         .expect("cs complete");
     assert!(
@@ -109,7 +121,9 @@ fn completed_molecule(repo: &Path) -> String {
 /// Commit one file on `feat/<mol>` and return to `main`; returns the new tip.
 fn commit_on_branch(repo: &Path, mol_id: &str, file: &str) -> String {
     let branch = format!("feat/{mol_id}");
-    let exists = git(repo, &["rev-parse", "--verify", &branch]).status.success();
+    let exists = git(repo, &["rev-parse", "--verify", &branch])
+        .status
+        .success();
     if exists {
         git_ok(repo, &["checkout", "-q", &branch]);
     } else {
@@ -179,7 +193,10 @@ fn a_branch_that_moved_after_the_pin_is_refused_on_the_merge_path() {
         after["merged_at"].is_null(),
         "merged_at must not be stamped: {after}"
     );
-    assert_ne!(after["archived"], true, "the molecule must stay un-archived");
+    assert_ne!(
+        after["archived"], true,
+        "the molecule must stay un-archived"
+    );
     assert!(
         git(repo, &["rev-parse", "--verify", &format!("feat/{mol_id}")])
             .status
@@ -219,7 +236,14 @@ fn the_pin_is_checked_on_the_already_merged_path() {
     let base = rev(repo, "main");
     git_ok(
         repo,
-        &["merge", "--no-ff", "-q", "-m", "train", &format!("feat/{mol_id}")],
+        &[
+            "merge",
+            "--no-ff",
+            "-q",
+            "-m",
+            "train",
+            &format!("feat/{mol_id}"),
+        ],
     );
     assert!(is_ancestor(repo, &h1, "main"));
 

@@ -1129,11 +1129,17 @@ fn branch_never_advanced(repo_root: &Path, branch: &str) -> bool {
     let Some(tip) = git_out(&["rev-parse", "--verify", &format!("{branch}^{{commit}}")]) else {
         return false;
     };
-    let Some(log) = git_out(&["reflog", "show", "--format=%H", &format!("refs/heads/{branch}")])
-    else {
+    let Some(log) = git_out(&[
+        "reflog",
+        "show",
+        "--format=%H",
+        &format!("refs/heads/{branch}"),
+    ]) else {
         return false;
     };
-    log.lines().last().is_some_and(|creation| creation == tip.trim())
+    log.lines()
+        .last()
+        .is_some_and(|creation| creation == tip.trim())
 }
 
 /// Structural post-condition for the final `cs done` guard: `true` iff
@@ -2447,8 +2453,7 @@ fn run_with_remote_before_lock(
     // the same inputs the merge reads and writes nothing — no event, no stamp,
     // no git call — so it can be run any number of times before the merge.
     if args.print_merge_message {
-        let project_cfg =
-            cosmon_filestore::load_project_config(&resolve_config_from_context(ctx))?;
+        let project_cfg = cosmon_filestore::load_project_config(&resolve_config_from_context(ctx))?;
         let mut warnings = Vec::new();
         let parts = completion_message_parts(&store, &state_dir, &mol, &project_cfg, &mut warnings);
         for warning in &warnings {
