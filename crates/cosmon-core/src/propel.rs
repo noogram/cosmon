@@ -120,6 +120,24 @@
 //! determine briefing presence it passes `briefing_present: true`, degrading to
 //! exactly the pre-orphan behaviour (still bounded by the attempt ceiling).
 //!
+//! # Background work in flight (noogram/cosmon#216)
+//!
+//! A worker that starts a long command in the background ends its turn and
+//! waits for the completion notification. Its terminal is silent and its
+//! progress clock is frozen, which is the same picture as a stalled worker, and
+//! each nudge makes it re-read its whole context. [`NudgeView::background_work_age`]
+//! carries the one fact that tells the two apart: how long the oldest
+//! background work known to be in flight has been running. It comes from two
+//! sources the shell reads (a provider-reported background task, and a detached
+//! gate run recorded in the molecule directory); this module sees only the
+//! age.
+//!
+//! The rule comes after the operator, not-running and orphan gates and before
+//! the pane clock, and it is bounded by [`PROPEL_BACKGROUND_CEILING`]: past the
+//! ceiling the work no longer suppresses and the later rules decide as if the
+//! field were absent. `None` is *unknown or none* and never changes a
+//! decision, so an adapter or a worker that reports nothing behaves as before.
+//!
 //! # A judge of refusals needs a warrant to say yes
 //!
 //! Everything above is a *refusal*: each rule can only stop a nudge. Once none
@@ -160,6 +178,17 @@ pub const PROPEL_BACKOFF_CAP: Duration = Duration::minutes(30);
 /// fault is structural and belongs to a human or to `cs patrol --heal`, not to
 /// a louder sentence.
 pub const PROPEL_MAX_ATTEMPTS: u32 = 4;
+
+/// How long background work may be in flight and still count as a reason to
+/// leave a silent worker alone.
+///
+/// A worker that started a long command in the background ends its turn and
+/// waits for the completion notification, so its terminal is silent and its
+/// progress clock frozen. Forty-five minutes covers the project's own cold
+/// gate run (about fifteen minutes) three times over. Past it the suppression
+/// lapses and the ordinary rules decide, so a hung command or a stale record
+/// can delay a nudge but never prevent one.
+pub const PROPEL_BACKGROUND_CEILING: Duration = Duration::minutes(45);
 
 /// Which organ is asking to speak into a worker's terminal.
 ///
@@ -215,6 +244,14 @@ pub struct NudgeView {
     /// `None` when the transport cannot report it (no backend, unsupported
     /// adapter) — decided as "unknown", never as "idle".
     pub pane_idle: Option<Duration>,
+    /// Age of the oldest background work known to be in flight for this worker
+    /// (a provider-reported background task, or a detached gate run).
+    ///
+    /// `None` means *unknown or none*, and is decided exactly as it was before
+    /// this field existed: never as "idle", never as "busy". Only a positive
+    /// observation of work in flight may suppress a nudge, and only while it is
+    /// younger than [`PROPEL_BACKGROUND_CEILING`].
+    pub background_work_age: Option<Duration>,
     /// The provider's own journal typed this worker's **last assistant turn**
     /// as a transport failure (Claude's `isApiErrorMessage`). Read only by
     /// [`decide_api_stall_nudge`], which refuses to speak without it.
@@ -244,6 +281,15 @@ pub enum NudgeSkip {
     NotRunning {
         /// The status observed instead of `Running`.
         status: MoleculeStatus,
+    },
+    /// Background work the worker started is still in flight and younger than
+    /// [`PROPEL_BACKGROUND_CEILING`]. The worker is waiting for its completion
+    /// notification, so a nudge would only make it re-read its context.
+    BackgroundWork {
+        /// Seconds the oldest in-flight work has been running.
+        age_secs: i64,
+        /// The ceiling past which the work stops suppressing, in seconds.
+        ceiling_secs: i64,
     },
     /// The worker's terminal produced output recently: it is thinking or
     /// streaming, not idle. The false-idle repair.
@@ -339,10 +385,13 @@ pub fn propel_backoff(attempts: u32, stale_after: Duration) -> Duration {
 /// 2. a non-`Running` status (there is no step to continue),
 /// 3. an orphan (briefing missing — nudging is structurally futile and, left
 ///    to the clocks below, would loop forever: the 2026-07-21 money pump),
-/// 4. an active pane (nudging a thinking worker — the 2026-07-19 spam),
-/// 5. the attempt ceiling (so an exhausted molecule reports `Escalate` rather
+/// 4. background work in flight and younger than
+///    [`PROPEL_BACKGROUND_CEILING`] (the worker is waiting for a completion
+///    notification; noogram/cosmon#216),
+/// 5. an active pane (nudging a thinking worker — the 2026-07-19 spam),
+/// 6. the attempt ceiling (so an exhausted molecule reports `Escalate` rather
 ///    than a perpetual `Backoff`),
-/// 6. the spacing window.
+/// 7. the spacing window.
 #[must_use]
 pub fn decide_nudge(view: &NudgeView, stale_after: Duration) -> NudgeDecision {
     let threshold = stale_after.num_seconds().max(1);
@@ -373,6 +422,19 @@ pub fn decide_nudge(view: &NudgeView, stale_after: Duration) -> NudgeDecision {
             attempts: view.attempts,
             reason: EscalateReason::Orphaned,
         };
+    }
+
+    // (3b) Background work in flight. The worker ended its turn to wait for a
+    // completion notification, so silence is the expected state. Bounded by a
+    // ceiling so a hung command or a stale record cannot silence the patrol
+    // for good; absent data decides as before.
+    if let Some(age) = view.background_work_age {
+        if age < PROPEL_BACKGROUND_CEILING {
+            return NudgeDecision::Skip(NudgeSkip::BackgroundWork {
+                age_secs: age.num_seconds(),
+                ceiling_secs: PROPEL_BACKGROUND_CEILING.num_seconds(),
+            });
+        }
     }
 
     // (4) False-idle repair. A terminal that spoke more recently than the
@@ -470,6 +532,7 @@ pub fn decide_nudge(view: &NudgeView, stale_after: Duration) -> NudgeDecision {
 ///     api_error_stalled: true,
 ///     progress_age: Duration::minutes(20),
 ///     pane_idle: Some(Duration::minutes(20)),
+///     background_work_age: None,
 ///     attempts: 0,
 ///     since_last_propel: None,
 /// };
@@ -509,6 +572,7 @@ mod tests {
             api_error_stalled: false,
             progress_age: Duration::seconds(progress),
             pane_idle: pane.map(Duration::seconds),
+            background_work_age: None,
             attempts,
             since_last_propel: since.map(Duration::seconds),
         }
@@ -941,6 +1005,9 @@ mod tests {
                 NudgeDecision::Skip(NudgeSkip::NoTypedApiError) => {
                     unreachable!("this is the propulsion channel, not the api-stall one")
                 }
+                NudgeDecision::Skip(NudgeSkip::BackgroundWork { .. }) => {
+                    unreachable!("this worker reports no background work")
+                }
                 NudgeDecision::Skip(NudgeSkip::AwaitingOperator | NudgeSkip::NotRunning { .. }) => {
                     unreachable!("this worker is Running and holds no operator gate")
                 }
@@ -952,5 +1019,152 @@ mod tests {
         }
         assert_eq!(nudges, PROPEL_MAX_ATTEMPTS as usize);
         assert!(escalated, "ceiling never reached in 70 minutes");
+    }
+
+    // ---------------------------------------------------------------
+    // Background work in flight (noogram/cosmon#216)
+    // ---------------------------------------------------------------
+
+    /// A silent, stale worker whose provider reported background work that has
+    /// been running for `age_secs`.
+    fn with_background(age_secs: i64) -> NudgeView {
+        NudgeView {
+            background_work_age: Some(Duration::seconds(age_secs)),
+            ..view(1800, Some(1800), 0, None)
+        }
+    }
+
+    /// The report of #216: a worker waiting on a background command has a
+    /// silent terminal and a frozen progress clock, and must not be nudged.
+    #[test]
+    fn background_work_in_flight_suppresses_the_nudge() {
+        for channel in CHANNELS {
+            let mut v = with_background(600);
+            v.channel = channel;
+            assert_eq!(
+                decide_nudge(&v, STALE),
+                NudgeDecision::Skip(NudgeSkip::BackgroundWork {
+                    age_secs: 600,
+                    ceiling_secs: PROPEL_BACKGROUND_CEILING.num_seconds(),
+                }),
+                "{channel:?}"
+            );
+        }
+    }
+
+    /// Past the ceiling the suppression lapses and the later rules decide
+    /// exactly as they do for a worker with no background work.
+    #[test]
+    fn background_work_past_the_ceiling_no_longer_suppresses() {
+        let over = PROPEL_BACKGROUND_CEILING.num_seconds() + 1;
+        let v = with_background(over);
+        let plain = view(1800, Some(1800), 0, None);
+        assert_eq!(decide_nudge(&v, STALE), decide_nudge(&plain, STALE));
+        assert!(matches!(
+            decide_nudge(&v, STALE),
+            NudgeDecision::Nudge { attempt: 1, .. }
+        ));
+    }
+
+    /// The ceiling is 45 minutes and the bound is exclusive at the ceiling
+    /// itself: work that has run exactly that long is no longer suppressing.
+    #[test]
+    fn the_background_ceiling_is_forty_five_minutes() {
+        assert_eq!(PROPEL_BACKGROUND_CEILING, Duration::minutes(45));
+        let at = with_background(PROPEL_BACKGROUND_CEILING.num_seconds());
+        assert!(matches!(
+            decide_nudge(&at, STALE),
+            NudgeDecision::Nudge { .. }
+        ));
+        let under = with_background(PROPEL_BACKGROUND_CEILING.num_seconds() - 1);
+        assert!(matches!(
+            decide_nudge(&under, STALE),
+            NudgeDecision::Skip(NudgeSkip::BackgroundWork { .. })
+        ));
+    }
+
+    /// Unknown is not a verdict: with no background datum the decision is the
+    /// one the rules gave before the field existed, across the whole matrix of
+    /// clocks and ledger states.
+    #[test]
+    fn unknown_background_work_decides_as_before() {
+        for progress in [0, 400, 9_000] {
+            for pane in [None, Some(5), Some(400)] {
+                for (attempts, since) in [(0, None), (1, Some(30)), (1, Some(900)), (4, Some(900))]
+                {
+                    let v = view(progress, pane, attempts, since);
+                    assert_eq!(v.background_work_age, None);
+                    let expected = if let Some(p) = pane.filter(|p| *p < 300) {
+                        NudgeDecision::Skip(NudgeSkip::PaneActive {
+                            idle_secs: p,
+                            threshold_secs: 300,
+                        })
+                    } else if attempts >= PROPEL_MAX_ATTEMPTS {
+                        NudgeDecision::Escalate {
+                            attempts,
+                            reason: EscalateReason::AttemptsExhausted,
+                        }
+                    } else {
+                        decide_nudge(&v, STALE)
+                    };
+                    assert_eq!(decide_nudge(&v, STALE), expected);
+                }
+            }
+        }
+    }
+
+    /// The operator gate, the not-running gate and the orphan gate all outrank
+    /// the background rule; the pane clock and the ledger rules come after it.
+    #[test]
+    fn background_rule_sits_after_the_gates_and_before_the_clocks() {
+        let mut gated = with_background(60);
+        gated.awaiting_operator = true;
+        assert_eq!(
+            decide_nudge(&gated, STALE),
+            NudgeDecision::Skip(NudgeSkip::AwaitingOperator)
+        );
+
+        let mut done = with_background(60);
+        done.status = MoleculeStatus::Completed;
+        assert!(matches!(
+            decide_nudge(&done, STALE),
+            NudgeDecision::Skip(NudgeSkip::NotRunning { .. })
+        ));
+
+        let mut orphan = with_background(60);
+        orphan.briefing_present = false;
+        assert!(matches!(
+            decide_nudge(&orphan, STALE),
+            NudgeDecision::Escalate {
+                reason: EscalateReason::Orphaned,
+                ..
+            }
+        ));
+
+        // Ahead of the pane clock, the ceiling and the spacing window.
+        let mut talking = with_background(60);
+        talking.pane_idle = Some(Duration::seconds(5));
+        assert!(matches!(
+            decide_nudge(&talking, STALE),
+            NudgeDecision::Skip(NudgeSkip::BackgroundWork { .. })
+        ));
+        let mut spent = with_background(60);
+        spent.attempts = PROPEL_MAX_ATTEMPTS;
+        assert!(matches!(
+            decide_nudge(&spent, STALE),
+            NudgeDecision::Skip(NudgeSkip::BackgroundWork { .. })
+        ));
+    }
+
+    /// The narrow channel keeps its extra warrant and then obeys the same rule.
+    #[test]
+    fn the_api_stall_channel_obeys_the_background_rule_too() {
+        let mut v = with_background(60);
+        v.channel = NudgeChannel::ApiStall;
+        v.api_error_stalled = true;
+        assert!(matches!(
+            decide_api_stall_nudge(&v, STALE),
+            NudgeDecision::Skip(NudgeSkip::BackgroundWork { .. })
+        ));
     }
 }
