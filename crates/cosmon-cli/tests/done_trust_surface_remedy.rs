@@ -537,3 +537,87 @@ fn never_trusted_repo_keeps_the_not_trusted_message() {
         "no merge-staleness sequence.\n{text}"
     );
 }
+
+/// Characterisation (issue #215, B1) — NOT a requirement. Trust is granted,
+/// the shell surface then changes on the base branch *outside* `cs done`
+/// (a push, a hand merge), and `cs done` is run for a molecule whose branch
+/// is ALREADY merged into the base. This records what happens today so the
+/// operator can decide separately whether closing an already-landed branch
+/// should need trust at all. Changing this behaviour is out of scope.
+#[test]
+fn done_of_already_merged_branch_after_base_surface_change_is_refused_with_resume_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo(
+        repo,
+        GATED_CONFIG,
+        &[
+            ("scripts/gate.sh", "exit 0\n"),
+            ("src/main.py", "print('hi')\n"),
+        ],
+    );
+    let mol_id = nucleate_terminal(repo, store.path());
+    let branch = stage_branch(repo, &mol_id, &[("src/work.py", "print('work')\n")]);
+    grant_trust(repo, store.path());
+    // The branch lands outside `cs done`, then the base's shell surface moves.
+    git_ok(
+        repo,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "land the branch by hand",
+            &branch,
+        ],
+    );
+    write_file(repo, "scripts/extra.sh", "exit 0\n");
+    write_file(
+        repo,
+        ".cosmon/config.toml",
+        "[project]\nproject_id = \"issue-74\"\n\n[gates]\nintegrity_command = 'sh scripts/gate.sh && sh scripts/extra.sh'\n",
+    );
+    git_ok(repo, &["add", "-A"]);
+    git_ok(repo, &["commit", "-qm", "change the shell surface on main"]);
+    let main_before = rev(repo, "main");
+
+    let out = done(repo, store.path(), &mol_id);
+    let text = combined(&out);
+    eprintln!("exit={:?}\n{text}", out.status.code());
+    // Today: refused (exit 1) although the branch is already on the base; the
+    // "rollback" is a no-op (base unmoved), and branch + trust stay as found.
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("already_merged"), "{text}");
+    assert!(
+        text.contains("POST-MERGE COMPILE GATE REFUSED") && text.contains("trust is stale"),
+        "{text}"
+    );
+    assert_eq!(rev(repo, "main"), main_before, "{text}");
+    assert!(git(repo, &["rev-parse", "--verify", &branch])
+        .status
+        .success());
+    let trust = cs(repo, store.path())
+        .args(["trust", "--status"])
+        .output()
+        .unwrap();
+    assert!(combined(&trust).contains("stale"), "{}", combined(&trust));
+
+    // B2: the refusal says how to resume — one grant covers every pending
+    // closure, the refused command is rerun by hand, `--review-shell` exists.
+    for needle in [
+        "One grant covers every pending closure",
+        "rerun the command that was refused",
+        "cs done <id> --review-shell",
+    ] {
+        assert!(text.contains(needle), "missing {needle:?}.\n{text}");
+    }
+
+    // Following it: grant once, rerun the same `cs done`; the closure lands.
+    grant_trust(repo, store.path());
+    let rerun = done(repo, store.path(), &mol_id);
+    assert!(rerun.status.success(), "{}", combined(&rerun));
+    assert!(!git(repo, &["rev-parse", "--verify", &branch])
+        .status
+        .success());
+}

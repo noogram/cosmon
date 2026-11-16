@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- The stale-trust refusal now says that one `cs trust` covers every pending closure, that the refused command must be rerun, and that `cs done <id> --review-shell` reviews and grants in one step when the change arrives with the merge; the trust model is unchanged (#215).
+
 - `cs done` finishes removing a worktree that `git worktree remove` left half-deleted because a process was still writing under it: up to ten retries over five seconds, confined to `.worktrees/<id>` without following symlinks; if the directory remains, the warning names its path, the likely cause and `cs purge --worktrees` (#218).
 
 - `cs sessions ack <key>` acknowledges one pilot-mailbox envelope separately from reading it; duplicate acknowledgments succeed without writing, and unknown keys are refused.
