@@ -746,6 +746,27 @@ fn resolve_hook_session_id(
     }
 }
 
+/// How this hook moment updates the recorded background tasks.
+///
+/// Only a Claude `Stop` carries the list. It replaces the record, so a payload
+/// without the field clears it (unknown, not busy); every other moment leaves
+/// the record as it was.
+fn background_update(
+    provider: HookProvider,
+    event: HookEvent,
+    payload: &HookPayload,
+) -> presence::BackgroundUpdate {
+    if !matches!(provider, HookProvider::Claude) || !matches!(event, HookEvent::TurnEnd) {
+        return presence::BackgroundUpdate::Preserve;
+    }
+    presence::BackgroundUpdate::Replace(
+        payload
+            .background
+            .as_ref()
+            .map(|b| (b.running, b.kinds.clone())),
+    )
+}
+
 /// Resolve this session's id and emit its presence heartbeat.
 ///
 /// Returns `None` when no id can be resolved, after saying so on stderr.
@@ -865,21 +886,7 @@ fn beat_presence(
             state: Some(state),
             lifecycle_source: Some(lifecycle_source),
             detail: presence::PresenceDetailUpdate::Replace(detail),
-            // Only a Claude `Stop` carries the list. It replaces the record,
-            // so a payload without the field clears it (unknown, not busy);
-            // every other moment leaves the record as it was.
-            background: if matches!(provider, HookProvider::Claude)
-                && matches!(event, HookEvent::TurnEnd)
-            {
-                presence::BackgroundUpdate::Replace(
-                    payload
-                        .background
-                        .as_ref()
-                        .map(|b| (b.running, b.kinds.clone())),
-                )
-            } else {
-                presence::BackgroundUpdate::Preserve
-            },
+            background: background_update(provider, event, payload),
             ..presence::PingArgs::default()
         },
     ) {
