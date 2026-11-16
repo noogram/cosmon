@@ -17,13 +17,27 @@ one-off miss.
 > No emitter decides "is this worker idle?" for itself.
 
 An emitter assembles a `NudgeView` — its `NudgeChannel`, the molecule's status,
-whether the worker is gated on the operator, the two clocks, and its attempt
-ledger — and obeys the verdict. Per-channel tuning goes into the `stale_after`
+whether the worker is gated on the operator, the two clocks, the age of any
+background work in flight, and its attempt ledger — and obeys the verdict. Per-channel tuning goes into the `stale_after`
 the emitter passes. It never goes into a second copy of the rule.
 
 Adding a new channel means adding a `NudgeChannel` variant and calling the
 judge. If you find yourself writing `if age > threshold` next to a
 `send_input`, you are re-creating the bug.
+
+## The rules, in order
+
+`decide_nudge` applies these in order and returns at the first that fires:
+
+| # | Rule | Verdict | Fact it reads |
+|---|---|---|---|
+| 1 | operator gate | `Skip(AwaitingOperator)` | `temp:awaiting-op` tag or `blocked_on.json` |
+| 2 | not `Running` | `Skip(NotRunning)` | molecule status |
+| 3 | orphan | `Escalate(Orphaned)` | `briefing.md` missing or empty |
+| 4 | background work in flight | `Skip(BackgroundWork)` | `NudgeView::background_work_age` below `PROPEL_BACKGROUND_CEILING` (45 min) |
+| 5 | active pane | `Skip(PaneActive)` | terminal silence below `stale_after` |
+| 6 | attempt ceiling | `Escalate(AttemptsExhausted)` | per-stall ledger |
+| 7 | spacing | `Skip(Backoff)` | time since the last nudge |
 
 ## The inventory
 
@@ -140,6 +154,43 @@ not silently re-open the door.
 A gated candidate also skips the liveness projection. Its process is healthy and
 its silence is the intended behaviour; stamping it `Unresponsive` would
 manufacture a health anomaly out of a correct pause.
+
+## Background work in flight
+
+A worker that starts a long command in the background ends its turn and waits
+for the completion notification. Its terminal is silent and its progress clock
+is frozen, which is the picture of a stalled worker, and every nudge makes it
+re-read its whole context (noogram/cosmon#216). Rule 4 tells the two apart with
+one fact, `NudgeView::background_work_age`: the age of the oldest background work
+known to be in flight. Two sources feed it, both read by the shell
+(`crates/cosmon-cli/src/cmd/patrol_background.rs`); the core sees only the age.
+
+- **Provider report (Claude).** The observe-only `Stop` hook `cs tackle`
+  installs runs `cs sessions hook run`. Claude's `Stop` input carries
+  `background_tasks`; the hook keeps the number of entries whose `status` is
+  `running` and their `type`, with the time the stretch started, in the worker's
+  presence row (`background_tasks`). The entry's `command` and `description` are
+  worker-written text and are never read into the record. A `Stop` without the
+  field clears the record: unknown, not busy. Other hook moments leave it alone.
+- **Detached gate run (every adapter).** `scripts/run-gates-bg.sh` writes
+  `gates.pid` in the molecule directory and `gates.exit` when the run ends. A
+  `gates.pid` naming a live process with no `gates.exit` is a run in flight, aged
+  by the pid file. A dead pid without an exit file is not in flight.
+
+The rule is bounded. Past `PROPEL_BACKGROUND_CEILING` (45 minutes, three times
+the cold gate run) the work no longer suppresses and rules 5 to 7 decide as if
+no background work were known, so a hung command or a stale record delays a
+nudge and never prevents one. `None` means unknown or none and decides exactly
+as before: an adapter or a hook that reports nothing is neither idle nor busy.
+
+It sits after the operator, not-running and orphan gates, so none of those is
+weakened, and before the pane clock, because a waiting worker's pane is silent.
+A worker skipped by this rule is not stamped `Unresponsive` either.
+
+Every `NudgeView` construction site is fed: `build_propulsion_view` (used by
+`--propel` and `--propel-api-stall`) and the `--nudge` briefing tier in
+`nudge_stalled_molecules`. `--heal` remedy `A2` is gated by the heal guard
+rather than by `decide_nudge`; it does not consult this rule.
 
 ## Reading the report
 
