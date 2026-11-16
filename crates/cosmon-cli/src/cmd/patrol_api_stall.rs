@@ -352,7 +352,13 @@ fn apply_decision(
         // `NoTypedApiError` is unreachable — the flag was established before
         // the judge was called — and `NotRunning` cannot fire on a candidate
         // the finder already filtered to Running.
-        NudgeDecision::Skip(NudgeSkip::NoTypedApiError | NudgeSkip::NotRunning { .. }) => {}
+        // A worker waiting on background work it started is left alone, flag
+        // or not: the same rule every channel obeys (#216).
+        NudgeDecision::Skip(
+            NudgeSkip::NoTypedApiError
+            | NudgeSkip::NotRunning { .. }
+            | NudgeSkip::BackgroundWork { .. },
+        ) => {}
         NudgeDecision::Skip(NudgeSkip::Backoff {
             since_secs,
             window_secs,

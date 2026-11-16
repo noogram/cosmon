@@ -2106,6 +2106,9 @@ pub(crate) fn build_propulsion_view(
         api_error_stalled: false,
         progress_age,
         pane_idle,
+        // Background work the worker is waiting on (provider report or a
+        // detached gate run); `None` when neither source reports any.
+        background_work_age: super::patrol_background::background_work_age(store, mid, now),
         attempts: attempts.count,
         since_last_propel: attempts
             .last_at
@@ -2214,6 +2217,14 @@ pub(crate) fn propel_stale_molecules(
             continue;
         }
 
+        // A worker waiting on background work it started (#216) is neither
+        // thinking nor stuck: its terminal is silent because it is waiting for
+        // the completion notification. No nudge, and no liveness witness
+        // either, for the same reason as a thinking worker.
+        if let NudgeDecision::Skip(NudgeSkip::BackgroundWork { .. }) = decision {
+            continue;
+        }
+
         // Likewise for a worker at an operator gate — and here the liveness
         // projection must be skipped for a second reason: its process is
         // healthy and its silence is the *intended* behaviour, so stamping it
@@ -2259,6 +2270,7 @@ pub(crate) fn propel_stale_molecules(
                 NudgeSkip::PaneActive { .. }
                 | NudgeSkip::AwaitingOperator
                 | NudgeSkip::NotRunning { .. }
+                | NudgeSkip::BackgroundWork { .. }
                 // Never produced by `decide_nudge`; it is the api-stall
                 // channel's own refusal.
                 | NudgeSkip::NoTypedApiError,
@@ -2574,6 +2586,10 @@ pub(crate) fn nudge_stalled_molecules(
             api_error_stalled: false,
             progress_age: now.signed_duration_since(mol.updated_at),
             pane_idle: pane_idle_seconds(be.socket(), &session).map(chrono::Duration::seconds),
+            // The same background-work rule as the propulsion tier: a worker
+            // waiting on a background command must not be told to re-read its
+            // briefing either.
+            background_work_age: super::patrol_background::background_work_age(store, &mol.id, now),
             // Deliberately not `mol.nudge_count`: that field is a *lifetime*
             // total the briefing tier never resets, so feeding it as the
             // per-stall attempt count would silence this channel permanently
@@ -4758,6 +4774,7 @@ mod tests {
             api_error_stalled: false,
             progress_age: chrono::Duration::seconds(644),
             pane_idle: Some(chrono::Duration::seconds(2)),
+            background_work_age: None,
             attempts: 0,
             since_last_propel: None,
         };
@@ -4915,6 +4932,7 @@ mod tests {
                     api_error_stalled: false,
                     progress_age: chrono::Duration::seconds(300 + pass * 70),
                     pane_idle: Some(chrono::Duration::seconds(300 + pass * 70)),
+                    background_work_age: None,
                     attempts: 0,
                     since_last_propel: None,
                 };
@@ -4974,6 +4992,7 @@ mod tests {
             api_error_stalled: false,
             progress_age: chrono::Duration::hours(3),
             pane_idle: Some(chrono::Duration::hours(3)),
+            background_work_age: None,
             attempts: 0,
             since_last_propel: None,
         };
@@ -6986,5 +7005,126 @@ mod tests {
             .tags
             .iter()
             .any(|tag| tag.as_str() == "dialogue-blocked"));
+    }
+
+    // ---------------------------------------------------------------
+    // Background work in flight (noogram/cosmon#216): the judge fed the way
+    // the sweep feeds it, through `build_propulsion_view` over a real on-disk
+    // store, so the sources read are the ones the sweep reads.
+    // ---------------------------------------------------------------
+
+    /// A Running molecule, stale by progress, with a briefing on disk.
+    fn stale_molecule_with_briefing() -> (TempDir, FileStore, MoleculeData) {
+        let (tmp, store) = make_store();
+        let mol = make_stale_molecule("task-20261116-e643", "w1", 9_000);
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let dir = store.molecule_dir(&mol.id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("briefing.md"), "# brief\n").unwrap();
+        (tmp, store, mol)
+    }
+
+    /// What the sweep decides for this molecule with a terminal silent for 9000 s.
+    fn background_verdict(store: &FileStore, mol: &MoleculeData) -> NudgeDecision {
+        let view = build_propulsion_view(
+            store,
+            std::slice::from_ref(mol),
+            &mol.id,
+            chrono::Duration::seconds(9_000),
+            Some(chrono::Duration::seconds(9_000)),
+        );
+        decide_nudge(&view, chrono::Duration::seconds(300))
+    }
+
+    fn is_background_skip(d: NudgeDecision) -> bool {
+        matches!(d, NudgeDecision::Skip(NudgeSkip::BackgroundWork { .. }))
+    }
+
+    /// Record, in the worker's presence row, what its last `Stop` reported.
+    fn report_background(tmp: &TempDir, mol: &MoleculeData, minutes_ago: i64) {
+        use cosmon_core::presence::{BackgroundTasks, Presence};
+        let at = Utc::now();
+        let row = Presence {
+            current_molecule: Some(mol.id.clone()),
+            background_tasks: Some(BackgroundTasks {
+                running: 1,
+                kinds: vec!["shell".to_owned()],
+                since: at - chrono::Duration::minutes(minutes_ago),
+                observed_at: at - chrono::Duration::minutes(minutes_ago),
+            }),
+            ..Presence::new(
+                cosmon_core::id::SessionId::new("session-w1").unwrap(),
+                "cosmon",
+                "/tmp/w",
+                1,
+                at,
+            )
+        };
+        cosmon_filestore::presence_store::PresenceStore::new(tmp.path())
+            .upsert(&row)
+            .unwrap();
+    }
+
+    /// The control: nothing in flight, silent terminal, stale progress — nudged.
+    #[test]
+    fn control_a_silent_stale_worker_is_nudged() {
+        let (_tmp, store, mol) = stale_molecule_with_briefing();
+        assert!(matches!(
+            background_verdict(&store, &mol),
+            NudgeDecision::Nudge { attempt: 1, .. }
+        ));
+    }
+
+    /// (a) The provider reported a running background task at the last turn end.
+    #[test]
+    fn a_reported_background_task_suppresses_the_nudge() {
+        let (tmp, store, mol) = stale_molecule_with_briefing();
+        report_background(&tmp, &mol, 10);
+        assert!(is_background_skip(background_verdict(&store, &mol)));
+    }
+
+    /// (a, bounded) The same report, older than the ceiling, no longer holds.
+    #[test]
+    fn a_reported_background_task_past_the_ceiling_no_longer_suppresses() {
+        let (tmp, store, mol) = stale_molecule_with_briefing();
+        report_background(&tmp, &mol, 50);
+        assert!(matches!(
+            background_verdict(&store, &mol),
+            NudgeDecision::Nudge { attempt: 1, .. }
+        ));
+    }
+
+    /// (b) A detached gate run: `gates.pid` names a live process, no `gates.exit`.
+    #[test]
+    fn a_live_gate_run_suppresses_the_nudge() {
+        let (_tmp, store, mol) = stale_molecule_with_briefing();
+        let dir = store.molecule_dir(&mol.id);
+        std::fs::write(dir.join("gates.pid"), std::process::id().to_string()).unwrap();
+        assert!(is_background_skip(background_verdict(&store, &mol)));
+    }
+
+    /// (b) A pid file whose process is gone, with no exit file, is a dead run.
+    #[test]
+    fn a_dead_gate_pid_does_not_suppress_the_nudge() {
+        let (_tmp, store, mol) = stale_molecule_with_briefing();
+        let dir = store.molecule_dir(&mol.id);
+        std::fs::write(dir.join("gates.pid"), "4000000000").unwrap();
+        assert!(matches!(
+            background_verdict(&store, &mol),
+            NudgeDecision::Nudge { attempt: 1, .. }
+        ));
+    }
+
+    /// (b) A finished run leaves both files; the exit file ends the suppression.
+    #[test]
+    fn a_finished_gate_run_does_not_suppress_the_nudge() {
+        let (_tmp, store, mol) = stale_molecule_with_briefing();
+        let dir = store.molecule_dir(&mol.id);
+        std::fs::write(dir.join("gates.pid"), std::process::id().to_string()).unwrap();
+        std::fs::write(dir.join("gates.exit"), "0").unwrap();
+        assert!(matches!(
+            background_verdict(&store, &mol),
+            NudgeDecision::Nudge { attempt: 1, .. }
+        ));
     }
 }
