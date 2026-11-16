@@ -19,10 +19,6 @@ this stage.
 
 ## [Unreleased]
 
-- The stale-trust refusal now says that one `cs trust` covers every pending closure, that the refused command must be rerun, and that `cs done <id> --review-shell` reviews and grants in one step when the change arrives with the merge; the trust model is unchanged (#215).
-
-- `cs done` finishes removing a worktree that `git worktree remove` left half-deleted because a process was still writing under it: up to ten retries over five seconds, confined to `.worktrees/<id>` without following symlinks; if the directory remains, the warning names its path, the likely cause and `cs purge --worktrees` (#218).
-
 - `cs sessions ack <key>` acknowledges one pilot-mailbox envelope separately from reading it; duplicate acknowledgments succeed without writing, and unknown keys are refused.
 
 - Step changes preserve edited `briefing.md` bytes as `briefing.md.edited-<step>` and warn with the saved path and `--var-file` guidance; retries never overwrite an existing backup.
@@ -30,6 +26,10 @@ this stage.
 - `task-work`, `producer-work`, and `merge-conflict` use the project's own verification gates; `cs nucleate` includes declared `[gates]` commands in the briefing. Existing formula copies need updating: `cs init --upgrade` only backfills missing files and preserves existing ones.
 
 - `cs complete`: when `surface_visual` refuses and the galaxy lacks `verify-surface`, show `cs init --upgrade` before the nucleation command.
+
+- The stale-trust refusal now says that one `cs trust` covers every pending closure, that the refused command must be rerun, and that `cs done <id> --review-shell` reviews and grants in one step when the change arrives with the merge; the trust model is unchanged (#215).
+
+- `cs done` finishes removing a worktree that `git worktree remove` left half-deleted because a process was still writing under it: up to ten retries over five seconds, confined to `.worktrees/<id>` without following symlinks; if the directory remains, the warning names its path, the likely cause and `cs purge --worktrees` (#218).
 
 - `cs done` refuses overlapping uncommitted base-checkout edits before attempting a merge, names the files and asks the pilot to commit or stash them, and preserves the harvestable molecule; unrelated unstaged edits remain allowed (dirty-base preflight requires Git 2.38+).
 
