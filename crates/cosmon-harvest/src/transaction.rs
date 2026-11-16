@@ -6124,6 +6124,44 @@ fn rescue_untracked_files(
 /// ghost branch behind. Pruning here, immediately before step 6's delete, is
 /// what makes that delete succeed.
 fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> anyhow::Result<()> {
+    remove_worktree_with(
+        repo_root,
+        worktree_path,
+        WORKTREE_REMOVE_RETRIES,
+        WORKTREE_REMOVE_RETRY_DELAY,
+    )
+}
+
+/// How many times [`remove_worktree`] re-tries finishing a removal that
+/// `git worktree remove` left half-done (issue #218).
+const WORKTREE_REMOVE_RETRIES: u32 = 10;
+
+/// Pause before each retry; with [`WORKTREE_REMOVE_RETRIES`] the window is
+/// five seconds, long enough for a process that is exiting and short enough
+/// that a process which never exits does not stall the harvest.
+const WORKTREE_REMOVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// [`remove_worktree`] with an explicit retry budget.
+///
+/// `git worktree remove` fails with `failed to delete '<path>': Directory not
+/// empty` when a process creates entries under the tree while git is walking
+/// it (a build still flushing into an ignored `target/`, typically a worker
+/// that outlived its session). By then git has already dropped the worktree
+/// registration, so the directory is orphaned and repeating the git command
+/// cannot help. The removal was authorised before the first attempt — the
+/// dirty check passed and untracked files were rescued — so what is left of
+/// it is finished here, directly, a bounded number of times.
+///
+/// Only that one failure is retried: a locked worktree or any other git
+/// refusal is a decision, not a race, and is reported as before. The retry
+/// removes nothing but `<repo_root>/.worktrees/<name>` itself
+/// ([`finish_orphaned_worktree_removal`]).
+fn remove_worktree_with(
+    repo_root: &Path,
+    worktree_path: &Path,
+    retries: u32,
+    delay: std::time::Duration,
+) -> anyhow::Result<()> {
     let out = Command::new("git")
         .args([
             "-C",
@@ -6135,13 +6173,56 @@ fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> anyhow::Result<()>
         .output()?;
     prune_worktrees(repo_root);
     if out.status.success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
+        return Ok(());
     }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+    if !stderr.contains("failed to delete") || !worktree_path.exists() {
+        return Err(anyhow::anyhow!("{stderr}"));
+    }
+    for _ in 0..retries {
+        std::thread::sleep(delay);
+        if finish_orphaned_worktree_removal(repo_root, worktree_path).is_ok()
+            && !worktree_path.exists()
+        {
+            prune_worktrees(repo_root);
+            return Ok(());
+        }
+    }
+    Err(anyhow::anyhow!(
+        "{stderr}\n    {} is still on disk after {retries} retries over {:?}: a process is \
+         probably still writing under it. Stop that process, then run `cs purge --worktrees` \
+         to see the directory and remove it by hand (`rm -r {}`).",
+        worktree_path.display(),
+        delay * retries,
+        worktree_path.display(),
+    ))
+}
+
+/// Remove what is left of a worktree directory whose removal was authorised.
+///
+/// Refuses anything that is not exactly `<repo_root>/.worktrees/<name>` (one
+/// level, no `..`), and refuses a path that is itself a symlink. Below that
+/// root `std::fs::remove_dir_all` unlinks symbolic links instead of following
+/// them, so a link pointing outside the tree is removed and its destination
+/// is left alone.
+fn finish_orphaned_worktree_removal(repo_root: &Path, worktree_path: &Path) -> std::io::Result<()> {
+    let invalid = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, why.to_owned());
+    let parent = repo_root.join(".worktrees");
+    if worktree_path.parent() != Some(parent.as_path())
+        || worktree_path.file_name().is_none()
+        || worktree_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(invalid("not a direct child of .worktrees/"));
+    }
+    if std::fs::symlink_metadata(worktree_path)?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(invalid("worktree path is a symlink"));
+    }
+    std::fs::remove_dir_all(worktree_path)
 }
 
 /// Drop git's registrations for worktrees whose directory no longer exists.
@@ -9400,6 +9481,30 @@ mod tests {
         prune_worktrees(&root);
         delete_branch(&root, "feat/task-a").expect("after the prune the branch must be deletable");
         assert!(!branch_exists(&root, "feat/task-a"));
+    }
+
+    /// The finishing step removes only `<repo>/.worktrees/<name>`: a path
+    /// elsewhere, a nested path and a symlink standing in for the worktree are
+    /// all refused and left intact.
+    #[test]
+    fn finishing_a_removal_refuses_paths_outside_dot_worktrees() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().canonicalize().unwrap();
+        let wts = repo.join(".worktrees");
+        std::fs::create_dir_all(wts.join("mol/nested")).unwrap();
+        let elsewhere = repo.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("keep"), "x").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, wts.join("link")).unwrap();
+
+        assert!(finish_orphaned_worktree_removal(&repo, &elsewhere).is_err());
+        assert!(finish_orphaned_worktree_removal(&repo, &wts.join("mol/nested")).is_err());
+        assert!(finish_orphaned_worktree_removal(&repo, &wts.join("link")).is_err());
+        assert!(elsewhere.join("keep").exists());
+        assert!(wts.join("mol/nested").exists());
+
+        finish_orphaned_worktree_removal(&repo, &wts.join("mol")).unwrap();
+        assert!(!wts.join("mol").exists());
     }
 
     fn make_store() -> (TempDir, FileStore) {
