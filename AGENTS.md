@@ -192,6 +192,7 @@ scripts/sovereignty-gate.sh
 scripts/confidentiality-banlist.sh                 + .test.sh
 scripts/check-workflow-yaml.sh                     + .test.sh
 scripts/check-docs-one-gate.sh                     + .test.sh   # the 2026-09-26 gap
+scripts/check-removed-assertions.test.sh           # assert-guard rule: merge-base diff, override marker
 scripts/check-book-links.sh                        + .test.sh
 scripts/source-provenance.test.sh
 scripts/install-hooks.test.sh
@@ -227,7 +228,7 @@ specific, checked reason:
 
 | Check | Reason it stays CI-only |
 |---|---|
-| `assert-guard`, `dco.yml`, `session-id-gate` PR steps, `provenance-gate` main check | Need `GITHUB_BASE_REF`/`GITHUB_SHA`/PR title+body — meaningless outside a real PR event; the gate scripts themselves (`check-no-session-ids.sh`, `check-provenance.sh main HEAD`) already run locally in scoped form |
+| `assert-guard` (PR-event wiring only), `dco.yml`, `session-id-gate` PR steps, `provenance-gate` main check | Need `GITHUB_BASE_REF`/`GITHUB_SHA`/PR title+body — meaningless outside a real PR event; the gate scripts themselves (`check-no-session-ids.sh`, `check-provenance.sh main HEAD`, and for assert-guard `check-removed-assertions.sh`, whose rule is covered by its `.test.sh` in `just quick`) already run locally in scoped form |
 | `deny.yml` (cargo-deny / cargo-audit / cargo-vet), `license-gate`'s deny/vet steps | Install extra cargo subcommands and fetch advisory/license databases over the network |
 | `front-door.yml` | `cargo install --git https://github.com/noogram/cosmon.git` — network install against a repo that must actually be public |
 | `install-lint.yml` `live` / `served-drift` / `endpoint` | Fetch a live GitHub release or the hosted `noogram.org` endpoint |

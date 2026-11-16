@@ -512,47 +512,11 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          BASE="$BASE_SHA"
-          HEAD="$HEAD_SHA"
-
-          # Match removed lines containing Rust test assertions
-          PATTERN='^\-.*\b(assert!|assert_eq!|assert_ne!|debug_assert!|debug_assert_eq!|debug_assert_ne!|#\[should_panic)'
-
-          REMOVED=$(git diff "$BASE".."$HEAD" -- '*.rs' | grep -P "$PATTERN" || true)
-
-          if [ -n "$REMOVED" ]; then
-            echo "::warning::Test assertions were removed in this PR. Review required."
-            echo ""
-            echo "The following assertion lines were removed:"
-            echo "$REMOVED"
-            echo ""
-            echo "If these removals are intentional, add 'assert-guard: reviewed' to the PR description."
-
-            # Check if PR description contains the override marker.
-            #
-            # The body arrives through the environment, never as source. An
-            # event expression written anywhere in this run block — code OR
-            # comment — is substituted textually by Actions before the shell
-            # ever sees the script, so naming the PR-body expression here
-            # would inject the body here. Two measured failures, same cause:
-            # 2026-08-05 on noogram/cosmon#44 a body containing backticks ran
-            # as a command and the marker it did contain was never seen; then
-            # 2026-08-11 on PR #47 (run 31498866585) the surviving mention of
-            # the expression in this very comment carried a multi-line body
-            # out of the `#` and killed the job at parse time — "line 76:
-            # unexpected EOF while looking for matching quote", exit 2, on a
-            # branch that already had the first fix. Which is why the rule is
-            # now mechanical: see scripts/check-workflow-yaml.sh.
-            if printf '%s' "$PR_BODY" | grep -q 'assert-guard: reviewed'; then
-              echo ""
-              echo "Override marker found in PR description. Proceeding."
-              exit 0
-            fi
-
-            exit 1
-          fi
-
-          echo "No test assertions removed. ✓"
+          # The rule lives in a tracked, tested script; it compares from the
+          # merge base of base and head, so merges into the base after the
+          # fork are not counted as removals. The body stays in the
+          # environment (PR_BODY, above) and is read there by the script.
+          ./scripts/check-removed-assertions.sh "$BASE_SHA" "$HEAD_SHA"
 
   spawn-matrix:
     name: Spawn matrix (fake tmux + claude)

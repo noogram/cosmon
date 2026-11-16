@@ -133,6 +133,12 @@ if ! bash -n "$script" 2>"$tmp/parse.err"; then
   fail "rendered assert-guard step does not parse with an apostrophe in the body"
 fi
 
+# The step now calls the tracked script by its repository path, as it does in
+# a checkout; give the throwaway repo the same layout (untracked, so the
+# diff under test is unchanged).
+mkdir -p "$work/scripts"
+cp "$repo/scripts/check-removed-assertions.sh" "$work/scripts/"
+
 if ! (cd "$work" && bash "$script" >"$tmp/step.out" 2>&1); then
   cat "$tmp/step.out" >&2
   fail "assert-guard step did not accept a marker in a body with an apostrophe and a newline"
