@@ -48,12 +48,6 @@ fn git_ok(repo: &Path, args: &[&str]) {
     );
 }
 
-fn rev(repo: &Path, refname: &str) -> String {
-    String::from_utf8_lossy(&git(repo, &["rev-parse", refname]).stdout)
-        .trim()
-        .to_owned()
-}
-
 fn setup_repo(repo: &Path) {
     git_ok(repo, &["init", "-q", "-b", "main"]);
     git_ok(repo, &["config", "user.email", "test@example.com"]);
