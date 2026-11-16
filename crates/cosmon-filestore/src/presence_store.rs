@@ -317,6 +317,40 @@ impl PresenceStore {
         }
         Ok(removed)
     }
+
+    /// Remove one session's presence snapshot on that session's own say-so.
+    ///
+    /// Unlike [`Self::gc`], this does not wait for the heartbeat to go stale
+    /// or the pid to die: the session is withdrawing itself. It unlinks the
+    /// snapshot only (canonical name, and the legacy unprefixed name when one
+    /// is still around). The whisper log and seek pointer, the pilot mailbox,
+    /// checkpoints and lease ledger are evidence or state owned by other
+    /// stores and are left exactly as they are.
+    ///
+    /// Returns `true` when a snapshot was removed and `false` when there was
+    /// none. The `false` case touches no file, so the call is safe to repeat.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CosmonError::StateStore`] when a snapshot exists but cannot
+    /// be unlinked.
+    pub fn detach(&self, sid: &SessionId) -> Result<bool, CosmonError> {
+        let mut paths = vec![self.snapshot_path(sid)];
+        paths.extend(self.legacy_path(sid, "json"));
+        let mut removed = false;
+        for path in paths {
+            match fs::remove_file(&path) {
+                Ok(()) => removed = true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(CosmonError::StateStore {
+                        reason: format!("failed to remove presence {}: {e}", path.display()),
+                    })
+                }
+            }
+        }
+        Ok(removed)
+    }
 }
 
 /// Probe whether `pid` names a live process on this host without
@@ -483,6 +517,21 @@ mod tests {
         let loaded = store.scan().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].session_id.as_str(), "sid-good");
+    }
+
+    #[test]
+    fn detach_removes_one_snapshot_and_is_repeatable() {
+        let (_tmp, store) = make_store();
+        let mine = sample("sid-mine", Utc::now(), std::process::id());
+        let other = sample("sid-other", Utc::now(), std::process::id());
+        store.upsert(&mine).unwrap();
+        store.upsert(&other).unwrap();
+
+        assert!(store.detach(&mine.session_id).unwrap());
+        assert!(store.load(&mine.session_id).unwrap().is_none());
+        assert!(store.load(&other.session_id).unwrap().is_some());
+        // Nothing left to remove: reports it and succeeds.
+        assert!(!store.detach(&mine.session_id).unwrap());
     }
 
     #[test]
