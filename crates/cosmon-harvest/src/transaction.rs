@@ -1090,6 +1090,52 @@ fn branch_landed_by_merge_commit(repo_root: &Path, branch: &str, base: &str) -> 
     !chain.lines().any(|line| line == tip)
 }
 
+/// The branch is provably empty: zero commits ahead of base, not landed
+/// through a merge commit, and its tip is still where it was created. This is
+/// the only condition under which `cs done` reports `empty_branch`.
+fn branch_never_had_commits(repo_root: &Path, branch: &str, base: &str) -> bool {
+    branch_is_empty_relative_to(repo_root, branch, base)
+        && !branch_landed_by_merge_commit(repo_root, branch, base)
+        && branch_never_advanced(repo_root, branch)
+}
+
+/// `true` iff the branch tip is still the commit the branch was created at,
+/// i.e. the branch never had a commit of its own.
+///
+/// Why: "zero commits ahead of base" ([`branch_is_empty_relative_to`]) is also
+/// what a branch looks like after its commits reached the base by
+/// fast-forward, so it cannot tell an empty branch from landed work.
+/// Cosmon does not store the base object id at tackle time (`MoleculeData`
+/// records only the base branch *name*), so the fork point is read from the
+/// best durable evidence git keeps: the branch's reflog, whose oldest entry is
+/// the creation. The tip equals that entry only if no commit was ever added.
+///
+/// Unknown stays unknown: an absent, expired or empty reflog, or any git
+/// failure, answers `false`, so the caller does not claim `empty_branch`
+/// without proof and falls back to the label that promises nothing about
+/// emptiness. A branch whose reflog was pruned is therefore never reported
+/// empty, even if it is.
+fn branch_never_advanced(repo_root: &Path, branch: &str) -> bool {
+    let git_out = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let Some(tip) = git_out(&["rev-parse", "--verify", &format!("{branch}^{{commit}}")]) else {
+        return false;
+    };
+    let Some(log) = git_out(&["reflog", "show", "--format=%H", &format!("refs/heads/{branch}")])
+    else {
+        return false;
+    };
+    log.lines().last().is_some_and(|creation| creation == tip.trim())
+}
+
 /// Structural post-condition for the final `cs done` guard: `true` iff
 /// `branch` still exists locally **and** carries commit(s) not reachable
 /// from `base`.
@@ -3257,8 +3303,7 @@ fn run_with_remote_before_lock(
                 // branch's tip never does.
                 let label = classify_already_merged_label(
                     mol.merged_at.is_some(),
-                    branch_is_empty_relative_to(&repo_root, &branch_name, &base_branch)
-                        && !branch_landed_by_merge_commit(&repo_root, &branch_name, &base_branch),
+                    branch_never_had_commits(&repo_root, &branch_name, &base_branch),
                 );
                 actions.push(label.to_owned());
                 merge_succeeded = true;
@@ -11550,6 +11595,56 @@ mod tests {
             "feat/does-not-exist",
             "main"
         ));
+    }
+
+    /// Issue #213: a branch whose commits reached the base by fast-forward is
+    /// zero commits ahead and on the first-parent chain, yet it is landed
+    /// work. Only a branch whose tip never left its creation point is empty.
+    #[test]
+    fn fast_forwarded_branch_is_not_an_empty_branch() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/empty"])
+            .status
+            .success());
+        assert!(branch_never_had_commits(repo, "feat/empty", "main"));
+
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/ff", "main"])
+            .status
+            .success());
+        commit_file(repo, "one.txt", "1\n", "feat: one");
+        commit_file(repo, "two.txt", "2\n", "feat: two");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        assert!(git(repo, &["merge", "-q", "--ff-only", "feat/ff"])
+            .status
+            .success());
+
+        assert!(branch_is_empty_relative_to(repo, "feat/ff", "main"));
+        assert!(!branch_landed_by_merge_commit(repo, "feat/ff", "main"));
+        assert!(
+            !branch_never_had_commits(repo, "feat/ff", "main"),
+            "a fast-forwarded branch carried commits of its own"
+        );
+        // The empty branch is still empty once the base moved on.
+        assert!(branch_never_had_commits(repo, "feat/empty", "main"));
+    }
+
+    /// With no reflog the creation point is unknown: the branch is not
+    /// reported empty, whatever its topology.
+    #[test]
+    fn branch_without_a_reflog_is_not_reported_empty() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        assert!(git(repo, &["branch", "feat/unknown"]).status.success());
+        let log = repo.join(".git/logs/refs/heads/feat/unknown");
+        assert!(log.exists(), "fixture assumes git wrote a reflog");
+        std::fs::remove_file(&log).unwrap();
+
+        assert!(branch_is_empty_relative_to(repo, "feat/unknown", "main"));
+        assert!(!branch_never_had_commits(repo, "feat/unknown", "main"));
     }
 
     #[test]
