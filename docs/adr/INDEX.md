@@ -174,4 +174,5 @@
 | 187-a-collapse-is-conditional-idempotent-and-receipted | [187-a-collapse-is-conditional-idempotent-and-receipted.md](187-a-collapse-is-conditional-idempotent-and-receipted.md) |
 | 188-a-worker-is-stopped-through-its-supervising-parent | [188-a-worker-is-stopped-through-its-supervising-parent.md](188-a-worker-is-stopped-through-its-supervising-parent.md) |
 | 189-msrv-1-89-for-patched-sqlite | [189-msrv-1-89-for-patched-sqlite.md](189-msrv-1-89-for-patched-sqlite.md) |
+| 190-a-project-may-declare-an-external-derived-root | [190-a-project-may-declare-an-external-derived-root.md](190-a-project-may-declare-an-external-derived-root.md) |
 
