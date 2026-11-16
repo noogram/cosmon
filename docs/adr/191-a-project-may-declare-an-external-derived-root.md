@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-# ADR-190 — A project may declare an external derived root; `cs purge --worktrees` reclaims it for terminal molecules
+# ADR-191 — A project may declare an external derived root; `cs purge --worktrees` reclaims it for terminal molecules
 
 **Status:** Proposed (2026-11-16).
 **Date:** 2026-11-16.
