@@ -25,6 +25,8 @@ this stage.
 
 - Step changes preserve edited `briefing.md` bytes as `briefing.md.edited-<step>` and warn with the saved path and `--var-file` guidance; retries never overwrite an existing backup.
 
+- `cs patrol --propel`, `--nudge` and `--propel-api-stall` no longer nudge a worker waiting on background work: a running Claude background task reported on `Stop`, or a live `scripts/run-gates-bg.sh` run, suppresses the nudge for up to 45 minutes; `cs presence` rows gain an optional `background_tasks` record (count and kinds only) (#216).
+
 - `task-work`, `producer-work`, and `merge-conflict` use the project's own verification gates; `cs nucleate` includes declared `[gates]` commands in the briefing. Existing formula copies need updating: `cs init --upgrade` only backfills missing files and preserves existing ones.
 
 - `cs complete`: when `surface_visual` refuses and the galaxy lacks `verify-surface`, show `cs init --upgrade` before the nucleation command.
