@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- `cs tackle --if-needed` exits 0 and prints `already dispatched to <session> (adapter <a>, model <m>)` when the molecule already has a live worker matching any explicit `--adapter`/`--model`; a different adapter or model, or a dead worker, fails as before, and it conflicts with `--force` (#217).
+
 - `cs sessions ack <key>` acknowledges one pilot-mailbox envelope separately from reading it; duplicate acknowledgments succeed without writing, and unknown keys are refused.
 
 - Step changes preserve edited `briefing.md` bytes as `briefing.md.edited-<step>` and warn with the saved path and `--var-file` guidance; retries never overwrite an existing backup.
