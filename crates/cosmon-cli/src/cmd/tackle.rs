@@ -11801,25 +11801,6 @@ mod tests {
         assert!(store.load_fleet().unwrap().workers.is_empty());
     }
 
-    /// COSMON #90 — the end-to-end shape of the fix: a *live* session torn
-    /// down under `--force` must be protected by a fresh lease for the whole
-    /// width of the teardown, and the lease must be gone once the caller
-    /// (`run`) is done with it.
-    ///
-    /// Drives `reclaim_session_if_present` — the exact function `run` (step
-    /// 8) delegates its whole reclaim decision to, `already_running` included
-    /// — against `MockBackend` (the same injectable transport double
-    /// `cmd::patrol`'s tests already use for `TransportBackend`-generic
-    /// logic) rather than a real tmux server, with a session actually
-    /// registered alive on it first so the reclaim has a live pane to kill.
-    /// The `on_teardown` hook fires from *inside* the reclaim, once the old
-    /// session is confirmed torn down but before the lease is released — the
-    /// exact moment `cs patrol`'s orphan sweep would otherwise race it — so
-    /// this asserts the lease from the same vantage point the race actually
-    /// occurs at, not merely before/after the call. Driving the decision
-    /// function itself (not the inner `reclaim_live_session_under_lease`
-    /// directly) means a mutation to the `already_running` gate — e.g.
-    /// silently disabling it — is a real, non-vacuous test failure here.
     #[test]
     fn if_needed_compares_only_what_the_caller_passed() {
         let process = cosmon_core::process::MoleculeProcess::new(
@@ -11852,6 +11833,25 @@ mod tests {
         );
     }
 
+    /// COSMON #90 — the end-to-end shape of the fix: a *live* session torn
+    /// down under `--force` must be protected by a fresh lease for the whole
+    /// width of the teardown, and the lease must be gone once the caller
+    /// (`run`) is done with it.
+    ///
+    /// Drives `reclaim_session_if_present` — the exact function `run` (step
+    /// 8) delegates its whole reclaim decision to, `already_running` included
+    /// — against `MockBackend` (the same injectable transport double
+    /// `cmd::patrol`'s tests already use for `TransportBackend`-generic
+    /// logic) rather than a real tmux server, with a session actually
+    /// registered alive on it first so the reclaim has a live pane to kill.
+    /// The `on_teardown` hook fires from *inside* the reclaim, once the old
+    /// session is confirmed torn down but before the lease is released — the
+    /// exact moment `cs patrol`'s orphan sweep would otherwise race it — so
+    /// this asserts the lease from the same vantage point the race actually
+    /// occurs at, not merely before/after the call. Driving the decision
+    /// function itself (not the inner `reclaim_live_session_under_lease`
+    /// directly) means a mutation to the `already_running` gate — e.g.
+    /// silently disabling it — is a real, non-vacuous test failure here.
     #[test]
     fn forced_reclaim_holds_the_lease_across_the_teardown() {
         use cosmon_core::id::AgentId;
