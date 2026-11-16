@@ -519,6 +519,7 @@ callback. An absent sample remains unavailable on every surface.
 | Capability | CLI | Native UI | Other CLI views |
 |---|---|---|---|
 | Serialize a manual tackle and resident dispatch before model selection | `cs tackle` claims the molecule until the spawn verdict; a losing invocation exits non-zero and names the winning worker, adapter and selected model | No equivalent admission control audited | No equivalent admission control audited |
+| Re-run a dispatch without failing when it already exists | `cs tackle <id> --if-needed` prints `already dispatched to <session> (adapter <a>, model <m>)` and exits 0 when the recorded worker is alive and every explicit `--adapter`/`--model` matches; a different adapter or model, or a dead worker, fails as before (a dead worker needs `--force`). Conflicts with `--force`. | No equivalent dispatch control audited | No equivalent dispatch control audited |
 
 The loser receives a recorded model pin when one exists. If the winning
 adapter chose its own default, the exact model is unrecorded and the error
