@@ -179,6 +179,16 @@ refused on a leased mission.
 `inbox` still acknowledges the messages it prints; `inbox --peek` does not.
 Acknowledgment records consumption only and grants no lifecycle authority.
 
+## Explicit presence detach (issue #212, W5 increment 2)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| End a session's presence without waiting for `gc` | `cs presence detach [--session <SID>] [--json]` removes the snapshot through the presence store; a repeat exits successfully, writes nothing and says "nothing to detach" | No detach control audited | S-DETACH remains specified for W7; no route added |
+
+Detach keeps the session's mailbox envelopes, checkpoints, logs and lease
+ledger, and neither requests nor grants a lease. `presence` is a hidden command,
+so no help golden, man page or reference page lists it.
+
 ## Codex live lifecycle observations (issue #193)
 
 | Capability | CLI | Native UI | Remote service |
