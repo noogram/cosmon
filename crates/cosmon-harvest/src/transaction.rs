@@ -1142,6 +1142,184 @@ fn branch_never_advanced(repo_root: &Path, branch: &str) -> bool {
         .is_some_and(|creation| creation == tip.trim())
 }
 
+/// What `cs done` could establish about a branch that reached the base outside
+/// it (issue #215, ADR-158 amendment "No merge, nothing to verify").
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutsideLanding {
+    /// The commit on the base's first-parent chain that landed the branch: the
+    /// merge commit for a `--no-ff` landing, the branch tip for a fast-forward.
+    landing: Option<String>,
+    /// The commit the branch was forked from, and the evidence it came from.
+    fork: Option<(String, &'static str)>,
+    /// Paths changed between `fork` and `landing`. `None` when either end is
+    /// unknown — unknown is never reported as "nothing changed".
+    changed: Option<Vec<PathBuf>>,
+}
+
+/// Run `git -C repo args`, answering stdout on success and `None` otherwise.
+fn git_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// Establish how `branch` reached `base` without `cs done`.
+///
+/// Why: when the closure skips the gate it also skips the only review of what
+/// landed, so the operator is told which trusted-shell paths moved. The range
+/// is the branch's fork point to the landing commit:
+///
+/// - **landing commit** — the oldest commit on `base`'s first-parent chain that
+///   descends from the branch tip (`rev-list --first-parent --ancestry-path`);
+///   the tip itself when the tip is on that chain (fast-forward).
+/// - **fork point** — the oldest reflog entry of the branch (its creation),
+///   when it is an ancestor of the tip; otherwise the merge base of the tip with
+///   the landing commit's first parent (the pre-landing base). A fast-forward
+///   with no usable reflog has neither, and stays unknown.
+///
+/// Every git failure degrades to `None` for the affected field.
+fn outside_landing(repo_root: &Path, branch: &str, base: &str) -> OutsideLanding {
+    let unknown = OutsideLanding {
+        landing: None,
+        fork: None,
+        changed: None,
+    };
+    let Some(tip) = git_stdout(
+        repo_root,
+        &["rev-parse", "--verify", &format!("{branch}^{{commit}}")],
+    )
+    .map(|s| s.trim().to_owned()) else {
+        return unknown;
+    };
+    let Some(chain) = git_stdout(repo_root, &["rev-list", "--first-parent", base]) else {
+        return unknown;
+    };
+    let landing = if chain.lines().any(|l| l == tip) {
+        Some(tip.clone())
+    } else {
+        git_stdout(
+            repo_root,
+            &[
+                "rev-list",
+                "--first-parent",
+                "--ancestry-path",
+                &format!("{tip}..{base}"),
+            ],
+        )
+        .and_then(|s| s.lines().last().map(str::to_owned))
+    };
+    let Some(landing) = landing else {
+        return unknown;
+    };
+    let is_ancestor = |a: &str, b: &str| {
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(["merge-base", "--is-ancestor", a, b])
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    let reflog_fork = git_stdout(
+        repo_root,
+        &[
+            "reflog",
+            "show",
+            "--format=%H",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .and_then(|s| s.lines().last().map(str::to_owned))
+    .filter(|c| is_ancestor(c, &tip));
+    let fork = reflog_fork
+        .map(|c| (c, "branch reflog (creation entry)"))
+        .or_else(|| {
+            git_stdout(
+                repo_root,
+                &["rev-parse", "--verify", &format!("{landing}^1")],
+            )
+            .map(|s| s.trim().to_owned())
+            .and_then(|pre_landing| git_stdout(repo_root, &["merge-base", &tip, &pre_landing]))
+            .map(|s| (s.trim().to_owned(), "merge base with the pre-landing base"))
+            .filter(|(c, _)| !c.is_empty())
+        });
+    let changed = fork.as_ref().and_then(|(fork_commit, _)| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(["diff", "-z", "--name-only", fork_commit, &landing])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(
+            String::from_utf8_lossy(&out.stdout)
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+                .collect(),
+        )
+    });
+    OutsideLanding {
+        landing: Some(landing),
+        fork,
+        changed,
+    }
+}
+
+/// The warning printed when a closure skipped the gate: which trusted-shell
+/// paths changed in the landed range, or that the range could not be
+/// established. `None` when the range is known and no surface path changed.
+fn outside_landing_warning(
+    landing: &OutsideLanding,
+    surface: &[String],
+    base: &str,
+) -> Option<String> {
+    let short = |c: &str| c.chars().take(10).collect::<String>();
+    let Some(changed) = landing.changed.as_ref() else {
+        return Some(format!(
+            "trusted shell surface: could not establish the branch's fork point or landing \
+             commit, so changes to it between them are unknown. The branch reached {base} \
+             outside `cs done`, which ran no gate and did not review it."
+        ));
+    };
+    let paths = shell_surface_changes(changed, surface, surface);
+    if paths.is_empty() {
+        return None;
+    }
+    let (fork, how) = landing.fork.as_ref()?;
+    let landed = landing.landing.as_deref()?;
+    Some(format!(
+        "trusted shell surface changed between the branch's fork point {} ({how}) and the \
+         commit that landed it, {}: {}. This change reached {base} outside `cs done` and was \
+         not reviewed by it; `cs done` ran no gate for this closure. Review it, then `cs trust`.",
+        short(fork),
+        short(landed),
+        paths.join(", ")
+    ))
+}
+
+/// The refusal for a configured `pre_done` hook under missing or stale trust.
+///
+/// Why its own wording: the hook is configured shell that `cs done` would run
+/// before anything else, so trust is legitimately required — and nothing was
+/// merged, so the post-merge refusal's "merge rolled back" would be false.
+fn pre_done_trust_refusal(
+    hook_cmd: &str,
+    mol_id: &MoleculeId,
+    cause: &anyhow::Error,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "`[hooks] pre_done` is configured (`{hook_cmd}`) and `cs done` would run it, so the \
+         repository's shell surface must be trusted first — and it is not.\n\n{cause}\n\n\
+         Nothing was run, merged or changed. Review the shell surface, run `cs trust`, then \
+         rerun `cs done {mol_id}`."
+    )
+}
+
 /// Structural post-condition for the final `cs done` guard: `true` iff
 /// `branch` still exists locally **and** carries commit(s) not reachable
 /// from `base`.
@@ -2814,7 +2992,8 @@ fn run_with_remote_before_lock(
                 // merge, so refuse `cs done` outright on an untrusted repository
                 // rather than running the hook — the operator is told to
                 // `cs trust` first.
-                crate::trust::ensure_trusted(&repo_root)?;
+                crate::trust::ensure_trusted(&repo_root)
+                    .map_err(|e| pre_done_trust_refusal(hook_cmd, &mol_id, &e))?;
                 run_pre_done_hook(&repo_root, hook_cmd, &mol_id).inspect_err(|e| {
                     // The refusal is now known, so its reason can be kept
                     // without writing ahead of authority freshness checks.
@@ -2851,6 +3030,14 @@ fn run_with_remote_before_lock(
 
     // Track whether merge succeeded — gates branch deletion (FIX 2).
     let mut merge_succeeded = false;
+
+    // Set when `cs done` found the branch already reachable from the base and
+    // moved nothing (`pre_merge_head..HEAD` is empty): the branch was landed
+    // outside `cs done`. There is then no tree `cs done` produced, so the
+    // post-merge gate, the surface check made on the gate's behalf and the
+    // `post_merge` deploy hook all stand down (ADR-158, "No merge, nothing to
+    // verify"). Holds the landing commit, recorded as evidence.
+    let mut landed_outside: Option<String> = None;
 
     // PR-B (task-20260714-aa2e): the durable `MergeCompleted` for a *successful*
     // merge is emitted ONCE, AFTER the post-merge gate — never before it. The
@@ -3312,10 +3499,26 @@ fn run_with_remote_before_lock(
                 );
                 actions.push(label.to_owned());
                 merge_succeeded = true;
-                // PR-B: pre-gate `Ok` removed — the branch was already
-                // reachable, so the gate still runs on the (usually empty)
-                // diff and the single post-gate event records its verdict.
+                // PR-B: pre-gate `Ok` removed; the single post-gate event
+                // records the verdict (or, below, that no gate ran).
                 merge_escalation_retries = Some(0);
+                // Nothing merged: HEAD is where it was before the loop. The
+                // comparison is on the revision, not on a flag, so a bookkeeping
+                // commit that did land would keep the gate.
+                if pre_merge_head.is_some() && git_head(&repo_root).ok() == pre_merge_head {
+                    let evidence = outside_landing(&repo_root, &branch_name, &base_branch);
+                    if let Some(landing) = evidence.landing.as_deref() {
+                        actions.push(format!("landed_outside_cs_done: {landing}"));
+                    }
+                    if let Some(w) = outside_landing_warning(
+                        &evidence,
+                        &crate::trust::surface_paths(&repo_root),
+                        &base_branch,
+                    ) {
+                        warnings.push(w);
+                    }
+                    landed_outside = Some(evidence.landing.unwrap_or_default());
+                }
             }
             Ok(MergeLoopOutcome::NoBranch) => {
                 actions.push("no_branch".to_owned());
@@ -3490,7 +3693,12 @@ fn run_with_remote_before_lock(
         // *delegated* command (the only rung that asked about trust), so a tree
         // the cargo rung verified, or one no gate was declared for, landed a
         // new `post_merge` hook unreviewed.
-        if let (Some(pmh), Some(pre)) = (pre_merge_head.as_deref(), pre_merge_trust.as_ref()) {
+        if let (Some(pmh), Some(pre)) = (
+            pre_merge_head
+                .as_deref()
+                .filter(|_| landed_outside.is_none()),
+            pre_merge_trust.as_ref(),
+        ) {
             let changed = post_merge_changed_files(&repo_root, pmh).unwrap_or_default();
             let merged_surface = crate::trust::surface_paths(&repo_root);
             let paths = shell_surface_changes(&changed, &pre.surface, &merged_surface);
@@ -3567,6 +3775,16 @@ fn run_with_remote_before_lock(
         }
 
         let gate_outcome = match pre_merge_head.as_deref() {
+            // No merge, nothing to verify: no integrity_command, no cargo
+            // check, no build_command, and no trust check on their behalf.
+            _ if landed_outside.is_some() => {
+                actions.push(
+                    "post_merge_compile_gate: skipped — cs done merged nothing (branch already \
+                     landed on the base)"
+                        .to_owned(),
+                );
+                GateOutcome::NothingToVerify
+            }
             Some(pmh) => match run_post_merge_gate(&repo_root, pmh, &project_cfg.gates) {
                 Ok(outcome) => outcome,
                 // A gate *error* — a declared command or `cargo check` returned
@@ -3617,6 +3835,7 @@ fn run_with_remote_before_lock(
             GateOutcome::Verified { description } => {
                 actions.push(format!("post_merge_compile_gate: {description}"));
             }
+            GateOutcome::NothingToVerify if landed_outside.is_some() => {}
             GateOutcome::NothingToVerify => {
                 actions.push(
                     "post_merge_compile_gate: nothing to verify (no Rust or build-structural change)"
@@ -3865,7 +4084,24 @@ fn run_with_remote_before_lock(
             );
         }
 
-        if let Some(ref hook_cmd) = cfg.hooks.post_merge {
+        if let (Some(hook_cmd), true) = (cfg.hooks.post_merge.as_ref(), landed_outside.is_some()) {
+            // The hook deploys what `cs done` merged. This `cs done` merged
+            // nothing, so there is nothing of its own to deploy: whoever moved
+            // the base owns the deploy. Witnessed like every other skip.
+            let reason =
+                "cs done merged nothing: the branch was already landed on the base".to_owned();
+            warnings.push(format!(
+                "post_merge hook not run ({reason}); deploy by hand if the landing needs it"
+            ));
+            emit_post_merge_hook_event(
+                &events_path,
+                &mol_id,
+                hook_cmd,
+                cosmon_core::event_v2::PostMergeHookResult::Skipped { reason },
+                merge_dispatch_seq,
+                &mut warnings,
+            );
+        } else if let Some(ref hook_cmd) = cfg.hooks.post_merge {
             // Trunk-boundary gate (task-20260725-b64f): the `post_merge` hook
             // DEPLOYS — the canonical `just install` rebuilds and reinstalls
             // the on-disk `cs` binary from the merged code. That is correct
