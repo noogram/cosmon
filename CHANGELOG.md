@@ -25,6 +25,10 @@ this stage.
 
 - Step changes preserve edited `briefing.md` bytes as `briefing.md.edited-<step>` and warn with the saved path and `--var-file` guidance; retries never overwrite an existing backup.
 
+- `cs done --expect-head <oid>` refuses, on the merge path and the already-merged path alike, when the molecule branch tip is not that object id; `cs done --print-merge-message` prints the exact completion merge message (subject and trailers) without changing state (#213).
+
+- `cs done` reports `empty_branch` only for a branch that never had a commit of its own, not for work that reached the base by fast-forward; the harvest queue names plain `cs done <id>` for landed work instead of `--no-merge`, and counts only first-parent merges as landing evidence (#213).
+
 - `cs patrol --propel`, `--nudge` and `--propel-api-stall` no longer nudge a worker waiting on background work: a running Claude background task reported on `Stop`, or a live `scripts/run-gates-bg.sh` run, suppresses the nudge for up to 45 minutes; `cs presence` rows gain an optional `background_tasks` record (count and kinds only) (#216).
 
 - `task-work`, `producer-work`, and `merge-conflict` use the project's own verification gates; `cs nucleate` includes declared `[gates]` commands in the briefing. Existing formula copies need updating: `cs init --upgrade` only backfills missing files and preserves existing ones.

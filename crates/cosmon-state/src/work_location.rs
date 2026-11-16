@@ -74,11 +74,13 @@ impl WorkLocation {
     }
 
     /// Mark the work as already merged: the way to finish the molecule is
-    /// `cs done <id> --no-merge`, which archives it and tears down its
-    /// worktree, session and worker without merging a second time.
+    /// plain `cs done <id>`. It finds the branch already on the base, merges
+    /// nothing a second time, and archives and tears down the worktree, session
+    /// and worker. `--no-merge` would do the same teardown but records a
+    /// `MergeSkipped` that is false for work that did land.
     #[must_use]
     pub fn already_merged(mut self) -> Self {
-        self.harvest_command = format!("cs done {} --no-merge", self.molecule);
+        self.harvest_command = format!("cs done {}", self.molecule);
         self.landed = true;
         self
     }
@@ -97,5 +99,27 @@ impl WorkLocation {
             self.worktree,
             outcome.replace("{}", &self.harvest_command)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #213: the hint for landed work is plain `cs done`, never
+    /// `--no-merge`, which would record a `MergeSkipped` that is false.
+    #[test]
+    fn landed_work_points_at_plain_cs_done() {
+        let location = WorkLocation {
+            molecule: "task-20260101-aaaa".to_owned(),
+            branch: "feat/task-20260101-aaaa".to_owned(),
+            worktree: "/repo/.worktrees/task-20260101-aaaa".to_owned(),
+            harvest_command: "cs done task-20260101-aaaa".to_owned(),
+            landed: false,
+        }
+        .already_merged();
+        assert!(location.landed);
+        assert_eq!(location.harvest_command, "cs done task-20260101-aaaa");
+        assert!(!location.render().contains("--no-merge"));
     }
 }

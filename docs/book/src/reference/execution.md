@@ -225,6 +225,12 @@ SEE ALSO: cs complete (state transition only), cs tackle (counterpart).
 * `--allow-protected-change` — Merge even though the worker branch changed a path the molecule declared protected (`cs nucleate --protect`, issue #94).
 
    Without it, `cs done` refuses such a branch (`protected_path_modified`, exit 78) and names each protected path it changed. Protected paths are reference inputs; a branch that rewrites them can make any result "match". Pass this flag only when you, the operator, have read the change and it is intended — for example a reference dataset that was itself wrong. No effect on a molecule that declared no protected path.
+* `--expect-head <OID>` — Refuse unless the molecule branch tip is exactly this object id.
+
+   Pins what lands (or is closed as landed) to what was gated: an operator who built and verified a batch of merges outside cosmon passes the branch head they verified, and a commit added to the branch afterwards makes `cs done` refuse instead of landing or closing something nobody gated. Applies on the merge path and on the already-merged path alike. Accepts a full or unambiguous abbreviated object id, resolved with git. On refusal nothing is merged and `merged_at` is not stamped.
+* `--print-merge-message` — Print the commit message `cs done` would write for this molecule's merge, then exit without merging or changing any state.
+
+   The text is the subject (the `[project] merge_subject` template when configured, otherwise `Merge branch 'feat/<id>'`) followed by one trailer paragraph: attribution trailers, then the lineage trailers (`Mol-Id`, `Mission-Id`, `Depends-On`). It is rendered by the same function the merge uses, so `git merge --no-ff -F <file>` of the printed text yields the message `cs done` would have written, before any commit-msg or sign-off hook runs.
 
 
 
