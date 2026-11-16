@@ -235,6 +235,32 @@ pub struct Args {
     /// itself wrong. No effect on a molecule that declared no protected path.
     #[arg(long)]
     allow_protected_change: bool,
+
+    /// Refuse unless the molecule branch tip is exactly this object id.
+    ///
+    /// Pins what lands (or is closed as landed) to what was gated: an
+    /// operator who built and verified a batch of merges outside cosmon
+    /// passes the branch head they verified, and a commit added to the
+    /// branch afterwards makes `cs done` refuse instead of landing or
+    /// closing something nobody gated. Applies on the merge path and on the
+    /// already-merged path alike. Accepts a full or unambiguous abbreviated
+    /// object id, resolved with git. On refusal nothing is merged and
+    /// `merged_at` is not stamped.
+    #[arg(long, value_name = "OID", conflicts_with = "print_merge_message")]
+    expect_head: Option<String>,
+
+    /// Print the commit message `cs done` would write for this molecule's
+    /// merge, then exit without merging or changing any state.
+    ///
+    /// The text is the subject (the `[project] merge_subject` template when
+    /// configured, otherwise `Merge branch 'feat/<id>'`) followed by one
+    /// trailer paragraph: attribution trailers, then the lineage trailers
+    /// (`Mol-Id`, `Mission-Id`, `Depends-On`). It is rendered by the same
+    /// function the merge uses, so `git merge --no-ff -F <file>` of the
+    /// printed text yields the message `cs done` would have written, before
+    /// any commit-msg or sign-off hook runs.
+    #[arg(long, conflicts_with_all = ["dry_run", "review_shell"])]
+    print_merge_message: bool,
 }
 
 impl Args {
@@ -299,6 +325,10 @@ impl Args {
             // made by the operator at their terminal, with the diff in front
             // of them — the same reason `--dry-run` stays local.
             allow_protected_change: false,
+            // The wire has no head pin and no message preview: both are
+            // operator-terminal gestures.
+            expect_head: None,
+            print_merge_message: false,
         }
     }
 
@@ -2453,6 +2483,18 @@ fn run_with_remote_before_lock(
             branch_head_oid(&repo_root, &branch_name)?,
         ))
     };
+    // `--expect-head`: what lands, or is closed as landed, must be exactly what
+    // was gated. Checked here — after the preliminary head capture the locked
+    // recheck compares against, before any gate, event, merge or stamp — so a
+    // refusal changes nothing, and the same check covers the merge path and the
+    // already-merged path.
+    if let Some(expected) = args.expect_head.as_deref() {
+        let actual = match preliminary_git.as_ref() {
+            Some((_, head)) => head.clone(),
+            None => branch_head_oid(&repo_root, &branch_name)?,
+        };
+        verify_expected_head(&repo_root, &branch_name, actual.as_deref(), expected)?;
+    }
     let preliminary_mission = if preliminary_facts.as_ref().is_some_and(|facts| {
         if remote.is_some() {
             cosmon_core::remote_harvest::resolve_remote_policy(&facts.config.harvest_authority)
@@ -6281,6 +6323,56 @@ fn branch_head_oid(repo_root: &Path, branch: &str) -> anyhow::Result<Option<Stri
     Ok(Some(oid))
 }
 
+/// Refuse unless the molecule branch tip is the object the operator pinned
+/// with `cs done --expect-head`.
+///
+/// `expected` is resolved with git to a commit, so a full or unambiguous
+/// abbreviated id both work; an id git cannot resolve (unknown, or ambiguous)
+/// is itself a refusal. `actual` is the branch tip read by the caller, `None`
+/// when the branch does not exist — a pin cannot be satisfied by an absent
+/// branch. The error names both full ids.
+///
+/// # Errors
+///
+/// Returns an error when the pinned id does not resolve, the branch is absent,
+/// or the tip differs from the pinned commit.
+fn verify_expected_head(
+    repo_root: &Path,
+    branch: &str,
+    actual: Option<&str>,
+    expected: &str,
+) -> anyhow::Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("{expected}^{{commit}}"))
+        .output()?;
+    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !output.status.success() || resolved.is_empty() {
+        anyhow::bail!(
+            "cs done refused: --expect-head `{expected}` does not resolve to a single \
+             commit in this repository. Nothing was merged and `merged_at` was not stamped."
+        );
+    }
+    let Some(actual) = actual else {
+        anyhow::bail!(
+            "cs done refused: --expect-head {resolved} was given but branch `{branch}` \
+             does not exist, so its tip cannot be {resolved}. Nothing was merged and \
+             `merged_at` was not stamped."
+        );
+    };
+    if actual != resolved {
+        anyhow::bail!(
+            "cs done refused: branch `{branch}` is at {actual}, not the pinned \
+             --expect-head {resolved}. Something was added to or removed from the branch \
+             after the head was gated. Nothing was merged and `merged_at` was not stamped; \
+             gate the new head and pass it, or drop --expect-head."
+        );
+    }
+    Ok(())
+}
+
 /// Migrate a historical reservation only when independent state, event, and
 /// Git evidence agree that its molecule landed. A receipt by itself, a stamp
 /// by itself, or mere ancestry is never sufficient.
@@ -9554,6 +9646,8 @@ mod tests {
             skip_pre_done_hook: false,
             deploy_off_trunk: false,
             allow_protected_change: false,
+            expect_head: None,
+            print_merge_message: false,
         }
     }
 
