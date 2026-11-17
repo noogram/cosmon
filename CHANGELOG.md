@@ -37,6 +37,8 @@ this stage.
 
 - `cs complete`: when `surface_visual` refuses and the galaxy lacks `verify-surface`, show `cs init --upgrade` before the nucleation command.
 
+- The resident runtime stamps `merged_at` only when `cs done` exited 0 and git shows the molecule branch reachable from its base; a failed or unmerged `cs done` is logged with the molecule and exit code, leaves `merged_at` unset and keeps dependents blocked (#214).
+
 - The stale-trust refusal now says that one `cs trust` covers every pending closure, that the refused command must be rerun, and that `cs done <id> --review-shell` reviews and grants in one step when the change arrives with the merge; the trust model is unchanged (#215).
 
 - `cs done` of a branch already on the base (landed outside `cs done`, `pre_merge_head..HEAD` empty) runs no post-merge gate and no `post_merge` deploy hook, makes no trust check on their behalf, records the landing commit as `landed_outside_cs_done`, and warns which trusted-shell-surface paths changed between the branch's fork point and the landing commit; a configured `pre_done` under stale trust is refused with its own wording, never "merge rolled back" (#215, #213).

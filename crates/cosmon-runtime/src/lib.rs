@@ -377,10 +377,29 @@ pub trait Executor {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeError`] if the teardown fails. Implementations
-    /// should treat failures as non-fatal (log and continue).
+    /// Returns [`RuntimeError`] if the teardown fails or the merge did not
+    /// happen. The runtime logs it, leaves `merged_at` unset (dependents stay
+    /// blocked) and carries on with the other molecules.
     fn on_complete(&self, _id: &MoleculeId) -> Result<(), RuntimeError> {
         Ok(())
+    }
+
+    /// Report whether the molecule's branch really landed on its base.
+    ///
+    /// The runtime asks this after [`Self::on_complete`] succeeded and
+    /// `cs done` did not record `merged_at` itself. `merged_at` releases the
+    /// molecule's dependents (ADR-041), so it must mean "the branch is
+    /// reachable from its base", not "a teardown command returned".
+    ///
+    /// Default: `true` — in-process and test executors have no git branch to
+    /// check. The production [`SubprocessExecutor`] asks git.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] if the question cannot be answered (git could
+    /// not be run). The runtime then leaves `merged_at` unset.
+    fn branch_landed(&self, _mol: &MoleculeData) -> Result<bool, RuntimeError> {
+        Ok(true)
     }
 
     /// Drive a `Running` molecule whose current step does not require a
@@ -434,6 +453,9 @@ pub struct SubprocessExecutor {
     /// When true, redirect child stdout and stderr to `/dev/null` so the
     /// parent's own rendering stays clean.
     quiet: bool,
+    /// The `cs` program to spawn. `"cs"` (resolved on `PATH`) in production;
+    /// tests point it at a stand-in script.
+    cs_program: std::ffi::OsString,
 }
 
 impl SubprocessExecutor {
@@ -445,7 +467,18 @@ impl SubprocessExecutor {
         Self {
             cwd: cwd.into(),
             quiet: false,
+            cs_program: "cs".into(),
         }
+    }
+
+    /// Spawn `program` instead of the `cs` found on `PATH`.
+    ///
+    /// Exists so a test can stand in for `cs done` (a script that exits with
+    /// a chosen code) without editing the process-wide `PATH`.
+    #[must_use]
+    pub fn with_cs_program(mut self, program: impl Into<std::ffi::OsString>) -> Self {
+        self.cs_program = program.into();
+        self
     }
 
     /// Silence child stdout/stderr. Returns `self` so callers can chain:
@@ -518,7 +551,7 @@ impl Executor for SubprocessExecutor {
         // would make the runtime's own dispatch look like a sticky human
         // lease. `<pid>` is the `cs run` process id (this executor runs
         // inside it), matching the claim `apply_evolve` stamped on the flip.
-        let mut cmd = Command::new("cs");
+        let mut cmd = Command::new(&self.cs_program);
         cmd.arg("tackle")
             .arg(id.as_str())
             .arg("--by")
@@ -560,7 +593,7 @@ impl Executor for SubprocessExecutor {
         // (dispatched next) see it in their worktree. Without this,
         // each worker lives in an isolated branch and never sees
         // the predecessor's work.
-        let mut cmd = Command::new("cs");
+        let mut cmd = Command::new(&self.cs_program);
         cmd.args(["done", id.as_str()]).current_dir(&self.cwd);
         // ADR-080 §3.5: `cs done` is operator-only, and `cs` now refuses it
         // under the RPP request envelope. This teardown is not the request —
@@ -579,17 +612,46 @@ impl Executor for SubprocessExecutor {
         })?;
 
         if !status.success() {
-            // Non-fatal: the molecule IS completed in cosmon state.
-            // The merge might fail (conflict, no branch, etc.) but
-            // the DAG should continue. Log and move on.
-            eprintln!(
-                "⚠ cs done {} exited with {} (non-fatal)",
-                id,
-                status.code().unwrap_or(-1)
-            );
+            // The molecule IS completed in cosmon state, but its branch did
+            // not land (conflict, red post-merge gate, stale trust, no
+            // branch). Report it as an error so the runtime leaves
+            // `merged_at` unset; the loop itself carries on.
+            return Err(RuntimeError::Dispatch {
+                id: id.clone(),
+                reason: format!(
+                    "cs done exited with {}; branch not merged",
+                    status
+                        .code()
+                        .map_or_else(|| "signal".to_owned(), |c| c.to_string())
+                ),
+            });
         }
 
         Ok(())
+    }
+
+    fn branch_landed(&self, mol: &MoleculeData) -> Result<bool, RuntimeError> {
+        let branch = format!("refs/heads/feat/{}", mol.id);
+        let git = |args: &[&str]| -> Result<std::process::ExitStatus, RuntimeError> {
+            Command::new("git")
+                .args(args)
+                .current_dir(&self.cwd)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map_err(|e| RuntimeError::Dispatch {
+                    id: mol.id.clone(),
+                    reason: format!("git failed to launch: {e}"),
+                })
+        };
+        if !git(&["rev-parse", "--verify", "--quiet", &branch])?.success() {
+            // No branch ref: nothing to land for a molecule `cs done`
+            // archived without a branch (delib, drainage). A molecule that
+            // `cs done` recorded as not integrated has not landed.
+            return Ok(mol.archived && mol.non_integration.is_none());
+        }
+        let base = mol.base_branch.as_deref().unwrap_or("HEAD");
+        Ok(git(&["merge-base", "--is-ancestor", &branch, base])?.success())
     }
 
     fn drain_native_tail(&self, mol: &MoleculeData) -> Result<bool, RuntimeError> {
@@ -627,7 +689,7 @@ impl Executor for SubprocessExecutor {
             return Ok(false);
         }
 
-        let mut cmd = Command::new("cs");
+        let mut cmd = Command::new(&self.cs_program);
         cmd.arg("tackle")
             .arg(mol.id.as_str())
             .arg("--by")
@@ -1521,19 +1583,34 @@ impl Runtime {
                 if completion_handled.contains(&mol.id) {
                     continue;
                 }
-                if self.executor.on_complete(&mol.id).is_ok() {
-                    // Stamp `merged_at` once the executor reports the
-                    // branch has landed. This is the single point where
-                    // the merge-before-dispatch temporal invariant is
-                    // promoted to a structural fact on disk (ADR-041),
-                    // so the next `frontier::compute_from_molecules`
-                    // pass can release dependents. Idempotent: we only
-                    // set the field if it was unset.
-                    if let Ok(mut latest) = self.store.load_molecule(&mol.id) {
-                        if latest.merged_at.is_none() {
-                            latest.merged_at = Some(Utc::now());
-                            if self.store.save_molecule(&mol.id, &latest).is_ok() {
-                                stamped_any = true;
+                match self.executor.on_complete(&mol.id) {
+                    Err(e) => eprintln!(
+                        "⚠ merge pass: {e}; merged_at left unset, dependents stay blocked (non-fatal)"
+                    ),
+                    Ok(()) => {
+                        // Stamp `merged_at` only when the branch landed:
+                        // this is the point where the merge-before-dispatch
+                        // invariant becomes a structural fact on disk
+                        // (ADR-041) and releases dependents. A value `cs done`
+                        // already recorded is never overwritten.
+                        if let Ok(mut latest) = self.store.load_molecule(&mol.id) {
+                            if latest.merged_at.is_none() {
+                                match self.executor.branch_landed(&latest) {
+                                    Ok(true) => {
+                                        latest.merged_at = Some(Utc::now());
+                                        if self.store.save_molecule(&mol.id, &latest).is_ok() {
+                                            stamped_any = true;
+                                        }
+                                    }
+                                    Ok(false) => eprintln!(
+                                        "⚠ merge pass: cs done {} exited 0 but its branch is not reachable from the base; merged_at left unset (non-fatal)",
+                                        mol.id
+                                    ),
+                                    Err(e) => eprintln!(
+                                        "⚠ merge pass: cannot verify the branch of {}: {e}; merged_at left unset (non-fatal)",
+                                        mol.id
+                                    ),
+                                }
                             }
                         }
                     }
