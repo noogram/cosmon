@@ -179,6 +179,16 @@ refused on a leased mission.
 `inbox` still acknowledges the messages it prints; `inbox --peek` does not.
 Acknowledgment records consumption only and grants no lifecycle authority.
 
+## Explicit presence detach (issue #212, W5 increment 2)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| End a session's presence without waiting for `gc` | `cs presence detach [--session <SID>] [--json]` removes the snapshot through the presence store; a repeat exits successfully, writes nothing and says "nothing to detach" | No detach control audited | S-DETACH remains specified for W7; no route added |
+
+Detach keeps the session's mailbox envelopes, checkpoints, logs and lease
+ledger, and neither requests nor grants a lease. `presence` is a hidden command,
+so no help golden, man page or reference page lists it.
+
 ## Codex live lifecycle observations (issue #193)
 
 | Capability | CLI | Native UI | Remote service |
@@ -402,6 +412,9 @@ private signing key enters the service or a worker through these commands.
 |---|---|---|---|
 | Explain a failed merge | `cs done` refuses overlapping uncommitted base-checkout edits before `git merge`, names each path and asks the pilot to commit or stash the changes; unrelated unstaged edits are allowed. Dirty-base preflight requires Git 2.38+. Text prints the diagnosis; JSON includes `error` and `dirty_paths` | No equivalent diagnostic view audited | The harvest response retains the transaction error; no dirty-path projection audited |
 | Finish a harvest in a project with tracked archive state | `cs done` commits eligible archive, event, and frontier changes after teardown and skips ignored molecule directories without an artifact warning | No equivalent action audited | The shared harvest transaction applies the same state commit |
+| Close a molecule only if its branch is the head that was gated | `cs done <id> --expect-head <oid>` refuses, before any gate, merge or `merged_at` stamp, when the branch tip is not that object id (full or abbreviated); it applies to the merge path and the already-merged path | No equivalent control audited | Not on the wire: `HarvestOptions` has no head pin, so a request cannot carry one |
+| Print the merge commit message `cs done` would write | `cs done <id> --print-merge-message` prints the subject and the attribution and lineage trailers, changing no state; `git merge --no-ff -F` of the printed text gives the same message `cs done` writes | No equivalent control audited | Not on the wire: a local preview |
+| Tell landed work from an empty branch | `cs done` reports `empty_branch` only when the branch tip is still its creation point (read from the branch reflog; no reflog means no claim); fast-forwarded work reports `already_merged`. The queue hint for landed work is plain `cs done <id>` | No equivalent label audited | The harvest response carries the same action label |
 
 The dirty-path list is a checkout observation at the failure report. It may
 include state written while recording that failure.

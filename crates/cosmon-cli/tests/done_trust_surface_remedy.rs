@@ -537,3 +537,72 @@ fn never_trusted_repo_keeps_the_not_trusted_message() {
         "no merge-staleness sequence.\n{text}"
     );
 }
+
+/// Issue #215 (B1), operator decision 2026-11-16: closing a branch that is
+/// ALREADY on the base runs no post-merge gate and needs no shell trust.
+///
+/// Trust is granted, the branch lands outside `cs done`, then the shell surface
+/// moves on the base (a push, a hand merge). `cs done` merges nothing, so there
+/// is no tree for the gate to verify: it closes the molecule, leaves the trust
+/// grant exactly as found, and never claims a rollback. This test replaces the
+/// earlier characterisation of the refusal (`POST-MERGE COMPILE GATE REFUSED —
+/// merge rolled back` over a no-op), which the amendment to ADR-158 retires.
+/// The broader matrix lives in `done_already_landed_no_gate.rs`.
+#[test]
+fn done_of_already_merged_branch_after_base_surface_change_closes_without_gate_or_trust() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo(
+        repo,
+        GATED_CONFIG,
+        &[
+            ("scripts/gate.sh", "exit 0\n"),
+            ("src/main.py", "print('hi')\n"),
+        ],
+    );
+    let mol_id = nucleate_terminal(repo, store.path());
+    let branch = stage_branch(repo, &mol_id, &[("src/work.py", "print('work')\n")]);
+    grant_trust(repo, store.path());
+    // The branch lands outside `cs done`, then the base's shell surface moves.
+    git_ok(
+        repo,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "land the branch by hand",
+            &branch,
+        ],
+    );
+    write_file(repo, "scripts/extra.sh", "exit 0\n");
+    write_file(
+        repo,
+        ".cosmon/config.toml",
+        "[project]\nproject_id = \"issue-74\"\n\n[gates]\nintegrity_command = 'sh scripts/gate.sh && sh scripts/extra.sh'\n",
+    );
+    git_ok(repo, &["add", "-A"]);
+    git_ok(repo, &["commit", "-qm", "change the shell surface on main"]);
+    let main_before = rev(repo, "main");
+
+    let out = done(repo, store.path(), &mol_id);
+    let text = combined(&out);
+    eprintln!("exit={:?}\n{text}", out.status.code());
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(text.contains("already_merged"), "{text}");
+    assert!(
+        !text.contains("GATE REFUSED") && !text.contains("rolled back"),
+        "{text}"
+    );
+    assert_eq!(rev(repo, "main"), main_before, "{text}");
+    assert!(!git(repo, &["rev-parse", "--verify", &branch])
+        .status
+        .success());
+    // The closure never touched the grant: it is still stale, as found.
+    let trust = cs(repo, store.path())
+        .args(["trust", "--status"])
+        .output()
+        .unwrap();
+    assert!(combined(&trust).contains("stale"), "{}", combined(&trust));
+}

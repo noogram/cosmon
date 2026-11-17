@@ -21,15 +21,27 @@ this stage.
 
 - `cs tackle --if-needed` exits 0 and prints `already dispatched to <session> (adapter <a>, model <m>)` when the molecule already has a live worker matching any explicit `--adapter`/`--model`; a different adapter or model, or a dead worker, fails as before, and it conflicts with `--force` (#217).
 
+- `cs presence detach [--session <SID>] [--json]` removes a session's presence snapshot and nothing else (mailbox, checkpoints, logs and leases stay); repeating it succeeds, writes nothing and reports "nothing to detach".
+
 - `cs sessions ack <key>` acknowledges one pilot-mailbox envelope separately from reading it; duplicate acknowledgments succeed without writing, and unknown keys are refused.
 
 - Step changes preserve edited `briefing.md` bytes as `briefing.md.edited-<step>` and warn with the saved path and `--var-file` guidance; retries never overwrite an existing backup.
+
+- `cs done --expect-head <oid>` refuses, on the merge path and the already-merged path alike, when the molecule branch tip is not that object id; `cs done --print-merge-message` prints the exact completion merge message (subject and trailers) without changing state (#213).
+
+- `cs done` reports `empty_branch` only for a branch that never had a commit of its own, not for work that reached the base by fast-forward; the harvest queue names plain `cs done <id>` for landed work instead of `--no-merge`, and counts only first-parent merges as landing evidence (#213).
 
 - `cs patrol --propel`, `--nudge` and `--propel-api-stall` no longer nudge a worker waiting on background work: a running Claude background task reported on `Stop`, or a live `scripts/run-gates-bg.sh` run, suppresses the nudge for up to 45 minutes; `cs presence` rows gain an optional `background_tasks` record (count and kinds only) (#216).
 
 - `task-work`, `producer-work`, and `merge-conflict` use the project's own verification gates; `cs nucleate` includes declared `[gates]` commands in the briefing. Existing formula copies need updating: `cs init --upgrade` only backfills missing files and preserves existing ones.
 
 - `cs complete`: when `surface_visual` refuses and the galaxy lacks `verify-surface`, show `cs init --upgrade` before the nucleation command.
+
+- The stale-trust refusal now says that one `cs trust` covers every pending closure, that the refused command must be rerun, and that `cs done <id> --review-shell` reviews and grants in one step when the change arrives with the merge; the trust model is unchanged (#215).
+
+- `cs done` of a branch already on the base (landed outside `cs done`, `pre_merge_head..HEAD` empty) runs no post-merge gate and no `post_merge` deploy hook, makes no trust check on their behalf, records the landing commit as `landed_outside_cs_done`, and warns which trusted-shell-surface paths changed between the branch's fork point and the landing commit; a configured `pre_done` under stale trust is refused with its own wording, never "merge rolled back" (#215, #213).
+
+- `cs done` finishes removing a worktree that `git worktree remove` left half-deleted because a process was still writing under it: up to ten retries over five seconds, confined to `.worktrees/<id>` without following symlinks; if the directory remains, the warning names its path, the likely cause and `cs purge --worktrees` (#218).
 
 - `cs done` refuses overlapping uncommitted base-checkout edits before attempting a merge, names the files and asks the pilot to commit or stash them, and preserves the harvestable molecule; unrelated unstaged edits remain allowed (dirty-base preflight requires Git 2.38+).
 

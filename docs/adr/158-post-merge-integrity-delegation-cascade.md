@@ -234,3 +234,62 @@ unchanged. The shared helper is `cmd::egress_delegate`.
   — the delegated shell is refused fail-closed rather than run unconfined.
 - `empty_gates_fall_back_to_cargo_and_need_no_trust` /
   `declared_gates_delegate_and_are_trust_gated` (validate unit) — tier-2 symmetry.
+
+## Amendment 2026-11-17 — No merge, nothing to verify (issues #215, #213)
+
+Decided by the operator on 2026-11-16, recorded as a proposal in ADR-190 §8.
+
+**No merge, nothing to verify.** When `cs done` finds the branch already
+reachable from base (`AlreadyMerged`) and `pre_merge_head..HEAD` is empty, the
+post-merge cascade runs no rung: no `integrity_command`, no cargo check, no
+`build_command`, and no `ensure_trusted` call on the gate's behalf. `cs done`
+stamps `merged_at` from ancestry and records the landing commit as evidence (the
+`landed_outside_cs_done: <oid>` action). The gate exists to verify a tree that
+`cs done` produced; on this path `cs done` produced none, and the tree on main
+was verified, or not, by whoever moved main. ADR-052 §I9 is unchanged: the
+molecule must still be Completed. The `pre_done` trust call and the #109
+surface check are not changed by this paragraph: the #109 check is a function of
+the merge's diff and is empty here, so it is not evaluated.
+
+What was implemented beyond that paragraph:
+
+- **`post_merge` hook.** Before the amendment the hook ran on this path: it
+  passed the trunk-boundary gate and `ensure_trusted`, and deployed (or skipped
+  with a warning under stale trust). It now does not run when `cs done` merged
+  nothing. It deploys what `cs done` merged, and there is none. The skip is
+  witnessed as a `PostMergeHook` `Skipped` event and a warning, so a deploy the
+  operator expected is visible as not done.
+- **`pre_done` hook.** Unchanged in substance: it is configured shell that would
+  run, so it needs trust. Under missing or stale trust the refusal now names the
+  hook, says `cs done` would run it, and gives `cs trust` then a rerun. It does
+  not say "merge rolled back", because nothing was merged.
+- **Warning replacing the accidental stop.** A closure that skipped the gate
+  prints a warning naming every trusted-shell-surface path (the paths
+  `trust::surface_paths` reports for the checkout) that changed between the
+  branch's fork point and the commit that landed it, and says the change reached
+  the base outside `cs done` and was not reviewed by it. The landing commit is
+  the oldest first-parent commit of the base descending from the branch tip (the
+  tip itself for a fast-forward). The fork point is the oldest reflog entry of
+  the branch when it is an ancestor of the tip, otherwise the merge base of the
+  tip with the landing commit's first parent. When neither can be established,
+  the warning says the changes are unknown; unknown is never reported as none.
+  No warning when the range is known and no surface path changed.
+- **Limits.** The surface is read from the current checkout, so a delegated
+  script the range deleted is not named; the range is fork point to landing
+  commit, so surface edits that other commits made to the base inside that range
+  are named too; a surface change after the landing commit is outside the range
+  and is not reported. The warning does not grant, revoke or refresh trust.
+- **Not changed.** The trust model, the rollback compare-and-swap, gate slots,
+  and any train verb.
+
+Falsifiers (`crates/cosmon-cli/tests/done_already_landed_no_gate.rs`):
+`closing_a_no_ff_landed_branch_runs_no_gate_and_needs_no_trust`,
+`closing_a_fast_forwarded_branch_runs_no_gate_and_needs_no_trust`,
+`closure_records_the_landing_commit_as_evidence`,
+`closure_warns_about_a_surface_path_the_landing_changed`,
+`closure_warns_about_a_surface_path_a_fast_forward_changed`,
+`closure_does_not_warn_when_the_landing_changed_no_surface_path`,
+`a_real_merge_by_cs_done_still_runs_the_gate_and_refuses_under_stale_trust`,
+`a_real_merge_by_cs_done_with_fresh_trust_runs_the_gate`,
+`post_merge_hook_runs_after_a_real_merge_and_not_after_an_already_landed_closure`,
+`pre_done_under_stale_trust_is_refused_with_its_own_wording`.

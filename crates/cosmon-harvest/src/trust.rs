@@ -708,6 +708,11 @@ fn stale_message(root: &Path) -> String {
          granted trust\n  (.cosmon/config.toml or .cosmon/formulas/* were \
          modified). Re-review the change, then re-grant:\n\
          \n      cs trust\n\
+         \n  One grant covers every pending closure of this repository. Then \
+         rerun the command that was refused (for example `cs done <id>`); it \
+         is not resumed for you.\n\
+         \n  If the change comes with the merge being harvested, \
+         `cs done <id> --review-shell` reviews and grants in one step.\n\
          \n  repository: {}",
         root.display()
     )

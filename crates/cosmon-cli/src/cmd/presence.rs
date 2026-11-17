@@ -9,11 +9,12 @@
 //! headline — plus a `session-<sid>.log` / `session-<sid>.seek` pair carrying the
 //! whisper pull channel.
 //!
-//! Seven subcommands ship together:
+//! Eight subcommands ship together:
 //!
 //! - `ping` — upsert this session's snapshot (C-PRESENCE-CORE).
 //! - `ls` — scan the directory and render live peers.
 //! - `gc` — sweep stale snapshots whose pids no longer exist.
+//! - `detach` — withdraw this session's snapshot on its own say-so.
 //! - `poll` — pull new whisper log lines since the last read.
 //! - `send` — deliver one traced envelope to a peer's mailbox (M2).
 //! - `inbox` — read and acknowledge this session's pending envelopes (M2).
@@ -77,6 +78,15 @@ pub struct Args {
     pub command: Sub,
 }
 
+impl Args {
+    /// Whether this invocation is `presence detach`, which must leave the
+    /// event log alone.
+    #[must_use]
+    pub fn is_detach(&self) -> bool {
+        matches!(self.command, Sub::Detach(_))
+    }
+}
+
 /// Presence subcommands — see module doc for the full picture.
 ///
 /// `PingArgs` is the widest variant by some margin (ten optional flags), and
@@ -93,6 +103,9 @@ pub enum Sub {
     Ls(LsArgs),
     /// Remove stale snapshots whose pids are no longer alive.
     Gc,
+    /// Withdraw this session's presence snapshot. Repeatable; keeps mailbox,
+    /// checkpoints, logs and leases.
+    Detach(DetachArgs),
     /// Print unread log lines for a session and bump the seek pointer.
     Poll(PollArgs),
     /// Deliver one traced message envelope to a peer session's mailbox.
@@ -350,6 +363,18 @@ pub struct InboxArgs {
     pub all: bool,
 }
 
+/// Arguments for `cs presence detach`.
+#[derive(clap::Args, Default)]
+pub struct DetachArgs {
+    /// Session whose snapshot to remove. Defaults to the current session,
+    /// resolved the way `ping` resolves it.
+    #[arg(long, value_name = "SID")]
+    pub session: Option<String>,
+    /// Emit one JSON object instead of a sentence.
+    #[arg(long)]
+    pub json: bool,
+}
+
 /// Arguments for `cs presence poll`.
 #[derive(clap::Args, Default)]
 pub struct PollArgs {
@@ -369,6 +394,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         Sub::Ping(a) => run_ping(ctx, a),
         Sub::Ls(a) => run_ls(ctx, a),
         Sub::Gc => run_gc(ctx),
+        Sub::Detach(a) => run_detach(ctx, a),
         Sub::Poll(a) => run_poll(ctx, a),
         Sub::Send(a) => run_send(ctx, a),
         Sub::Inbox(a) => run_inbox(ctx, a),
@@ -691,6 +717,25 @@ fn run_gc(ctx: &Context) -> anyhow::Result<()> {
         println!("{v}");
     } else {
         println!("presence gc: removed {removed} stale snapshot(s)");
+    }
+    Ok(())
+}
+
+/// Remove one session's presence snapshot through the store's writer.
+///
+/// Detaching a session with no snapshot succeeds and writes nothing, so the
+/// verb can be retried. It never touches the mailbox, checkpoints, logs or any
+/// lease: it neither requests nor grants authority.
+fn run_detach(ctx: &Context, args: &DetachArgs) -> anyhow::Result<()> {
+    let sid = resolve_or_derive_sid(args.session.as_deref())?;
+    let detached = store(ctx).detach(&sid)?;
+    if args.json || ctx.json {
+        let v = serde_json::json!({ "session": sid.as_str(), "detached": detached });
+        println!("{v}");
+    } else if detached {
+        println!("presence detach: {} detached", sid.as_str());
+    } else {
+        println!("presence detach: {}: nothing to detach", sid.as_str());
     }
     Ok(())
 }
