@@ -96,8 +96,9 @@ pub mod store;
 
 pub use checkpoint::{
     checkpoint_schema_v1, Claim, EvidenceRef, PilotCheckpoint, Scope, Stance, CHECKPOINT_SCHEMA_V1,
+    MAX_CHECKPOINT_BYTES, MAX_EVIDENCE_REFS,
 };
 pub use drift::{compare, CitedClaim, DriftClass, DriftFinding, DriftReport, Side, Verdict};
 pub use error::CheckpointError;
 pub use id::{CheckpointId, ClaimId, FindingId, MissionId, SessionId};
-pub use store::CheckpointStore;
+pub use store::{CheckpointStore, Publication};

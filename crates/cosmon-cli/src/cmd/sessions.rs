@@ -378,7 +378,9 @@ pub struct AckArgs {
 #[allow(clippy::large_enum_variant)]
 #[derive(clap::Subcommand)]
 pub enum CheckpointSub {
-    /// Publish this pilot's hand-over record for a mission.
+    /// Publish this pilot's hand-over record for a mission. At most 262144
+    /// bytes and 100 evidence references; republishing the same `--id` with the
+    /// same content succeeds without writing, with other content it is refused.
     Publish(CheckpointPublishArgs),
     /// Write the same record as a draft, for the hook to publish at the next
     /// natural transition. Takes exactly the flags `publish` takes.
@@ -402,7 +404,8 @@ pub struct CheckpointPublishArgs {
     /// the epoch on its own presence snapshot, then to 0.
     #[arg(long, value_name = "N")]
     pub epoch: Option<u64>,
-    /// Identifier for this checkpoint. Defaults to a timestamped id.
+    /// Identifier for this checkpoint, which is also its idempotency key.
+    /// Defaults to a timestamped id.
     #[arg(long, value_name = "ID")]
     pub id: Option<String>,
     /// Something this mission covers. Repeatable.
@@ -429,10 +432,12 @@ pub struct CheckpointPublishArgs {
     /// uncertainty belongs, never inside a stance.
     #[arg(long = "question", value_name = "TEXT")]
     pub questions: Vec<String>,
-    /// Evidence for one claim, as `SUBJECT=LOCATOR[#DIGEST]`. Repeatable.
+    /// Evidence for one claim, as `SUBJECT=LOCATOR[#DIGEST]`. The locator is
+    /// an artifact reference, never a path on this machine. Repeatable.
     #[arg(long = "evidence", value_name = "SUBJECT=LOCATOR")]
     pub evidence: Vec<String>,
-    /// Evidence for the checkpoint as a whole, as `LOCATOR[#DIGEST]`.
+    /// Evidence for the checkpoint as a whole, as `LOCATOR[#DIGEST]`. The
+    /// locator is an artifact reference, never a path on this machine.
     /// Repeatable.
     #[arg(long = "checkpoint-evidence", value_name = "LOCATOR")]
     pub checkpoint_evidence: Vec<String>,
@@ -1977,7 +1982,8 @@ fn build_checkpoint(
 
 fn run_checkpoint_publish(ctx: &Context, args: &CheckpointPublishArgs) -> anyhow::Result<()> {
     let cp = build_checkpoint(ctx, args)?;
-    let path = checkpoints(ctx).publish(&cp)?;
+    let publication = checkpoints(ctx).publish(&cp)?;
+    let path = publication.path;
 
     if ctx.json {
         let mut v = serde_json::to_value(&cp)?;
@@ -1986,15 +1992,26 @@ fn run_checkpoint_publish(ctx: &Context, args: &CheckpointPublishArgs) -> anyhow
                 "path".to_owned(),
                 serde_json::Value::from(path.display().to_string()),
             );
+            obj.insert(
+                "duplicate".to_owned(),
+                serde_json::Value::Bool(!publication.written),
+            );
         }
         println!("{v}");
-    } else {
+    } else if publication.written {
         println!(
             "published {id} for {mission} by {sid} at epoch {epoch} → {path}",
             id = cp.id,
             mission = cp.mission_id,
             sid = cp.session_id,
             epoch = cp.lease_epoch,
+            path = path.display(),
+        );
+    } else {
+        println!(
+            "{id} for {mission} was already published with this content — nothing written → {path}",
+            id = cp.id,
+            mission = cp.mission_id,
             path = path.display(),
         );
     }

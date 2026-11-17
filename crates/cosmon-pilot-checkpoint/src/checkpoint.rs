@@ -57,6 +57,17 @@ pub struct EvidenceRef {
     pub digest: Option<String>,
 }
 
+/// Largest serialised checkpoint the store writes or reads, in bytes.
+///
+/// The limit of routes S-CKPUT and S-CKGET in the collaboration contract
+/// (`docs/specs/cross-machine-collaboration.md` §4).
+pub const MAX_CHECKPOINT_BYTES: u64 = 262_144;
+
+/// Most evidence references one checkpoint may cite, claims included.
+///
+/// The limit of route S-CKPUT in the collaboration contract.
+pub const MAX_EVIDENCE_REFS: usize = 100;
+
 impl EvidenceRef {
     /// A reference to `locator`, with no digest pinned.
     #[must_use]
@@ -74,6 +85,24 @@ impl EvidenceRef {
             locator: locator.into(),
             digest: Some(digest.into()),
         }
+    }
+}
+
+impl EvidenceRef {
+    /// Whether the locator names a filesystem path or URL of the publisher's
+    /// machine: absolute, home-relative, parent-traversing, a `file:` URL or a
+    /// Windows drive path.
+    ///
+    /// Such a locator is never readable by a recipient on another machine, so
+    /// the store refuses it rather than record a pointer nobody can follow.
+    #[must_use]
+    pub fn is_client_path(&self) -> bool {
+        let l = self.locator.trim();
+        let bytes = l.as_bytes();
+        l.starts_with(['/', '\\', '~'])
+            || l.to_ascii_lowercase().starts_with("file:")
+            || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+            || l.split(['/', '\\']).any(|segment| segment == "..")
     }
 }
 
@@ -280,6 +309,33 @@ impl PilotCheckpoint {
             unresolved_questions: Vec::new(),
             created_at,
         })
+    }
+
+    /// Every evidence reference the checkpoint cites: its own, then those of
+    /// each hypothesis and each intended next action.
+    ///
+    /// Exists so the publication bound counts what a reader would have to
+    /// resolve, not only the top-level list.
+    pub fn all_evidence(&self) -> impl Iterator<Item = &EvidenceRef> {
+        self.evidence_refs.iter().chain(
+            self.current_hypotheses
+                .iter()
+                .chain(&self.intended_next_actions)
+                .flat_map(|c| c.evidence.iter()),
+        )
+    }
+
+    /// Whether `other` records the same content, ignoring only when it was
+    /// created.
+    ///
+    /// A retried publication is stamped with a later time than the first
+    /// attempt; that stamp is provenance, not content, so it is the one field
+    /// an idempotent retry may differ in.
+    #[must_use]
+    pub fn same_content_as(&self, other: &Self) -> bool {
+        let mut normalised = other.clone();
+        normalised.created_at = self.created_at;
+        *self == normalised
     }
 
     /// Every subject this checkpoint takes a position on, in either list.

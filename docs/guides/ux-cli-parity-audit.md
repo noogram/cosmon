@@ -189,6 +189,17 @@ Detach keeps the session's mailbox envelopes, checkpoints, logs and lease
 ledger, and neither requests nor grants a lease. `presence` is a hidden command,
 so no help golden, man page or reference page lists it.
 
+## Local checkpoint custody (issue #212, W5 completion)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Publish a checkpoint under a retry-safe key | `cs sessions checkpoint publish --id <ID>` writes through the existing checkpoint store. The same id with the same content (publication time aside) exits 0 and writes nothing; other content under that id is refused. `--json` adds `duplicate` | No checkpoint publisher audited | S-CKPUT remains specified for W7; no route added |
+| Bound a checkpoint | Refuses more than 262144 serialised bytes, more than 100 evidence references (claims included), or evidence whose locator is a path or `file:` URL of the publisher's machine; nothing is written. `checkpoint show` and `list` refuse a stored record over 262144 bytes before reading it | None audited | S-CKGET and S-CKCMP remain specified for W7; no route added |
+
+Evidence-readability is not checked yet; see the open questions in the
+collaboration contract's 2026-11-17 amendment. Control handover (W6) is not
+shipped, so `takeover request|show` stay local advisory records.
+
 ## Codex live lifecycle observations (issue #193)
 
 | Capability | CLI | Native UI | Remote service |
