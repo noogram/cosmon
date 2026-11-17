@@ -1,9 +1,10 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 # ADR-190 — Bounded verification and train landing: gate slots, one writer of main, `cs done` the only closer
 
-**Status:** Proposed (2026-11-16). The operator accepts or amends it when the
-pull request is reviewed.
-**Date:** 2026-11-16.
+**Status:** Accepted (2026-11-17), decided by the operator on review of pull
+request #222, with two amendments (see "Amendments on acceptance" below).
+Proposed 2026-11-16.
+**Date:** 2026-11-16 (proposed); 2026-11-17 (accepted).
 **Decider:** Noogram.
 **Authoring molecule:** `task-20261116-dcd7`.
 **Parent deliberation:** `delib-20261116-d0fc` (panel: architect, torvalds,
@@ -13,9 +14,9 @@ adversary).
 
 **Amends:** the lock order of
 [ADR-110](110-single-writer-trunk-and-coordination-invariants.md) I1 (adds
-the gate slot ahead of trunk). **Proposes an amendment to:**
-[ADR-158](158-post-merge-integrity-delegation-cascade.md), in §8 below, to be
-applied to ADR-158 only if the operator accepts it.
+the gate slot ahead of trunk). **Proposed an amendment to:**
+[ADR-158](158-post-merge-integrity-delegation-cascade.md), in §8 below. It was
+applied to ADR-158 by pull request #225 (amendment of 2026-11-17).
 
 **Binds:**
 [ADR-052](052-one-ledger-one-writer-one-witness.md) §I9 (a merged branch
@@ -31,6 +32,33 @@ admission at `cs tackle`, train landing) and the invariants each must keep.
 It adds no code. The increments that implement it are separate molecules;
 their refutation tests are this ADR's acceptance criteria (§4).
 
+**Amendments on acceptance (2026-11-17).** The operator accepted this ADR on
+review of pull request #222 with two amendments, written into the text below
+and marked with their date:
+
+1. A run waiting for a gate slot is distinguished from a run holding one, and
+   the patrol's background-work ceiling applies from slot acquisition (§3
+   Slots, §4 B1).
+2. The status of the increments is recorded, since several landed between
+   proposal and acceptance (§1.1, §7, §8, §9, §10, and the table below).
+   Statements that were true on 2026-11-16 are kept and annotated, not
+   rewritten.
+
+**Increment status (2026-11-17).**
+
+| Increment | What | Status |
+|---|---|---|
+| A1 | Compare-and-swap rollback in `cs done` | Pending (pull request #227 or later); not on main |
+| A2 | Closure of a landed branch without re-gating; ADR-158 amendment (§8) | Landed, pull request #225 |
+| A3 | `empty_branch` only when the branch never had a commit | Landed, pull request #225 |
+| A4 | Queue hint and first-parent landed-evidence scan | Landed, pull request #225 |
+| C1 | `cs done --expect-head <oid>` | Landed, pull request #225 |
+| C2 | `cs done --print-merge-message` | Landed, pull request #225 |
+| — | Runtime stamps `merged_at` only when the branch landed (§9 question 1) | Landed, pull request #226 |
+| B1, B2 | Gate slots and named pools | Not started |
+| B3 | Admission at `cs tackle` | Not started |
+| D1 | Landing verb | Not started |
+
 ---
 
 ## 1 · Context
@@ -43,31 +71,34 @@ one night.
 
 ### 1.1 What the code does today (read, not run)
 
-Each line below was re-read in the tree at the time of writing. Paths are
-repository-relative.
+Each line below was re-read in the tree at the time of writing (2026-11-16);
+the line numbers are those of that tree and have since moved. Paths are
+repository-relative. Rows that changed before acceptance carry a dated note
+naming the change; the original statement is kept.
 
 | Fact | Where |
 |---|---|
 | `cs done` takes the trunk lock before the merge and holds it through the merge, the `merged_at` stamp, the post-merge hook and the archive write; it drops it before the fleet purge. `cs stitch` takes the trunk lock alone. | `crates/cosmon-harvest/src/transaction.rs:2789-2813`; `crates/cosmon-cli/src/cmd/stitch.rs:265` |
 | Nothing bounds the worker-side full gate. The formula tells workers to run it through `[gates].background_runner_command`, which is `./scripts/run-gates-bg.sh`; that script takes no lock. | `.cosmon/formulas/task-work.formula.toml:66-90`; `.cosmon/config.toml:95`; `scripts/run-gates-bg.sh` |
 | `cs tackle` has no admission refusal. Its pressure check runs only with `--reclaim-derived`, reclaims derived output, reports and swallows failures, and never refuses a spawn. | `crates/cosmon-cli/src/cmd/tackle.rs:1669`, `:4175-4205` |
-| The post-merge gate cascade has no empty-diff short-circuit when a gate command is declared. Rung 1 (`integrity_command`) always runs; rung 2 (cargo) returns `NothingToVerify` on a diff with no build-relevant file only when no `build_command` is declared, and otherwise declines to rung 3 (`build_command`). | `transaction.rs:6945-6987`, `:7092-7098` |
+| The post-merge gate cascade has no empty-diff short-circuit when a gate command is declared. Rung 1 (`integrity_command`) always runs; rung 2 (cargo) returns `NothingToVerify` on a diff with no build-relevant file only when no `build_command` is declared, and otherwise declines to rung 3 (`build_command`). *2026-11-17 (A2, #225):* when `cs done` merged nothing (`AlreadyMerged`, HEAD unchanged), no rung runs. | `transaction.rs:6945-6987`, `:7092-7098` |
 | A delegated gate command calls `ensure_trusted` first and returns `Unverified{expected:true}` on stale trust. | `transaction.rs:7004-7020` |
-| On a branch already reachable from base (`AlreadyMerged`), `cs done` sets `merge_succeeded` and the gate runs on the empty diff `pre_merge_head..HEAD`. | `transaction.rs:3221-3241`, `:3022-3026`, `:3493`; diff range at `:7180-7200` |
+| On a branch already reachable from base (`AlreadyMerged`), `cs done` sets `merge_succeeded` and the gate runs on the empty diff `pre_merge_head..HEAD`. *2026-11-17 (A2, #225):* no gate runs on that path; the landing commit is recorded as `landed_outside_cs_done: <oid>`. | `transaction.rs:3221-3241`, `:3022-3026`, `:3493`; diff range at `:7180-7200` |
 | Cosmon itself declares `build_command = "cargo check --workspace"`. | `.cosmon/config.toml:76` |
-| With `[hooks].pre_done` configured, `cs done` calls `ensure_trusted` before the merge block and refuses on stale trust. | `transaction.rs:2692-2702` |
-| The `post_merge` hook block is guarded only by `merge_succeeded && !resuming_integrated`, so it also runs on the `AlreadyMerged` path when the hook is configured, the base is the trunk (or `--deploy-off-trunk` is given) and trust holds; on stale trust it is skipped with a warning. | `transaction.rs:3728`, `:3791`, `:3855` |
+| With `[hooks].pre_done` configured, `cs done` calls `ensure_trusted` before the merge block and refuses on stale trust. *2026-11-17 (A2, #225):* unchanged in substance; the refusal now names the hook and does not say the merge was rolled back. | `transaction.rs:2692-2702` |
+| The `post_merge` hook block is guarded only by `merge_succeeded && !resuming_integrated`, so it also runs on the `AlreadyMerged` path when the hook is configured, the base is the trunk (or `--deploy-off-trunk` is given) and trust holds; on stale trust it is skipped with a warning. *2026-11-17 (A2, #225):* the hook no longer runs when `cs done` merged nothing; the skip is recorded as a `PostMergeHook` `Skipped` event with a warning. | `transaction.rs:3728`, `:3791`, `:3855` |
 | The #109 shell-surface check compares the files changed over `pre_merge_head..HEAD`. On the `AlreadyMerged` path that range is empty. | `transaction.rs:3410-3420`, `:6638-6647`, `:7180-7200` |
-| A post-merge gate failure rolls main back with `git reset --hard <pre_merge_head>`, without checking that main still points at this invocation's merge. | `transaction.rs:6798-6836`, `:7666-7680` |
-| `empty_branch` is reported when the branch is zero commits ahead of base and its tip is on base's first-parent chain. A branch landed by a `--no-ff` merge is labelled `already_merged`; a fast-forwarded branch is labelled `empty_branch`. | `transaction.rs:947-955`, `:979-998`, `:1030-1064`, `:3230-3235` |
-| `cs done` writes the merge subject from the project's `[project] merge_subject` template when one is set, otherwise `Merge branch '<branch>'`, followed by one trailer paragraph: `Co-Authored-By` attribution first, then `Mol-Id`, `Mission-Id` and one `Depends-On` per `blocked_by` parent. | `transaction.rs:3151-3166`, `:5385-5402`; `crates/cosmon-harvest/src/lineage.rs:117-128`; `crates/cosmon-core/src/config.rs:1537` |
+| A post-merge gate failure rolls main back with `git reset --hard <pre_merge_head>`, without checking that main still points at this invocation's merge. *2026-11-17:* still true on main; the compare-and-swap rollback (A1) is pending. | `transaction.rs:6798-6836`, `:7666-7680` |
+| `empty_branch` is reported when the branch is zero commits ahead of base and its tip is on base's first-parent chain. A branch landed by a `--no-ff` merge is labelled `already_merged`; a fast-forwarded branch is labelled `empty_branch`. *2026-11-17 (A3, #225):* `empty_branch` now also requires the tip to equal the oldest entry of the branch reflog; without a reflog the branch is not claimed empty, and a fast-forwarded branch is labelled `already_merged`. | `transaction.rs:947-955`, `:979-998`, `:1030-1064`, `:3230-3235` |
+| `cs done` writes the merge subject from the project's `[project] merge_subject` template when one is set, otherwise `Merge branch '<branch>'`, followed by one trailer paragraph: `Co-Authored-By` attribution first, then `Mol-Id`, `Mission-Id` and one `Depends-On` per `blocked_by` parent. *2026-11-17 (C2, #225):* `cs done --print-merge-message` prints that message without merging, built from the same paragraphs as the merge. | `transaction.rs:3151-3166`, `:5385-5402`; `crates/cosmon-harvest/src/lineage.rs:117-128`; `crates/cosmon-core/src/config.rs:1537` |
 | `cs done` refuses `--strategy ff-only` whenever trailers exist, because a fast-forward has no commit to carry them. | `transaction.rs:474-492` |
 | CI provenance accepts `Merge branch 'feat/<mol_id>'` (pattern not end-anchored), a base-sync subject only of the form `Merge branch 'main' into feat/<mol_id>`, a `Base-Sync: <base>..feat/<mol_id>` trailer subject to a structural trunk check, and integration shapes for `feat/issue-N` only. `Merge branch 'train' into feat/<id>` matches none of them. | `scripts/check-provenance.sh:160`, `:192`, `:202`, `:228-240` |
 | `cs stitch` writes `stitch(<mol>): merge into <base>`, which matches none of the provenance patterns. | `stitch.rs:450` |
-| The harvest queue's landed-evidence scan reads `git log main --merges` (not first-parent) and counts any subject containing `feat/<id>`, for molecules whose branch no longer exists. For landed work the queue's hint is `cs done <id> --no-merge`, which records `MergeSkipped`. | `crates/cosmon-cli/src/cmd/harvest_queue.rs:147-187`; `crates/cosmon-state/src/work_location.rs:76-84`; `transaction.rs:3388` |
+| The harvest queue's landed-evidence scan reads `git log main --merges` (not first-parent) and counts any subject containing `feat/<id>`, for molecules whose branch no longer exists. For landed work the queue's hint is `cs done <id> --no-merge`, which records `MergeSkipped`. *2026-11-17 (A4, #225):* the scan reads `git log main --first-parent --merges` and only the merged-branch side of the subject; the hint is plain `cs done <id>`. | `crates/cosmon-cli/src/cmd/harvest_queue.rs:147-187`; `crates/cosmon-state/src/work_location.rs:76-84`; `transaction.rs:3388` |
 | The harvest door already bounds the closed-but-unintegrated backlog by an operator-sealed ceiling. | `crates/cosmon-filestore/src/harvest_door.rs:356-367` |
+| *Added 2026-11-17 (#216).* Patrol does not nudge a worker whose background work is in flight and younger than `PROPEL_BACKGROUND_CEILING` (45 minutes). A detached gate run counts as in flight while `gates.pid` names a live process and `gates.exit` is absent in the molecule directory; its age is the modification time of `gates.pid`, which `scripts/run-gates-bg.sh` writes when it detaches. | `crates/cosmon-core/src/propel.rs` (`decide_nudge`, rule 3b); `crates/cosmon-cli/src/cmd/patrol_background.rs` (`gate_run_age`) |
 | `[harvest_authority] required` is a boolean field of the project config. | `crates/cosmon-core/src/config.rs:678-684` |
-| `cs done` is not the only production writer of `merged_at`. The resident runtime stamps it after its executor's `on_complete` returns `Ok`, and the production executor returns `Ok` even when the `cs done` child exits non-zero. | `crates/cosmon-runtime/src/lib.rs:557-594`, `:1528-1538` |
+| `cs done` is not the only production writer of `merged_at`. The resident runtime stamps it after its executor's `on_complete` returns `Ok`, and the production executor returns `Ok` even when the `cs done` child exits non-zero. *2026-11-17 (#226):* the executor now returns an error when `cs done` exits non-zero, and the runtime stamps `merged_at` only when `cs done` did not and `Executor::branch_landed` reports the branch reachable from its base. | `crates/cosmon-runtime/src/lib.rs:557-594`, `:1528-1538` |
 
 ### 1.2 What follows from it
 
@@ -140,6 +171,31 @@ needs a successor ADR.
 - A run waiting for a slot is queued, not failed (#112).
 - Holders of pool X never block holders of pool Y.
 
+**Queued is not a stall (amendment of 2026-11-17).** With N slots and more
+than N workers, a run can wait for a slot longer than
+`PROPEL_BACKGROUND_CEILING` (45 minutes, issue #216). If that wait counted as
+"gate run in flight", the ceiling would lapse and patrol would nudge a worker
+that is legitimately queued.
+- The gate runner records the wait and the run separately, in the molecule
+  directory: `gates.queued` is written when the runner detaches, before it
+  requests a slot, and names the waiting process; `gates.pid` is written only
+  once the slot is held, and `gates.queued` is then removed. `gates.exit`
+  keeps its meaning.
+- Patrol skips a worker whose run is queued, without applying the ceiling,
+  only when all of the following hold: the `gates.queued` process is alive,
+  neither `gates.pid` nor `gates.exit` exists, and the pool has at least one
+  live holder. Any other combination (dead queued process, no live holder,
+  unreadable files) is unknown and is decided as before the rule existed,
+  so a stale `gates.queued` cannot silence patrol.
+- The ceiling applies from slot acquisition: the age of a run in flight is
+  the age of `gates.pid`, and time spent queued is not counted in it.
+- Rationale for exempting the wait from the ceiling: the wait ends when a
+  holder releases its slot, and each holder's run is itself under the
+  ceiling. This bounds the wait by the holders' runs; it is not a bound of
+  45 minutes. Past the ceiling, patrol resumes nudging the holder; it does
+  not free the slot, which only the holder's exit releases. With several
+  runs queued, a run's wait is the sum of the runs ahead of it.
+
 **Admission.**
 - A refusal happens before any worktree, branch or session exists, and names
   the bound that was exceeded and the observed value.
@@ -187,6 +243,14 @@ implementation.
   This catches a per-worktree state-dir resolution.
 - Refuted if `gates.exit` appears before the bundle has run.
 - Static check: refuted if any `cs done` path acquires a slot.
+- Queued versus running (amendment of 2026-11-17). N=1, two workers; the
+  second run stays queued longer than `PROPEL_BACKGROUND_CEILING` while the
+  first holds the slot. Refuted if patrol nudges the second worker while it
+  is queued. Then `kill -9` the first holder's process: refuted if the second
+  run does not acquire the slot, or if it is nudged on acquisition on account
+  of its time in the queue (its age restarts at `gates.pid`).
+- Refuted if a `gates.queued` whose process is dead, or whose pool has no
+  live holder, still exempts the worker from nudging.
 
 **B2 — Named pools.**
 - Refuted if holders of pool X block holders of pool Y.
@@ -302,6 +366,10 @@ This section locates the intersections; it does not redesign trust.
   under stale trust; whether it should be skipped on an empty diff is left
   to the A2 increment to decide. The `post_merge` hook on the same path
   skips with a warning under stale trust (`:3855`).
+  *2026-11-17 (A2, #225):* decided. The `pre_done` hook still needs trust,
+  because it is configured shell that would run; under stale trust the
+  refusal names the hook and gives `cs trust` then a rerun. The `post_merge`
+  hook no longer runs when `cs done` merged nothing.
 - **Interim review gap opened by A2.** Today a stale-trust refusal at closure
   is the only stop, and an accidental one, for a shell-surface change that an
   operator train landed by fast-forward. A2 removes that stop on the gate
@@ -310,11 +378,23 @@ This section locates the intersections; it does not redesign trust.
   therefore warn, naming every trusted-surface path changed between the
   molecule's fork point and its landing commit, or the operator accepts the
   gap explicitly when accepting A2.
+  *2026-11-17 (A2, #225):* the warning exists. A closure that skipped the
+  gate names every trusted-surface path changed between the branch's fork
+  point (oldest branch reflog entry, else a merge base) and the landing
+  commit, and says the changes are unknown when that range cannot be
+  established. Its limits are recorded in ADR-158's amendment of 2026-11-17.
+  The warning reviews nothing; the gap closes only with the landing verb.
 
-## 8 · Proposed amendment to ADR-158 (increment A2)
+## 8 · Amendment to ADR-158 (increment A2)
 
-> **Proposed, not applied.** This paragraph is written into ADR-158 only if
-> the operator accepts increment A2.
+> **Applied.** Proposed here on 2026-11-16 as "proposed, not applied". The
+> operator accepted increment A2, and the paragraph was written into
+> ADR-158 as its amendment of 2026-11-17 by pull request #225 (merged),
+> together with the warning that replaces the accidental stop (§7). The
+> text below is the paragraph as proposed; ADR-158 holds the applied text,
+> which also records what the increment implemented beyond it (the
+> `post_merge` hook, the `pre_done` refusal wording, the warning) and its
+> falsifiers.
 
 > **No merge, nothing to verify.** When `cs done` finds the branch already
 > reachable from base (`AlreadyMerged`) and `pre_merge_head..HEAD` is empty,
@@ -340,6 +420,13 @@ no gate command.
    `:1528-1538`). This ADR adds no writer and does not change that path.
    Whether it contradicts the closure invariant of §3 needs its own
    decision.
+   *Answered 2026-11-17 by pull request #226.* The runtime remains a writer
+   of `merged_at`, but only for a branch that landed: the executor reports
+   an error when `cs done` exits non-zero, and the runtime stamps
+   `merged_at` only when `cs done` did not and `Executor::branch_landed`
+   finds the branch reachable from its base
+   (`crates/cosmon-runtime/tests/merged_at_landed.rs`). The record of
+   "merged" stays git ancestry plus `merged_at`, as §3 requires.
 2. **Counting rule for `max_active`.** Whether Completed-but-unharvested and
    awaiting-human molecules count toward the cap.
 3. **Lifecycle path for a red-train culprit's fix.** Today it goes through
@@ -348,11 +435,18 @@ no gate command.
 4. **Tackle-time base oid.** Whether the molecule records the oid it forked
    from, which the `empty_branch` fix (A3) needs to report `empty_branch`
    only when the tip equals the fork point.
+   *Answered 2026-11-17 by the A3 change (#225).* The oid is not stored on
+   the molecule, which records only the base branch name. The fork point is
+   read from the branch reflog (its oldest entry); without a usable reflog
+   the branch is not claimed empty.
 5. **`cs stitch` provenance subject.** `stitch(<mol>): merge into <base>`
    fails CI provenance. It is a separate defect to be filed on its own.
 6. **`post_merge` hook per member.** Read, not run: the hook runs on the
    `AlreadyMerged` path (§1.1), so a train of k members runs it k times.
    Whether a landing should run it once instead is open.
+   *Premise changed 2026-11-17 (A2, #225):* the hook no longer runs when
+   `cs done` merged nothing, so closing k train members runs it zero times.
+   Whether a landing should run it once is still open.
 7. **Operator ergonomics.** The deliberation had no operator-ergonomics seat.
    The cost of the no-train-sync rule against the reporter's 76-minute median
    is estimated, not measured.
@@ -363,6 +457,7 @@ no gate command.
   (trunk before fleet, trunk dropped before the fleet purge) is unchanged.
 - `cs done` gains `--expect-head` and an exported merge-message renderer
   (CLI changes; help, man page and docs are updated with them).
+  *Landed 2026-11-17 (C1, C2, #225).*
 - An operator train is safe to run with the defect fixes and
   `--expect-head` alone, landing under its own lock; the landing verb moves
   that last step under the trunk lock.
@@ -370,3 +465,5 @@ no gate command.
   closure of a landed branch without re-gating, the `empty_branch` label, the
   queue hint and landed-evidence scan) are independent of this ADR except
   for the ADR-158 amendment in §8.
+  *2026-11-17:* all landed by #225 except the compare-and-swap rollback
+  (A1), which is pending.
