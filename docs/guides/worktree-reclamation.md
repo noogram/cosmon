@@ -116,3 +116,28 @@ an editor, a detached worker pane, or a half-finished rebase.
 Removing a worktree stays a thing a human asks for by name: `cs done` after a
 harvest, or `git worktree remove`. The register above is what makes that choice
 informed.
+
+## `[admission]` — refusing a spawn on machine state
+
+```toml
+# Optional. Both bounds unset (the default) means `cs tackle` behaves as before.
+[admission]
+max_active = 2                  # refuse when this many molecules are active
+min_free_bytes = 10737418240    # refuse below 10 GiB free on the volume holding .worktrees/
+```
+
+`cs tackle` checks these before the dispatch claim, so a refusal leaves no
+worktree, branch or session. It exits 1 and names the bound and the observed
+value. There is no bypass flag; wait, or raise the bound.
+
+**Counting rule for `max_active`:** a molecule is active when its status is
+`running` and its recorded worker session is alive. `completed` (harvested or
+not), `frozen`, `starved`, `collapsed` and awaiting-human molecules are not
+counted, and the molecule being tackled never counts against itself. The rule
+is one function, `cosmon_core::spawn_admission::counts_as_active`.
+
+**Free space** comes from `df -Pk` on the nearest existing ancestor of
+`.worktrees/`. If the probe fails, the spawn is admitted and a notice goes to
+stderr. Load average and memory are not inputs (ADR-190 D2). TOML integers are
+signed 64-bit, so the largest `min_free_bytes` a file can state is
+9223372036854775807.

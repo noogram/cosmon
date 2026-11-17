@@ -727,6 +727,35 @@ fn run_with_transport(
         );
     }
 
+    // Admission (issue #214, ADR-190 D2): refuse on a configured active-molecule
+    // cap or free-space floor, before the dispatch claim and before any
+    // worktree, branch or session exists. Unset config costs nothing.
+    if !args.dry_run {
+        let admission_config =
+            cosmon_filestore::load_project_config(&super::resolve_config_from_context(ctx))
+                .unwrap_or_default()
+                .admission;
+        if admission_config.is_enabled() {
+            let fallback;
+            let liveness: &dyn TransportBackend = if let Some(backend) = injected {
+                backend
+            } else {
+                fallback = TmuxBackend::new(super::tmux_socket_name(ctx));
+                &fallback
+            };
+            let worktrees_root = find_repo_root()?.join(".worktrees");
+            super::spawn_admission::enforce(
+                &admission_config,
+                &store,
+                liveness,
+                &super::spawn_admission::DfProbe,
+                &mol_id,
+                &worktrees_root,
+                &mut |msg| eprintln!("{msg}"),
+            )?;
+        }
+    }
+
     // Claim the molecule before resolving its adapter or model. The resident
     // runtime shells out to this same command, so the lock serializes both
     // contenders through the recorded spawn verdict. A dry run has no spawn
