@@ -56,7 +56,10 @@ impl Galaxy {
                     visit(root, &path, out);
                 } else {
                     out.insert(
-                        path.strip_prefix(root).expect("relative").display().to_string(),
+                        path.strip_prefix(root)
+                            .expect("relative")
+                            .display()
+                            .to_string(),
                         std::fs::read(&path).expect("bytes"),
                     );
                 }
@@ -92,7 +95,12 @@ fn republishing_the_same_key_and_content_succeeds_without_writing() {
     let args = ["--hypothesis", "cursor=byte offsets", "--risk", "none"];
     success(&g.publish("cp-idem", &args));
     let before = g.files();
-    assert_eq!(before.len(), 1, "one record is written: {:?}", before.keys());
+    assert_eq!(
+        before.len(),
+        1,
+        "one record is written: {:?}",
+        before.keys()
+    );
 
     let again = success(&g.publish("cp-idem", &args));
     assert!(again.contains("already published"), "{again}");
@@ -172,7 +180,14 @@ fn showing_a_stored_record_over_262144_bytes_is_refused_before_it_is_read() {
     record["open_risks"] = serde_json::json!(["y".repeat(262_144)]);
     std::fs::write(&path, serde_json::to_vec(&record).expect("bytes")).expect("grow record");
 
-    let error = refused(&g.cs(&["checkpoint", "show", "--mission", MISSION, "--id", "cp-grown"]));
+    let error = refused(&g.cs(&[
+        "checkpoint",
+        "show",
+        "--mission",
+        MISSION,
+        "--id",
+        "cp-grown",
+    ]));
     assert!(error.contains("262144"), "the limit is named: {error}");
 }
 
