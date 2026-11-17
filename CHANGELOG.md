@@ -37,6 +37,8 @@ this stage.
 
 - The stale-trust refusal now says that one `cs trust` covers every pending closure, that the refused command must be rerun, and that `cs done <id> --review-shell` reviews and grants in one step when the change arrives with the merge; the trust model is unchanged (#215).
 
+- `cs done` of a branch already on the base (landed outside `cs done`, `pre_merge_head..HEAD` empty) runs no post-merge gate and no `post_merge` deploy hook, makes no trust check on their behalf, records the landing commit as `landed_outside_cs_done`, and warns which trusted-shell-surface paths changed between the branch's fork point and the landing commit; a configured `pre_done` under stale trust is refused with its own wording, never "merge rolled back" (#215, #213).
+
 - `cs done` finishes removing a worktree that `git worktree remove` left half-deleted because a process was still writing under it: up to ten retries over five seconds, confined to `.worktrees/<id>` without following symlinks; if the directory remains, the warning names its path, the likely cause and `cs purge --worktrees` (#218).
 
 - `cs done` refuses overlapping uncommitted base-checkout edits before attempting a merge, names the files and asks the pilot to commit or stash them, and preserves the harvestable molecule; unrelated unstaged edits remain allowed (dirty-base preflight requires Git 2.38+).
