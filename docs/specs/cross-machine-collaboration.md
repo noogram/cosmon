@@ -76,7 +76,7 @@ are advisory and rebuildable from the canonical files.
 | `binding-store` | Collaboration bindings, attachment verifiers and revisions | Host state, written only by the local binding command (W2) |
 | `pilot-mailbox` | Pilot messages and their client acknowledgments | Existing pilot mailbox of the mission (W5) |
 | `presence-store` | Tagged remote-presence records with server-observed heartbeat | Existing presence store (W5) |
-| `checkpoint-store` | Immutable checkpoint revisions, takeover requests | Existing checkpoint store (W5) |
+| `checkpoint-store` | Immutable checkpoint revisions | Existing checkpoint store (W5) |
 | `lease-ledger` | Signed pilot-lease grants and epochs | Existing lease ledger; no route in this contract writes it |
 
 ## 3. Scopes
@@ -89,8 +89,8 @@ table confers lifecycle, harvest, spawn or lease rights.
 |---|---|---|
 | `cosmon:work:read` | List a work's roster and revision, plus metadata for messages sent or received by the admitted caller seat; peek at or pull its own inbox | - |
 | `cosmon:work:write` | Send a message and acknowledge one addressed to the caller's seat | `cosmon:work:read` |
-| `cosmon:sessions:read` | List authorized peers, pull pilot messages, read checkpoints and takeover requests | - |
-| `cosmon:sessions:write` | Attach, heartbeat, detach, send and acknowledge pilot messages, publish checkpoints, request takeover | `cosmon:sessions:read` |
+| `cosmon:sessions:read` | List authorized peers, pull pilot messages, read checkpoints | - |
+| `cosmon:sessions:write` | Attach, heartbeat, detach, send and acknowledge pilot messages, publish checkpoints | `cosmon:sessions:read` |
 
 Missing evidence bytes move through the existing artifact read and write
 routes under their own scopes; this contract adds none for them.
@@ -128,8 +128,6 @@ model received or considered the content.
 | S-CKPUT | checkpoint publish | `POST /v1/pilot/{mission}/checkpoints` | `cosmon:sessions:write` | `cs sessions checkpoint publish` | `checkpoint-store` | 262144 bytes per checkpoint, 100 evidence references | idempotent-key | advisory-write | W7 |
 | S-CKGET | checkpoint read | `GET /v1/pilot/{mission}/checkpoints/{revision}` | `cosmon:sessions:read` | `cs sessions checkpoint show` | `checkpoint-store` | 262144 bytes | safe-repeat | read-only | W7 |
 | S-CKCMP | checkpoint compare | `GET /v1/pilot/{mission}/checkpoints/{revision}/comparison` | `cosmon:sessions:read` | `cs sessions drift` | `checkpoint-store` | 262144 bytes | safe-repeat | read-only | W7 |
-| S-TKREQ | takeover request | `POST /v1/pilot/{mission}/takeover-requests` | `cosmon:sessions:write` | `cs sessions takeover request` | `checkpoint-store` | 1 open request per attachment | idempotent-key | advisory-write | W7 |
-| S-TKGET | takeover show | `GET /v1/pilot/{mission}/takeover-requests/{request}` | `cosmon:sessions:read` | `cs sessions takeover show` | `checkpoint-store` | 1 request | safe-repeat | read-only | W7 |
 
 Of the local counterparts above, both W5 verbs now exist.
 `cs presence detach [--session <SID>] [--json]` removes the session's presence
@@ -141,6 +139,15 @@ to detach", which is the safe-repeat behavior S-DETACH needs.
 separately from reading it. A duplicate succeeds without writing; an unknown
 key is refused. The local mailbox read still acknowledges as it reads, while
 `inbox --peek` reads without acknowledging. The pilot routes remain W7 work.
+`cs sessions checkpoint publish` is now idempotent on its id and bounded.
+The same id with the same content, publication time aside, succeeds and writes
+nothing; the same id with other content is refused and the first record stays.
+A checkpoint over 262144 serialised bytes, one citing more than 100 evidence
+references (claims included), or one whose evidence locator is a path or
+`file:` URL of the publisher's machine is refused before anything is written.
+`cs sessions checkpoint show` refuses a stored record over 262144 bytes before
+reading it. `cs sessions checkpoint list` and `cs sessions drift` read only,
+and a drift verdict never states that a checkpoint is portable.
 The singular `GET /v1/molecules/{id}/session`
 transcript route is unchanged and stays read-only. Three things stay
 distinct: reading a transcript, advisory exchange (everything above) and
@@ -227,6 +234,7 @@ It is part of the contract: adding any of these needs an amendment here first.
 | X-NUCLEATE | Remote `nucleate` from a message | refused | No message becomes a molecule; molecule creation keeps its own scope. |
 | X-TACKLE | Remote `tackle`, `run` or `done` conferred by a collaboration scope | refused | Spawn and harvest keep their dedicated scopes and bindings. |
 | X-PATH | Caller-supplied filesystem paths or URLs | refused | Evidence moves as digest-bound references into canonical custody. |
+| X-TAKEOVER | Remote takeover request or show | refused | A request exists only to be answered by a host-local grant (O4) and is stored in the lease ledger directory, which no route writes. |
 | X-STORE | Independently writable mirrors of state directories | refused | One authoritative host; backups are not an active second writer. |
 
 ## 6. Errors
@@ -283,7 +291,8 @@ epoch, (b) check the current epoch at commit with a documented lock order
 against molecule and harvest locks, (c) serialize two same-epoch grants so one
 commits, and (d) refuse an unsupported mutation while the mission is leased.
 If W6 cannot cover a path, checkpoint exchange ships and control handover
-stays disabled. A pilot lease never authorizes integration; independent
+stays disabled. W6 is not shipped (§11, 2026-11-17), so that case applies to
+every path. A pilot lease never authorizes integration; independent
 harvest grants remain mandatory.
 
 ## 9. Confidentiality, retention and recovery
@@ -307,9 +316,9 @@ harvest grants remain mandatory.
 | 1 | W2 | Typed bindings and attachment admission, host-local provisioning and revocation; no public route | Any route |
 | 2 | W3 | Typed work operations with an injected admitted caller and `AdmittedNonLocal` evidence (already merged) | Transport |
 | 3 | W4 | Work routes W-LIST … W-ACK, remote client commands, canon, OpenAPI, help and parity updates | Session routes |
-| 4 | W5 | Portable presence, pilot mailbox acknowledgment and checkpoint custody on the local side | Lease fencing |
-| 5 | W6 | Fencing of every covered effect | Session routes |
-| 6 | W7 | Session routes S-ATTACH … S-TKGET and client commands | Remote signing |
+| 4 | W5 | Portable presence, pilot mailbox acknowledgment and checkpoint custody on the local side: `cs presence detach`, `cs sessions ack`, `cs sessions checkpoint publish\|show\|list`, `cs sessions drift` (done 2026-11-17, see §11) | Lease fencing; evidence-reference resolution |
+| 5 | W6 | Nothing: not shipped, by decision of 2026-11-17 (see §8 and §11) | Fencing of every covered effect; control handover |
+| 6 | W7 | Session routes S-ATTACH … S-CKCMP and client commands | Remote signing; takeover routes |
 | 7 | W8 | Two-machine acceptance evidence and the off-host restore check | New features |
 
 W4 is the work-only release boundary. Units that share exports, route
@@ -339,6 +348,24 @@ local work-list messages are visible only to their sender and recipient seats.
 W-LIST filters messages before pagination; roster visibility and pagination
 remain unchanged. Local listing requires current member identity, including
 when the owner is explicit.
+
+**2026-11-17 amendment (operator decision).** W5 is complete on the local
+side for the verbs it names: `cs presence detach`, `cs sessions ack`,
+`cs sessions checkpoint publish`, `show` and `list`, and `cs sessions drift`,
+with the bounds and the retry rule of S-CKPUT and S-CKGET now enforced by the
+checkpoint store (§4). One part of the checkpoint rule is not implemented and
+is not guessed: the syntax of an artifact reference, whether a reference must
+carry a digest, and how a recipient resolves one, so that a checkpoint with an
+unreadable reference can be reported as incomplete. W7 settles it before it
+mounts S-CKPUT, S-CKGET or S-CKCMP. W6 is not shipped: pilot missions run
+without leases (decision of 2026-10-16), so lease fencing is not built and
+control handover stays disabled, as §8 foresees. W7 mounts the session and
+checkpoint routes through S-CKCMP and not S-TKREQ or S-TKGET. Their only
+consumer is a grant, which stays host-local (O4), and the local request record
+lives in the lease ledger directory, which §2 says no route writes; they are
+therefore dropped from §4 and refused as X-TAKEOVER, and the local
+`cs sessions takeover` verbs are unchanged. O1 and O8 stand as written: no
+route confers or exercises lifecycle authority.
 
 **Amendments**, recorded in the ADRs themselves:
 

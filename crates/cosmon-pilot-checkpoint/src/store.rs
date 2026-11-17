@@ -21,9 +21,22 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::checkpoint::PilotCheckpoint;
+use crate::checkpoint::{PilotCheckpoint, MAX_CHECKPOINT_BYTES, MAX_EVIDENCE_REFS};
 use crate::error::CheckpointError;
 use crate::id::{CheckpointId, MissionId, SessionId};
+
+/// What [`CheckpointStore::publish`] did.
+///
+/// Returned instead of a bare path so a caller can tell a first publication
+/// from an idempotent retry without a second filesystem probe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Publication {
+    /// Where the record lives.
+    pub path: PathBuf,
+    /// `true` if this call wrote the record, `false` if an identical one was
+    /// already there and nothing was written.
+    pub written: bool,
+}
 
 /// Reads and publishes checkpoints under one root directory.
 #[derive(Clone, Debug)]
@@ -56,24 +69,38 @@ impl CheckpointStore {
             .join(format!("{}.json", id.as_str()))
     }
 
-    /// Write `checkpoint` and return where it landed.
+    /// Publish a checkpoint under its id, once.
+    ///
+    /// The id is the idempotency key. Publishing the same id with the same
+    /// content again succeeds and writes nothing ([`Publication::written`] is
+    /// `false`), so a retry after a lost response or a crash between publication
+    /// and cleanup is safe. The same id with different content is refused with
+    /// [`CheckpointError::AlreadyPublished`] and the first record stays as it
+    /// was: a finding cites a checkpoint by id, so a published record is never
+    /// rewritten. Only `created_at` may differ between an original and its
+    /// retry ([`PilotCheckpoint::same_content_as`]).
+    ///
+    /// Before anything is written the checkpoint is bounded: at most
+    /// [`MAX_EVIDENCE_REFS`] references, none of them a client path, and at
+    /// most [`MAX_CHECKPOINT_BYTES`] serialised.
     ///
     /// # Errors
     ///
-    /// - [`CheckpointError::AlreadyPublished`] if that id already exists.
-    /// - [`CheckpointError::Io`] if the directory or file cannot be written.
-    pub fn publish(&self, checkpoint: &PilotCheckpoint) -> Result<PathBuf, CheckpointError> {
-        let dir = self.mission_dir(&checkpoint.mission_id);
-        std::fs::create_dir_all(&dir).map_err(|source| CheckpointError::Io {
-            path: dir.clone(),
-            source,
-        })?;
-
-        let path = self.path_of(&checkpoint.mission_id, &checkpoint.id);
-        if path.exists() {
-            return Err(CheckpointError::AlreadyPublished {
+    /// [`CheckpointError::TooManyEvidenceRefs`],
+    /// [`CheckpointError::ClientPathEvidence`], [`CheckpointError::TooLarge`],
+    /// [`CheckpointError::AlreadyPublished`] or [`CheckpointError::Io`].
+    pub fn publish(&self, checkpoint: &PilotCheckpoint) -> Result<Publication, CheckpointError> {
+        let count = checkpoint.all_evidence().count();
+        if count > MAX_EVIDENCE_REFS {
+            return Err(CheckpointError::TooManyEvidenceRefs {
                 id: checkpoint.id.to_string(),
-                path,
+                count,
+                limit: MAX_EVIDENCE_REFS,
+            });
+        }
+        if let Some(reference) = checkpoint.all_evidence().find(|e| e.is_client_path()) {
+            return Err(CheckpointError::ClientPathEvidence {
+                locator: reference.locator.clone(),
             });
         }
 
@@ -83,20 +110,53 @@ impl CheckpointStore {
                 checkpoint.id
             ))
         })?;
+        if body.len() as u64 > MAX_CHECKPOINT_BYTES {
+            return Err(CheckpointError::TooLarge {
+                subject: checkpoint.id.to_string(),
+                bytes: body.len() as u64,
+                limit: MAX_CHECKPOINT_BYTES,
+            });
+        }
 
-        // Same directory as the destination, so the rename cannot cross a
-        // filesystem boundary and degrade into a copy.
+        let dir = self.mission_dir(&checkpoint.mission_id);
+        std::fs::create_dir_all(&dir).map_err(|source| CheckpointError::Io {
+            path: dir.clone(),
+            source,
+        })?;
+        let path = self.path_of(&checkpoint.mission_id, &checkpoint.id);
+
+        // Same directory as the destination, so the link cannot cross a
+        // filesystem boundary. A hard link fails if the target exists, which
+        // makes the publication atomic *and* no-clobber: two concurrent
+        // publishers of one id cannot both win.
         let tmp = dir.join(format!(".{}.json.tmp", checkpoint.id.as_str()));
         std::fs::write(&tmp, &body).map_err(|source| CheckpointError::Io {
             path: tmp.clone(),
             source,
         })?;
-        std::fs::rename(&tmp, &path).map_err(|source| CheckpointError::Io {
-            path: path.clone(),
-            source,
-        })?;
-
-        Ok(path)
+        let linked = std::fs::hard_link(&tmp, &path);
+        std::fs::remove_file(&tmp).ok();
+        match linked {
+            Ok(()) => Ok(Publication {
+                path,
+                written: true,
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = read_record(&path)?;
+                if existing.same_content_as(checkpoint) {
+                    Ok(Publication {
+                        path,
+                        written: false,
+                    })
+                } else {
+                    Err(CheckpointError::AlreadyPublished {
+                        id: checkpoint.id.to_string(),
+                        path,
+                    })
+                }
+            }
+            Err(source) => Err(CheckpointError::Io { path, source }),
+        }
     }
 
     /// Load one checkpoint by id.
@@ -214,6 +274,21 @@ impl CheckpointStore {
 }
 
 fn read_record(path: &Path) -> Result<PilotCheckpoint, CheckpointError> {
+    // Measured before the read, so an oversized or swapped-in record cannot make
+    // the store allocate past the contract's limit.
+    let len = std::fs::metadata(path)
+        .map_err(|source| CheckpointError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len();
+    if len > MAX_CHECKPOINT_BYTES {
+        return Err(CheckpointError::TooLarge {
+            subject: path.display().to_string(),
+            bytes: len,
+            limit: MAX_CHECKPOINT_BYTES,
+        });
+    }
     let bytes = std::fs::read(path).map_err(|source| CheckpointError::Io {
         path: path.to_path_buf(),
         source,
@@ -276,17 +351,45 @@ mod tests {
     }
 
     #[test]
-    fn republishing_the_same_id_is_refused() {
+    fn republishing_the_same_content_is_a_no_op_even_with_a_later_stamp() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::new(tmp.path());
-        let checkpoint = cp("cp-1", "sess-a", 100);
+        let first = store.publish(&cp("cp-1", "sess-a", 100)).unwrap();
+        assert!(first.written);
+        let before = std::fs::read(&first.path).unwrap();
 
-        store.publish(&checkpoint).unwrap();
-        let again = store.publish(&checkpoint);
+        let retry = store.publish(&cp("cp-1", "sess-a", 999)).unwrap();
+        assert!(!retry.written);
+        assert_eq!(before, std::fs::read(&retry.path).unwrap());
+    }
+
+    #[test]
+    fn republishing_the_same_id_with_other_content_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(tmp.path());
+        store.publish(&cp("cp-1", "sess-a", 100)).unwrap();
+
+        let mut other = cp("cp-1", "sess-a", 100);
+        other.open_risks.push("changed".to_owned());
         assert!(matches!(
-            again,
+            store.publish(&other),
             Err(CheckpointError::AlreadyPublished { .. })
         ));
+    }
+
+    #[test]
+    fn a_checkpoint_citing_a_client_path_is_refused_before_anything_is_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(tmp.path());
+        let mut checkpoint = cp("cp-1", "sess-a", 100);
+        checkpoint
+            .evidence_refs
+            .push(crate::EvidenceRef::pinned("/home/me/notes.md", "ab"));
+        assert!(matches!(
+            store.publish(&checkpoint),
+            Err(CheckpointError::ClientPathEvidence { .. })
+        ));
+        assert!(!store.mission_dir(&checkpoint.mission_id).exists());
     }
 
     #[test]

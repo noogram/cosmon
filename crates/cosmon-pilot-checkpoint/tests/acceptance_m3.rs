@@ -325,7 +325,7 @@ fn a_relief_pilot_resumes_from_one_record_not_from_the_transcript() {
     let published = store
         .publish(&fixture("primary-claude.json"))
         .expect("publish");
-    assert!(published.exists());
+    assert!(published.path.exists());
 
     let mission = MissionId::new("task-20260731-67f2").expect("valid");
     let resumed = store
@@ -364,7 +364,14 @@ fn a_published_checkpoint_is_append_only() {
     let checkpoint = fixture("primary-claude.json");
 
     store.publish(&checkpoint).expect("first publish");
-    assert!(store.publish(&checkpoint).is_err(), "second publish");
+    let mut rewritten = checkpoint.clone();
+    rewritten.open_risks.push("a different position".to_owned());
+    assert!(store.publish(&rewritten).is_err(), "rewrite under same id");
+    let kept = store
+        .load(&checkpoint.mission_id, &checkpoint.id)
+        .expect("load")
+        .expect("still there");
+    assert_eq!(kept, checkpoint, "the first record is untouched");
 }
 
 #[test]

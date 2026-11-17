@@ -675,7 +675,7 @@ Leave — or read — the note that lets someone else resume this mission
 
 ###### **Subcommands:**
 
-* `publish` — Publish this pilot's hand-over record for a mission
+* `publish` — Publish this pilot's hand-over record for a mission. At most 262144 bytes and 100 evidence references; republishing the same `--id` with the same content succeeds without writing, with other content it is refused
 * `stage` — Write the same record as a draft, for the hook to publish at the next natural transition. Takes exactly the flags `publish` takes
 * `list` — List the checkpoints published for a mission
 * `show` — Show one checkpoint in full
@@ -684,7 +684,7 @@ Leave — or read — the note that lets someone else resume this mission
 
 ## `cs sessions checkpoint publish`
 
-Publish this pilot's hand-over record for a mission
+Publish this pilot's hand-over record for a mission. At most 262144 bytes and 100 evidence references; republishing the same `--id` with the same content succeeds without writing, with other content it is refused
 
 **Usage:** `cs sessions checkpoint publish [OPTIONS] --mission <MOLECULE_ID>`
 
@@ -693,7 +693,7 @@ Publish this pilot's hand-over record for a mission
 * `--mission <MOLECULE_ID>` — The mission being flown
 * `--session <SID>` — Publishing session. Defaults to `$COSMON_SESSION_ID`
 * `--epoch <N>` — The authority epoch the publisher believes it is under. Defaults to the epoch on its own presence snapshot, then to 0
-* `--id <ID>` — Identifier for this checkpoint. Defaults to a timestamped id
+* `--id <ID>` — Identifier for this checkpoint, which is also its idempotency key. Defaults to a timestamped id
 * `--include <TEXT>` — Something this mission covers. Repeatable
 * `--exclude <TEXT>` — Something this mission explicitly does not cover. Repeatable
 * `--hypothesis <CLAIM>` — A position currently held, as `SUBJECT[:affirm|deny]=STATEMENT`. Repeatable
@@ -701,8 +701,8 @@ Publish this pilot's hand-over record for a mission
 * `--done <TEXT>` — Something already done, in the pilot's words. Repeatable
 * `--risk <TEXT>` — A known risk. Repeatable
 * `--question <TEXT>` — A question the pilot could not answer. Repeatable — this is where uncertainty belongs, never inside a stance
-* `--evidence <SUBJECT=LOCATOR>` — Evidence for one claim, as `SUBJECT=LOCATOR[#DIGEST]`. Repeatable
-* `--checkpoint-evidence <LOCATOR>` — Evidence for the checkpoint as a whole, as `LOCATOR[#DIGEST]`. Repeatable
+* `--evidence <SUBJECT=LOCATOR>` — Evidence for one claim, as `SUBJECT=LOCATOR[#DIGEST]`. The locator is an artifact reference, never a path on this machine. Repeatable
+* `--checkpoint-evidence <LOCATOR>` — Evidence for the checkpoint as a whole, as `LOCATOR[#DIGEST]`. The locator is an artifact reference, never a path on this machine. Repeatable
 * `--from-file <PATH|->` — Read versioned checkpoint content from a JSON file, or `-` for stdin. Cosmon, rather than the file, stamps all publication provenance
 
 
@@ -718,7 +718,7 @@ Write the same record as a draft, for the hook to publish at the next natural tr
 * `--mission <MOLECULE_ID>` — The mission being flown
 * `--session <SID>` — Publishing session. Defaults to `$COSMON_SESSION_ID`
 * `--epoch <N>` — The authority epoch the publisher believes it is under. Defaults to the epoch on its own presence snapshot, then to 0
-* `--id <ID>` — Identifier for this checkpoint. Defaults to a timestamped id
+* `--id <ID>` — Identifier for this checkpoint, which is also its idempotency key. Defaults to a timestamped id
 * `--include <TEXT>` — Something this mission covers. Repeatable
 * `--exclude <TEXT>` — Something this mission explicitly does not cover. Repeatable
 * `--hypothesis <CLAIM>` — A position currently held, as `SUBJECT[:affirm|deny]=STATEMENT`. Repeatable
@@ -726,8 +726,8 @@ Write the same record as a draft, for the hook to publish at the next natural tr
 * `--done <TEXT>` — Something already done, in the pilot's words. Repeatable
 * `--risk <TEXT>` — A known risk. Repeatable
 * `--question <TEXT>` — A question the pilot could not answer. Repeatable — this is where uncertainty belongs, never inside a stance
-* `--evidence <SUBJECT=LOCATOR>` — Evidence for one claim, as `SUBJECT=LOCATOR[#DIGEST]`. Repeatable
-* `--checkpoint-evidence <LOCATOR>` — Evidence for the checkpoint as a whole, as `LOCATOR[#DIGEST]`. Repeatable
+* `--evidence <SUBJECT=LOCATOR>` — Evidence for one claim, as `SUBJECT=LOCATOR[#DIGEST]`. The locator is an artifact reference, never a path on this machine. Repeatable
+* `--checkpoint-evidence <LOCATOR>` — Evidence for the checkpoint as a whole, as `LOCATOR[#DIGEST]`. The locator is an artifact reference, never a path on this machine. Repeatable
 * `--from-file <PATH|->` — Read versioned checkpoint content from a JSON file, or `-` for stdin. Cosmon, rather than the file, stamps all publication provenance
 
 
