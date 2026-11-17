@@ -14,7 +14,6 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::process::{Command, Output};
-use std::time::{Duration, Instant};
 
 fn cs(cwd: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
@@ -46,23 +45,8 @@ fn install_stub_claude(dir: &Path, launched: &Path) -> std::path::PathBuf {
     bin
 }
 
-fn wait_for(path: &Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    false
-}
-
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-fn stdout(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 /// Number of tmux sessions on the test's private server (0 when it is down).
