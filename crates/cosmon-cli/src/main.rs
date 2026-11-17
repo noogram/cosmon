@@ -439,7 +439,7 @@ enum Command {
     )]
     Whisper(cmd::whisper::Args),
 
-    /// Presence — live-session registry (ping / ls / gc / poll / send / inbox)
+    /// Presence — live-session registry (ping / ls / gc / detach / poll / send / inbox)
     #[command(after_help = cmd::examples::PRESENCE, hide = true)]
     Presence(cmd::presence::Args),
 
@@ -589,11 +589,13 @@ fn records_operator_presence(command: &Command) -> bool {
             | Command::Heartbeat(_)
             | Command::Sync(_)
             | Command::Run(_)
-            | Command::Presence(_)
             | Command::Archive(_)
             | Command::Notarize(_)
             | Command::Notify(_)
     ) || matches!(command, Command::Project(args) | Command::Reconcile(args) if !args.is_check())
+        // `presence detach` withdraws a session; stamping "operator present"
+        // after it would contradict the verb, and a repeat must write nothing.
+        || matches!(command, Command::Presence(args) if !args.is_detach())
 }
 
 /// Install the process-wide `tracing` subscriber that carries `cs`'s own
