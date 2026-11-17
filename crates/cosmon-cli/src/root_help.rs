@@ -124,6 +124,13 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              without a git checkout dance, and what lets a 'cs done' fired by a \
              tmux hook (whose environment froze when the tmux server started) still \
              land on the right trunk.\n\n\
+             ADMISSION. A project may set [admission].max_active and \
+             [admission].min_free_bytes in .cosmon/config.toml. When the number of \
+             active molecules (status running with a live worker session) has \
+             reached the cap, or the volume holding .worktrees/ has fewer free \
+             bytes than the floor, 'cs tackle' exits 1 before any worktree, branch \
+             or session exists, naming the bound and the observed value. Unset \
+             means no check; a failed free-space probe admits with a notice.\n\n\
              DISPATCH CLAIM. A manual 'cs tackle' and a resident 'cs run' \
              serialize on the molecule before adapter and model selection. \
              The losing tackle exits non-zero and names the winning worker, \

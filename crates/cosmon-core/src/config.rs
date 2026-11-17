@@ -192,6 +192,12 @@ pub struct ProjectConfig {
     /// [`WorktreeReclaimConfig`].
     #[serde(default)]
     pub worktree_reclaim: WorktreeReclaimConfig,
+
+    /// Optional admission bounds checked by `cs tackle` before any worktree
+    /// exists (issue #214, ADR-190 D2). Unset means no new refusal. See
+    /// [`AdmissionConfig`](crate::spawn_admission::AdmissionConfig).
+    #[serde(default)]
+    pub admission: crate::spawn_admission::AdmissionConfig,
 }
 
 /// Per-project defaults for the molecule-level `StepBudget` circuit breaker
