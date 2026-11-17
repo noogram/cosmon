@@ -1459,3 +1459,79 @@ fn rolled_back_merge_leaves_molecule_harvestable_and_rerunnable() {
         "after the rerun the worker content is on main"
     );
 }
+
+/// Issue #214: the post-merge rollback is a compare-and-swap. A gate command
+/// that commits to the base (a foreign writer that does not take the trunk
+/// lock) and then fails must NOT have that commit discarded by the rollback:
+/// the base no longer points at this invocation's own merge, so `cs done`
+/// leaves it untouched, exits non-zero and names the three object ids
+/// (pre-merge, own merge, current).
+///
+/// FALSIFIER: restoring an unconditional `git reset --hard <pre_merge_head>` in
+/// `refuse_post_merge_and_rollback` makes the foreign commit unreachable from
+/// `main` and reddens this test.
+#[test]
+fn rollback_never_discards_a_commit_it_did_not_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let repo_str = repo.to_str().unwrap();
+    setup_repo_with_config(
+        repo,
+        &format!(
+            "\n[gates]\nintegrity_command = 'git -C {repo_str} commit --allow-empty -q -m foreign-writer; exit 7'\n"
+        ),
+    );
+
+    let mol_id = nucleate_terminal(repo);
+    let (branch, pre_merge) = stage_clean_merge(repo, &mol_id);
+
+    let done = cs_isolated(repo)
+        .args(["--json", "done", &mol_id, "--no-auto-propel"])
+        .output()
+        .expect("cs done");
+    let stdout = String::from_utf8_lossy(&done.stdout);
+    let stderr = String::from_utf8_lossy(&done.stderr);
+    let all = format!("{stdout}\n{stderr}");
+
+    let current = String::from_utf8_lossy(&git(repo, &["rev-parse", "main"]).stdout)
+        .trim()
+        .to_owned();
+    let foreign_subject =
+        String::from_utf8_lossy(&git(repo, &["log", "-1", "--format=%s", "main"]).stdout)
+            .trim()
+            .to_owned();
+    assert_eq!(
+        foreign_subject, "foreign-writer",
+        "the foreign commit must still be the tip of main.\n{all}"
+    );
+    assert_ne!(current, pre_merge, "main must not be reset to pre-merge");
+    assert!(
+        !done.status.success(),
+        "a refused rollback must exit non-zero.\n{all}"
+    );
+
+    // Own merge commit = first parent chain: foreign's parent.
+    let own_merge = String::from_utf8_lossy(&git(repo, &["rev-parse", "main~1"]).stdout)
+        .trim()
+        .to_owned();
+    for (label, id) in [
+        ("pre-merge", &pre_merge),
+        ("own merge", &own_merge),
+        ("current", &current),
+    ] {
+        assert!(
+            all.contains(id.as_str()),
+            "message must name the {label} id {id}.\n{all}"
+        );
+    }
+    assert!(
+        all.contains("NOT rolled back") && !all.contains("restored main to its pre-merge"),
+        "the report must not claim a restore that did not happen.\n{all}"
+    );
+    assert!(
+        git(repo, &["rev-parse", "--verify", &branch])
+            .status
+            .success(),
+        "the worker branch must be preserved"
+    );
+}
