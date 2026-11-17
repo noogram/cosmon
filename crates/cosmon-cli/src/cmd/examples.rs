@@ -1581,6 +1581,7 @@ pub const PRESENCE: &str = "EXAMPLES:
   cs presence ping            # heartbeat for current session
   cs presence ls              # list live sessions
   cs presence gc              # garbage-collect dead sessions
+  cs presence detach          # withdraw this session's snapshot (repeatable)
   cs presence poll            # one-shot poll of the text channel, exit
 
 CO-PILOTING (mission co-pilotage M2):

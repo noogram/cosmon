@@ -131,7 +131,12 @@ model received or considered the content.
 | S-TKREQ | takeover request | `POST /v1/pilot/{mission}/takeover-requests` | `cosmon:sessions:write` | `cs sessions takeover request` | `checkpoint-store` | 1 open request per attachment | idempotent-key | advisory-write | W7 |
 | S-TKGET | takeover show | `GET /v1/pilot/{mission}/takeover-requests/{request}` | `cosmon:sessions:read` | `cs sessions takeover show` | `checkpoint-store` | 1 request | safe-repeat | read-only | W7 |
 
-Of the local counterparts above, `cs presence detach` remains to be added by W5.
+Of the local counterparts above, both W5 verbs now exist.
+`cs presence detach [--session <SID>] [--json]` removes the session's presence
+snapshot through the presence store and nothing else: pending mailbox envelopes,
+checkpoints, logs and leases are untouched, and it neither requests nor grants a
+lease. A session with no snapshot exits 0, writes no file and reports "nothing
+to detach", which is the safe-repeat behavior S-DETACH needs.
 `cs sessions ack <key> [--session <SID>] [--json]` now acknowledges one envelope
 separately from reading it. A duplicate succeeds without writing; an unknown
 key is refused. The local mailbox read still acknowledges as it reads, while
