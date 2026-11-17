@@ -33,6 +33,8 @@ this stage.
 
 - `cs complete`: when `surface_visual` refuses and the galaxy lacks `verify-surface`, show `cs init --upgrade` before the nucleation command.
 
+- The resident runtime stamps `merged_at` only when `cs done` exited 0 and git shows the molecule branch reachable from its base; a failed or unmerged `cs done` is logged with the molecule and exit code, leaves `merged_at` unset and keeps dependents blocked (#214).
+
 - The stale-trust refusal now says that one `cs trust` covers every pending closure, that the refused command must be rerun, and that `cs done <id> --review-shell` reviews and grants in one step when the change arrives with the merge; the trust model is unchanged (#215).
 
 - `cs done` finishes removing a worktree that `git worktree remove` left half-deleted because a process was still writing under it: up to ten retries over five seconds, confined to `.worktrees/<id>` without following symlinks; if the directory remains, the warning names its path, the likely cause and `cs purge --worktrees` (#218).
