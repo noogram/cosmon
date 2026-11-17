@@ -108,6 +108,7 @@ pub mod sessions_hook;
 pub mod sessions_launch;
 pub mod sessions_lifecycle;
 pub mod spark;
+pub(crate) mod spawn_admission;
 pub mod spec_audit;
 pub mod spore;
 pub mod status;

@@ -49,6 +49,8 @@ this stage.
 
 - Work messages now show `delivery_state=exhausted` in local and remote work lists when delivery attempts are used up; pulls keep serving other messages and acknowledgment preserves the exhaustion history.
 
+- `cs tackle` refuses a spawn before any worktree, branch or session exists when `[admission].max_active` is reached (active = status running with a live worker session) or the volume holding `.worktrees/` has fewer than `[admission].min_free_bytes` free; the refusal names the bound and the observed value, unset config changes nothing, and a failed free-space probe admits with a notice (#214).
+
 - W-LIST and local `cs work list` expose message metadata only to its sender or recipient; the work roster remains visible to admitted seats.
 
 - Dependencies: `rustix` 1.1.4 → 1.1.6 (RUSTSEC-2026-0486); the cargo-vet exemption moves to 1.1.6 and remains unaudited.
