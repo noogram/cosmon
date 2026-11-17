@@ -48,7 +48,7 @@ impl HarvestAssessment {
     }
 
     /// Where a queued molecule's work sits and the gesture that finishes it:
-    /// `cs done <id>` to merge, `cs done <id> --no-merge` once it has landed.
+    /// plain `cs done <id>`, which merges it or, once it has landed, only closes it.
     #[must_use]
     pub(crate) fn location(
         &self,
@@ -156,7 +156,10 @@ fn merged_and_deleted_molecules(repo_root: &Path) -> HashSet<String> {
             .success()
             .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    let Some(subjects) = git(&["log", "main", "--merges", "--format=%s"]) else {
+    // First-parent only: a merge made on `main` itself. Merges reached through
+    // another branch's history (a `Merge branch 'train' into feat/X` inside a
+    // merged branch) were never this molecule landing on the trunk.
+    let Some(subjects) = git(&["log", "main", "--first-parent", "--merges", "--format=%s"]) else {
         return HashSet::new();
     };
     let live =
@@ -168,11 +171,17 @@ fn merged_and_deleted_molecules(repo_root: &Path) -> HashSet<String> {
         .collect()
 }
 
-/// Molecule ids named as `feat/<id>` in merge-commit subjects, one subject per
-/// line (`Merge branch 'feat/<id>'`, `Merge pull request … from …/feat/<id>`).
+/// Molecule ids named as `feat/<id>` in the merged-branch position of
+/// merge-commit subjects, one subject per line (`Merge branch 'feat/<id>'`,
+/// `Merge pull request … from …/feat/<id>`). Whatever follows ` into ` is the
+/// branch merged *onto*, not the work merged, and is not read: a subject
+/// `Merge branch 'train' into feat/<id>` says nothing about `<id>` landing.
 fn merged_molecule_ids(subjects: &str) -> HashSet<String> {
     let mut ids = HashSet::new();
     for subject in subjects.lines() {
+        let subject = subject
+            .rsplit_once(" into ")
+            .map_or(subject, |(merged, _)| merged);
         for (at, _) in subject.match_indices("feat/") {
             let rest = &subject[at + "feat/".len()..];
             let end = rest
@@ -202,6 +211,152 @@ mod tests {
         assert!(ids.contains("task-20260101-aaaa"));
         assert!(ids.contains("task-20260101-bbbb"));
         assert!(!ids.contains("task-20260101-cccc"));
+    }
+
+    /// Issue #213: the branch a merge lands *onto* is not work that landed.
+    #[test]
+    fn merged_molecule_ids_ignores_the_branch_merged_onto() {
+        let ids = merged_molecule_ids(
+            "Merge branch 'train' into feat/task-20260101-dddd\n\
+             Merge branch 'feat/task-20260101-eeee' into main\n",
+        );
+        assert!(!ids.contains("task-20260101-dddd"));
+        assert!(ids.contains("task-20260101-eeee"));
+    }
+
+    /// Issue #213: a subject reaching `main` only through a merged branch's
+    /// own history is not evidence; a first-parent merge of the branch is.
+    #[test]
+    fn landed_scan_counts_first_parent_merges_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(&["branch", "train"]);
+        git(&["checkout", "-q", "-b", "feat/task-20260101-bbbb"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "work"]);
+        git(&["checkout", "-q", "train"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "train work"]);
+        git(&["checkout", "-q", "feat/task-20260101-bbbb"]);
+        git(&[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge branch 'train' into feat/task-20260101-aaaa",
+            "train",
+        ]);
+        git(&["checkout", "-q", "main"]);
+        git(&[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge branch 'feat/task-20260101-bbbb'",
+            "feat/task-20260101-bbbb",
+        ]);
+        git(&["branch", "-q", "-D", "feat/task-20260101-bbbb"]);
+
+        let landed = merged_and_deleted_molecules(repo);
+        assert!(landed.contains("task-20260101-bbbb"), "{landed:?}");
+        assert!(
+            !landed.contains("task-20260101-aaaa"),
+            "a subject reached through another molecule's history is not a landing: {landed:?}"
+        );
+    }
+
+    /// Issue #213: the scan runs `git log --first-parent`. A molecule's
+    /// `Merge branch 'feat/<id>'` commit that is reachable from `main` only
+    /// through the second parent of another merge was never a landing on the
+    /// trunk, so it must not count. Removing `--first-parent` makes B appear.
+    #[test]
+    fn scan_ignores_a_merge_reachable_only_through_a_second_parent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+
+        // (1) A merges straight onto main, then its branch is deleted.
+        git(&["checkout", "-q", "-b", "feat/task-20260101-aaaa"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "work a"]);
+        git(&["checkout", "-q", "main"]);
+        git(&[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge branch 'feat/task-20260101-aaaa'",
+            "feat/task-20260101-aaaa",
+        ]);
+        git(&["branch", "-q", "-D", "feat/task-20260101-aaaa"]);
+
+        // (2) B merges onto a side branch, which then merges onto main.
+        git(&["checkout", "-q", "-b", "side"]);
+        git(&["checkout", "-q", "-b", "feat/task-20260101-bbbb"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "work b"]);
+        git(&["checkout", "-q", "side"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "side work"]);
+        git(&[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge branch 'feat/task-20260101-bbbb'",
+            "feat/task-20260101-bbbb",
+        ]);
+        git(&["branch", "-q", "-D", "feat/task-20260101-bbbb"]);
+        git(&["checkout", "-q", "main"]);
+        git(&[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "Merge branch 'side'",
+            "side",
+        ]);
+
+        let landed = merged_and_deleted_molecules(repo);
+        assert!(landed.contains("task-20260101-aaaa"), "{landed:?}");
+        assert!(
+            !landed.contains("task-20260101-bbbb"),
+            "a merge reachable only via a second parent is not a landing: {landed:?}"
+        );
     }
 
     /// A settled molecule is read as finalized; an unsettled one keeps its own flag.

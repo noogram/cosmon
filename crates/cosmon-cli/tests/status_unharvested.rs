@@ -666,10 +666,10 @@ fn merged_without_residue_is_listed_by_neither_status_nor_peek() {
 
 /// Issue #174, hiding residue is worse than the original bug: merged work that
 /// still has a worktree on disk, or a worker on the roster, stays listed and
-/// names `cs done <id> --no-merge`, the gesture that tears it down without
-/// merging a second time. Both surfaces list it.
+/// names plain `cs done <id>`, which finds the branch already on the trunk and
+/// only tears it down (`--no-merge` would record a false `MergeSkipped`). Both surfaces list it.
 #[test]
-fn merged_with_residue_stays_listed_and_names_the_no_merge_gesture() {
+fn merged_with_residue_stays_listed_and_names_plain_cs_done() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo =
         repo_with_merged_branches(tmp.path(), &["task-20260101-b001"], &["task-20260101-b004"]);
@@ -724,16 +724,16 @@ fn merged_with_residue_stays_listed_and_names_the_no_merge_gesture() {
     );
     assert_eq!(
         harvest_command_of(&out, "task-20260101-b001"),
-        "cs done task-20260101-b001 --no-merge"
+        "cs done task-20260101-b001"
     );
     assert_eq!(
         harvest_command_of(&out, "task-20260101-b002"),
-        "cs done task-20260101-b002 --no-merge"
+        "cs done task-20260101-b002"
     );
     assert_eq!(
         harvest_command_of(&out, "task-20260101-b004"),
         "cs done task-20260101-b004",
-        "work that has not landed is still merged by plain `cs done`"
+        "work that has not landed is merged by the same plain `cs done`"
     );
     assert_eq!(peek_harvestable_ids(&repo, &state_dir), status_ids(&out));
 }

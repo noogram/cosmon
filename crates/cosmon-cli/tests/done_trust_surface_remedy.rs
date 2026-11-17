@@ -538,14 +538,18 @@ fn never_trusted_repo_keeps_the_not_trusted_message() {
     );
 }
 
-/// Characterisation (issue #215, B1) — NOT a requirement. Trust is granted,
-/// the shell surface then changes on the base branch *outside* `cs done`
-/// (a push, a hand merge), and `cs done` is run for a molecule whose branch
-/// is ALREADY merged into the base. This records what happens today so the
-/// operator can decide separately whether closing an already-landed branch
-/// should need trust at all. Changing this behaviour is out of scope.
+/// Issue #215 (B1), operator decision 2026-11-16: closing a branch that is
+/// ALREADY on the base runs no post-merge gate and needs no shell trust.
+///
+/// Trust is granted, the branch lands outside `cs done`, then the shell surface
+/// moves on the base (a push, a hand merge). `cs done` merges nothing, so there
+/// is no tree for the gate to verify: it closes the molecule, leaves the trust
+/// grant exactly as found, and never claims a rollback. This test replaces the
+/// earlier characterisation of the refusal (`POST-MERGE COMPILE GATE REFUSED —
+/// merge rolled back` over a no-op), which the amendment to ADR-158 retires.
+/// The broader matrix lives in `done_already_landed_no_gate.rs`.
 #[test]
-fn done_of_already_merged_branch_after_base_surface_change_is_refused_with_resume_hint() {
+fn done_of_already_merged_branch_after_base_surface_change_closes_without_gate_or_trust() {
     let tmp = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
     let repo = tmp.path();
@@ -585,39 +589,20 @@ fn done_of_already_merged_branch_after_base_surface_change_is_refused_with_resum
     let out = done(repo, store.path(), &mol_id);
     let text = combined(&out);
     eprintln!("exit={:?}\n{text}", out.status.code());
-    // Today: refused (exit 1) although the branch is already on the base; the
-    // "rollback" is a no-op (base unmoved), and branch + trust stay as found.
-    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert_eq!(out.status.code(), Some(0), "{text}");
     assert!(text.contains("already_merged"), "{text}");
     assert!(
-        text.contains("POST-MERGE COMPILE GATE REFUSED") && text.contains("trust is stale"),
+        !text.contains("GATE REFUSED") && !text.contains("rolled back"),
         "{text}"
     );
     assert_eq!(rev(repo, "main"), main_before, "{text}");
-    assert!(git(repo, &["rev-parse", "--verify", &branch])
+    assert!(!git(repo, &["rev-parse", "--verify", &branch])
         .status
         .success());
+    // The closure never touched the grant: it is still stale, as found.
     let trust = cs(repo, store.path())
         .args(["trust", "--status"])
         .output()
         .unwrap();
     assert!(combined(&trust).contains("stale"), "{}", combined(&trust));
-
-    // B2: the refusal says how to resume — one grant covers every pending
-    // closure, the refused command is rerun by hand, `--review-shell` exists.
-    for needle in [
-        "One grant covers every pending closure",
-        "rerun the command that was refused",
-        "cs done <id> --review-shell",
-    ] {
-        assert!(text.contains(needle), "missing {needle:?}.\n{text}");
-    }
-
-    // Following it: grant once, rerun the same `cs done`; the closure lands.
-    grant_trust(repo, store.path());
-    let rerun = done(repo, store.path(), &mol_id);
-    assert!(rerun.status.success(), "{}", combined(&rerun));
-    assert!(!git(repo, &["rev-parse", "--verify", &branch])
-        .status
-        .success());
 }

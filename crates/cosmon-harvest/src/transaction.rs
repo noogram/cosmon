@@ -235,6 +235,32 @@ pub struct Args {
     /// itself wrong. No effect on a molecule that declared no protected path.
     #[arg(long)]
     allow_protected_change: bool,
+
+    /// Refuse unless the molecule branch tip is exactly this object id.
+    ///
+    /// Pins what lands (or is closed as landed) to what was gated: an
+    /// operator who built and verified a batch of merges outside cosmon
+    /// passes the branch head they verified, and a commit added to the
+    /// branch afterwards makes `cs done` refuse instead of landing or
+    /// closing something nobody gated. Applies on the merge path and on the
+    /// already-merged path alike. Accepts a full or unambiguous abbreviated
+    /// object id, resolved with git. On refusal nothing is merged and
+    /// `merged_at` is not stamped.
+    #[arg(long, value_name = "OID", conflicts_with = "print_merge_message")]
+    expect_head: Option<String>,
+
+    /// Print the commit message `cs done` would write for this molecule's
+    /// merge, then exit without merging or changing any state.
+    ///
+    /// The text is the subject (the `[project] merge_subject` template when
+    /// configured, otherwise `Merge branch 'feat/<id>'`) followed by one
+    /// trailer paragraph: attribution trailers, then the lineage trailers
+    /// (`Mol-Id`, `Mission-Id`, `Depends-On`). It is rendered by the same
+    /// function the merge uses, so `git merge --no-ff -F <file>` of the
+    /// printed text yields the message `cs done` would have written, before
+    /// any commit-msg or sign-off hook runs.
+    #[arg(long, conflicts_with_all = ["dry_run", "review_shell"])]
+    print_merge_message: bool,
 }
 
 impl Args {
@@ -299,6 +325,10 @@ impl Args {
             // made by the operator at their terminal, with the diff in front
             // of them — the same reason `--dry-run` stays local.
             allow_protected_change: false,
+            // The wire has no head pin and no message preview: both are
+            // operator-terminal gestures.
+            expect_head: None,
+            print_merge_message: false,
         }
     }
 
@@ -1058,6 +1088,236 @@ fn branch_landed_by_merge_commit(repo_root: &Path, branch: &str, base: &str) -> 
     };
     let tip = tip.trim();
     !chain.lines().any(|line| line == tip)
+}
+
+/// The branch is provably empty: zero commits ahead of base, not landed
+/// through a merge commit, and its tip is still where it was created. This is
+/// the only condition under which `cs done` reports `empty_branch`.
+fn branch_never_had_commits(repo_root: &Path, branch: &str, base: &str) -> bool {
+    branch_is_empty_relative_to(repo_root, branch, base)
+        && !branch_landed_by_merge_commit(repo_root, branch, base)
+        && branch_never_advanced(repo_root, branch)
+}
+
+/// `true` iff the branch tip is still the commit the branch was created at,
+/// i.e. the branch never had a commit of its own.
+///
+/// Why: "zero commits ahead of base" ([`branch_is_empty_relative_to`]) is also
+/// what a branch looks like after its commits reached the base by
+/// fast-forward, so it cannot tell an empty branch from landed work.
+/// Cosmon does not store the base object id at tackle time (`MoleculeData`
+/// records only the base branch *name*), so the fork point is read from the
+/// best durable evidence git keeps: the branch's reflog, whose oldest entry is
+/// the creation. The tip equals that entry only if no commit was ever added.
+///
+/// Unknown stays unknown: an absent, expired or empty reflog, or any git
+/// failure, answers `false`, so the caller does not claim `empty_branch`
+/// without proof and falls back to the label that promises nothing about
+/// emptiness. A branch whose reflog was pruned is therefore never reported
+/// empty, even if it is.
+fn branch_never_advanced(repo_root: &Path, branch: &str) -> bool {
+    let git_out = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let Some(tip) = git_out(&["rev-parse", "--verify", &format!("{branch}^{{commit}}")]) else {
+        return false;
+    };
+    let Some(log) = git_out(&[
+        "reflog",
+        "show",
+        "--format=%H",
+        &format!("refs/heads/{branch}"),
+    ]) else {
+        return false;
+    };
+    log.lines()
+        .last()
+        .is_some_and(|creation| creation == tip.trim())
+}
+
+/// What `cs done` could establish about a branch that reached the base outside
+/// it (issue #215, ADR-158 amendment "No merge, nothing to verify").
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutsideLanding {
+    /// The commit on the base's first-parent chain that landed the branch: the
+    /// merge commit for a `--no-ff` landing, the branch tip for a fast-forward.
+    landing: Option<String>,
+    /// The commit the branch was forked from, and the evidence it came from.
+    fork: Option<(String, &'static str)>,
+    /// Paths changed between `fork` and `landing`. `None` when either end is
+    /// unknown — unknown is never reported as "nothing changed".
+    changed: Option<Vec<PathBuf>>,
+}
+
+/// Run `git -C repo args`, answering stdout on success and `None` otherwise.
+fn git_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// Establish how `branch` reached `base` without `cs done`.
+///
+/// Why: when the closure skips the gate it also skips the only review of what
+/// landed, so the operator is told which trusted-shell paths moved. The range
+/// is the branch's fork point to the landing commit:
+///
+/// - **landing commit** — the oldest commit on `base`'s first-parent chain that
+///   descends from the branch tip (`rev-list --first-parent --ancestry-path`);
+///   the tip itself when the tip is on that chain (fast-forward).
+/// - **fork point** — the oldest reflog entry of the branch (its creation),
+///   when it is an ancestor of the tip; otherwise the merge base of the tip with
+///   the landing commit's first parent (the pre-landing base). A fast-forward
+///   with no usable reflog has neither, and stays unknown.
+///
+/// Every git failure degrades to `None` for the affected field.
+fn outside_landing(repo_root: &Path, branch: &str, base: &str) -> OutsideLanding {
+    let unknown = OutsideLanding {
+        landing: None,
+        fork: None,
+        changed: None,
+    };
+    let Some(tip) = git_stdout(
+        repo_root,
+        &["rev-parse", "--verify", &format!("{branch}^{{commit}}")],
+    )
+    .map(|s| s.trim().to_owned()) else {
+        return unknown;
+    };
+    let Some(chain) = git_stdout(repo_root, &["rev-list", "--first-parent", base]) else {
+        return unknown;
+    };
+    let landing = if chain.lines().any(|l| l == tip) {
+        Some(tip.clone())
+    } else {
+        git_stdout(
+            repo_root,
+            &[
+                "rev-list",
+                "--first-parent",
+                "--ancestry-path",
+                &format!("{tip}..{base}"),
+            ],
+        )
+        .and_then(|s| s.lines().last().map(str::to_owned))
+    };
+    let Some(landing) = landing else {
+        return unknown;
+    };
+    let is_ancestor = |a: &str, b: &str| {
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(["merge-base", "--is-ancestor", a, b])
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    let reflog_fork = git_stdout(
+        repo_root,
+        &[
+            "reflog",
+            "show",
+            "--format=%H",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .and_then(|s| s.lines().last().map(str::to_owned))
+    .filter(|c| is_ancestor(c, &tip));
+    let fork = reflog_fork
+        .map(|c| (c, "branch reflog (creation entry)"))
+        .or_else(|| {
+            git_stdout(
+                repo_root,
+                &["rev-parse", "--verify", &format!("{landing}^1")],
+            )
+            .map(|s| s.trim().to_owned())
+            .and_then(|pre_landing| git_stdout(repo_root, &["merge-base", &tip, &pre_landing]))
+            .map(|s| (s.trim().to_owned(), "merge base with the pre-landing base"))
+            .filter(|(c, _)| !c.is_empty())
+        });
+    let changed = fork.as_ref().and_then(|(fork_commit, _)| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(["diff", "-z", "--name-only", fork_commit, &landing])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(
+            String::from_utf8_lossy(&out.stdout)
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+                .collect(),
+        )
+    });
+    OutsideLanding {
+        landing: Some(landing),
+        fork,
+        changed,
+    }
+}
+
+/// The warning printed when a closure skipped the gate: which trusted-shell
+/// paths changed in the landed range, or that the range could not be
+/// established. `None` when the range is known and no surface path changed.
+fn outside_landing_warning(
+    landing: &OutsideLanding,
+    surface: &[String],
+    base: &str,
+) -> Option<String> {
+    let short = |c: &str| c.chars().take(10).collect::<String>();
+    let Some(changed) = landing.changed.as_ref() else {
+        return Some(format!(
+            "trusted shell surface: could not establish the branch's fork point or landing \
+             commit, so changes to it between them are unknown. The branch reached {base} \
+             outside `cs done`, which ran no gate and did not review it."
+        ));
+    };
+    let paths = shell_surface_changes(changed, surface, surface);
+    if paths.is_empty() {
+        return None;
+    }
+    let (fork, how) = landing.fork.as_ref()?;
+    let landed = landing.landing.as_deref()?;
+    Some(format!(
+        "trusted shell surface changed between the branch's fork point {} ({how}) and the \
+         commit that landed it, {}: {}. This change reached {base} outside `cs done` and was \
+         not reviewed by it; `cs done` ran no gate for this closure. Review it, then `cs trust`.",
+        short(fork),
+        short(landed),
+        paths.join(", ")
+    ))
+}
+
+/// The refusal for a configured `pre_done` hook under missing or stale trust.
+///
+/// Why its own wording: the hook is configured shell that `cs done` would run
+/// before anything else, so trust is legitimately required — and nothing was
+/// merged, so the post-merge refusal's "merge rolled back" would be false.
+fn pre_done_trust_refusal(
+    hook_cmd: &str,
+    mol_id: &MoleculeId,
+    cause: &anyhow::Error,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "`[hooks] pre_done` is configured (`{hook_cmd}`) and `cs done` would run it, so the \
+         repository's shell surface must be trusted first — and it is not.\n\n{cause}\n\n\
+         Nothing was run, merged or changed. Review the shell surface, run `cs trust`, then \
+         rerun `cs done {mol_id}`."
+    )
 }
 
 /// Structural post-condition for the final `cs done` guard: `true` iff
@@ -2367,6 +2627,27 @@ fn run_with_remote_before_lock(
         }
     }
 
+    // `--print-merge-message`: show the completion merge message and stop. Reads
+    // the same inputs the merge reads and writes nothing — no event, no stamp,
+    // no git call — so it can be run any number of times before the merge.
+    if args.print_merge_message {
+        let project_cfg = cosmon_filestore::load_project_config(&resolve_config_from_context(ctx))?;
+        let mut warnings = Vec::new();
+        let parts = completion_message_parts(&store, &state_dir, &mol, &project_cfg, &mut warnings);
+        for warning in &warnings {
+            eprintln!("⚠ {warning}");
+        }
+        print!(
+            "{}",
+            render_merge_message(
+                &format!("feat/{mol_id}"),
+                parts.merge_subject.as_deref(),
+                &parts.merge_trailers
+            )
+        );
+        return Ok(());
+    }
+
     let pinned_backend = transport_target
         .as_ref()
         .map(|_| {
@@ -2453,6 +2734,18 @@ fn run_with_remote_before_lock(
             branch_head_oid(&repo_root, &branch_name)?,
         ))
     };
+    // `--expect-head`: what lands, or is closed as landed, must be exactly what
+    // was gated. Checked here — after the preliminary head capture the locked
+    // recheck compares against, before any gate, event, merge or stamp — so a
+    // refusal changes nothing, and the same check covers the merge path and the
+    // already-merged path.
+    if let Some(expected) = args.expect_head.as_deref() {
+        let actual = match preliminary_git.as_ref() {
+            Some((_, head)) => head.clone(),
+            None => branch_head_oid(&repo_root, &branch_name)?,
+        };
+        verify_expected_head(&repo_root, &branch_name, actual.as_deref(), expected)?;
+    }
     let preliminary_mission = if preliminary_facts.as_ref().is_some_and(|facts| {
         if remote.is_some() {
             cosmon_core::remote_harvest::resolve_remote_policy(&facts.config.harvest_authority)
@@ -2699,7 +2992,8 @@ fn run_with_remote_before_lock(
                 // merge, so refuse `cs done` outright on an untrusted repository
                 // rather than running the hook — the operator is told to
                 // `cs trust` first.
-                crate::trust::ensure_trusted(&repo_root)?;
+                crate::trust::ensure_trusted(&repo_root)
+                    .map_err(|e| pre_done_trust_refusal(hook_cmd, &mol_id, &e))?;
                 run_pre_done_hook(&repo_root, hook_cmd, &mol_id).inspect_err(|e| {
                     // The refusal is now known, so its reason can be kept
                     // without writing ahead of authority freshness checks.
@@ -2736,6 +3030,14 @@ fn run_with_remote_before_lock(
 
     // Track whether merge succeeded — gates branch deletion (FIX 2).
     let mut merge_succeeded = false;
+
+    // Set when `cs done` found the branch already reachable from the base and
+    // moved nothing (`pre_merge_head..HEAD` is empty): the branch was landed
+    // outside `cs done`. There is then no tree `cs done` produced, so the
+    // post-merge gate, the surface check made on the gate's behalf and the
+    // `post_merge` deploy hook all stand down (ADR-158, "No merge, nothing to
+    // verify"). Holds the landing commit, recorded as evidence.
+    let mut landed_outside: Option<String> = None;
 
     // PR-B (task-20260714-aa2e): the durable `MergeCompleted` for a *successful*
     // merge is emitted ONCE, AFTER the post-merge gate — never before it. The
@@ -3124,48 +3426,11 @@ fn run_with_remote_before_lock(
     // last-writer-wins, "a guess dressed as a fact". Empty `coauthor_email` ⇒
     // empty vec ⇒ every commit message byte-identical to a pre-attribution
     // cosmon (F9).
-    let coauthor_trailers: Vec<String> = {
-        use cosmon_state::ops::model_attribution::folded_adapter;
-        let real_adapter = adapter_for_coauthor(
-            folded_adapter(&state_dir, &mol_id),
-            &mol_id,
-            !project_cfg.attribution.coauthor_trailers(None).is_empty(),
-            &mut warnings,
-        );
-        project_cfg
-            .attribution
-            .coauthor_trailers(real_adapter.as_deref())
-    };
-    warn_unstamped_attribution(&project_cfg.attribution, &coauthor_trailers, &mut warnings);
-
-    // Scheduler-derived lineage trailers (delib-20260720-cff4, Phase 1).
-    // The completion merge is stamped with the mission lineage read from the
-    // *ledger* — this molecule's id, the DAG root it belongs to, and one
-    // `Depends-On` per `blocked_by` parent — so git history's DAG structure
-    // becomes legible without changing any merge topology. buterin's hard
-    // constraint: these values come from `store.load_molecule` (the edges
-    // recorded at nucleation), never from worker-writable state, so the
-    // legibility layer cannot become a forgery channel. On the modal
-    // single-molecule case this adds exactly `Mol-Id` + `Mission-Id` and
-    // nothing else — the merge is byte-identical save the new trailer lines.
-    let lineage_trailers = crate::lineage::completion_trailers(&store, &mol_id);
-
-    // The merge commit carries both attribution (`Co-Authored-By`) and lineage
-    // trailers as one contiguous trailer paragraph. Attribution stays first so
-    // pre-existing message snapshots keep their leading block; lineage follows.
-    let merge_trailers: Vec<String> = coauthor_trailers
-        .iter()
-        .cloned()
-        .chain(lineage_trailers.iter().cloned())
-        .collect();
-
-    let merge_subject = project_cfg.project.render_merge_subject(
-        mol_id.as_str(),
-        mol.variables
-            .get("title")
-            .or_else(|| mol.variables.get("topic"))
-            .map_or("", String::as_str),
-    );
+    let CompletionMessageParts {
+        coauthor_trailers,
+        merge_trailers,
+        merge_subject,
+    } = completion_message_parts(&store, &state_dir, &mol, &project_cfg, &mut warnings);
 
     // A fast-forward creates no commit owned by cosmon, so there is nowhere to
     // carry the merge's trailers without rewriting worker commits (forbidden by
@@ -3230,15 +3495,30 @@ fn run_with_remote_before_lock(
                 // branch's tip never does.
                 let label = classify_already_merged_label(
                     mol.merged_at.is_some(),
-                    branch_is_empty_relative_to(&repo_root, &branch_name, &base_branch)
-                        && !branch_landed_by_merge_commit(&repo_root, &branch_name, &base_branch),
+                    branch_never_had_commits(&repo_root, &branch_name, &base_branch),
                 );
                 actions.push(label.to_owned());
                 merge_succeeded = true;
-                // PR-B: pre-gate `Ok` removed — the branch was already
-                // reachable, so the gate still runs on the (usually empty)
-                // diff and the single post-gate event records its verdict.
+                // PR-B: pre-gate `Ok` removed; the single post-gate event
+                // records the verdict (or, below, that no gate ran).
                 merge_escalation_retries = Some(0);
+                // Nothing merged: HEAD is where it was before the loop. The
+                // comparison is on the revision, not on a flag, so a bookkeeping
+                // commit that did land would keep the gate.
+                if pre_merge_head.is_some() && git_head(&repo_root).ok() == pre_merge_head {
+                    let evidence = outside_landing(&repo_root, &branch_name, &base_branch);
+                    if let Some(landing) = evidence.landing.as_deref() {
+                        actions.push(format!("landed_outside_cs_done: {landing}"));
+                    }
+                    if let Some(w) = outside_landing_warning(
+                        &evidence,
+                        &crate::trust::surface_paths(&repo_root),
+                        &base_branch,
+                    ) {
+                        warnings.push(w);
+                    }
+                    landed_outside = Some(evidence.landing.unwrap_or_default());
+                }
             }
             Ok(MergeLoopOutcome::NoBranch) => {
                 actions.push("no_branch".to_owned());
@@ -3413,7 +3693,12 @@ fn run_with_remote_before_lock(
         // *delegated* command (the only rung that asked about trust), so a tree
         // the cargo rung verified, or one no gate was declared for, landed a
         // new `post_merge` hook unreviewed.
-        if let (Some(pmh), Some(pre)) = (pre_merge_head.as_deref(), pre_merge_trust.as_ref()) {
+        if let (Some(pmh), Some(pre)) = (
+            pre_merge_head
+                .as_deref()
+                .filter(|_| landed_outside.is_none()),
+            pre_merge_trust.as_ref(),
+        ) {
             let changed = post_merge_changed_files(&repo_root, pmh).unwrap_or_default();
             let merged_surface = crate::trust::surface_paths(&repo_root);
             let paths = shell_surface_changes(&changed, &pre.surface, &merged_surface);
@@ -3490,6 +3775,16 @@ fn run_with_remote_before_lock(
         }
 
         let gate_outcome = match pre_merge_head.as_deref() {
+            // No merge, nothing to verify: no integrity_command, no cargo
+            // check, no build_command, and no trust check on their behalf.
+            _ if landed_outside.is_some() => {
+                actions.push(
+                    "post_merge_compile_gate: skipped — cs done merged nothing (branch already \
+                     landed on the base)"
+                        .to_owned(),
+                );
+                GateOutcome::NothingToVerify
+            }
             Some(pmh) => match run_post_merge_gate(&repo_root, pmh, &project_cfg.gates) {
                 Ok(outcome) => outcome,
                 // A gate *error* — a declared command or `cargo check` returned
@@ -3540,6 +3835,7 @@ fn run_with_remote_before_lock(
             GateOutcome::Verified { description } => {
                 actions.push(format!("post_merge_compile_gate: {description}"));
             }
+            GateOutcome::NothingToVerify if landed_outside.is_some() => {}
             GateOutcome::NothingToVerify => {
                 actions.push(
                     "post_merge_compile_gate: nothing to verify (no Rust or build-structural change)"
@@ -3788,7 +4084,24 @@ fn run_with_remote_before_lock(
             );
         }
 
-        if let Some(ref hook_cmd) = cfg.hooks.post_merge {
+        if let (Some(hook_cmd), true) = (cfg.hooks.post_merge.as_ref(), landed_outside.is_some()) {
+            // The hook deploys what `cs done` merged. This `cs done` merged
+            // nothing, so there is nothing of its own to deploy: whoever moved
+            // the base owns the deploy. Witnessed like every other skip.
+            let reason =
+                "cs done merged nothing: the branch was already landed on the base".to_owned();
+            warnings.push(format!(
+                "post_merge hook not run ({reason}); deploy by hand if the landing needs it"
+            ));
+            emit_post_merge_hook_event(
+                &events_path,
+                &mol_id,
+                hook_cmd,
+                cosmon_core::event_v2::PostMergeHookResult::Skipped { reason },
+                merge_dispatch_seq,
+                &mut warnings,
+            );
+        } else if let Some(ref hook_cmd) = cfg.hooks.post_merge {
             // Trunk-boundary gate (task-20260725-b64f): the `post_merge` hook
             // DEPLOYS — the canonical `just install` rebuilds and reinstalls
             // the on-disk `cs` binary from the merged code. That is correct
@@ -5215,6 +5528,41 @@ enum MergeOutcome {
     Error(String),
 }
 
+/// The paragraphs of a completion merge commit message, in order: the subject,
+/// then — when there are trailers — one trailer paragraph.
+///
+/// The single source of the message text: the merge and the conflict
+/// auto-resolve commit pass each paragraph as one `-m`, and
+/// [`render_merge_message`] (behind `cs done --print-merge-message`) joins the
+/// same paragraphs, so a message printed for a hand-made merge cannot drift
+/// from the one `cs done` writes. The subject is `merge_subject` when the
+/// project configures one, otherwise git's own `Merge branch '<branch>'`. The
+/// trailers stay a single paragraph because a trailer block must not be split
+/// by a blank line.
+fn merge_message_paragraphs(
+    branch: &str,
+    merge_subject: Option<&str>,
+    trailers: &[String],
+) -> Vec<String> {
+    let subject = merge_subject.map_or_else(|| format!("Merge branch '{branch}'"), str::to_owned);
+    let mut paragraphs = vec![subject];
+    if !trailers.is_empty() {
+        paragraphs.push(trailers.join("\n"));
+    }
+    paragraphs
+}
+
+/// The commit message of a completion merge as git stores it: the
+/// [`merge_message_paragraphs`] separated by a blank line, ending in a newline.
+///
+/// This is the text before any `commit-msg` or sign-off hook runs; such a hook
+/// acts on whichever message it is given, so it is not part of the comparison.
+fn render_merge_message(branch: &str, merge_subject: Option<&str>, trailers: &[String]) -> String {
+    let mut message = merge_message_paragraphs(branch, merge_subject, trailers).join("\n\n");
+    message.push('\n');
+    message
+}
+
 /// Attempt to merge `branch` into the current HEAD with the given strategy.
 ///
 /// Returns a [`MergeOutcome`] variant rather than a `Result` so callers can
@@ -5393,13 +5741,10 @@ fn try_merge_branch_target_with_subject(
                 // commit message.
                 cmd.args(["--no-ff", "--no-edit", merge_target]);
             } else {
-                let subject = merge_subject
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("Merge branch '{branch}'"));
-                cmd.args(["--no-ff", "-m", &subject]);
-                if !coauthor_trailers.is_empty() {
-                    let trailers = coauthor_trailers.join("\n");
-                    cmd.args(["-m", &trailers]);
+                cmd.arg("--no-ff");
+                for paragraph in merge_message_paragraphs(branch, merge_subject, coauthor_trailers)
+                {
+                    cmd.args(["-m", &paragraph]);
                 }
                 cmd.arg(merge_target);
             }
@@ -5867,13 +6212,8 @@ fn auto_resolve_append_only_jsonl(
     if coauthor_trailers.is_empty() && merge_subject.is_none() {
         commit_cmd.arg("--no-edit");
     } else {
-        let subject = merge_subject
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("Merge branch '{branch}'"));
-        commit_cmd.args(["-m", &subject]);
-        if !coauthor_trailers.is_empty() {
-            let trailers = coauthor_trailers.join("\n");
-            commit_cmd.args(["-m", &trailers]);
+        for paragraph in merge_message_paragraphs(branch, merge_subject, coauthor_trailers) {
+            commit_cmd.args(["-m", &paragraph]);
         }
     }
     let commit = commit_cmd.output()?;
@@ -6360,6 +6700,122 @@ fn branch_head_oid(repo_root: &Path, branch: &str) -> anyhow::Result<Option<Stri
         return Err(recovery_fault("empty branch head"));
     }
     Ok(Some(oid))
+}
+
+/// The inputs of a completion merge message, derived once so the merge and
+/// `--print-merge-message` read the same facts.
+struct CompletionMessageParts {
+    /// Attribution (`Co-Authored-By`) trailers alone; the artifact-commit
+    /// fallback carrier reuses them.
+    coauthor_trailers: Vec<String>,
+    /// Attribution trailers followed by the lineage trailers — the one trailer
+    /// paragraph of the merge commit.
+    merge_trailers: Vec<String>,
+    /// The `[project] merge_subject` template rendered for this molecule, or
+    /// `None` for git's default subject.
+    merge_subject: Option<String>,
+}
+
+/// Compute the trailers and subject of the completion merge commit.
+///
+/// Attribution (delib-20260717-194b, F1 + F6): the `Co-Authored-By` block is
+/// folded from the durable event log under the strict rule that the adapter
+/// annotation is emitted only when exactly one distinct adapter ran the
+/// molecule; zero or several drop it and push a warning. An empty
+/// `coauthor_email` yields no trailer, keeping every message byte-identical to
+/// a pre-attribution cosmon (F9).
+///
+/// Lineage (delib-20260720-cff4, Phase 1): `Mol-Id`, `Mission-Id` and one
+/// `Depends-On` per `blocked_by` parent, read from the ledger and never from
+/// worker-writable state. Attribution stays first so existing message
+/// snapshots keep their leading block.
+fn completion_message_parts(
+    store: &FileStore,
+    state_dir: &Path,
+    mol: &MoleculeData,
+    project_cfg: &ProjectConfig,
+    warnings: &mut Vec<String>,
+) -> CompletionMessageParts {
+    use cosmon_state::ops::model_attribution::folded_adapter;
+    let real_adapter = adapter_for_coauthor(
+        folded_adapter(state_dir, &mol.id),
+        &mol.id,
+        !project_cfg.attribution.coauthor_trailers(None).is_empty(),
+        warnings,
+    );
+    let coauthor_trailers = project_cfg
+        .attribution
+        .coauthor_trailers(real_adapter.as_deref());
+    warn_unstamped_attribution(&project_cfg.attribution, &coauthor_trailers, warnings);
+
+    let merge_trailers = coauthor_trailers
+        .iter()
+        .cloned()
+        .chain(crate::lineage::completion_trailers(store, &mol.id))
+        .collect();
+
+    let merge_subject = project_cfg.project.render_merge_subject(
+        mol.id.as_str(),
+        mol.variables
+            .get("title")
+            .or_else(|| mol.variables.get("topic"))
+            .map_or("", String::as_str),
+    );
+    CompletionMessageParts {
+        coauthor_trailers,
+        merge_trailers,
+        merge_subject,
+    }
+}
+
+/// Refuse unless the molecule branch tip is the object the operator pinned
+/// with `cs done --expect-head`.
+///
+/// `expected` is resolved with git to a commit, so a full or unambiguous
+/// abbreviated id both work; an id git cannot resolve (unknown, or ambiguous)
+/// is itself a refusal. `actual` is the branch tip read by the caller, `None`
+/// when the branch does not exist — a pin cannot be satisfied by an absent
+/// branch. The error names both full ids.
+///
+/// # Errors
+///
+/// Returns an error when the pinned id does not resolve, the branch is absent,
+/// or the tip differs from the pinned commit.
+fn verify_expected_head(
+    repo_root: &Path,
+    branch: &str,
+    actual: Option<&str>,
+    expected: &str,
+) -> anyhow::Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("{expected}^{{commit}}"))
+        .output()?;
+    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !output.status.success() || resolved.is_empty() {
+        anyhow::bail!(
+            "cs done refused: --expect-head `{expected}` does not resolve to a single \
+             commit in this repository. Nothing was merged and `merged_at` was not stamped."
+        );
+    }
+    let Some(actual) = actual else {
+        anyhow::bail!(
+            "cs done refused: --expect-head {resolved} was given but branch `{branch}` \
+             does not exist, so its tip cannot be {resolved}. Nothing was merged and \
+             `merged_at` was not stamped."
+        );
+    };
+    if actual != resolved {
+        anyhow::bail!(
+            "cs done refused: branch `{branch}` is at {actual}, not the pinned \
+             --expect-head {resolved}. Something was added to or removed from the branch \
+             after the head was gated. Nothing was merged and `merged_at` was not stamped; \
+             gate the new head and pass it, or drop --expect-head."
+        );
+    }
+    Ok(())
 }
 
 /// Migrate a historical reservation only when independent state, event, and
@@ -9659,6 +10115,8 @@ mod tests {
             skip_pre_done_hook: false,
             deploy_off_trunk: false,
             allow_protected_change: false,
+            expect_head: None,
+            print_merge_message: false,
         }
     }
 
@@ -11483,6 +11941,56 @@ mod tests {
             "feat/does-not-exist",
             "main"
         ));
+    }
+
+    /// Issue #213: a branch whose commits reached the base by fast-forward is
+    /// zero commits ahead and on the first-parent chain, yet it is landed
+    /// work. Only a branch whose tip never left its creation point is empty.
+    #[test]
+    fn fast_forwarded_branch_is_not_an_empty_branch() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/empty"])
+            .status
+            .success());
+        assert!(branch_never_had_commits(repo, "feat/empty", "main"));
+
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/ff", "main"])
+            .status
+            .success());
+        commit_file(repo, "one.txt", "1\n", "feat: one");
+        commit_file(repo, "two.txt", "2\n", "feat: two");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        assert!(git(repo, &["merge", "-q", "--ff-only", "feat/ff"])
+            .status
+            .success());
+
+        assert!(branch_is_empty_relative_to(repo, "feat/ff", "main"));
+        assert!(!branch_landed_by_merge_commit(repo, "feat/ff", "main"));
+        assert!(
+            !branch_never_had_commits(repo, "feat/ff", "main"),
+            "a fast-forwarded branch carried commits of its own"
+        );
+        // The empty branch is still empty once the base moved on.
+        assert!(branch_never_had_commits(repo, "feat/empty", "main"));
+    }
+
+    /// With no reflog the creation point is unknown: the branch is not
+    /// reported empty, whatever its topology.
+    #[test]
+    fn branch_without_a_reflog_is_not_reported_empty() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        assert!(git(repo, &["branch", "feat/unknown"]).status.success());
+        let log = repo.join(".git/logs/refs/heads/feat/unknown");
+        assert!(log.exists(), "fixture assumes git wrote a reflog");
+        std::fs::remove_file(&log).unwrap();
+
+        assert!(branch_is_empty_relative_to(repo, "feat/unknown", "main"));
+        assert!(!branch_never_had_commits(repo, "feat/unknown", "main"));
     }
 
     #[test]
