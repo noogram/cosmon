@@ -62,6 +62,7 @@ Fleet management:
 Execution:
   tackle               Tackle a molecule — claim before model selection and spawn ONE worker (for DAG walks use `cs run`)
   done                 Done — terminal teardown for a molecule (merge + cleanup, human-callable)
+  land-train           Land-train — land an operator-gated train on the base, then close each member
   sync                 Sync — base-sync the current worktree from main, stamping a Base-Sync trailer
   harvest              Harvest — close a completed-but-unmerged molecule by invoking `cs done`
   run                  Run — walk a molecule DAG of N≥1 nodes via the resident runtime (ADR-016 Layer B)
