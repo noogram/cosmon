@@ -175,4 +175,5 @@
 | 188-a-worker-is-stopped-through-its-supervising-parent | [188-a-worker-is-stopped-through-its-supervising-parent.md](188-a-worker-is-stopped-through-its-supervising-parent.md) |
 | 189-msrv-1-89-for-patched-sqlite | [189-msrv-1-89-for-patched-sqlite.md](189-msrv-1-89-for-patched-sqlite.md) |
 | 190-bounded-verification-and-train-landing | [190-bounded-verification-and-train-landing.md](190-bounded-verification-and-train-landing.md) |
+| 191-a-project-may-declare-an-external-derived-root | [191-a-project-may-declare-an-external-derived-root.md](191-a-project-may-declare-an-external-derived-root.md) |
 
