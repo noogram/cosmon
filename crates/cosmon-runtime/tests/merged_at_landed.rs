@@ -422,3 +422,18 @@ fn a_repository_that_cannot_be_asked_is_an_error() {
     let row = done_row(&tmp, &mol_id("task-20261117-ffff"));
     assert!(exec.branch_landed(&row).is_err());
 }
+
+/// An executor with no git branch to check (in-process, test doubles) keeps
+/// the documented default: whatever `on_complete` did, the branch has landed.
+#[test]
+fn an_executor_that_does_not_override_branch_landed_reports_landed() {
+    struct InProcess;
+    impl Executor for InProcess {
+        fn dispatch(&self, _id: &MoleculeId) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+    let tmp = TempDir::new().expect("tempdir");
+    let row = done_row(&tmp, &mol_id("task-20261117-9999"));
+    assert!(InProcess.branch_landed(&row).expect("answer"));
+}
