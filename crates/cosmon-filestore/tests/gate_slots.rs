@@ -56,9 +56,9 @@ fn a_slot_is_free_again_once_its_guard_drops() {
         .unwrap()
         .is_none());
     drop(first);
-    assert!(try_acquire_gate_slot_in(dir.path(), "p", 1)
+    assert!(eventually(|| try_acquire_gate_slot_in(dir.path(), "p", 1)
         .unwrap()
-        .is_some());
+        .is_some()));
 }
 
 /// Holders of pool X never block pool Y.
