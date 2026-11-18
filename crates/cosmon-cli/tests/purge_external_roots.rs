@@ -465,6 +465,12 @@ fn adr191_04_24_link_to_another_molecules_directory_is_refused() {
 
         let json = f.purge_json(&["--allow-unharvested"]);
         let why = withheld_reasons(&json, &theirs);
+        let entry = item(&json, "withheld", &theirs).unwrap();
+        assert_eq!(
+            entry["base"],
+            f.base1.display().to_string(),
+            "a refused link names its base"
+        );
         assert!(
             why.contains("not this molecule's directory"),
             "suffix {suffix:?}: {why}"
@@ -851,6 +857,15 @@ fn adr191_12_real_directory_and_stale_external_are_reclaimed_by_their_own_rules(
     let sel = item(&json, "selected", &stale).unwrap_or_else(|| panic!("{json:#}"));
     assert_eq!(sel["kind"], "orphan");
     assert_reclaimed(&stale, &json);
+    // The real directory is the in-worktree rule's alone: no external item.
+    assert!(
+        item(&json, "withheld", &wt.join("target")).is_none(),
+        "{json:#}"
+    );
+    assert!(
+        item(&json, "selected", &wt.join("target")).is_none(),
+        "{json:#}"
+    );
 }
 
 /// 15 — a link inside the payload that points outside it is unlinked; its
@@ -1093,4 +1108,130 @@ fn adr191_28_ambiguous_child_is_withheld_as_link_and_as_orphan() {
         "{json:#}"
     );
     assert!(payload_present(&dir));
+}
+
+// ---------------------------------------------------------------------------
+// Cases added to kill surviving mutants (verification.md)
+// ---------------------------------------------------------------------------
+
+/// D8 — a declared base with nothing under it still gets its register
+/// line: a base with no orphans is said to have been scanned.
+#[test]
+fn adr191_an_empty_declared_base_is_reported_as_scanned() {
+    let f = fx();
+    f.declare(&[(&f.base1, "")]);
+    let out = f.purge(&[]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(
+        stdout.contains(&format!("base {}: scanned", f.base1.display())),
+        "{stdout}"
+    );
+}
+
+/// D1 — a base that exists but is not a directory is unreachable, not a
+/// base to scan; the other base keeps its selection.
+#[test]
+fn adr191_a_base_that_is_a_file_is_unreachable() {
+    let f = fx();
+    let file_base = f.root.join("vol-c");
+    fs::write(&file_base, "not a directory").unwrap();
+    f.declare(&[(&f.base1, ""), (&file_base, "")]);
+    let ctl = control(&f, &f.base1, "");
+    let json = f.purge_json(&["--allow-unharvested"]);
+    let b = ext(&json)["bases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["base"] == file_base.display().to_string())
+        .unwrap_or_else(|| panic!("{json:#}"))
+        .clone();
+    assert_eq!(b["state"], "unreachable", "{json:#}");
+    assert!(
+        b["detail"].as_str().unwrap().contains("not a directory"),
+        "{b:#}"
+    );
+    assert_reclaimed(&ctl, &json);
+    assert!(file_base.is_file());
+}
+
+/// D5 — a lock anchor that is a symbolic link is not a lock: the probe
+/// fails and nothing is removed; the file it points to is untouched.
+#[test]
+fn adr191_a_symlinked_anchor_is_not_a_lock() {
+    let f = fx();
+    f.declare(&[(&f.base1, "")]);
+    f.molecule(M, "completed");
+    let wt = f.worktree(M);
+    let dir = build_dir(&f.base1.join(M));
+    let decoy = f.root.join("decoy.lock");
+    fs::write(&decoy, "").unwrap();
+    fs::remove_file(dir.join("debug/.cargo-lock")).unwrap();
+    symlink(&decoy, dir.join("debug/.cargo-lock")).unwrap();
+    symlink(&dir, wt.join("target")).unwrap();
+    let json = f.purge_json(&["--allow-unharvested"]);
+    let why = withheld_reasons(&json, &dir);
+    assert!(why.contains("could not be probed"), "{why}");
+    assert!(payload_present(&dir));
+    assert!(decoy.is_file());
+}
+
+/// D7 — a worktree without `target` contributes nothing; one whose
+/// `target` cannot be read is reported, not skipped.
+#[test]
+fn adr191_absent_root_is_silent_and_unreadable_root_is_reported() {
+    let f = fx();
+    f.declare(&[(&f.base1, "")]);
+    let ctl = control(&f, &f.base1, "");
+    f.molecule(M, "completed");
+    let bare = f.worktree(M);
+    f.molecule(OTHER, "completed");
+    let locked = f.worktree(OTHER);
+    fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let json = f.purge_json(&["--allow-unharvested"]);
+    fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    assert!(
+        item(&json, "withheld", &bare.join("target")).is_none(),
+        "{json:#}"
+    );
+    let why = withheld_reasons(&json, &locked.join("target"));
+    assert!(why.contains("could not be read"), "{why}");
+    assert_reclaimed(&ctl, &json);
+}
+
+/// D6 — a base whose listing fails withholds every child of it, a linked
+/// one included, while another base keeps its selection.
+#[test]
+fn adr191_a_base_whose_listing_fails_withholds_its_children() {
+    let f = fx();
+    f.declare(&[(&f.base1, ""), (&f.base2, "")]);
+    let ctl = control(&f, &f.base1, "");
+    f.molecule(M, "completed");
+    let wt = f.worktree(M);
+    let dir = build_dir(&f.base2.join(M));
+    symlink(&dir, wt.join("target")).unwrap();
+    // Traversable, not listable.
+    fs::set_permissions(
+        &f.base2,
+        std::os::unix::fs::PermissionsExt::from_mode(0o300),
+    )
+    .unwrap();
+    let json = f.purge_json(&["--allow-unharvested"]);
+    fs::set_permissions(
+        &f.base2,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let b2 = ext(&json)["bases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["base"] == f.base2.display().to_string())
+        .unwrap_or_else(|| panic!("{json:#}"))
+        .clone();
+    assert_eq!(b2["state"], "listing_failed", "{json:#}");
+    let why = withheld_reasons(&json, &dir);
+    assert!(why.contains("listing of base"), "{why}");
+    assert!(payload_present(&dir));
+    assert_reclaimed(&ctl, &json);
 }
