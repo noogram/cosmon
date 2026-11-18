@@ -1182,8 +1182,9 @@ fn git_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
 ///   the tip itself when the tip is on that chain (fast-forward).
 /// - **fork point** — the oldest reflog entry of the branch (its creation),
 ///   when it is an ancestor of the tip; otherwise the merge base of the tip with
-///   the landing commit's first parent (the pre-landing base). A fast-forward
-///   with no usable reflog has neither, and stays unknown.
+///   the landing commit's first parent (the pre-landing base). That fallback
+///   exists only for a landing by merge commit: a fast-forward with no usable
+///   reflog has no pre-landing base and stays unknown.
 ///
 /// Every git failure degrades to `None` for the affected field.
 fn outside_landing(repo_root: &Path, branch: &str, base: &str) -> OutsideLanding {
@@ -1238,9 +1239,18 @@ fn outside_landing(repo_root: &Path, branch: &str, base: &str) -> OutsideLanding
     )
     .and_then(|s| s.lines().last().map(str::to_owned))
     .filter(|c| is_ancestor(c, &tip));
+    // The merge-base fallback needs a pre-landing base: the landing commit's
+    // first parent. A fast-forward lands the branch tip itself, whose first
+    // parent is the branch's own previous commit, so a merge base with it would
+    // cover the last commit only and understate the range. No reflog there
+    // means no fork point.
+    let landed_by_merge = landing != tip;
     let fork = reflog_fork
         .map(|c| (c, "branch reflog (creation entry)"))
         .or_else(|| {
+            if !landed_by_merge {
+                return None;
+            }
             git_stdout(
                 repo_root,
                 &["rev-parse", "--verify", &format!("{landing}^1")],
