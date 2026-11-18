@@ -163,6 +163,8 @@ struct CompletingSubprocess {
     inner: SubprocessExecutor,
     store_path: PathBuf,
     dispatched: Arc<Mutex<Vec<MoleculeId>>>,
+    /// Replaces the git check, to model a question git cannot answer.
+    verify: Option<fn(&MoleculeData) -> Result<bool, RuntimeError>>,
 }
 
 impl Executor for CompletingSubprocess {
@@ -184,7 +186,10 @@ impl Executor for CompletingSubprocess {
     }
 
     fn branch_landed(&self, mol: &MoleculeData) -> Result<bool, RuntimeError> {
-        self.inner.branch_landed(mol)
+        match self.verify {
+            Some(verify) => verify(mol),
+            None => self.inner.branch_landed(mol),
+        }
     }
 }
 
@@ -201,6 +206,16 @@ fn run_pred_then_dependent(
     cs_exit: i32,
     landed: bool,
     preset_merged_at: Option<chrono::DateTime<Utc>>,
+) -> Outcome {
+    run_with_verifier(cs_exit, landed, preset_merged_at, None)
+}
+
+/// [`run_pred_then_dependent`] with the git check optionally replaced.
+fn run_with_verifier(
+    cs_exit: i32,
+    landed: bool,
+    preset_merged_at: Option<chrono::DateTime<Utc>>,
+    verify: Option<fn(&MoleculeData) -> Result<bool, RuntimeError>>,
 ) -> Outcome {
     let tmp = TempDir::new().expect("tempdir");
     let repo = tmp.path().join("repo");
@@ -238,6 +253,7 @@ fn run_pred_then_dependent(
             .with_cs_program(fake_cs(tmp.path(), cs_exit)),
         store_path: state.clone(),
         dispatched: Arc::clone(&dispatched),
+        verify,
     };
     let config = RuntimeConfig {
         poll_interval: Duration::from_millis(5),
@@ -436,4 +452,23 @@ fn an_executor_that_does_not_override_branch_landed_reports_landed() {
     let tmp = TempDir::new().expect("tempdir");
     let row = done_row(&tmp, &mol_id("task-20261117-9999"));
     assert!(InProcess.branch_landed(&row).expect("answer"));
+}
+
+/// A branch check that cannot be answered (git missing, repository gone) is
+/// not a yes: `merged_at` stays unset and the dependent stays blocked.
+#[test]
+fn an_unanswerable_branch_check_leaves_merged_at_unset() {
+    let out = run_with_verifier(
+        0,
+        true,
+        None,
+        Some(|mol| {
+            Err(RuntimeError::Dispatch {
+                id: mol.id.clone(),
+                reason: "git failed to launch".to_owned(),
+            })
+        }),
+    );
+    assert!(out.pred.merged_at.is_none());
+    assert!(out.dispatched.is_empty(), "{:?}", out.dispatched);
 }
