@@ -592,6 +592,63 @@ mod tests {
         );
     }
 
+    /// Each rejection names its own condition: the configuration error an
+    /// operator reads is this sentence.
+    #[test]
+    fn every_rejection_names_its_condition() {
+        let cases = [
+            (
+                DeclarationRejection::RootNotEvicted("cache".into()),
+                "not in [worktree_reclaim].evict",
+            ),
+            (
+                DeclarationRejection::RootInvalid(
+                    "..".into(),
+                    super::super::DerivedRootRejection::Traversal,
+                ),
+                "not a derived root",
+            ),
+            (DeclarationRejection::BaseNotAbsolute, "absolute"),
+            (DeclarationRejection::SuffixHasSlash, "contains `/`"),
+            (DeclarationRejection::SuffixHasParent, "contains `..`"),
+            (DeclarationRejection::SuffixHasNul, "NUL"),
+            (DeclarationRejection::SuffixTooLong, "longer than 64 bytes"),
+            (DeclarationRejection::BaseIsFilesystemRoot, "is `/`"),
+            (DeclarationRejection::BaseIsHome, "home directory"),
+            (
+                DeclarationRejection::BaseIsRepositoryRoot,
+                "repository root",
+            ),
+            (
+                DeclarationRejection::BaseIsAncestorOfRepository,
+                "ancestor of the repository root",
+            ),
+            (
+                DeclarationRejection::BaseInsideRepository,
+                "inside the repository",
+            ),
+            (
+                DeclarationRejection::BaseInsideWorktree(p("/w/x")),
+                "inside the worktree /w/x",
+            ),
+            (
+                DeclarationRejection::Duplicate { of: 2 },
+                "duplicate of entry 2",
+            ),
+            (
+                DeclarationRejection::Nested { inside: 3 },
+                "nested inside the base of entry 3",
+            ),
+        ];
+        for (why, needle) in cases {
+            assert!(
+                why.describe().contains(needle),
+                "{why:?}: {}",
+                why.describe()
+            );
+        }
+    }
+
     /// The lexical checks: root in `evict`, root a derived root, base
     /// absolute, then the suffix.
     #[test]
