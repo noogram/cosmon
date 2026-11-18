@@ -1460,6 +1460,57 @@ fn rolled_back_merge_leaves_molecule_harvestable_and_rerunnable() {
     );
 }
 
+/// The same refusal leaves the base checkout alone: the foreign writer's
+/// commit adds a file, and after the refused rollback that file is still in the
+/// working tree and the tree is clean. The ref is swapped first and the tree is
+/// reset only after the swap succeeded, so a refused swap touches no file.
+///
+/// FALSIFIER: resetting the tree before (or without) the ref compare-and-swap
+/// deletes `foreign.txt` and reddens this test.
+#[test]
+fn a_refused_rollback_leaves_the_foreign_commits_files_in_the_working_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let repo_str = repo.to_str().unwrap();
+    setup_repo_with_config(
+        repo,
+        &format!(
+            "\n[gates]\nintegrity_command = 'cd {repo_str} && echo foreign > foreign.txt && git add foreign.txt && git commit -q -m foreign-writer; exit 7'\n"
+        ),
+    );
+
+    let mol_id = nucleate_terminal(repo);
+    let (_branch, _pre_merge) = stage_clean_merge(repo, &mol_id);
+
+    let done = cs_isolated(repo)
+        .args(["--json", "done", &mol_id, "--no-auto-propel"])
+        .output()
+        .expect("cs done");
+    let all = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&done.stdout),
+        String::from_utf8_lossy(&done.stderr)
+    );
+
+    assert!(!done.status.success(), "{all}");
+    assert_eq!(
+        fs::read_to_string(repo.join("foreign.txt")).unwrap_or_default(),
+        "foreign\n",
+        "the foreign commit's file must survive the refused rollback.\n{all}"
+    );
+    let status = String::from_utf8_lossy(&git(repo, &["status", "--porcelain"]).stdout)
+        .trim()
+        .to_owned();
+    assert!(
+        !status.contains("foreign.txt"),
+        "foreign.txt must still be tracked and unmodified, got status `{status}`.\n{all}"
+    );
+    assert!(
+        git(repo, &["cat-file", "-e", "main:worker.txt"]).status.success(),
+        "this invocation's own merge must still be on main.\n{all}"
+    );
+}
+
 /// Issue #214: the post-merge rollback is a compare-and-swap. A gate command
 /// that commits to the base (a foreign writer that does not take the trunk
 /// lock) and then fails must NOT have that commit discarded by the rollback:
