@@ -382,5 +382,14 @@ mod tests {
         let dir = Path::new("/g/.cosmon/state/fleets/default/molecules/task-1");
         assert_eq!(state_root_of(dir), Some(PathBuf::from("/g/.cosmon/state")));
         assert_eq!(state_root_of(Path::new("/tmp/flat/task-1")), None);
+        // Each of the two named levels is checked on its own.
+        assert_eq!(
+            state_root_of(Path::new("/g/state/fleets/default/other/task-1")),
+            None
+        );
+        assert_eq!(
+            state_root_of(Path::new("/g/state/other/default/molecules/task-1")),
+            None
+        );
     }
 }

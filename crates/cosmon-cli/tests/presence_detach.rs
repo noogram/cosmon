@@ -216,3 +216,48 @@ fn json_reports_detached_and_nothing_to_detach() {
     assert_eq!(second["session"], "detach-self");
     assert_eq!(second["detached"], false);
 }
+
+/// Whether any file under the state directory holds an `operator_present` event.
+fn records_operator_present(s: &State) -> bool {
+    s.listing()
+        .values()
+        .any(|(_, _, bytes)| String::from_utf8_lossy(bytes).contains("operator_present"))
+}
+
+/// A ping is a lifecycle write and stamps "operator present" in the event log;
+/// `detach` withdraws the session and must not, so the pair pins the carve-out.
+#[test]
+fn ping_stamps_operator_presence_and_detach_does_not() {
+    let s = State::new();
+    assert!(!records_operator_present(&s));
+    s.ping("detach-self");
+    assert!(records_operator_present(&s), "ping must stamp presence");
+
+    let fresh = State::new();
+    fresh.ping("detach-self");
+    let log = fresh
+        .listing()
+        .into_iter()
+        .find(|(_, (_, _, bytes))| String::from_utf8_lossy(bytes).contains("operator_present"))
+        .expect("the ping's event log");
+    let stamps = |s: &State| {
+        String::from_utf8_lossy(&s.listing()[&log.0].2)
+            .matches("operator_present")
+            .count()
+    };
+    let before = stamps(&fresh);
+    success(&fresh.cs(&["presence", "detach"]));
+    assert_eq!(before, stamps(&fresh), "detach must not stamp presence");
+}
+
+/// The global `--json` flag, given before the subcommand, selects the JSON form
+/// exactly as the verb's own `--json` does.
+#[test]
+fn global_json_flag_selects_the_json_form() {
+    let s = State::new();
+    s.ping("detach-self");
+    let first = json(&s.cs(&["--json", "presence", "detach"]));
+    assert_eq!(first["detached"], true);
+    let second = json(&s.cs(&["--json", "presence", "detach"]));
+    assert_eq!(second["detached"], false);
+}
