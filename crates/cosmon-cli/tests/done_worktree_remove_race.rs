@@ -31,6 +31,7 @@ struct Galaxy {
 impl Drop for Galaxy {
     fn drop(&mut self) {
         self.stop_writer();
+        self.unlock_subtree();
     }
 }
 
@@ -195,6 +196,33 @@ impl Galaxy {
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
 
+    /// Make part of the worktree impossible to remove, for as long as the test
+    /// needs: `target/locked` holds a file and has mode 000, so neither
+    /// `git worktree remove` nor `remove_dir_all` can delete it (they fail
+    /// with `Permission denied`, which `git` reports as `failed to delete`).
+    /// Unlike a writer racing the removal, this does not depend on timing.
+    /// [`Galaxy::unlock_subtree`] restores the mode before cleanup.
+    fn lock_subtree(&self) {
+        let locked = self.worktree.join("target/locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(locked.join("f"), "").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // A process running as root ignores the mode and the premise is void.
+        assert!(
+            fs::remove_file(locked.join("f")).is_err(),
+            "the locked directory must resist removal (running as root?)"
+        );
+    }
+
+    /// Restore the mode set by [`Galaxy::lock_subtree`] so the temporary
+    /// directory can be deleted. Safe to call when nothing was locked.
+    fn unlock_subtree(&self) {
+        let locked = self.worktree.join("target/locked");
+        if locked.exists() {
+            let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o755));
+        }
+    }
+
     fn stop_writer(&mut self) {
         let _ = fs::write(self.root.join("stop"), "");
         if let Some(mut w) = self.writer.take() {
@@ -238,16 +266,28 @@ fn writer_that_stops_within_the_window_leaves_no_directory_and_no_warning() {
     );
 }
 
-/// (ii) A writer that never stops: `cs done` still exits 0, the warning names
-/// the path and the remedy, and `cs purge --worktrees` lists the leftover.
+/// (ii) A removal that never completes: `cs done` still exits 0, the warning
+/// names the path and the remedy, and `cs purge --worktrees` lists the
+/// leftover.
+///
+/// Two things are present at once. A writer process keeps creating entries, so
+/// the scenario is the one the issue describes and the warning's cause wording
+/// ("still writing") is true. An unremovable subtree (`lock_subtree`) is what
+/// keeps the directory on disk: a shell loop alone is not guaranteed to leave
+/// the directory non-empty at every one of the ten retries, which made the
+/// "directory is still there" assertion depend on scheduling.
 #[test]
 fn writer_that_never_stops_warns_with_path_and_remedy() {
     let mut g = Galaxy::new(None);
     g.start_writer();
+    g.lock_subtree();
     let out = g.done();
     let text = combined(&out);
     assert!(out.status.success(), "cs done must succeed.\n{text}");
-    assert!(g.worktree.exists(), "the writer keeps the directory alive");
+    assert!(
+        g.worktree.exists(),
+        "the unremovable subtree keeps the directory alive"
+    );
     assert!(
         text.contains("worktree remove failed")
             && text.contains(&g.worktree.display().to_string())
@@ -256,6 +296,7 @@ fn writer_that_never_stops_warns_with_path_and_remedy() {
         "the warning must carry the path, the cause and the remedy.\n{text}"
     );
     g.stop_writer();
+    g.unlock_subtree();
     let purge = g
         .cs()
         .args(["purge", "--worktrees"])
@@ -265,6 +306,10 @@ fn writer_that_never_stops_warns_with_path_and_remedy() {
     assert!(
         listing.contains(&g.id),
         "the leftover must be listed by the dry run.\n{listing}"
+    );
+    assert!(
+        g.worktree.exists(),
+        "the dry run must remove nothing.\n{listing}"
     );
     eprintln!("purge --worktrees dry run:\n{listing}");
 }
