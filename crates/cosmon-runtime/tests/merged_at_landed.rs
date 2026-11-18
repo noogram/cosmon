@@ -331,3 +331,94 @@ fn executor_reports_cs_done_exit_code() {
         "got: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `branch_landed` asked directly, over a real repository. The runtime tests
+// above reach it only through a branch that exists; these pin the other cases.
+// ---------------------------------------------------------------------------
+
+/// A molecule row as `cs done` leaves it, loaded back from a seeded store.
+fn done_row(tmp: &TempDir, id: &MoleculeId) -> MoleculeData {
+    let store = FileStore::new(tmp.path().join("state"));
+    seed(&store, id, MoleculeStatus::Completed, None, Vec::new());
+    store.load_molecule(id).expect("load seeded molecule")
+}
+
+/// A branch that `cs done` already deleted counts as landed only when the row
+/// says `cs done` archived it and did not record a refusal.
+#[test]
+fn a_deleted_branch_has_landed_only_if_archived_without_a_non_integration() {
+    let tmp = TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).expect("repo dir");
+    let id = mol_id("task-20261117-dddd");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let exec = SubprocessExecutor::new(&repo);
+
+    let mut row = done_row(&tmp, &id);
+    assert!(
+        !exec.branch_landed(&row).expect("answer"),
+        "no branch and not archived: nothing shows it landed"
+    );
+
+    row.archived = true;
+    assert!(
+        exec.branch_landed(&row).expect("answer"),
+        "no branch, archived by cs done, no refusal recorded: nothing to land"
+    );
+
+    row.non_integration = Some(cosmon_state::NonIntegration {
+        reason: cosmon_state::NonIntegrationReason::MergeFailed,
+        at: Utc::now(),
+        base_branch: None,
+        detail: None,
+    });
+    assert!(
+        !exec.branch_landed(&row).expect("answer"),
+        "cs done recorded that the work is not integrated"
+    );
+}
+
+/// A branch that exists decides by ancestry alone, whatever the row says about
+/// being archived, and the row's own base wins over the checked-out `HEAD`.
+#[test]
+fn an_existing_branch_is_judged_against_the_rows_base_branch() {
+    let tmp = TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).expect("repo dir");
+    let id = mol_id("task-20261117-eeee");
+    repo_with_branch(&repo, &id, true);
+    // `release` is cut before the branch landed, so it does not contain it.
+    git(&repo, &["branch", "release", "main~1"]);
+    let exec = SubprocessExecutor::new(&repo);
+
+    let mut row = done_row(&tmp, &id);
+    assert!(
+        exec.branch_landed(&row).expect("answer"),
+        "no base on the row: HEAD (main) contains the branch"
+    );
+
+    row.base_branch = Some("release".to_owned());
+    assert!(
+        !exec.branch_landed(&row).expect("answer"),
+        "the branch is not on the row's base, whatever HEAD holds"
+    );
+
+    row.base_branch = Some("main".to_owned());
+    row.archived = false;
+    assert!(
+        exec.branch_landed(&row).expect("answer"),
+        "an existing branch is judged by ancestry, not by `archived`"
+    );
+}
+
+/// An unreachable git is a question that cannot be answered, not a "no".
+#[test]
+fn a_repository_that_cannot_be_asked_is_an_error() {
+    let tmp = TempDir::new().expect("tempdir");
+    let missing = tmp.path().join("no-such-dir");
+    let exec = SubprocessExecutor::new(&missing);
+    let row = done_row(&tmp, &mol_id("task-20261117-ffff"));
+    assert!(exec.branch_landed(&row).is_err());
+}
