@@ -534,6 +534,21 @@ mod tests {
         assert!(!store.detach(&mine.session_id).unwrap());
     }
 
+    /// An unlink that fails for a reason other than "not there" is an error,
+    /// never a silent `false`: the session believes it withdrew and did not.
+    #[test]
+    fn detach_reports_a_snapshot_it_cannot_remove() {
+        let (_tmp, store) = make_store();
+        let sid = SessionId::new("sid-stuck").unwrap();
+        // A directory where the snapshot file belongs cannot be unlinked as a file.
+        fs::create_dir_all(store.snapshot_path(&sid)).unwrap();
+        let err = store.detach(&sid).expect_err("not removable");
+        assert!(
+            err.to_string().contains("failed to remove presence"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn gc_removes_stale_dead_pids() {
         let (_tmp, store) = make_store();

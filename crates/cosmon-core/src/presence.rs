@@ -793,6 +793,50 @@ mod tests {
         assert!(rec.kinds.iter().all(|k| !k.contains(' ')));
     }
 
+    /// The token alphabet is ASCII letters, digits, `_` and `-`; anything else
+    /// could carry text a worker wrote, so it is dropped whole.
+    #[test]
+    fn kind_tokens_use_letters_digits_underscore_and_hyphen_only() {
+        let kinds: Vec<String> = [
+            "local_bash",
+            "local-agent",
+            "A1",
+            "a.b",
+            "a b",
+            "a/b",
+            "é",
+            "a;b",
+        ]
+        .iter()
+        .map(|k| (*k).to_owned())
+        .collect();
+        let rec = BackgroundTasks::observe(None, 1, &kinds, fixed_now()).unwrap();
+        assert_eq!(rec.kinds, ["local_bash", "local-agent", "A1"]);
+    }
+
+    /// The bounds are inclusive: a 32-character token and an eighth distinct
+    /// kind are kept, the 33rd character and a ninth kind are not, and a
+    /// repeated kind does not use up a slot.
+    #[test]
+    fn kind_bounds_hold_at_their_boundaries() {
+        let longest = "x".repeat(32);
+        let too_long = "y".repeat(33);
+        let rec =
+            BackgroundTasks::observe(None, 1, &[longest.clone(), too_long], fixed_now()).unwrap();
+        assert_eq!(rec.kinds, [longest]);
+
+        let mut kinds: Vec<String> = Vec::new();
+        for i in 0..BACKGROUND_KINDS_MAX {
+            kinds.push(format!("k{i}"));
+            kinds.push(format!("k{i}"));
+        }
+        kinds.push("ninth".to_owned());
+        let rec = BackgroundTasks::observe(None, 1, &kinds, fixed_now()).unwrap();
+        assert_eq!(rec.kinds.len(), BACKGROUND_KINDS_MAX);
+        assert_eq!(rec.kinds.last().map(String::as_str), Some("k7"));
+        assert!(!rec.kinds.iter().any(|k| k == "ninth"));
+    }
+
     #[test]
     fn a_presence_without_the_field_decodes_and_omits_it_on_the_wire() {
         let p = sample(fixed_now());
