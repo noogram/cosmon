@@ -854,3 +854,63 @@ fn a_failed_closure_stops_the_run_and_a_rerun_closes_the_rest() {
     assert!(t.fx.is_closed(&t.b));
     assert_eq!(t.fx.state(&t.a)["merged_at"], a_merged_at);
 }
+
+/// A collapsed member is refused before the base moves: `cs done` would close
+/// a Collapsed molecule, so the landing must check Completed itself
+/// (ADR-052 §I9).
+#[test]
+fn a_collapsed_member_is_refused() {
+    let fx = Fixture::new("", false);
+    let a = fx.completed_molecule("member a");
+    let out = fx
+        .cs()
+        .args(["--json", "nucleate", "task-work", "--var", "topic=member b"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", combined(&out));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let b = v["id"].as_str().unwrap().to_owned();
+    let col = fx
+        .cs()
+        .args(["collapse", &b, "--reason", "abandoned"])
+        .output()
+        .unwrap();
+    assert!(col.status.success(), "{}", combined(&col));
+    let ha = fx.commit_on_branch(&a, "main", "a.txt", "a\n");
+    let hb = fx.commit_on_branch(&b, "main", "b.txt", "b\n");
+    let base = rev(&fx.repo, "main");
+    fx.merge_member_into_train(&a);
+    fx.merge_member_into_train(&b);
+    let tip = rev(&fx.repo, "train");
+    let t = Train {
+        fx,
+        a,
+        b: b.clone(),
+        ha,
+        hb,
+        base: base.clone(),
+        tip,
+    };
+    let out = t.land();
+    t.assert_refused_naming(&out, &format!("member {b} is collapsed"), &base);
+}
+
+/// The worker of a member cannot land the train: the guard `cs done` runs
+/// first is run per member before the base moves, not left to the closures.
+#[test]
+fn a_member_worker_cannot_land_the_train() {
+    let t = happy_train(Fixture::new("", false));
+    let mut cmd = t.fx.cs();
+    cmd.env("COSMON_PARENT_MOL_ID", &t.b).args([
+        "land-train",
+        "--train-base",
+        &t.base,
+        "--train-tip",
+        &t.tip,
+    ]);
+    for (mol, head) in t.members() {
+        cmd.arg("--member").arg(format!("{mol}={head}"));
+    }
+    let out = cmd.output().unwrap();
+    t.assert_refused_naming(&out, "harvest belongs to the pilot", &t.base);
+}
