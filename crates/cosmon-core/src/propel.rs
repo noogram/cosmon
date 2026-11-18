@@ -252,6 +252,16 @@ pub struct NudgeView {
     /// observation of work in flight may suppress a nudge, and only while it is
     /// younger than [`PROPEL_BACKGROUND_CEILING`].
     pub background_work_age: Option<Duration>,
+    /// The worker's detached gate run is **queued for a slot** (ADR-190 D1):
+    /// it asked for a slot of a bounded pool, none is free, and the pool is
+    /// demonstrably busy. The shell sets it only when every part of the
+    /// amendment "Queued is not a stall" holds — the queued process is alive,
+    /// neither `gates.pid` nor `gates.exit` exists, and the pool has a live
+    /// holder — and `false` for anything unknown or unreadable.
+    ///
+    /// A queued run is waiting its turn, not hung, and the wait has no ceiling:
+    /// the 45-minute bound applies from slot acquisition, not from the request.
+    pub gate_queued: bool,
     /// The provider's own journal typed this worker's **last assistant turn**
     /// as a transport failure (Claude's `isApiErrorMessage`). Read only by
     /// [`decide_api_stall_nudge`], which refuses to speak without it.
@@ -291,6 +301,10 @@ pub enum NudgeSkip {
         /// The ceiling past which the work stops suppressing, in seconds.
         ceiling_secs: i64,
     },
+    /// The worker's gate run is queued for a slot of a busy pool
+    /// ([`NudgeView::gate_queued`]). Unlike [`Self::BackgroundWork`] it carries
+    /// no age and has no ceiling: the wait ends when a holder finishes or dies.
+    GateQueued,
     /// The worker's terminal produced output recently: it is thinking or
     /// streaming, not idle. The false-idle repair.
     PaneActive {
@@ -422,6 +436,14 @@ pub fn decide_nudge(view: &NudgeView, stale_after: Duration) -> NudgeDecision {
             attempts: view.attempts,
             reason: EscalateReason::Orphaned,
         };
+    }
+
+    // (3a) Queued for a gate slot. The run has not started, so it has no age to
+    // bound: waiting behind a live holder is the intended state, and the
+    // ceiling starts when the slot is taken (`gates.pid`). The shell passes
+    // `true` only on a positive, fully-checked observation.
+    if view.gate_queued {
+        return NudgeDecision::Skip(NudgeSkip::GateQueued);
     }
 
     // (3b) Background work in flight. The worker ended its turn to wait for a
@@ -573,6 +595,7 @@ mod tests {
             progress_age: Duration::seconds(progress),
             pane_idle: pane.map(Duration::seconds),
             background_work_age: None,
+            gate_queued: false,
             attempts,
             since_last_propel: since.map(Duration::seconds),
         }
@@ -1008,6 +1031,9 @@ mod tests {
                 NudgeDecision::Skip(NudgeSkip::BackgroundWork { .. }) => {
                     unreachable!("this worker reports no background work")
                 }
+                NudgeDecision::Skip(NudgeSkip::GateQueued) => {
+                    unreachable!("this worker has no gate run queued for a slot")
+                }
                 NudgeDecision::Skip(NudgeSkip::AwaitingOperator | NudgeSkip::NotRunning { .. }) => {
                     unreachable!("this worker is Running and holds no operator gate")
                 }
@@ -1032,6 +1058,44 @@ mod tests {
             background_work_age: Some(Duration::seconds(age_secs)),
             ..view(1800, Some(1800), 0, None)
         }
+    }
+
+    /// A silent, stale worker whose gate run is queued for a slot.
+    fn queued_for_a_slot() -> NudgeView {
+        NudgeView {
+            gate_queued: true,
+            ..view(9_000, Some(9_000), 0, None)
+        }
+    }
+
+    /// ADR-190 amendment: a queued run is not a stall, however long it has
+    /// waited — far past the background ceiling, on every channel.
+    #[test]
+    fn a_gate_run_queued_for_a_slot_is_never_nudged_whatever_its_wait() {
+        for channel in CHANNELS {
+            let mut v = queued_for_a_slot();
+            v.channel = channel;
+            assert!(v.progress_age > PROPEL_BACKGROUND_CEILING);
+            assert_eq!(
+                decide_nudge(&v, STALE),
+                NudgeDecision::Skip(NudgeSkip::GateQueued),
+                "{channel:?}"
+            );
+        }
+    }
+
+    /// Without the queued fact the same silent worker is nudged: the skip comes
+    /// from `gate_queued` and from nothing else in the view.
+    #[test]
+    fn the_same_worker_not_queued_is_nudged() {
+        let v = NudgeView {
+            gate_queued: false,
+            ..queued_for_a_slot()
+        };
+        assert!(matches!(
+            decide_nudge(&v, STALE),
+            NudgeDecision::Nudge { attempt: 1, .. }
+        ));
     }
 
     /// The report of #216: a worker waiting on a background command has a

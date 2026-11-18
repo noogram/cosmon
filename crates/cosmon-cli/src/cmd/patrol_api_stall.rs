@@ -357,7 +357,8 @@ fn apply_decision(
         NudgeDecision::Skip(
             NudgeSkip::NoTypedApiError
             | NudgeSkip::NotRunning { .. }
-            | NudgeSkip::BackgroundWork { .. },
+            | NudgeSkip::BackgroundWork { .. }
+            | NudgeSkip::GateQueued,
         ) => {}
         NudgeDecision::Skip(NudgeSkip::Backoff {
             since_secs,
