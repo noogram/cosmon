@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Duration, Utc};
 use cosmon_core::id::MoleculeId;
 use cosmon_core::presence::Presence;
+use cosmon_filestore::gate_slots::live_gate_slot_holders_in;
 use cosmon_filestore::presence_store::{pid_is_alive, PresenceStore};
 use cosmon_state::StateStore;
 
@@ -34,6 +35,9 @@ use cosmon_state::StateStore;
 const GATES_PID_FILE: &str = "gates.pid";
 /// File a detached gate run writes its exit code to when it ends.
 const GATES_EXIT_FILE: &str = "gates.exit";
+/// File a detached gate run writes while it waits for a gate slot (ADR-190 D1):
+/// the waiting process's pid on the first line, the pool name on the second.
+const GATES_QUEUED_FILE: &str = "gates.queued";
 
 /// The cosmon state root a molecule directory lives under.
 ///
@@ -72,6 +76,44 @@ pub(crate) fn gate_run_age(molecule_dir: &Path, now: DateTime<Utc>) -> Option<Du
     }
     let modified: DateTime<Utc> = std::fs::metadata(&pid_path).ok()?.modified().ok()?.into();
     Some((now - modified).max(Duration::zero()))
+}
+
+/// Whether the detached gate run in `molecule_dir` is queued for a slot of a
+/// busy pool (ADR-190, amendment "Queued is not a stall").
+///
+/// True only when **all** of these hold: `gates.queued` names a live process,
+/// neither `gates.pid` nor `gates.exit` exists, and the named pool has at
+/// least one live holder (a `flock` the kernel still reports as held). Any
+/// other combination — a dead queued process, a pool nobody holds, an
+/// unreadable or malformed file — is unknown and returns `false`, which the
+/// judge decides exactly as it did before slots existed. A leftover
+/// `gates.queued` can therefore never silence patrol on its own.
+#[must_use]
+pub(crate) fn gate_queued_at(molecule_dir: &Path, state_root: &Path) -> bool {
+    if molecule_dir.join(GATES_EXIT_FILE).exists() || molecule_dir.join(GATES_PID_FILE).exists() {
+        return false;
+    }
+    let Ok(body) = std::fs::read_to_string(molecule_dir.join(GATES_QUEUED_FILE)) else {
+        return false;
+    };
+    let mut lines = body.lines();
+    let (Some(pid), Some(pool)) = (lines.next(), lines.next()) else {
+        return false;
+    };
+    let Ok(pid) = pid.trim().parse::<u32>() else {
+        return false;
+    };
+    pid_is_alive(pid)
+        && live_gate_slot_holders_in(state_root, pool.trim()).is_ok_and(|held| held >= 1)
+}
+
+/// [`gate_queued_at`] for molecule `mid`, over the state root its directory
+/// lives under. A molecule directory that does not have the usual shape is
+/// unknown (`false`), as for [`background_work_age`].
+#[must_use]
+pub(crate) fn gate_run_queued(store: &dyn StateStore, mid: &MoleculeId) -> bool {
+    let dir = store.molecule_dir(mid);
+    state_root_of(&dir).is_some_and(|root| gate_queued_at(&dir, &root))
 }
 
 /// Age of the provider-reported background work of the session working on
@@ -118,6 +160,7 @@ mod tests {
     use chrono::TimeZone;
     use cosmon_core::id::SessionId;
     use cosmon_core::presence::BackgroundTasks;
+    use cosmon_filestore::gate_slots::{try_acquire_gate_slot_in, GateSlotGuard};
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 11, 16, 12, 0, 0).unwrap()
@@ -227,6 +270,87 @@ mod tests {
         ];
         assert_eq!(reported_background_age(&rows, &mol(), t), None);
         assert_eq!(reported_background_age(&[], &mol(), t), None);
+    }
+
+    /// A state root with one molecule directory, and the slot a holder took.
+    fn queued_fixture(pool_holders: usize) -> (tempfile::TempDir, PathBuf, Vec<GateSlotGuard>) {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("fleets/default/molecules/task-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let held = (0..pool_holders)
+            .map(|_| {
+                try_acquire_gate_slot_in(root.path(), "full_gate", 4)
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
+        (root, dir, held)
+    }
+
+    fn write_queued(dir: &Path, pid: &str, pool: &str) {
+        std::fs::write(dir.join("gates.queued"), format!("{pid}\n{pool}\n")).unwrap();
+    }
+
+    #[test]
+    fn a_live_queued_process_behind_a_live_holder_is_queued() {
+        let (root, dir, _held) = queued_fixture(1);
+        write_queued(&dir, &std::process::id().to_string(), "full_gate");
+        assert!(gate_queued_at(&dir, root.path()));
+    }
+
+    #[test]
+    fn a_pool_with_no_live_holder_is_not_a_reason_to_stay_silent() {
+        let (root, dir, held) = queued_fixture(1);
+        write_queued(&dir, &std::process::id().to_string(), "full_gate");
+        drop(held);
+        // A sibling test's `fork` can keep a copy of the released descriptor
+        // for a few milliseconds, so the release is awaited, not assumed.
+        let released = (0..100).any(|_| {
+            if gate_queued_at(&dir, root.path()) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                false
+            } else {
+                true
+            }
+        });
+        assert!(released);
+    }
+
+    #[test]
+    fn a_holder_in_another_pool_does_not_count() {
+        let (root, dir, _held) = queued_fixture(1);
+        write_queued(&dir, &std::process::id().to_string(), "docker_build");
+        assert!(!gate_queued_at(&dir, root.path()));
+    }
+
+    #[test]
+    fn a_stale_queued_file_with_a_dead_process_is_not_queued() {
+        let (root, dir, _held) = queued_fixture(1);
+        write_queued(&dir, "4000000000", "full_gate");
+        assert!(!gate_queued_at(&dir, root.path()));
+    }
+
+    #[test]
+    fn a_pid_or_an_exit_file_ends_the_queued_state() {
+        for file in ["gates.pid", "gates.exit"] {
+            let (root, dir, _held) = queued_fixture(1);
+            write_queued(&dir, &std::process::id().to_string(), "full_gate");
+            std::fs::write(dir.join(file), "1").unwrap();
+            assert!(!gate_queued_at(&dir, root.path()), "{file}");
+        }
+    }
+
+    #[test]
+    fn missing_or_malformed_queued_files_are_unknown() {
+        let (root, dir, _held) = queued_fixture(1);
+        assert!(!gate_queued_at(&dir, root.path()));
+        for body in ["", "not a pid\nfull_gate\n", "1234\n", "\u{0}"] {
+            std::fs::write(dir.join("gates.queued"), body).unwrap();
+            assert!(!gate_queued_at(&dir, root.path()), "{body:?}");
+        }
+        // A pool name that escapes the slot directory is refused, not followed.
+        write_queued(&dir, &std::process::id().to_string(), "../x");
+        assert!(!gate_queued_at(&dir, root.path()));
     }
 
     #[test]

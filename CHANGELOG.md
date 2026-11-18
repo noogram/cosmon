@@ -51,6 +51,8 @@ this stage.
 
 - `cs done` refuses overlapping uncommitted base-checkout edits before attempting a merge, names the files and asks the pilot to commit or stash them, and preserves the harvestable molecule; unrelated unstaged edits remain allowed (dirty-base preflight requires Git 2.38+).
 
+- `[gate_slots]` in `.cosmon/config.toml` bounds how many full gates run at once on a machine, across every worktree of a galaxy (`full_gate = N`, plus named pools under `[gate_slots.pools]`); `cs gates slot [--pool <name>] -- <command…>` runs a command while holding a slot, and `scripts/run-gates-bg.sh` goes through it. A run waiting for a slot writes `gates.queued` and then `gates.pid` once it holds one; `cs patrol` leaves a queued run alone while its pool has a live holder, and the 45-minute ceiling counts from slot acquisition. Unset keeps today's behaviour; `cs done` never takes a slot. (#214)
+
 - Work messages now show `delivery_state=exhausted` in local and remote work lists when delivery attempts are used up; pulls keep serving other messages and acknowledgment preserves the exhaustion history.
 
 - `cs tackle` refuses a spawn before any worktree, branch or session exists when `[admission].max_active` is reached (active = status running with a live worker session) or the volume holding `.worktrees/` has fewer than `[admission].min_free_bytes` free; the refusal names the bound and the observed value, unset config changes nothing, and a failed free-space probe admits with a notice (#214).

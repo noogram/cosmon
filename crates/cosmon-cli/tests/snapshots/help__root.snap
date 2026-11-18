@@ -314,6 +314,7 @@ Commands:
   galaxies           Galaxies — inspect the four-family taxonomy
   freeze             Freeze a worker — suspend with state preservation (preemption)
   thaw               Thaw a worker — resume a frozen worker's Claude session
+  gates              Gates — run a heavy command under a bounded slot pool (`cs gates slot`)
   trust              Trust — grant this repository permission to run its own formulas/hooks (the `direnv allow` of cosmon; refuses repo-supplied shell until granted)
   prime              Prime — re-inject the current step context of a running molecule
   resume             Resume — convenience alias for `cs patrol --propel --molecule <id>`

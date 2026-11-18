@@ -56,6 +56,11 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub gates: GatesConfig,
 
+    /// Gate slots — how many full gates and heavy commands may run at once
+    /// (ADR-190 D1). Unset keeps the behaviour from before the section existed.
+    #[serde(default)]
+    pub gate_slots: GateSlotsConfig,
+
     /// Archive subsystem — durable capture of terminated molecules under
     /// `.cosmon/state/archive/` (plumbing only in M1; actual archive writes
     /// land in later milestones).
@@ -1785,6 +1790,56 @@ pub struct HooksConfig {
     pub post_merge: Option<String>,
 }
 
+/// Name of the pool the full gate bundle runs in (`gate_slots.full_gate`).
+pub const FULL_GATE_POOL: &str = "full_gate";
+
+/// Gate slots: at most N runs of a pool at once (ADR-190 D1,
+/// noogram/cosmon#214).
+///
+/// Cosmon owns the primitive (a kernel `flock` per slot under the main
+/// checkout's state directory); the project owns the counts and the pool
+/// names. Nothing here is a default: an absent section, or a pool with no
+/// count, means that pool is unbounded and the runner takes no slot.
+///
+/// ```toml
+/// [gate_slots]
+/// full_gate = 2          # the full gate bundle, run by scripts/run-gates-bg.sh
+///
+/// [gate_slots.pools]
+/// docker_build = 1       # a project's own heavy command, via `cs gates slot`
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GateSlotsConfig {
+    /// Slots of the `full_gate` pool: how many full gate bundles may run at
+    /// once on this machine, across every worktree of the galaxy. Unset (or
+    /// `0`) leaves the full gate unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_gate: Option<usize>,
+
+    /// Named pools for the project's own heavy commands, pool name to slot
+    /// count. A pool is independent of every other: holders of one never wait
+    /// for another. A count of `0` leaves that pool unbounded.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pools: std::collections::BTreeMap<String, usize>,
+}
+
+impl GateSlotsConfig {
+    /// Slot count configured for `pool`, or `None` when the pool is unbounded.
+    ///
+    /// [`FULL_GATE_POOL`] reads [`Self::full_gate`]; any other name reads
+    /// [`Self::pools`]. A count of `0` is `None`: a pool that admits no run
+    /// would block every caller forever, so it is read as "not configured".
+    #[must_use]
+    pub fn count_for(&self, pool: &str) -> Option<usize> {
+        let n = if pool == FULL_GATE_POOL {
+            self.full_gate
+        } else {
+            self.pools.get(pool).copied()
+        };
+        n.filter(|n| *n > 0)
+    }
+}
+
 /// Project verification gates — language-agnostic shell commands.
 ///
 /// Each field is an opaque command string; cosmon does not inspect or parse
@@ -2844,6 +2899,31 @@ mod tests {
         .unwrap();
         assert_eq!(config.hooks.post_merge, None);
         assert_eq!(config.hooks.pre_done, None);
+    }
+
+    #[test]
+    fn gate_slots_unset_bounds_nothing() {
+        let config = ProjectConfig::default();
+        assert_eq!(config.gate_slots.count_for(FULL_GATE_POOL), None);
+        assert_eq!(config.gate_slots.count_for("docker_build"), None);
+    }
+
+    #[test]
+    fn gate_slots_read_the_full_gate_count_and_the_named_pools() {
+        let toml = r#"
+            [project]
+            project_id = "demo-a1b2"
+            [gate_slots]
+            full_gate = 2
+            [gate_slots.pools]
+            docker_build = 1
+            zero = 0
+        "#;
+        let config: ProjectConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.gate_slots.count_for("full_gate"), Some(2));
+        assert_eq!(config.gate_slots.count_for("docker_build"), Some(1));
+        assert_eq!(config.gate_slots.count_for("zero"), None);
+        assert_eq!(config.gate_slots.count_for("absent"), None);
     }
 
     #[test]

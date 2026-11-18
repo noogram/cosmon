@@ -43,6 +43,7 @@ pub mod examples;
 pub mod fleet;
 pub mod freeze;
 pub mod galaxies;
+pub mod gates;
 pub mod guard;
 pub mod harvest;
 pub mod harvest_authority;
