@@ -10064,6 +10064,45 @@ mod tests {
         assert!(!wts.join("mol").exists());
     }
 
+    /// Only the "failed to delete" race is retried. A locked worktree is a
+    /// decision git took on purpose: the removal is reported as git worded it,
+    /// the directory stays, and no retry (which would delete it) runs.
+    #[test]
+    fn a_locked_worktree_is_refused_not_retried_and_stays_on_disk() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().canonicalize().unwrap();
+        init_repo(&repo);
+        let wt = repo.join(".worktrees/locked");
+        assert!(git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat/locked",
+                wt.to_str().unwrap()
+            ]
+        )
+        .status
+        .success());
+        assert!(git(&repo, &["worktree", "lock", wt.to_str().unwrap()])
+            .status
+            .success());
+
+        // A retry would sleep for a minute and then delete the directory.
+        let started = std::time::Instant::now();
+        let err = remove_worktree_with(&repo, &wt, 3, std::time::Duration::from_secs(60))
+            .expect_err("git refuses to remove a locked worktree");
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        assert!(
+            err.to_string().contains("locked"),
+            "git's own refusal must be reported: {err}"
+        );
+        assert!(!err.to_string().contains("retries"), "{err}");
+        assert!(wt.join(".git").exists(), "a locked worktree must survive");
+    }
+
     fn make_store() -> (TempDir, FileStore) {
         let tmp = TempDir::new().unwrap();
         let store = FileStore::new(tmp.path());
