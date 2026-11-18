@@ -132,6 +132,71 @@ for _ in $(seq 1 100); do [ -f "$dir5/gates.exit" ] && break; sleep 0.1; done
     && ok "the run completes although the runner killed the launcher's tree on return" \
     || ko "run survives an instant kill of the launcher's tree" "gates.exit: '$(cat "$dir5/gates.exit" 2>/dev/null)'"
 
+# ── 6. gate slots (ADR-190 D1, noogram/cosmon#214) ─────────────────────────
+#
+# A stub `cs` stands in for `cs gates slot` so this stays hermetic: it honours
+# the same contract the runner relies on (`--configured` exits 0 with a count or
+# 3; otherwise it takes a `flock` on one slot file, writes --ready-file once
+# the slot is held, runs the command and returns its exit code). The real verb
+# is exercised against the real runner in cosmon-cli/tests/gate_slots_cli.rs.
+stub="$tmp/stub"; mkdir -p "$stub"
+cat > "$stub/cs" <<'PYEOF'
+#!/usr/bin/env python3
+import fcntl, os, subprocess, sys
+args = sys.argv[1:]
+slot_file = os.environ.get("STUB_SLOT_FILE")
+if "--configured" in args:
+    if slot_file:
+        print(1)
+        sys.exit(0)
+    sys.exit(3)
+ready = args[args.index("--ready-file") + 1]
+cmd = args[args.index("--") + 1:]
+fd = os.open(slot_file, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(ready, "w").write(str(os.getpid()))
+sys.exit(subprocess.call(cmd))
+PYEOF
+chmod +x "$stub/cs"
+
+# 6a. nothing configured: today's files, no queued file, no slot.
+dir6a="$tmp/slots-unset"; mkdir -p "$dir6a"
+COSMON_RUN_GATES_BG_CS="$stub/cs" COSMON_RUN_GATES_BG_DIR="$dir6a" "$SCRIPT" sleep 0.5 >/dev/null
+[ -f "$dir6a/gates.pid" ] && [ ! -e "$dir6a/gates.queued" ] && [ ! -e "$dir6a/gates.slot-held" ] \
+    && ok "unset config: gates.pid at once, no gates.queued, no slot" \
+    || ko "unset config keeps today's files" "$(ls "$dir6a")"
+for _ in $(seq 1 50); do [ -f "$dir6a/gates.exit" ] && break; sleep 0.1; done
+[ "$(cat "$dir6a/gates.exit" 2>/dev/null)" = "0" ] && [ ! -e "$dir6a/gates.queued" ] \
+    && ok "unset config: the run ends with gates.exit and still no gates.queued" \
+    || ko "unset config run ends cleanly" "$(ls "$dir6a")"
+
+# 6b. N=1: the second run is queued (not failed) while the first holds the slot.
+export STUB_SLOT_FILE="$tmp/slot0.lock"
+dir6b1="$tmp/slots-first"; dir6b2="$tmp/slots-second"; mkdir -p "$dir6b1" "$dir6b2"
+COSMON_RUN_GATES_BG_CS="$stub/cs" COSMON_RUN_GATES_BG_DIR="$dir6b1" "$SCRIPT" sleep 3 >/dev/null
+for _ in $(seq 1 100); do [ -f "$dir6b1/gates.pid" ] && break; sleep 0.05; done
+[ -f "$dir6b1/gates.pid" ] && [ ! -e "$dir6b1/gates.queued" ] \
+    && ok "a run that gets its slot has gates.pid and no gates.queued" \
+    || ko "first run holds the slot" "$(ls "$dir6b1")"
+COSMON_RUN_GATES_BG_CS="$stub/cs" COSMON_RUN_GATES_BG_DIR="$dir6b2" "$SCRIPT" \
+    bash -c "echo started > '$tmp/second-ran'; sleep 0.3" >/dev/null
+q=$(sed -n 1p "$dir6b2/gates.queued" 2>/dev/null)
+[ -n "$q" ] && kill -0 "$q" 2>/dev/null && [ "$(sed -n 2p "$dir6b2/gates.queued")" = "full_gate" ] \
+    && ok "the waiting run names its live process and its pool in gates.queued" \
+    || ko "gates.queued names the waiting process and pool" "got '$(cat "$dir6b2/gates.queued" 2>/dev/null)'"
+sleep 0.5
+[ ! -e "$dir6b2/gates.pid" ] && [ ! -e "$dir6b2/gates.exit" ] && [ ! -e "$tmp/second-ran" ] \
+    && ok "while queued: no gates.pid, no gates.exit, the bundle has not run" \
+    || ko "queued run has not started" "$(ls "$dir6b2")"
+for _ in $(seq 1 200); do [ -f "$dir6b2/gates.exit" ] && break; sleep 0.1; done
+[ "$(cat "$dir6b2/gates.exit" 2>/dev/null)" = "0" ] && [ -e "$tmp/second-ran" ] \
+    && ok "gates.exit appears only after the bundle ran, once the slot freed" \
+    || ko "queued run completes after the slot frees" "$(ls "$dir6b2")"
+[ -f "$dir6b2/gates.pid" ] && [ ! -e "$dir6b2/gates.queued" ] \
+    && ok "once the slot is held gates.pid exists and gates.queued is gone" \
+    || ko "gates.pid replaces gates.queued" "$(ls "$dir6b2")"
+unset STUB_SLOT_FILE
+
 echo "──────────────────────────────────────────────────────────────────────"
 if [ "$fail" -eq 0 ]; then
     echo "run-gates-bg.test: $pass passed, 0 failed."
