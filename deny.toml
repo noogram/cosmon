@@ -88,6 +88,13 @@ ignore = [
     # on a version bump, and that is precisely the day the exemption must
     # already be written down rather than discovered as a red gate.
     { id = "RUSTSEC-2026-0253", reason = "transitive via ratatui→lru 0.12 and ratatui-core→lru 0.16; unreachable — the only cache key in either crate is (Rect, Layout), a numeric-only type with zero `impl Drop` in both crates, so no user Drop can panic during pop(); the fix requires lru>=0.18.2, reachable only via a ratatui 0.30 bump that adds 56 crates and breaks cargo vet. See the comment block above for the lapse conditions." },
+    #
+    # RUSTSEC-2026-0543 — chrono 0.4.44 is flagged unmaintained. This is a
+    # maintenance advisory, not a corrected or known vulnerability, and no
+    # patched version exists. chrono is used across the whole workspace, so
+    # replacing it is a separate piece of work, tracked as its own plan.
+    # Exception recorded 2026-11-18 (operator decision); REVIEW BY 2026-12-18.
+    { id = "RUSTSEC-2026-0543", reason = "chrono 0.4.44 flagged unmaintained; a maintenance advisory, not a corrected or known vulnerability; no patched version exists; chrono is used across the workspace; replacement tracked as a separate plan; review by 2026-12-18" },
 ]
 
 [licenses]

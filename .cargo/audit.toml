@@ -39,4 +39,5 @@ ignore = [
     # and leaves cargo vet with 65 unvetted dependencies. Full rationale and
     # the two lapse conditions live in deny.toml [advisories.ignore].
     "RUSTSEC-2026-0253",
+    "RUSTSEC-2026-0543", # chrono — unmaintained; same rationale as deny.toml
 ]
