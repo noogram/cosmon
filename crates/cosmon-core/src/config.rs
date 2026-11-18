@@ -640,14 +640,48 @@ pub struct WorktreeReclaimConfig {
     /// Default: `["target"]`.
     #[serde(default = "default_evict_roots")]
     pub evict: Vec<String>,
+    /// External bases for derived roots that live outside the worktree
+    /// (ADR-191). Empty by default, and empty changes nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external: Vec<ExternalDerivedRootConfig>,
 }
 
 impl Default for WorktreeReclaimConfig {
     fn default() -> Self {
         Self {
             evict: default_evict_roots(),
+            external: Vec::new(),
         }
     }
+}
+
+/// One `[[worktree_reclaim.external]]` entry (ADR-191 D1).
+///
+/// ```toml
+/// [[worktree_reclaim.external]]
+/// root = "target"                         # must also appear in `evict`
+/// base = "/Volumes/Builds-A/cosmon-target"
+/// suffix = "-wt"                          # optional; default ""
+/// ```
+///
+/// It says that molecule `m`'s copy of `root` may live at
+/// `<base>/<m><suffix>`, reached from the worktree through the link
+/// `<worktree>/<root>`. Without such an entry a link that leaves the
+/// worktree is refused, because its target could be any directory; with
+/// one, only the molecule's own direct child of a base the project named in
+/// advance can ever be reclaimed. Several bases for one root are declared
+/// by repeating the entry. Every entry is validated when the reclamation
+/// pass starts and an invalid one stops the pass.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalDerivedRootConfig {
+    /// The worktree-relative derived root the link sits at.
+    pub root: String,
+    /// The absolute directory whose direct children are per-molecule copies.
+    pub base: std::path::PathBuf,
+    /// Fixed text after the molecule id in the child's name.
+    #[serde(default)]
+    pub suffix: String,
 }
 
 /// Default for [`WorktreeReclaimConfig::evict`] — `["target"]`.
