@@ -101,6 +101,89 @@ To make such a root reclaimable, an exclusion protocol for its producer has to
 exist — a lock the producer actually takes. Until then the honest answer is to
 report the bytes and keep them.
 
+## `[[worktree_reclaim.external]]` — build directories outside the worktree
+
+Some projects keep each worktree's `target` on another volume: `target` is a
+symbolic link to a per-molecule directory such as
+`/Volumes/Builds-A/cosmon-target/<molecule-id>-wt`. Without a declaration,
+that link is refused like any link that leaves the worktree, because its
+target could be any directory. A project that names its bases in advance gets
+those directories reclaimed ([ADR-191](../adr/191-a-project-may-declare-an-external-derived-root.md)):
+
+```toml
+[worktree_reclaim]
+evict = ["target"]
+
+[[worktree_reclaim.external]]
+root = "target"                          # must also appear in `evict`
+base = "/Volumes/Builds-A/cosmon-target"
+suffix = "-wt"                           # optional; default ""
+
+[[worktree_reclaim.external]]
+root = "target"
+base = "/Volumes/Builds-B/cosmon-target"
+suffix = "-wt"
+```
+
+With these two entries, molecule `m` may own `<base>/<m>-wt` under either
+base, and nothing else under either base.
+
+**What is reclaimed.** The payload of `<base>/<m><suffix>` — every entry except
+the build locks and their parent directories — when all of these hold:
+
+* the directory is reached through `<worktree>/target` and is exactly the
+  worktree's own molecule's child of a declared base, or it is a direct child
+  of a base that no live worktree link reaches (an **orphan**, typically left
+  by `cs done`, which removes the link and not its target);
+* molecule `m` has a record **in this fleet's store** and is `Completed` or
+  `Collapsed`. A directory whose molecule this store does not know is kept:
+  a base may be shared with another project;
+* every `<profile>/.cargo-lock` and `<triple>/<profile>/.cargo-lock` present
+  under the directory is acquired, and `debug/.cargo-lock` exists. That is the
+  only "in use" test. A process whose arguments name the path (a `du`) does not
+  block reclamation, and modification times are not read;
+* no other link or base child reaches the same directory, compared by path and
+  by device and inode;
+* the worktree enumeration and the base's listing had no error.
+
+The same gesture as above applies: dry by default, removal only with
+`--allow-unharvested` and without `--dry-run`. Execution re-resolves each link
+under the held locks and refuses when it now points elsewhere.
+
+**What is never deleted.** The link itself, which belongs to the worktree; the
+lock files and their parents; every base directory and everything under a base
+other than the selected directory; anything reached through a link inside the
+payload (the link is unlinked, its target is left alone); the worktree.
+
+**What the register says.** Each declared base gets a line — `scanned`,
+`unreachable, not scanned` (a volume that is not mounted: the rest of the pass
+runs), or `listing failed` — and each external directory is listed with its
+resolved path, how it was reached, its base and its size:
+
+```text
+  external derived roots (ADR-191):
+    base /Volumes/Builds-A/cosmon-target: scanned
+    base /Volumes/Builds-B/cosmon-target: unreachable, not scanned — …
+    1 external director(ies) withheld, 48.2 GiB:
+      - /Volumes/Builds-A/cosmon-target/task-…-0c2d-wt [orphan, base /Volumes/Builds-A/cosmon-target] (48.2 GiB)
+          molecule task-…-0c2d is running — a molecule that is not Completed or Collapsed may still be resumed
+    1 external director(ies) with reclaimable payload, 51.0 GiB:
+      - /Volumes/Builds-A/cosmon-target/task-…-77aa-wt [linked from …/.worktrees/task-…-77aa/target, base /Volumes/Builds-A/cosmon-target] (51.0 GiB)
+```
+
+**Declaration errors stop the pass**, naming the entry and the condition: a
+relative base; a base that is `/`, the home directory, the repository root, an
+ancestor of it, or inside the repository or a worktree; a suffix containing
+`/`, `..` or NUL, or longer than 64 bytes; two entries with the same canonical
+base and suffix; a base nested inside another; a `root` missing from `evict`.
+A name that reads as two molecules under two suffixes of one base (`""` and
+`t` make `task-20261118-b7d7t` both `task-20261118-b7d7t` and
+`task-20261118-b7d7` plus `t`) is not an error; that child is withheld as
+ambiguous.
+
+Not covered: simulator devices, temporary directories outside a declared base,
+and deeper layouts such as `<base>/<m>/target`.
+
 ## What is never reclaimed
 
 No path in cosmon removes a worktree automatically (ADR-178). The durable

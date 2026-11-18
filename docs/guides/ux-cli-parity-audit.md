@@ -431,6 +431,14 @@ include state written while recording that failure.
 
 The RPP route change has no CLI command behavior to mirror.
 
+## External derived roots in `cs purge --worktrees` (ADR-191, issue #218)
+
+| Capability | CLI | Native UI | Remote service |
+|---|---|---|---|
+| Reclaim a declared external build directory | `cs purge --worktrees --allow-unharvested` reclaims `<base>/<molecule-id><suffix>` reached through a worktree's link, or as an orphan, when `[[worktree_reclaim.external]]` declares the base; the register and `--json` (`external.bases`, `external.selected`, `external.withheld`) name each directory's base, size and reason | No equivalent control audited | No equivalent route audited |
+
+No flag changed; the pass's report gained an external section, and `cs tackle --reclaim-derived` runs the same pass.
+
 ## Briefing confirmation and patrol transitions (issue #125)
 
 | Capability | CLI | Native UI | Remote service |

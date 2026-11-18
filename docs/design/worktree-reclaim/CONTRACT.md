@@ -155,6 +155,44 @@ custom roots: adapters must establish their applicable exclusion or withhold
 those roots. Port capability and path validation are execution preconditions,
 not an ancestry conjunct smuggled into DerivedSelection.
 
+## External roots and orphan candidates (ADR-191)
+
+This subsection adds a candidate class; it changes no row of the seven-axis
+product above, and the witness does not read it. A project may declare, per
+derived root, external bases (`[[worktree_reclaim.external]]`: `root`, `base`,
+optional `suffix`). For a candidate `w` owned by molecule `m`, a symbolic link
+at `w/<root>` is an **external root** only when its canonical target is
+exactly `canonical(base_i)/<m><suffix_i>` for one reachable entry `i` of that
+root; any other resolution is refused with a reason and selects nothing. A
+direct child of a reachable base that no live link reaches is an **orphan
+candidate**. Base children are classified once per canonical base against
+every entry of it; a name with no molecule-id reading, or with more than one,
+is withheld. Without a declaration, a link that leaves the worktree keeps the
+`DerivedRoots::Unavailable` outcome above.
+
+An external root or orphan is selected only when all of the following hold,
+each failure withholding with its reason:
+
+* the worktree enumeration has no error (uniqueness needs the whole
+  population) and the base listing was read;
+* no other link or child resolves to the same directory, compared on
+  canonical path and on device and inode;
+* the molecule record is **Present in this fleet's store** and its status is
+  Completed or Collapsed. Unlike the G table, `M = Absent` withholds here: an
+  external base lies outside the repository and may belong to another fleet;
+* every `<profile>/.cargo-lock` and `<triple>/<profile>/.cargo-lock` under the
+  directory is acquired and retained, `debug/.cargo-lock` among them. A
+  missing debug anchor is a failed probe.
+
+Execution re-resolves the link (or re-reads the orphan) under the held locks
+and refuses when path, device or inode differ from the observation. It removes
+the directory's payload and preserves every lock anchor and its ancestors; the
+link, the bases, siblings and anything reached through a link inside the
+payload are never removed. A base that does not exist or canonicalize at pass
+start is reported unreachable and skipped; a link into it is dangling. The
+rules are the pure functions of `cosmon_core::worktree_reclaim::external`; the
+observation is `cosmon_harvest::worktree_reclaim::external`.
+
 ## Existing consumers: explicit migration contract
 
 Both dirty probes currently fail open: `purge.rs::dirty_paths` deliberately
