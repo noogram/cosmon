@@ -481,11 +481,11 @@ fn run_worktree_pass(ctx: &Context, store: &dyn StateStore, args: &Args) -> anyh
         return Ok(());
     };
     let base = super::worktree_reclaim::base_branch(ctx, &repo_root);
-    let evict = super::worktree_reclaim::evict_roots(ctx);
+    let config = super::worktree_reclaim::reclaim_config(ctx)?;
     // The derived tier is opt-in twice over: `--allow-unharvested` asks for
     // it, `--dry-run` overrides the ask.
     let execute = args.allow_unharvested && !args.dry_run;
-    let pass = super::worktree_reclaim::run_pass(&repo_root, &base, store, &evict, execute)?;
+    let pass = super::worktree_reclaim::run_pass(&repo_root, &base, store, &config, execute)?;
     if ctx.json {
         println!("{}", super::worktree_reclaim::to_json(&pass));
     } else {

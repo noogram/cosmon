@@ -4314,8 +4314,14 @@ pub(super) fn find_repo_root() -> anyhow::Result<PathBuf> {
 /// and the pass it calls removes no worktree under any flag (ADR-178).
 fn run_pressure_check(ctx: &Context, store: &dyn cosmon_state::StateStore, repo_root: &Path) {
     let base = super::worktree_reclaim::base_branch(ctx, repo_root);
-    let evict = super::worktree_reclaim::evict_roots(ctx);
-    match super::worktree_reclaim::run_pass(repo_root, &base, store, &evict, true) {
+    let config = match super::worktree_reclaim::reclaim_config(ctx) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("pressure check skipped: {e}");
+            return;
+        }
+    };
+    match super::worktree_reclaim::run_pass(repo_root, &base, store, &config, true) {
         Ok(pass) => {
             if pass.removed.is_empty() {
                 println!(
