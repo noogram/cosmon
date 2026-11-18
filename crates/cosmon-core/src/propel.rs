@@ -220,6 +220,9 @@ pub enum NudgeChannel {
 /// module docs for why a pane *duration* is admissible where a pane *string*
 /// is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Each flag is an independent observation the shell makes; folding them into a
+// bitset or an enum would hide which fact decided a verdict.
+#[allow(clippy::struct_excessive_bools)]
 pub struct NudgeView {
     /// Which emitter is asking. Reported back, never used to weaken a rule.
     pub channel: NudgeChannel,
