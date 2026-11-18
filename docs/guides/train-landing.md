@@ -107,9 +107,15 @@ cs land-train ...            # same arguments
 ```
 
 Until the train lands, that grant reads stale for the base's surface, so a
-`cs done` that needs trust in the meantime is refused. The comparison reads the
-tip's tracked files. A surface file that exists in the main checkout but is not
-tracked would make the two differ; a train cannot change such a file anyway.
+`cs done` that needs trust in the meantime is refused.
+
+The check compares the grant with the surface of the tip's tracked files. A
+grant made from a checkout matches it only when that checkout's surface files
+are exactly the tracked ones. While a surface file is untracked in the main
+checkout, or a tracked one is locally modified, no train that changes the
+surface can pass. Run `git status -- .cosmon/config.toml .cosmon/formulas` and
+the scripts they name, and commit, remove or restore what it lists before
+granting.
 
 ## Out of scope
 
