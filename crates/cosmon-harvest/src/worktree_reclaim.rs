@@ -1442,6 +1442,26 @@ mod tests {
         assert!(moved.join("debug/deps/payload.o").is_file());
     }
 
+    /// ADR-191 §4.16, same path — a directory replaced at the same path
+    /// (new inode) after observation is refused by the identity check.
+    #[test]
+    #[cfg(unix)]
+    fn adr191_16_a_directory_replaced_in_place_refuses_execution() {
+        let f = fixture("completed");
+        let (ext, dirs) = external_layout(&f, &[("builds-a", "")]);
+        let observer = f.observer().with_external(ext);
+        let plan = observer.observe_external(&[f.worktree.clone()], true);
+        let item = plan.items.iter().find(|i| i.path == dirs[0]).unwrap();
+        assert!(item.selected(), "{:?}", item.reasons);
+        std::fs::rename(&dirs[0], dirs[0].with_extension("old")).unwrap();
+        std::fs::create_dir_all(dirs[0].join("debug/deps")).unwrap();
+        std::fs::write(dirs[0].join("debug/.cargo-lock"), "").unwrap();
+        std::fs::write(dirs[0].join("debug/deps/new.o"), "someone else's bytes").unwrap();
+        let err = observer.reclaim_external(item).unwrap_err();
+        assert_eq!(err.operation, "re-resolve external root", "{err:?}");
+        assert!(dirs[0].join("debug/deps/new.o").is_file());
+    }
+
     /// ADR-191 §4.6, injected — an enumeration with errors selects no
     /// external root and no orphan, with the reason named.
     #[test]
