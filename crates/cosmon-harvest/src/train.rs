@@ -27,8 +27,11 @@
 //! # Rerun after a kill
 //!
 //! A kill between the fast-forward and the closures leaves the base at the
-//! train tip with some members unclosed. A rerun with the same arguments finds
-//! the base already at the tip, re-checks the train's shape, skips the move
+//! train tip with some members unclosed — or past it, because a closure in a
+//! galaxy that tracks harvest state commits that state to the base, and the
+//! released lock lets another pilot land in between. A rerun with the same
+//! arguments finds the tip on the base's first-parent chain, re-checks the
+//! train's shape, skips the move
 //! and the shell-surface predicate (the base already moved, so refusing it
 //! protects nothing), and hands back only the members whose `merged_at` is
 //! still empty. A member is therefore never closed twice by this verb.
@@ -100,8 +103,9 @@ pub struct LandTrainRequest {
 pub enum Landing {
     /// The base branch was fast-forwarded from the train base to the tip.
     Landed,
-    /// The base branch was already at the tip (a rerun after a kill between
-    /// the fast-forward and the closures); nothing was moved.
+    /// The tip was already on the base branch's first-parent chain (a rerun
+    /// after a kill between the fast-forward and the closures, possibly with
+    /// closures or other landings since); nothing was moved.
     AlreadyLanded,
 }
 
@@ -294,7 +298,8 @@ fn indent(text: &str) -> String {
 /// 1. `[harvest_authority] required` is false — this increment refuses a
 ///    train when sealed authority is required.
 /// 2. The base branch equals the train base (else "moved after the gate"), or
-///    already equals the tip (a rerun: no move, no surface check).
+///    already has the tip on its first-parent chain (a rerun: no move, no
+///    surface check).
 /// 3. [`check_train_chain`] over `train_base..tip`.
 /// 4. Every member is Completed, has no other base branch, and — unless
 ///    already closed — its branch is still at its pinned head.
@@ -380,7 +385,7 @@ pub fn land(ctx: &HarvestContext, req: &LandTrainRequest) -> anyhow::Result<Land
 
     let base_ref = format!("refs/heads/{base_branch}");
     let current = resolve_commit(&repo_root, &base_ref, "the base branch")?;
-    let landing = if current == train_tip {
+    let landing = if on_first_parent_chain(&repo_root, &train_tip, &current)? {
         Landing::AlreadyLanded
     } else if current == train_base {
         Landing::Landed
@@ -482,6 +487,38 @@ fn git(repo_root: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo_root).env("LC_ALL", "C");
     cmd
+}
+
+/// Whether `commit` is `head` or one of the commits reached from `head` by
+/// first parents alone — that is, whether a fast-forward to `commit` is part
+/// of `head`'s own history rather than something merged in from a side.
+fn on_first_parent_chain(repo_root: &Path, commit: &str, head: &str) -> anyhow::Result<bool> {
+    if commit == head {
+        return Ok(true);
+    }
+    let ancestor = git(repo_root)
+        .args(["merge-base", "--is-ancestor", commit, head])
+        .status()?;
+    if !ancestor.success() {
+        return Ok(false);
+    }
+    let out = git(repo_root)
+        .args(["rev-list", "--first-parent", "--parents"])
+        .arg(format!("{commit}..{head}"))
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git rev-list {commit}..{head} failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    // Newest first; the oldest first-parent commit not reachable from
+    // `commit` must have `commit` itself as its first parent.
+    let listing = String::from_utf8_lossy(&out.stdout);
+    let oldest_first_parent = listing
+        .lines()
+        .last()
+        .and_then(|line| line.split_whitespace().nth(1));
+    Ok(oldest_first_parent == Some(commit))
 }
 
 /// `git rev-parse --verify --quiet <rev>^{commit}`, `None` when it does not
@@ -872,6 +909,57 @@ mod tests {
             rendered
         ));
         assert!(!merge_message_matches("Merge branch 'feat/x'\n", rendered));
+    }
+
+    fn git_in(repo: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// The compare-and-swap is the last guard: when the base no longer holds
+    /// the train base, `update-ref` fails, the checked-out tree is moved back,
+    /// and the error says the base moved. Exercised directly, because under
+    /// `land` the pre-check refuses first.
+    #[test]
+    fn a_failed_compare_and_swap_moves_the_tree_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git_in(repo, &["init", "-q", "-b", "main"]);
+        git_in(repo, &["config", "user.email", "t@example.com"]);
+        git_in(repo, &["config", "user.name", "T"]);
+        git_in(repo, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        git_in(repo, &["add", "base.txt"]);
+        git_in(repo, &["commit", "-qm", "base"]);
+        let train_base = git_in(repo, &["rev-parse", "HEAD"]);
+        git_in(repo, &["checkout", "-qb", "train"]);
+        std::fs::write(repo.join("train.txt"), "train\n").unwrap();
+        git_in(repo, &["add", "train.txt"]);
+        git_in(repo, &["commit", "-qm", "train"]);
+        let tip = git_in(repo, &["rev-parse", "HEAD"]);
+        git_in(repo, &["checkout", "-q", "main"]);
+        // Another writer moves main after the gate, without changing the tree.
+        git_in(repo, &["commit", "-q", "--allow-empty", "-m", "moved"]);
+        let moved = git_in(repo, &["rev-parse", "main"]);
+
+        let err = fast_forward(repo, "main", &train_base, &tip)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("compare-and-swap"), "{err}");
+        assert!(err.contains("Nothing was moved"), "{err}");
+        assert_eq!(git_in(repo, &["rev-parse", "main"]), moved);
+        assert_eq!(git_in(repo, &["status", "--porcelain"]), "");
+        assert!(!repo.join("train.txt").exists(), "the tree is moved back");
     }
 
     /// `--member` parsing.

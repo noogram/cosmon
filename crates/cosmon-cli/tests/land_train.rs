@@ -123,6 +123,28 @@ impl Fixture {
         }
     }
 
+    /// A galaxy that tracks part of `.cosmon/state` (archive, frontier,
+    /// events), as cosmon itself does: there `cs done` commits harvest state
+    /// to the base after a closure, so the base moves past the train tip.
+    fn new_tracked_state() -> Self {
+        let fx = Self::new("[archive]\nenabled = true\n", true);
+        let cosmon = fx.repo.join(".cosmon");
+        fs::create_dir_all(cosmon.join("state/archive/events")).unwrap();
+        fs::write(
+            cosmon.join(".gitignore"),
+            "state/*\n!state/archive/\n!state/frontier.json\n",
+        )
+        .unwrap();
+        fs::write(cosmon.join("state/frontier.json"), "seed\n").unwrap();
+        fs::write(cosmon.join("state/archive/events/seed.jsonl"), "seed\n").unwrap();
+        fs::write(cosmon.join("state/events.jsonl"), "").unwrap();
+        fs::write(fx.repo.join(".gitignore"), ".worktrees/\n").unwrap();
+        git_ok(&fx.repo, &["add", "-A"]);
+        git_ok(&fx.repo, &["add", "-f", ".cosmon/state/events.jsonl"]);
+        git_ok(&fx.repo, &["commit", "-q", "-m", "track harvest state"]);
+        fx
+    }
+
     fn cs(&self) -> Command {
         cs(&self.repo, &self.trust)
     }
@@ -705,4 +727,130 @@ fn a_rerun_after_a_kill_between_closures_does_not_close_a_member_twice() {
         "member A was closed once; its merged_at must not be rewritten"
     );
     assert!(t.fx.is_closed(&t.b), "member B is closed by the rerun");
+}
+
+/// In a galaxy that tracks harvest state, closing member A commits that state
+/// to the base, which then sits past the train tip. A rerun after a kill at
+/// that point must still read the train as landed — the tip is on the base's
+/// first-parent chain — and close only member B.
+#[test]
+fn a_rerun_after_a_closure_committed_tracked_state_closes_the_rest() {
+    let t = happy_train(Fixture::new_tracked_state());
+    git_ok(&t.fx.repo, &["merge", "--ff-only", "-q", &t.tip]);
+    let first =
+        t.fx.cs()
+            .args(["done", &t.a, "--no-auto-propel", "--expect-head", &t.ha])
+            .output()
+            .unwrap();
+    assert!(first.status.success(), "{}", combined(&first));
+    let a_merged_at = t.fx.state(&t.a)["merged_at"].clone();
+
+    let rerun = t.land();
+    assert!(
+        rerun.status.success(),
+        "the rerun must finish the closures: {}",
+        combined(&rerun)
+    );
+    assert!(t.fx.is_ancestor(&t.tip, "main"));
+    assert_eq!(t.fx.state(&t.a)["merged_at"], a_merged_at);
+    assert!(t.fx.is_closed(&t.b), "member B is closed by the rerun");
+}
+
+/// The same galaxy, landed in one run: each closure may commit tracked state
+/// to the base, and the next closure must not be disturbed by it.
+#[test]
+fn a_train_lands_in_a_galaxy_that_tracks_harvest_state() {
+    let t = happy_train(Fixture::new_tracked_state());
+    let landed = t.land();
+    assert!(
+        landed.status.success(),
+        "the train must land: {}",
+        combined(&landed)
+    );
+    assert!(t.fx.is_ancestor(&t.tip, "main"));
+    assert!(t.fx.is_closed(&t.a) && t.fx.is_closed(&t.b));
+}
+
+/// The case the tip extraction exists for: the base's config already names a
+/// script that does not exist yet, and a member adds it. The script is in the
+/// surface only at the tip, so a check against the base on disk would miss it.
+#[test]
+fn a_member_adding_a_script_the_config_already_names_is_refused() {
+    let fx = Fixture::new("[gates]\nbuild_command = \"sh scripts/build.sh\"\n", true);
+    let granted = fx.cs().arg("trust").output().unwrap();
+    assert!(granted.status.success(), "{}", combined(&granted));
+    let a = fx.completed_molecule("member a");
+    let b = fx.completed_molecule("member b");
+    let ha = fx.commit_on_branch(&a, "main", "scripts/build.sh", "exit 0\n");
+    let hb = fx.commit_on_branch(&b, "main", "b.txt", "b\n");
+    let base = rev(&fx.repo, "main");
+    fx.merge_member_into_train(&a);
+    fx.merge_member_into_train(&b);
+    let tip = rev(&fx.repo, "train");
+    let t = Train {
+        fx,
+        a,
+        b,
+        ha,
+        hb,
+        base: base.clone(),
+        tip,
+    };
+    let out = t.land();
+    t.assert_refused_naming(&out, "scripts/build.sh", &base);
+}
+
+/// The first closure that fails stops the run: the base has moved, the
+/// members already closed and the ones still open are named, and a rerun
+/// closes the rest. Driven through the verb by a `pre_done` hook that fails
+/// on its second call only.
+#[test]
+fn a_failed_closure_stops_the_run_and_a_rerun_closes_the_rest() {
+    let tmp_hook = tempfile::tempdir().unwrap();
+    let script = tmp_hook.path().join("hook.sh");
+    let count = tmp_hook.path().join("count");
+    fs::write(
+        &script,
+        format!(
+            "n=$(cat '{c}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{c}'; \
+             [ \"$n\" -eq 2 ] && exit 1; exit 0\n",
+            c = count.display()
+        ),
+    )
+    .unwrap();
+    let t = happy_train(Fixture::new(
+        &format!("[hooks]\npre_done = \"sh {}\"\n", script.display()),
+        false,
+    ));
+    let granted = t.fx.cs().arg("trust").output().unwrap();
+    assert!(granted.status.success(), "{}", combined(&granted));
+
+    let out = t.land();
+    let text = combined(&out);
+    assert!(
+        !out.status.success(),
+        "the failed closure must fail the run: {text}"
+    );
+    assert_eq!(
+        rev(&t.fx.repo, "main"),
+        t.tip,
+        "the base moved before the closures"
+    );
+    assert!(t.fx.is_closed(&t.a), "member A was closed: {text}");
+    assert!(!t.fx.is_closed(&t.b), "member B was not: {text}");
+    assert!(
+        text.contains(&format!("Closed: [{}]", t.a))
+            && text.contains(&format!("Not closed: [{}]", t.b)),
+        "the report names closed and open members: {text}"
+    );
+    let a_merged_at = t.fx.state(&t.a)["merged_at"].clone();
+
+    let rerun = t.land();
+    assert!(
+        rerun.status.success(),
+        "the rerun closes the rest: {}",
+        combined(&rerun)
+    );
+    assert!(t.fx.is_closed(&t.b));
+    assert_eq!(t.fx.state(&t.a)["merged_at"], a_merged_at);
 }
