@@ -7149,10 +7149,19 @@ mod tests {
                 .unwrap();
         queue_for_slot(&tmp, &mol, &std::process::id().to_string());
         drop(first);
-        assert!(matches!(
-            background_verdict(&store, &mol),
-            NudgeDecision::Nudge { attempt: 1, .. }
-        ));
+        // A sibling test's `fork` can keep a copy of the released descriptor
+        // for a few milliseconds, so the release is awaited, not assumed.
+        let nudged = (0..100).any(|_| {
+            let nudge = matches!(
+                background_verdict(&store, &mol),
+                NudgeDecision::Nudge { attempt: 1, .. }
+            );
+            if !nudge {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            nudge
+        });
+        assert!(nudged);
     }
 
     /// A `gates.queued` left by a dead process does not silence patrol, even

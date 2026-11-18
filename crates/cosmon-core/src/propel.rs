@@ -558,6 +558,7 @@ pub fn decide_nudge(view: &NudgeView, stale_after: Duration) -> NudgeDecision {
 ///     progress_age: Duration::minutes(20),
 ///     pane_idle: Some(Duration::minutes(20)),
 ///     background_work_age: None,
+///     gate_queued: false,
 ///     attempts: 0,
 ///     since_last_propel: None,
 /// };

@@ -303,7 +303,17 @@ mod tests {
         let (root, dir, held) = queued_fixture(1);
         write_queued(&dir, &std::process::id().to_string(), "full_gate");
         drop(held);
-        assert!(!gate_queued_at(&dir, root.path()));
+        // A sibling test's `fork` can keep a copy of the released descriptor
+        // for a few milliseconds, so the release is awaited, not assumed.
+        let released = (0..100).any(|_| {
+            if gate_queued_at(&dir, root.path()) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                false
+            } else {
+                true
+            }
+        });
+        assert!(released);
     }
 
     #[test]

@@ -76,6 +76,22 @@ fn pools_are_independent() {
         .is_some());
 }
 
+/// Poll `cond` for up to five seconds.
+///
+/// A sibling test in the same process may `fork` (to spawn a subprocess) while
+/// a slot file is open; the child holds a copy of the descriptor, and so of the
+/// lock, until it `exec`s. A release is therefore visible to a probe within
+/// milliseconds, not instantly, under load.
+fn eventually(mut cond: impl FnMut() -> bool) -> bool {
+    for _ in 0..100 {
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 /// The live-holder count is the kernel's answer: it counts a held slot and
 /// stops counting it when the guard drops.
 #[test]
@@ -90,9 +106,13 @@ fn live_holders_counts_held_slots_only() {
         .unwrap();
     assert_eq!(live_gate_slot_holders_in(dir.path(), "p").unwrap(), 2);
     drop(a);
-    assert_eq!(live_gate_slot_holders_in(dir.path(), "p").unwrap(), 1);
+    assert!(eventually(|| live_gate_slot_holders_in(dir.path(), "p")
+        .unwrap()
+        == 1));
     drop(b);
-    assert_eq!(live_gate_slot_holders_in(dir.path(), "p").unwrap(), 0);
+    assert!(eventually(|| live_gate_slot_holders_in(dir.path(), "p")
+        .unwrap()
+        == 0));
 }
 
 /// A pool name comes from configuration and must not escape `gate-slots/`.
