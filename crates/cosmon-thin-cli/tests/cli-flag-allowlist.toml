@@ -74,6 +74,12 @@ adr_ref = "ADR-080 §5.1"
 reason = "fleet-locked sequential merge of a mission DAG into base (added in ADR-110 §I2) — local git + trunk lock, operator-only; no RPP/HTTP shape (same family as cs done / cs run)."
 
 [[verb_absent_from_thin]]
+verb = "land-train"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1; ADR-190 §2 D3"
+reason = "fast-forwards the trunk to an operator-built, operator-gated train under the trunk lock (local git + trunk lock), then closes each member through cs done --expect-head; a trunk write over several molecules, operator-only like cs stitch, with no RPP/HTTP shape. Members stay closable one at a time through the done route."
+
+[[verb_absent_from_thin]]
 verb = "kill"
 class = "operator_only"
 adr_ref = "ADR-080 §5.1"

@@ -318,6 +318,18 @@ enum Command {
     /// Configure and inspect remote harvest authority; reset a lost root only on the host.
     HarvestAuthority(cmd::harvest_authority::Args),
 
+    /// Land-train — land an operator-gated train on the base, then close each member
+    ///
+    /// The train is built off-trunk by the operator: one `git merge --no-ff`
+    /// per member, each with the message `cs done --print-merge-message`
+    /// prints, merging the member's pinned head. Under the trunk lock the base
+    /// moves by a compare-and-swap fast-forward to the train tip, after every
+    /// check passed; the lock is released, then each member is closed by
+    /// `cs done <id> --expect-head <head>`. A rerun after a kill skips the
+    /// landing and closes only the members still open.
+    #[command(after_help = cmd::examples::LAND_TRAIN)]
+    LandTrain(cmd::land_train::Args),
+
     /// Stitch — fleet-locked sequential merge of a mission DAG into base (Phase 1 Commit 2)
     #[command(after_help = cmd::examples::STITCH, hide = true)]
     Stitch(cmd::stitch::Args),
@@ -838,6 +850,7 @@ fn main() {
         Command::Done(args) => cmd::done::run(&ctx, &args),
         Command::Harvest(args) => cmd::harvest::run(&ctx, &args),
         Command::HarvestAuthority(args) => cmd::harvest_authority::run(&ctx, &args),
+        Command::LandTrain(args) => cmd::land_train::run(&ctx, &args),
         Command::Stitch(args) => cmd::stitch::run(&ctx, &args),
         Command::Stuck(args) => cmd::stuck::run(&ctx, &args),
         Command::AwaitOperator(args) => cmd::await_operator::run(&ctx, &args),

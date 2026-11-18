@@ -148,6 +148,7 @@ pub(crate) fn command_group_layout() -> Vec<CommandGroup> {
             slots: vec![
                 Derived("tackle"),
                 Derived("done"),
+                Derived("land-train"),
                 Derived("sync"),
                 Derived("harvest"),
                 Derived("run"),
