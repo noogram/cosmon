@@ -33,6 +33,8 @@ this stage.
 
 - `cs done` reports `empty_branch` only for a branch that never had a commit of its own, not for work that reached the base by fast-forward; the harvest queue names plain `cs done <id>` for landed work instead of `--no-merge`, and counts only first-parent merges as landing evidence (#213).
 
+- `cs land-train --train-base <rev> --train-tip <rev> --member <id>=<head>...` lands an operator-built, operator-gated train: under the trunk lock it checks the train's first-parent shape (one `--no-ff` merge per member, pinned head, `cs done --print-merge-message` text), the members, `[harvest_authority] required` and the trusted shell surface, fast-forwards the base by compare-and-swap, releases the lock, then closes each member with `cs done --expect-head`; a rerun after a kill closes only the members still open (#213).
+
 - `cs patrol --propel`, `--nudge` and `--propel-api-stall` no longer nudge a worker waiting on background work: a running Claude background task reported on `Stop`, or a live `scripts/run-gates-bg.sh` run, suppresses the nudge for up to 45 minutes; `cs presence` rows gain an optional `background_tasks` record (count and kinds only) (#216).
 
 - `task-work`, `producer-work`, and `merge-conflict` use the project's own verification gates; `cs nucleate` includes declared `[gates]` commands in the briefing. Existing formula copies need updating: `cs init --upgrade` only backfills missing files and preserves existing ones.

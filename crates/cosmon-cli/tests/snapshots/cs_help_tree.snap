@@ -118,6 +118,7 @@ harvest-authority configure
 harvest-authority status
 harvest-authority challenge
 harvest-authority import
+land-train
 stuck
 await-operator
 topology

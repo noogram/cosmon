@@ -930,6 +930,31 @@ otherwise. This alias will be removed after one release cycle.
 SEE ALSO: cs done --if-completed (canonical), cs patrol --harvest
 (belt-and-suspenders sweep).";
 
+pub const LAND_TRAIN: &str = "EXAMPLES:
+  git switch -c train main
+  git merge --no-ff -m \"$(cs done A --print-merge-message)\" feat/A
+  git merge --no-ff -m \"$(cs done B --print-merge-message)\" feat/B
+  # ... gate the train once ...
+  cs land-train --train-base <main-at-build> --train-tip <train-tip> \\
+                --member A=<head-of-A> --member B=<head-of-B>
+
+Every check runs under the trunk lock before the base moves: the base still
+equals --train-base; every first-parent commit of base..tip is a --no-ff merge
+of the next named member, with that member's pinned head as second parent and
+the message `cs done --print-merge-message` renders (trailer lines a hook
+appends are tolerated; pass the text with -m \"$(...)\", not -F, so a sign-off
+hook sees what it sees for `cs done`); each member is Completed and its branch
+is still at its pinned head; `[harvest_authority] required` is false; and a
+change to the trusted shell surface is already covered by a trust grant
+(cs land-train never grants trust). The base then moves by
+`git update-ref <base> <tip> <train-base>`, the lock is released, and each
+member is closed with `cs done <id> --expect-head <head>`, stopping at the
+first failure. Rerun the same command after a failure or a kill: if the tip is
+already on the base's first-parent chain, the landing is skipped and only open
+members are closed.
+
+See docs/guides/train-landing.md.";
+
 pub const STITCH: &str = "EXAMPLES:
   cs stitch <root-id>                    # merge mission's DAG into base under one lock
   cs stitch <root-id> --dry-run          # show planned order, do not touch git
