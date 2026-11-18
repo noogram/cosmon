@@ -3687,6 +3687,10 @@ fn run_with_remote_before_lock(
     // past a broken main.
     if merge_succeeded && !resuming_integrated {
         let mut review_granted = false;
+        // Issue #214: the revision this invocation's own merge produced. The
+        // rollback below is a compare-and-swap against it, so it can never
+        // discard a commit another writer put on the base afterwards.
+        let own_merge_head = git_head(&repo_root).ok();
         // Issue #109: a merge that changes the trusted shell surface is refused
         // unless the merged surface is itself trusted — on every gate rung.
         // Before this check the refusal was a side effect of the gate running a
@@ -3722,6 +3726,7 @@ fn run_with_remote_before_lock(
                                 &branch_name,
                                 &repo_root,
                                 Some(pmh),
+                                own_merge_head.as_deref(),
                                 merge_dispatch_seq,
                                 &actions,
                                 &e.to_string(),
@@ -3764,6 +3769,7 @@ fn run_with_remote_before_lock(
                         &branch_name,
                         &repo_root,
                         Some(pmh),
+                        own_merge_head.as_deref(),
                         merge_dispatch_seq,
                         &actions,
                         &cause,
@@ -3800,6 +3806,7 @@ fn run_with_remote_before_lock(
                         &branch_name,
                         &repo_root,
                         Some(pmh),
+                        own_merge_head.as_deref(),
                         merge_dispatch_seq,
                         &actions,
                         &e.to_string(),
@@ -3816,6 +3823,7 @@ fn run_with_remote_before_lock(
                     &branch_name,
                     &repo_root,
                     None,
+                    own_merge_head.as_deref(),
                     merge_dispatch_seq,
                     &actions,
                     "post-merge gate refused DONE but no pre-merge revision was captured",
@@ -3909,6 +3917,7 @@ fn run_with_remote_before_lock(
                         &branch_name,
                         &repo_root,
                         pre_merge_head.as_deref(),
+                        own_merge_head.as_deref(),
                         merge_dispatch_seq,
                         &actions,
                         &cause,
@@ -4884,6 +4893,11 @@ fn report_plan(ctx: &Context, plan: &TeardownPlan) {
 /// tell a non-merge apart from a merged-with-caveats teardown. The JSON form
 /// carries `ok: false`, `merged: false`, `teardown: false`, and a typed
 /// `outcome` (`"merge_conflict"` | `"merge_failed"`).
+/// Prefix of the refusal message when the rollback found the base moved
+/// (issue #214); the report keys its headline and footer on it so it never
+/// claims a restore that did not happen.
+const ROLLBACK_BASE_MOVED: &str = "the base moved since this merge";
+
 fn report_merge_failure(
     ctx: &Context,
     repo_root: &Path,
@@ -4896,6 +4910,9 @@ fn report_merge_failure(
     let headline = match outcome {
         "merge_conflict" => "MERGE CONFLICT — not merged, branch preserved",
         "merge_failed" => "MERGE FAILED — not merged, branch preserved",
+        _ if recovery.contains(ROLLBACK_BASE_MOVED) => {
+            "POST-MERGE COMPILE GATE REFUSED — base moved, NOT rolled back, branch preserved"
+        }
         _ => "POST-MERGE COMPILE GATE REFUSED — merge rolled back, branch preserved",
     };
     let dirty = worktree_is_dirty(repo_root);
@@ -4937,7 +4954,9 @@ fn report_merge_failure(
         if let Some(error) = dirty_probe_error {
             println!("  dirty checkout probe failed: {error}");
         }
-        if outcome == "post_merge_compile_gate_refused" {
+        if outcome == "post_merge_compile_gate_refused" && recovery.contains(ROLLBACK_BASE_MOVED) {
+            println!("  base branch NOT restored: it moved since this merge (ids above).");
+        } else if outcome == "post_merge_compile_gate_refused" {
             println!("  base branch restored to its pre-merge revision.");
         } else {
             println!("  base branch unchanged — no merge commit was created.");
@@ -7339,6 +7358,7 @@ fn refuse_post_merge_and_rollback(
     branch_name: &str,
     repo_root: &Path,
     pre_merge_head: Option<&str>,
+    own_merge_head: Option<&str>,
     merge_dispatch_seq: Option<cosmon_core::event_v2::Seq>,
     actions: &[String],
     cause: &str,
@@ -7348,7 +7368,16 @@ fn refuse_post_merge_and_rollback(
     let rollback = pre_merge_head.ok_or_else(|| {
         anyhow::anyhow!("post-merge gate refused DONE but no pre-merge revision was captured")
     });
-    let reason = match rollback.and_then(|head| reset_hard(repo_root, head)) {
+    let rollback_result = rollback.and_then(|head| {
+        let own = own_merge_head.ok_or_else(|| {
+            anyhow::anyhow!(
+                "could not capture this invocation's merge revision, so the base cannot be \
+                 proven unchanged since the merge; base left untouched (pre-merge {head})"
+            )
+        })?;
+        rollback_base_if_unmoved(repo_root, head, own)
+    });
+    let reason = match rollback_result {
         Ok(()) => {
             let restored = if restore_pre_merge_trust {
                 match crate::trust::grant(repo_root, &crate::trust::store_dir()) {
@@ -7369,7 +7398,7 @@ fn refuse_post_merge_and_rollback(
             } else {
                 String::new()
             };
-            format!("{cause}; CRITICAL: git reset --hard failed: {reset_err}{revoked}")
+            format!("{cause}; CRITICAL: rollback of the base failed: {reset_err}{revoked}")
         }
     };
     let _ = cosmon_state::event_log::emit_one(
@@ -8197,6 +8226,38 @@ fn require_security_review_verdict(state_dir: &Path, mol: &MoleculeData) -> anyh
             verdict.display()
         );
     }
+}
+
+/// Move the base back to `pre_merge_head` **only if** it still points at
+/// `own_merge_head`, the revision this invocation's own merge produced.
+///
+/// Issue #214 / ADR-110 I1: a rollback must never discard a commit it did not
+/// write. The ref move is an atomic compare-and-swap
+/// (`git update-ref HEAD <new> <old>`); when the base has moved it fails and
+/// nothing is touched. Only after the swap succeeds is the working tree reset
+/// to match (the base is the checked-out branch of `repo_root`).
+fn rollback_base_if_unmoved(
+    repo_root: &Path,
+    pre_merge_head: &str,
+    own_merge_head: &str,
+) -> anyhow::Result<()> {
+    let swap = Command::new("git")
+        .args(["-C", &repo_root.to_string_lossy(), "update-ref", "HEAD"])
+        .args([pre_merge_head, own_merge_head])
+        .output()?;
+    if !swap.status.success() {
+        let current = git_head(repo_root).unwrap_or_else(|e| format!("<unreadable: {e}>"));
+        anyhow::bail!(
+            "{ROLLBACK_BASE_MOVED}, so it was NOT rolled back and no commit was \
+             discarded: pre-merge {pre_merge_head}, this merge {own_merge_head}, current \
+             {current}. Inspect `git log --oneline {pre_merge_head}..HEAD` and `git reflog`, \
+             decide whether the post-merge gate failure concerns the foreign commits, then \
+             revert or keep the merge by hand; the worker branch, worktree and session are \
+             preserved. ({})",
+            String::from_utf8_lossy(&swap.stderr).trim()
+        );
+    }
+    reset_hard(repo_root, pre_merge_head)
 }
 
 /// Restore main to the revision captured before a gated merge.
