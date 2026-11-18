@@ -5563,6 +5563,29 @@ fn render_merge_message(branch: &str, merge_subject: Option<&str>, trailers: &[S
     message
 }
 
+/// The completion merge message of `mol`, exactly as `cs done
+/// --print-merge-message` prints it, plus the attribution warnings computed
+/// on the way.
+///
+/// `cs land-train` compares each member merge of a train with this text
+/// (ADR-190 §3 "Merge shape"); it calls the same two functions as the merge
+/// and the preview, so the three cannot drift.
+pub(crate) fn completion_merge_message(
+    store: &FileStore,
+    state_dir: &Path,
+    mol: &MoleculeData,
+    project_cfg: &ProjectConfig,
+) -> (String, Vec<String>) {
+    let mut warnings = Vec::new();
+    let parts = completion_message_parts(store, state_dir, mol, project_cfg, &mut warnings);
+    let message = render_merge_message(
+        &format!("feat/{}", mol.id),
+        parts.merge_subject.as_deref(),
+        &parts.merge_trailers,
+    );
+    (message, warnings)
+}
+
 /// Attempt to merge `branch` into the current HEAD with the given strategy.
 ///
 /// Returns a [`MergeOutcome`] variant rather than a `Result` so callers can
@@ -7172,7 +7195,11 @@ fn unreviewed_surface_refusal(
 /// union matters — a branch can add a delegated script (only in the merged
 /// surface) or delete one (only in the pre-merge surface). A primary surface
 /// file such as `.cosmon/config.toml` is in both.
-fn shell_surface_changes(changed: &[PathBuf], pre: &[String], post: &[String]) -> Vec<String> {
+pub(crate) fn shell_surface_changes(
+    changed: &[PathBuf],
+    pre: &[String],
+    post: &[String],
+) -> Vec<String> {
     let mut out: Vec<String> = changed
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
@@ -8980,7 +9007,7 @@ fn commit_molecule_artifacts(
 /// current directory otherwise. Note that in the undeclared case this still
 /// returns the *worktree* path when `cs done` runs from inside
 /// `.worktrees/<mol>/`, which several call sites below rely on.
-fn find_repo_root(ctx: &Context) -> anyhow::Result<PathBuf> {
+pub(crate) fn find_repo_root(ctx: &Context) -> anyhow::Result<PathBuf> {
     crate::target_repo::resolve_from_config_in(
         &resolve_config_from_context(ctx),
         ctx.repo_root.as_deref(),

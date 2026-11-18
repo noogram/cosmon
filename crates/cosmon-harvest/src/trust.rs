@@ -527,7 +527,23 @@ fn primary_surface_files(key_root: &Path) -> Vec<PathBuf> {
 /// files `surface_hash` folds, via the same helpers.
 #[must_use]
 pub fn surface_paths(start: &Path) -> Vec<String> {
-    let key_root = key_root_or_fallback(start);
+    surface_paths_in(&key_root_or_fallback(start))
+}
+
+/// [`surface_paths`] of the files under `content_root` itself, with no
+/// repository resolution: `content_root` is read as the root of the tree.
+///
+/// # Why this exists
+///
+/// `cs land-train` (ADR-190 §7) must name the shell-surface paths a train
+/// changes *before* the train is on disk, so it extracts the train base and
+/// the train tip into scratch directories and reads each one's surface here.
+/// Resolving a repository root from such a directory would be wrong: it is
+/// not a checkout, and a scratch directory that happened to sit inside some
+/// other repository would resolve to that repository instead.
+#[must_use]
+pub fn surface_paths_in(content_root: &Path) -> Vec<String> {
+    let key_root = content_root.to_path_buf();
     let root_canon = key_root.canonicalize().unwrap_or_else(|_| key_root.clone());
     let primary = primary_surface_files(&key_root);
     let mut surface_text = String::new();
@@ -651,6 +667,44 @@ pub fn revoke(start: &Path, store: &Path) -> std::io::Result<(PathBuf, bool)> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((key_root, false)),
         Err(e) => Err(e),
     }
+}
+
+/// Evaluate the grant of the repository containing `start` against the shell
+/// surface of the tree under `content_root`, instead of the surface on disk.
+///
+/// # Why this exists
+///
+/// A grant pins the hash of the surface that will be on disk when the shell
+/// runs. `cs land-train` checks, before it moves the base, whether the grant
+/// already covers the surface the landing would put on disk — the train
+/// tip's — which it extracts into `content_root`. The grant itself, its key
+/// and its hash are unchanged: this asks the existing question of different
+/// bytes. Hashing a tree reads only tracked files, so it equals the on-disk
+/// hash of a checkout of that tree when the surface files are tracked, which
+/// is the only case in which a train can change them.
+#[must_use]
+pub fn evaluate_content(start: &Path, content_root: &Path, store: &Path) -> TrustStatus {
+    let key_root = key_root_or_fallback(start);
+    let grant = grant_file(store, &key_root);
+    let recorded = match std::fs::read_to_string(&grant) {
+        Ok(s) => s.trim().to_owned(),
+        Err(_) => return TrustStatus::Untrusted,
+    };
+    if recorded == surface_hash(content_root) {
+        TrustStatus::Trusted
+    } else {
+        TrustStatus::Stale
+    }
+}
+
+/// [`evaluate_content`] against the default [`store_dir`], honoring the
+/// [`ASSUME_TRUSTED_ENV`] bypass the same way [`status`] does.
+#[must_use]
+pub fn status_of_content(start: &Path, content_root: &Path) -> TrustStatus {
+    if assume_trusted() {
+        return TrustStatus::Trusted;
+    }
+    evaluate_content(start, content_root, &store_dir())
 }
 
 /// Convenience wrapper over [`evaluate`] that resolves the default
