@@ -53,7 +53,8 @@ failure moves nothing, closes nothing, and names the offending commit or member:
    refuses the train; close the members one at a time with `cs done`.
 2. The base branch still equals `--train-base`. Otherwise the refusal reads
    "`<base>` moved after the gate": rebuild the train on the current base and
-   gate it again.
+   gate it again. (A base that already has the tip on its first-parent chain is
+   a rerun, described below.)
 3. Each first-parent commit of `train-base..train-tip` is a two-parent merge.
    Its first parent is the previous commit (the train base for the oldest).
    Its second parent is the next member's pinned head, and its message is that
@@ -83,10 +84,13 @@ already-landed path: no merge, no post-merge gate.
 
 The first failing closure stops the run. The message names the members already
 closed and the ones still open. Fix the cause and rerun the same `cs land-train`
-command. When the base is already at the train tip, which is also the state a
-kill between the fast-forward and the closures leaves, the rerun checks the
-train's shape again, skips the landing, and closes only the members whose
-`merged_at` is still empty. A member is never closed twice.
+command. A kill between the fast-forward and the closures leaves the same kind
+of state. The base is then at the train tip, or past it: in a galaxy that
+tracks harvest state each closure commits that state to the base, and another
+pilot may land once the lock is released. When the tip is on the base's
+first-parent chain, the rerun checks the train's shape again, skips the landing,
+and closes only the members whose `merged_at` is still empty. A member is never
+closed twice.
 
 ## When the shell-surface check refuses
 
