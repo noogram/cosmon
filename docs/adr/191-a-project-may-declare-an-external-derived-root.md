@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 # ADR-191 — A project may declare an external derived root; `cs purge --worktrees` reclaims it for terminal molecules
 
-**Status:** Proposed (2026-11-16; amended 2026-11-18, still Proposed).
+**Status:** Accepted (2026-11-18). Proposed 2026-11-16; amended 2026-11-18.
 **Date:** 2026-11-16.
 **Decider:** Noogram.
 **Authoring molecule:** `task-20261116-ac57`.
