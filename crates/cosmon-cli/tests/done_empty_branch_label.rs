@@ -163,3 +163,30 @@ fn a_branch_that_never_had_a_commit_is_still_empty() {
         "a never-committed branch is empty: {actions:?}"
     );
 }
+
+/// With the branch's reflog gone (expired, pruned, or never written) the
+/// creation point is unknown, so `cs done` does not claim `empty_branch`, even
+/// though the branch has no commit of its own. It reports `already_merged`,
+/// the label that promises nothing about emptiness.
+#[test]
+fn a_branch_whose_reflog_is_gone_is_never_reported_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo(repo);
+    let mol_id = completed_molecule(repo);
+    let branch = format!("feat/{mol_id}");
+    git_ok(repo, &["branch", &branch, "main"]);
+    let log = repo.join(".git/logs/refs/heads").join(&branch);
+    assert!(log.exists(), "fixture assumes git wrote a branch reflog");
+    fs::remove_file(log).unwrap();
+
+    let actions = actions_of_done(repo, &mol_id);
+    assert!(
+        !actions.iter().any(|a| a == "empty_branch"),
+        "an unknown creation point must not be reported as empty: {actions:?}"
+    );
+    assert!(
+        actions.iter().any(|a| a == "already_merged"),
+        "the fallback label is already_merged: {actions:?}"
+    );
+}
