@@ -199,6 +199,25 @@ fn merged_molecule_ids(subjects: &str) -> HashSet<String> {
 mod tests {
     use super::*;
 
+    /// Run `git` in `repo` with a throwaway identity, asserting success.
+    fn run_git(repo: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     /// Issue #174: merge subjects name the molecule branch in several shapes;
     /// non-molecule refs and unrelated text yield nothing.
     #[test]
@@ -230,23 +249,7 @@ mod tests {
     fn landed_scan_counts_first_parent_merges_only() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path();
-        let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(repo)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .expect("git");
-            assert!(
-                out.status.success(),
-                "{args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
+        let git = |args: &[&str]| run_git(repo, args);
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "commit.gpgsign", "false"]);
         git(&["commit", "-q", "--allow-empty", "-m", "root"]);
@@ -291,23 +294,7 @@ mod tests {
     fn scan_ignores_a_merge_reachable_only_through_a_second_parent() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path();
-        let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(repo)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "Test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "Test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .expect("git");
-            assert!(
-                out.status.success(),
-                "{args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
+        let git = |args: &[&str]| run_git(repo, args);
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "commit.gpgsign", "false"]);
         git(&["commit", "-q", "--allow-empty", "-m", "root"]);
