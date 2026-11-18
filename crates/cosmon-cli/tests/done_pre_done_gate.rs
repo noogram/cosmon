@@ -1506,7 +1506,9 @@ fn a_refused_rollback_leaves_the_foreign_commits_files_in_the_working_tree() {
         "foreign.txt must still be tracked and unmodified, got status `{status}`.\n{all}"
     );
     assert!(
-        git(repo, &["cat-file", "-e", "main:worker.txt"]).status.success(),
+        git(repo, &["cat-file", "-e", "main:worker.txt"])
+            .status
+            .success(),
         "this invocation's own merge must still be on main.\n{all}"
     );
 }
