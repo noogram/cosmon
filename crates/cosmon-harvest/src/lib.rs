@@ -102,6 +102,9 @@ pub mod self_harvest;
 pub mod target_repo;
 // The transaction itself.
 pub mod transaction;
+// Train landing (ADR-190 D3): the checks and compare-and-swap fast-forward
+// that move the base to an operator-built, operator-gated train.
+pub mod train;
 // Repo-supplied shell trust gate (B5, RCE-by-clone) — the `direnv allow` of
 // cosmon. Every `sh -c` on a string the repository supplies (formula
 // `command`/`verification` steps, `post_merge`/`pre_done` hooks) is gated on
