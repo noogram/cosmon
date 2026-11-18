@@ -53,6 +53,8 @@ this stage.
 
 - Dependencies: `rustix` 1.1.4 → 1.1.6 (RUSTSEC-2026-0486); the cargo-vet exemption moves to 1.1.6 and remains unaudited.
 
+- Recorded a justified exception for RUSTSEC-2026-0543 (chrono is unmaintained, no patched version), to be reviewed by 2026-12-18.
+
 ## [0.9.0] — 2026-11-09
 
 ### Added
