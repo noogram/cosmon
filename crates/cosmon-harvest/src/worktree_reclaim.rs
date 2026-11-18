@@ -13,7 +13,7 @@
 //! [`reclaim_derived`] is callable and tested but wired to **no CLI verb**.
 //! No automatic path in this workspace removes a whole worktree.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,6 +30,12 @@ use cosmon_core::worktree_reclaim::{
     WorktreeObservationPort,
 };
 use cosmon_state::StateStore;
+
+pub mod external;
+
+pub use external::{
+    BaseReport, BaseState, ExternalDeclarations, ExternalItem, ExternalKind, ExternalPlan,
+};
 
 /// The lock anchor, relative to a candidate worktree.
 ///
@@ -69,6 +75,16 @@ pub struct GitWorktreeObserver<'a> {
     /// dropped: a root that silently vanishes from the selection is the same
     /// invisible leak in the other direction.
     withheld_roots: Mutex<HashMap<PathBuf, Vec<(PathBuf, String)>>>,
+    /// The project's external declarations (ADR-191); empty by default.
+    external: ExternalDeclarations,
+    /// Device and inode of every lock file this observer holds a flock on,
+    /// so a second path to the same file (a worktree's link and the
+    /// resolved directory) is recognised as already ours rather than read
+    /// as contention.
+    held_ids: Mutex<HashSet<(u64, u64)>>,
+    /// Lock files acquired by the external pass, held for the observer's
+    /// lifetime.
+    external_guards: Mutex<Vec<File>>,
 }
 
 impl<'a> GitWorktreeObserver<'a> {
@@ -99,6 +115,9 @@ impl<'a> GitWorktreeObserver<'a> {
             derived_roots: validated,
             guards: Mutex::new(HashMap::new()),
             withheld_roots: Mutex::new(HashMap::new()),
+            external: ExternalDeclarations::default(),
+            held_ids: Mutex::new(HashSet::new()),
+            external_guards: Mutex::new(Vec::new()),
         })
     }
 
@@ -207,16 +226,19 @@ impl<'a> GitWorktreeObserver<'a> {
             .unwrap_or_default()
     }
 
-    /// `true` when `path` is the lock anchor or one of its ancestors.
-    fn is_anchor_or_ancestor(candidate: &Path, path: &Path) -> bool {
-        let anchor = candidate.join(LOCK_ANCHOR);
-        anchor == path || anchor.starts_with(path)
+    /// `true` when `path` is one of the lock anchors or an ancestor of one.
+    fn is_anchor_or_ancestor(anchors: &BTreeSet<PathBuf>, path: &Path) -> bool {
+        anchors.iter().any(|a| a == path || a.starts_with(path))
     }
 
-    /// Remove one derived root's payload, preserving the lock anchor.
-    fn reclaim_root(
-        candidate: &Path,
+    /// Remove the payload under `root`, preserving every lock anchor and
+    /// its ancestor directories.
+    ///
+    /// One walk for both rules: the in-worktree root passes its single
+    /// anchor, an external directory every profile lock found under it.
+    fn reclaim_tree(
         root: &Path,
+        anchors: &BTreeSet<PathBuf>,
         report: &mut ReclaimReport,
     ) -> Result<(), ObservationError> {
         let entries = std::fs::read_dir(root)
@@ -225,12 +247,12 @@ impl<'a> GitWorktreeObserver<'a> {
             let entry = entry
                 .map_err(|e| ObservationError::new("read derived entry", root, e.to_string()))?;
             let path = entry.path();
-            if Self::is_anchor_or_ancestor(candidate, &path) {
-                if path == candidate.join(LOCK_ANCHOR) {
+            if Self::is_anchor_or_ancestor(anchors, &path) {
+                if anchors.contains(&path) {
                     report.preserved.insert(path);
                 } else {
-                    // An ancestor of the anchor: descend, keep the directory.
-                    Self::reclaim_root(candidate, &path, report)?;
+                    // An ancestor of an anchor: descend, keep the directory.
+                    Self::reclaim_tree(&path, anchors, report)?;
                 }
                 continue;
             }
@@ -302,9 +324,10 @@ pub fn reclaim_derived(
             "the acquired flock guard is no longer held by this observer",
         ));
     }
+    let anchors = BTreeSet::from([obs.path.join(LOCK_ANCHOR)]);
     for root in &selected {
         if root.is_dir() {
-            GitWorktreeObserver::reclaim_root(&obs.path, root, &mut report)?;
+            GitWorktreeObserver::reclaim_tree(root, &anchors, &mut report)?;
         }
     }
     Ok(report)
@@ -381,9 +404,21 @@ impl WorktreeObservationPort for GitWorktreeObserver<'_> {
                 ))
             }
         };
-        match file.try_lock_exclusive() {
+        // The same file reached by another path (two links to one
+        // directory, ADR-191) is already ours: a second flock from this
+        // process would read as contention it is not.
+        let id = external::open_file_id(&file);
+        let already_ours = self.holds_lock_on(id);
+        match if already_ours {
+            Ok(())
+        } else {
+            file.try_lock_exclusive()
+        } {
             Ok(()) => match self.guards.lock() {
                 Ok(mut guards) => {
+                    if let (Some(id), Ok(mut held)) = (id, self.held_ids.lock()) {
+                        held.insert(id);
+                    }
                     // Retain the guard: the answer must stay true while the
                     // caller acts on it.
                     guards.insert(candidate.to_path_buf(), file);
@@ -490,6 +525,12 @@ impl WorktreeObservationPort for GitWorktreeObserver<'_> {
                 // "adapters must establish their applicable exclusion or
                 // withhold those roots" is this branch.
                 withheld.push((path, Self::no_exclusion_reason(root)));
+                continue;
+            }
+            if self.left_to_external(root, &path) {
+                // A declared root reached through a link is observed by the
+                // external pass (ADR-191 D7), per root: refusing it there
+                // never makes this candidate's other roots unavailable.
                 continue;
             }
             if !path.exists() {
@@ -1298,6 +1339,179 @@ mod tests {
             observe_dirty(&tmp.path().join("gone")),
             DirtyObservation::Clean
         );
+    }
+
+    /// An external base for `target` next to the fixture repository, with
+    /// a build directory for the fixture's molecule.
+    #[cfg(unix)]
+    fn external_layout(
+        f: &Fixture,
+        bases: &[(&str, &str)],
+    ) -> (ExternalDeclarations, Vec<PathBuf>) {
+        let root = std::fs::canonicalize(f.repo.parent().unwrap()).unwrap();
+        let mut decls = Vec::new();
+        let mut dirs = Vec::new();
+        for (name, suffix) in bases {
+            let base = root.join(name);
+            let dir = base.join(format!("{}{suffix}", f.id));
+            std::fs::create_dir_all(dir.join("debug/deps")).unwrap();
+            std::fs::write(dir.join("debug/.cargo-lock"), "").unwrap();
+            std::fs::write(dir.join("debug/deps/payload.o"), "bytes").unwrap();
+            decls.push(cosmon_core::config::ExternalDerivedRootConfig {
+                root: "target".to_owned(),
+                base,
+                suffix: (*suffix).to_owned(),
+            });
+            dirs.push(dir);
+        }
+        let ext = ExternalDeclarations::resolve(
+            &decls,
+            &["target".to_owned()],
+            &f.repo,
+            &[f.worktree.clone()],
+            None,
+        )
+        .unwrap();
+        (ext, dirs)
+    }
+
+    /// ADR-191 §4.16 — the link is swapped between observation and
+    /// execution, to a directory that is still a well-formed molecule
+    /// directory under another declared base. Execution refuses; nothing
+    /// is removed under either directory.
+    ///
+    /// Not observable through the binary: nothing can run between the
+    /// pass's observation and its execution there.
+    #[test]
+    #[cfg(unix)]
+    fn adr191_16_a_link_swapped_after_observation_refuses_execution() {
+        let f = fixture("completed");
+        let (ext, dirs) = external_layout(&f, &[("builds-a", "-wt"), ("builds-b", "-wt")]);
+        std::fs::remove_dir_all(f.worktree.join("target")).unwrap();
+        let link = f.worktree.join("target");
+        std::os::unix::fs::symlink(&dirs[0], &link).unwrap();
+        let observer = f.observer().with_external(ext);
+        let _ = observer.observe(&f.worktree);
+        let plan = observer.observe_external(&[f.worktree.clone()], true);
+        let item = plan
+            .items
+            .iter()
+            .find(|i| i.path == dirs[0])
+            .expect("the linked directory is observed");
+        assert!(item.selected(), "{:?}", item.reasons);
+
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&dirs[1], &link).unwrap();
+        let err = observer.reclaim_external(item).unwrap_err();
+        assert_eq!(err.operation, "re-resolve external root", "{err:?}");
+        for dir in &dirs {
+            assert!(
+                dir.join("debug/deps/payload.o").is_file(),
+                "{}",
+                dir.display()
+            );
+        }
+        // Unswapped, the same observation does reclaim: the refusal above is
+        // the re-resolution, not a reclaim that never works.
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&dirs[0], &link).unwrap();
+        let report = observer.reclaim_external(item).unwrap();
+        assert!(
+            report.removed.contains(&dirs[0].join("debug/deps")),
+            "{report:?}"
+        );
+        assert!(dirs[0].join("debug/.cargo-lock").is_file());
+    }
+
+    /// ADR-191 §4.16, orphan form — a base child replaced by a symbolic link
+    /// after observation is refused at execution.
+    #[test]
+    #[cfg(unix)]
+    fn adr191_16_an_orphan_replaced_by_a_link_refuses_execution() {
+        let f = fixture("completed");
+        let (ext, dirs) = external_layout(&f, &[("builds-a", "")]);
+        let observer = f.observer().with_external(ext);
+        let plan = observer.observe_external(&[f.worktree.clone()], true);
+        let item = plan.items.iter().find(|i| i.path == dirs[0]).unwrap();
+        assert!(item.selected(), "{:?}", item.reasons);
+        let moved = dirs[0].with_extension("moved");
+        std::fs::rename(&dirs[0], &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &dirs[0]).unwrap();
+        let err = observer.reclaim_external(item).unwrap_err();
+        assert_eq!(err.operation, "re-read base child", "{err:?}");
+        assert!(moved.join("debug/deps/payload.o").is_file());
+    }
+
+    /// ADR-191 §4.6, injected — an enumeration with errors selects no
+    /// external root and no orphan, with the reason named.
+    #[test]
+    #[cfg(unix)]
+    fn adr191_06_injected_enumeration_error_selects_nothing_external() {
+        let f = fixture("completed");
+        let (ext, dirs) = external_layout(&f, &[("builds-a", ""), ("builds-b", "-wt")]);
+        std::fs::remove_dir_all(f.worktree.join("target")).unwrap();
+        std::os::unix::fs::symlink(&dirs[0], f.worktree.join("target")).unwrap();
+        let observer = f.observer().with_external(ext);
+        let complete = observer.observe_external(&[f.worktree.clone()], true);
+        assert!(
+            complete.items.iter().all(ExternalItem::selected),
+            "{complete:?}"
+        );
+        assert_eq!(complete.items.len(), 2, "one linked root, one orphan");
+        let incomplete = observer.observe_external(&[f.worktree.clone()], false);
+        assert_eq!(incomplete.items.len(), 2);
+        for item in &incomplete.items {
+            assert!(!item.selected());
+            assert!(
+                item.reasons[0].contains("enumeration is incomplete"),
+                "{item:?}"
+            );
+        }
+    }
+
+    /// ADR-191 D7 — with `target` declared, its link is left to the
+    /// external pass and no longer makes the candidate `Unavailable`.
+    #[test]
+    #[cfg(unix)]
+    fn adr191_d7_a_declared_link_does_not_make_the_candidate_unavailable() {
+        let f = fixture("completed");
+        let (ext, _) = external_layout(&f, &[("builds-a", "")]);
+        let outside = f.repo.join("elsewhere");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::remove_dir_all(f.worktree.join("target")).unwrap();
+        std::os::unix::fs::symlink(&outside, f.worktree.join("target")).unwrap();
+        let observer = f.observer().with_external(ext);
+        assert_eq!(
+            observer.derived_roots(&f.worktree),
+            DerivedRoots::Validated(BTreeSet::new())
+        );
+        let plan = observer.observe_external(&[f.worktree.clone()], true);
+        let refused = plan
+            .items
+            .iter()
+            .find(|i| i.path == std::fs::canonicalize(&outside).unwrap());
+        assert!(
+            refused.is_some_and(|i| i.reasons[0].contains("outside every declared base")),
+            "{plan:?}"
+        );
+    }
+
+    /// ADR-191 D2 — two links to one directory: the second in-worktree
+    /// probe of the same lock file is recognised as this observer's own
+    /// lock, not reported as another process's contention.
+    #[test]
+    #[cfg(unix)]
+    fn adr191_a_lock_reached_twice_is_not_contention_with_ourselves() {
+        let f = fixture("completed");
+        let (_, dirs) = external_layout(&f, &[("builds-a", "")]);
+        let second = f.repo.join(".worktrees/task-20260911-0009");
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::remove_dir_all(f.worktree.join("target")).unwrap();
+        std::os::unix::fs::symlink(&dirs[0], f.worktree.join("target")).unwrap();
+        std::os::unix::fs::symlink(&dirs[0], second.join("target")).unwrap();
+        let observer = f.observer();
+        assert_eq!(observer.lock(&f.worktree), LockObservation::Acquired);
+        assert_eq!(observer.lock(&second), LockObservation::Acquired);
     }
 
     /// A derived root that escapes the candidate through a symlink is refused
