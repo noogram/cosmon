@@ -162,10 +162,16 @@ fn evidence_on_claims_counts_toward_the_same_hundred() {
 #[test]
 fn a_checkpoint_over_262144_bytes_is_refused_and_one_within_it_is_kept() {
     let g = Galaxy::new();
-    success(&g.publish("cp-small", &["--risk", &"x".repeat(200_000)]));
+    // Linux caps ONE argument at 128 KiB (MAX_ARG_STRLEN), so a large record
+    // is built from several `--risk` flags of 100 000 bytes each, never one.
+    let chunk = "x".repeat(100_000);
+    success(&g.publish("cp-small", &["--risk", &chunk, "--risk", &chunk]));
 
     let before = g.files();
-    let error = refused(&g.publish("cp-big", &["--risk", &"x".repeat(262_144)]));
+    let error = refused(&g.publish(
+        "cp-big",
+        &["--risk", &chunk, "--risk", &chunk, "--risk", &chunk],
+    ));
     assert!(error.contains("262144"), "the limit is named: {error}");
     assert_eq!(before, g.files(), "a refused checkpoint writes nothing");
 }
