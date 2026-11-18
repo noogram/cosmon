@@ -337,6 +337,7 @@ Commands:
   done               Done — terminal teardown for a molecule (merge + cleanup, human-callable)
   harvest            Harvest — close a completed-but-unmerged molecule by invoking `cs done`
   harvest-authority  Configure and inspect remote harvest authority; reset a lost root only on the host
+  land-train         Land-train — land an operator-gated train on the base, then close each member
   stuck              Stuck — freeze a molecule and record the blocker
   await-operator     Await-operator — the only sanctioned way to block on an operator decision at an irreversibility boundary (ADR-123). Routes on the molecule's `op-block:*` capability: block-and-emit, or surface-and-continue
   topology           Topology — structural maps of the workspace (wraps the `topon` CLI)

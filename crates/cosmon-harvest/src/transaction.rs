@@ -256,9 +256,12 @@ pub struct Args {
     /// configured, otherwise `Merge branch 'feat/<id>'`) followed by one
     /// trailer paragraph: attribution trailers, then the lineage trailers
     /// (`Mol-Id`, `Mission-Id`, `Depends-On`). It is rendered by the same
-    /// function the merge uses, so `git merge --no-ff -F <file>` of the
-    /// printed text yields the message `cs done` would have written, before
-    /// any commit-msg or sign-off hook runs.
+    /// function the merge uses, so
+    /// `git merge --no-ff -m "$(cs done <id> --print-merge-message)"` yields
+    /// the message `cs done` would have written, also after a sign-off hook
+    /// appends a trailer. `-F <file>` of the printed text gives the same
+    /// message before hooks, but its final newline makes such a hook start a
+    /// new paragraph.
     #[arg(long, conflicts_with_all = ["dry_run", "review_shell"])]
     print_merge_message: bool,
 }
