@@ -183,6 +183,10 @@ enum Command {
     #[command(after_help = cmd::examples::THAW)]
     Thaw(cmd::thaw::Args),
 
+    /// Gates — run a heavy command under a bounded slot pool (`cs gates slot`)
+    #[command(after_help = cmd::examples::GATES)]
+    Gates(cmd::gates::Args),
+
     /// Trust — grant this repository permission to run its own formulas/hooks
     /// (the `direnv allow` of cosmon; refuses repo-supplied shell until granted)
     Trust(cmd::trust::Args),
@@ -818,6 +822,7 @@ fn main() {
         Command::Freeze(args) => cmd::freeze::run(&ctx, &args),
         Command::Thaw(args) => cmd::thaw::run(&ctx, &args),
         Command::Trust(args) => cmd::trust::run(&ctx, &args),
+        Command::Gates(args) => cmd::gates::run(&ctx, &args),
         Command::Resume(args) => cmd::resume::run(&ctx, &args),
         Command::Resurrect(args) => cmd::resurrect::run(&ctx, &args),
         Command::Teardown(args) => cmd::teardown::run(&ctx, &args),

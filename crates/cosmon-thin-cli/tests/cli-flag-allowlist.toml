@@ -68,6 +68,12 @@ adr_ref = "ADR-080 §5.1 / ADR-140 N5"
 reason = "germinate a polymer from a spore.toml template (install/validate/run/export); run nucleates a whole DAG against the operator's local store, and install writes into the operator's checkout + formula registry — same operator-only orchestration family as cs run, no one-shot HTTP shape."
 
 [[verb_absent_from_thin]]
+verb = "gates"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1; ADR-190 D1"
+reason = "runs a command under a machine-local gate slot (kernel flock on a file under the main checkout's state dir, ADR-190 D1) — a local process holds the lock for the life of the command, so there is no one-shot HTTP shape; same operator-side family as cs run / cs stitch."
+
+[[verb_absent_from_thin]]
 verb = "stitch"
 class = "operator_only"
 adr_ref = "ADR-080 §5.1"

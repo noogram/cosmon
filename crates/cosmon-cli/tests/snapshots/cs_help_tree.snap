@@ -44,6 +44,8 @@ galaxies registry list
 galaxies registry resolve
 freeze
 thaw
+gates
+gates slot
 trust
 prime
 resume

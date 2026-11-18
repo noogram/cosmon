@@ -33,6 +33,7 @@
 
 pub mod cas;
 pub mod event;
+pub mod gate_slots;
 pub mod harvest_authority;
 pub mod harvest_door;
 pub mod operator_trust;
