@@ -27,6 +27,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use cosmon_core::config::WorktreeReclaimConfig;
 use cosmon_core::worktree_reclaim::{
     consideration_gate, durable_eligibility, selected_derived_paths, AheadObservation,
     CandidateObservation, Consideration, DerivedRoots, DirtyObservation, DurableEligibility,
@@ -34,7 +35,8 @@ use cosmon_core::worktree_reclaim::{
     RegistrationObservation, StatusObservation, WorktreeObservationPort,
 };
 use cosmon_harvest::worktree_reclaim::{
-    approximate_size_bytes, describe_size, enumerate_candidates, reclaim_derived, CandidateSource,
+    approximate_size_bytes, describe_size, enumerate_candidates, reclaim_derived, BaseState,
+    CandidateSource, ExternalDeclarations, ExternalItem, ExternalKind, ExternalPlan,
     GitWorktreeObserver, LOCK_ANCHOR,
 };
 use cosmon_state::StateStore;
@@ -87,6 +89,8 @@ pub(crate) struct ReclaimPass {
     pub preserved: BTreeSet<PathBuf>,
     /// Per-path removal failures; partial progress is reported, never hidden.
     pub failures: Vec<ObservationError>,
+    /// External roots and orphans under declared bases (ADR-191).
+    pub external: ExternalPlan,
 }
 
 impl ReclaimPass {
@@ -240,22 +244,41 @@ fn gate_reason(molecule: &MoleculeRecordObservation, status: &StatusObservation)
 /// **only** the derived tier. Whatever it is set to, no path in this function
 /// removes a worktree: the durable set is computed, reported and dropped.
 ///
+/// External roots (ADR-191) are observed after every candidate, because
+/// their uniqueness and the orphan rule range over the whole population,
+/// and executed last, each re-resolved under its held locks.
+///
 /// # Errors
-/// Returns an error only when the observer itself cannot be built — which
-/// means a configured derived root is not a rebuildable, worktree-local
-/// relative path, and the configuration must be fixed before anything runs.
+/// Returns an error only when the configuration is invalid — a configured
+/// derived root that is not a rebuildable, worktree-local relative path, or
+/// an `[[worktree_reclaim.external]]` entry that fails a condition of
+/// ADR-191 D1 — and then nothing is observed or removed.
 pub(crate) fn run_pass(
     repo_root: &Path,
     base_branch: &str,
     store: &dyn StateStore,
-    evict: &[String],
+    config: &WorktreeReclaimConfig,
     execute: bool,
 ) -> anyhow::Result<ReclaimPass> {
-    let roots: Vec<&str> = evict.iter().map(String::as_str).collect();
+    let roots: Vec<&str> = config.evict.iter().map(String::as_str).collect();
     let observer = GitWorktreeObserver::new(repo_root, base_branch, store, &roots)
         .map_err(|e| anyhow::anyhow!("[worktree_reclaim].evict is invalid: {}", e.describe()))?;
 
     let enumeration = enumerate_candidates(repo_root);
+    let paths: Vec<PathBuf> = enumeration
+        .candidates
+        .iter()
+        .map(|c| c.path.clone())
+        .collect();
+    let external = ExternalDeclarations::resolve(
+        &config.external,
+        &config.evict,
+        repo_root,
+        &paths,
+        dirs::home_dir().as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("the reclamation pass does not run: {e}"))?;
+    let observer = observer.with_external(external);
     let mut pass = ReclaimPass {
         enumeration_errors: enumeration.errors,
         executed: execute,
@@ -322,7 +345,120 @@ pub(crate) fn run_pass(
             }
         }
     }
+
+    pass.external = observer.observe_external(&paths, pass.enumeration_errors.is_empty());
+    if execute {
+        for item in pass.external.items.iter().filter(|i| i.selected()) {
+            match observer.reclaim_external(item) {
+                Ok(report) => {
+                    pass.removed.extend(report.removed);
+                    pass.preserved.extend(report.preserved);
+                    pass.failures.extend(report.failures);
+                }
+                Err(e) => pass.failures.push(e),
+            }
+        }
+    }
     Ok(pass)
+}
+
+/// One external item as a register line: path, how it was reached, base
+/// and size.
+fn external_line(item: &ExternalItem) -> String {
+    let how = match &item.kind {
+        ExternalKind::Linked { link, .. } => format!("linked from {}", link.display()),
+        ExternalKind::Orphan => "orphan".to_owned(),
+    };
+    let base = item
+        .base
+        .as_ref()
+        .map_or_else(String::new, |b| format!(", base {}", b.display()));
+    format!(
+        "{} [{how}{base}] ({})",
+        item.path.display(),
+        describe_size(item.bytes)
+    )
+}
+
+/// The external half of the register (ADR-191 D8).
+///
+/// Every declared base gets a line, so a base that was not scanned says so
+/// instead of reading as a base with no orphans.
+fn report_external(plan: &ExternalPlan) {
+    if plan.bases.is_empty() && plan.items.is_empty() {
+        return;
+    }
+    println!("  external derived roots (ADR-191):");
+    for b in &plan.bases {
+        match &b.state {
+            BaseState::Scanned => println!("    base {}: scanned", b.base.display()),
+            BaseState::Unreachable(e) => println!(
+                "    base {}: unreachable, not scanned — {}",
+                b.base.display(),
+                e.describe()
+            ),
+            BaseState::ListingFailed(e) => println!(
+                "    base {}: listing failed, every child withheld — {}",
+                b.base.display(),
+                e.describe()
+            ),
+        }
+    }
+    let (selected, withheld): (Vec<&ExternalItem>, Vec<&ExternalItem>) =
+        plan.items.iter().partition(|i| i.selected());
+    println!(
+        "    {} external director(ies) withheld, {}:",
+        withheld.len(),
+        describe_size(withheld.iter().map(|i| i.bytes).sum())
+    );
+    for item in withheld {
+        println!("      - {}", external_line(item));
+        for reason in &item.reasons {
+            println!("          {reason}");
+        }
+    }
+    println!(
+        "    {} external director(ies) with reclaimable payload, {}:",
+        selected.len(),
+        describe_size(selected.iter().map(|i| i.bytes).sum())
+    );
+    for item in selected {
+        println!("      - {}", external_line(item));
+    }
+}
+
+/// The external half of `--json`.
+fn external_json(plan: &ExternalPlan) -> serde_json::Value {
+    let item = |i: &ExternalItem| {
+        let link = match &i.kind {
+            ExternalKind::Linked { link, .. } => Some(link.display().to_string()),
+            ExternalKind::Orphan => None,
+        };
+        serde_json::json!({
+            "kind": i.kind.label(),
+            "path": i.path.display().to_string(),
+            "link": link,
+            "base": i.base.as_ref().map(|b| b.display().to_string()),
+            "reasons": i.reasons,
+            "bytes": i.bytes,
+        })
+    };
+    serde_json::json!({
+        "bases": plan.bases.iter().map(|b| {
+            let (state, detail) = match &b.state {
+                BaseState::Scanned => ("scanned", None),
+                BaseState::Unreachable(e) => ("unreachable", Some(e.describe())),
+                BaseState::ListingFailed(e) => ("listing_failed", Some(e.describe())),
+            };
+            serde_json::json!({
+                "base": b.base.display().to_string(),
+                "state": state,
+                "detail": detail,
+            })
+        }).collect::<Vec<_>>(),
+        "selected": plan.items.iter().filter(|i| i.selected()).map(item).collect::<Vec<_>>(),
+        "withheld": plan.items.iter().filter(|i| !i.selected()).map(item).collect::<Vec<_>>(),
+    })
 }
 
 /// Print the pass in the operator's register.
@@ -359,6 +495,8 @@ pub(crate) fn report(pass: &ReclaimPass) {
         }
     }
 
+    report_external(&pass.external);
+
     if pass.executed {
         println!("  removed {} entr(ies).", pass.removed.len());
         for p in &pass.preserved {
@@ -367,7 +505,7 @@ pub(crate) fn report(pass: &ReclaimPass) {
         for f in &pass.failures {
             println!("    FAILED — {}", f.describe());
         }
-    } else if !pass.selected.is_empty() {
+    } else if !pass.selected.is_empty() || pass.external.items.iter().any(ExternalItem::selected) {
         println!(
             "  Nothing was removed. Repeat with --allow-unharvested to reclaim \
              the derived output above."
@@ -409,6 +547,7 @@ pub(crate) fn to_json(pass: &ReclaimPass) -> serde_json::Value {
         "removed": pass.removed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "preserved": pass.preserved.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "failures": pass.failures.iter().map(ObservationError::describe).collect::<Vec<_>>(),
+        "external": external_json(&pass.external),
     })
 }
 
@@ -454,12 +593,18 @@ pub(crate) fn base_branch(ctx: &super::Context, repo_root: &Path) -> String {
     "main".to_owned()
 }
 
-/// The `[worktree_reclaim].evict` set for this invocation, with its default.
-pub(crate) fn evict_roots(ctx: &super::Context) -> Vec<String> {
-    cosmon_filestore::load_project_config(&super::resolve_config_from_context(ctx)).map_or_else(
-        |_| cosmon_core::config::WorktreeReclaimConfig::default().evict,
-        |cfg| cfg.worktree_reclaim.evict,
-    )
+/// The `[worktree_reclaim]` section for this invocation.
+///
+/// A missing `config.toml` is the default section. A file that cannot be
+/// parsed is an error: a malformed `[[worktree_reclaim.external]]` entry
+/// must stop the pass, not read as "nothing declared" (ADR-191 D1).
+///
+/// # Errors
+/// The configuration file exists and cannot be read or parsed.
+pub(crate) fn reclaim_config(ctx: &super::Context) -> anyhow::Result<WorktreeReclaimConfig> {
+    cosmon_filestore::load_project_config(&super::resolve_config_from_context(ctx))
+        .map(|cfg| cfg.worktree_reclaim)
+        .map_err(|e| anyhow::anyhow!("the reclamation pass does not run: {e}"))
 }
 
 #[cfg(test)]

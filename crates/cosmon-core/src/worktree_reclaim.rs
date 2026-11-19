@@ -34,6 +34,8 @@ use std::path::{Path, PathBuf};
 
 use crate::molecule::MoleculeStatus;
 
+pub mod external;
+
 // ---------------------------------------------------------------------------
 // Failed observations
 // ---------------------------------------------------------------------------
