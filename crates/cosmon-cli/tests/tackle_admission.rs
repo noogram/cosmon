@@ -156,8 +156,12 @@ fn tackle_refuses_the_third_spawn_at_cap_two_before_any_worktree_exists() {
         }
     }
     let live = session_count(&socket);
+    write_config("[admission]\nmax_active = 2\nmin_free_bytes = 9223372036854775807\n");
+    let retry = tackle(&ids[0], &["--if-needed", "--no-worktree"]);
+    write_config("[admission]\nmax_active = 2\n");
     let third = &ids[2];
     let refused = tackle(third, &[]);
+    let refused_if_needed = tackle(third, &["--if-needed"]);
     let sessions_after_refusal = session_count(&socket);
     let worktree_exists = root.join(".worktrees").join(third).exists();
     let branch =
@@ -172,10 +176,19 @@ fn tackle_refuses_the_third_spawn_at_cap_two_before_any_worktree_exists() {
     kill_server();
 
     assert_eq!(live, 2, "fixture must hold two live sessions");
+    assert!(retry.status.success(), "{}", stderr(&retry));
+    assert!(String::from_utf8_lossy(&retry.stdout).starts_with("already dispatched to "));
     assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
     let err = stderr(&refused);
     assert!(err.contains("2 active molecules"), "{err}");
     assert!(err.contains("max_active is 2"), "{err}");
+    assert_eq!(
+        refused_if_needed.status.code(),
+        Some(1),
+        "{}",
+        stderr(&refused_if_needed)
+    );
+    assert!(stderr(&refused_if_needed).contains("max_active is 2"));
     assert!(
         err.contains("[admission].max_active"),
         "remedy missing: {err}"
@@ -258,4 +271,47 @@ fn tackle_refuses_when_the_free_space_floor_is_unreachable() {
     );
     assert!(!root.join(".worktrees").join(&id).exists());
     assert_eq!(session_count(&project_id), 0);
+    let branches = git(root, &["branch", "--list", &format!("feat/{id}")]);
+    assert!(branches.status.success());
+    assert!(
+        branches.stdout.is_empty(),
+        "the refused spawn created a branch"
+    );
+
+    // Probing the same configured floor can fail. The unknown result allows a
+    // real dispatch and names the failed probe in the diagnostic.
+    let stub_bin = install_stub_claude(root, &root.join("launched"));
+    let df = stub_bin.join("df");
+    fs::write(&df, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&df, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        stub_bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let admitted = cs(root)
+        .env("PATH", path)
+        .env("COSMON_ALLOW_NO_WORKTREE", "1")
+        .env(
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "test-placeholder-not-a-credential",
+        )
+        .args([
+            "tackle",
+            &id,
+            "--adapter",
+            "claude",
+            "--no-worktree",
+            "--config",
+        ])
+        .arg(&state_dir)
+        .output()
+        .unwrap();
+    let sessions = session_count(&project_id);
+    let _ = Command::new("tmux")
+        .args(["-L", &project_id, "kill-server"])
+        .output();
+    assert!(admitted.status.success(), "{}", stderr(&admitted));
+    assert!(stderr(&admitted).contains("admission: free-space probe failed (df exited with"));
+    assert_eq!(sessions, 1);
 }
