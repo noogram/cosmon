@@ -7228,6 +7228,24 @@ mod tests {
         assert!(nudged);
     }
 
+    /// The briefing tier obeys the gate-slot queue too: a worker waiting for a
+    /// slot behind a live holder is not told to re-read its briefing, exactly as
+    /// the propulsion tier leaves it alone (ADR-190, "Queued is not a stall").
+    #[test]
+    fn the_briefing_tier_leaves_a_worker_queued_for_a_gate_slot_alone() {
+        let (tmp, store, mol) = stale_molecule_with_briefing();
+        assert!(
+            matches!(briefing_verdict(&store, &mol), NudgeDecision::Nudge { .. }),
+            "control: silent, stale, nothing queued"
+        );
+        let _holder =
+            cosmon_filestore::gate_slots::try_acquire_gate_slot_in(tmp.path(), "full_gate", 1)
+                .unwrap()
+                .unwrap();
+        queue_for_slot(&tmp, &mol, &std::process::id().to_string());
+        assert!(is_queued_skip(briefing_verdict(&store, &mol)));
+    }
+
     /// A `gates.queued` left by a dead process does not silence patrol, even
     /// while the pool is busy.
     #[test]
