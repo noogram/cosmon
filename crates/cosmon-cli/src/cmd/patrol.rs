@@ -2577,36 +2577,12 @@ pub(crate) fn nudge_stalled_molecules(
         // would have covered `--propel` and left `--nudge` hammering the very
         // same gated worker with the very same sentence.
         let session = mol.session_name.clone().unwrap_or_else(|| wid.to_string());
-        let view = NudgeView {
-            channel: NudgeChannel::Briefing,
-            status: mol.status,
-            awaiting_operator: worker_awaits_operator(store, mol),
-            // The same orphan gate the propulsion tier consults: telling a
-            // brief-less worker to "re-read briefing.md" is exactly as futile
-            // as telling it to "continue", so this channel suppresses too.
-            briefing_present: worker_briefing_present(store, &mol.id),
-            // Not this channel's warrant: the briefing tier is judged by
-            // `decide_nudge`, which never reads the field.
-            api_error_stalled: false,
-            progress_age: now.signed_duration_since(mol.updated_at),
-            pane_idle: pane_idle_seconds(be.socket(), &session).map(chrono::Duration::seconds),
-            // The same background-work rule as the propulsion tier: a worker
-            // waiting on a background command must not be told to re-read its
-            // briefing either.
-            background_work_age: super::patrol_background::background_work_age(store, &mol.id, now),
-            gate_queued: super::patrol_background::gate_run_queued(store, &mol.id),
-            // Deliberately not `mol.nudge_count`: that field is a *lifetime*
-            // total the briefing tier never resets, so feeding it as the
-            // per-stall attempt count would silence this channel permanently
-            // after the fourth nudge of a molecule's whole life. This tier
-            // brings its own spacing rule (the idempotence window below) and
-            // no ceiling; the ledger-and-ceiling arithmetic belongs to the
-            // propulsion tier, which keeps a per-stall register.
-            attempts: 0,
-            since_last_propel: mol
-                .last_nudged_at
-                .map(|at| now.signed_duration_since(at).max(chrono::Duration::zero())),
-        };
+        let view = build_briefing_view(
+            store,
+            mol,
+            pane_idle_seconds(be.socket(), &session).map(chrono::Duration::seconds),
+            now,
+        );
         if !matches!(
             decide_nudge(&view, chrono::Duration::seconds(NUDGE_IDEMPOTENCE_SECS)),
             NudgeDecision::Nudge { .. }
@@ -2642,6 +2618,49 @@ pub(crate) fn nudge_stalled_molecules(
         nudged.push((wid, mol.id.clone()));
     }
     nudged
+}
+
+/// The view the briefing tier (`cs patrol --nudge`) hands the judge for one
+/// stalled molecule: the same facts the propulsion tier reads, plus this
+/// tier's own spacing rule (see the field comments).
+fn build_briefing_view(
+    store: &dyn StateStore,
+    mol: &MoleculeData,
+    pane_idle: Option<chrono::Duration>,
+    now: chrono::DateTime<Utc>,
+) -> NudgeView {
+    NudgeView {
+        channel: NudgeChannel::Briefing,
+        status: mol.status,
+        awaiting_operator: worker_awaits_operator(store, mol),
+        // The same orphan gate the propulsion tier consults: telling a
+        // brief-less worker to "re-read briefing.md" is exactly as futile
+        // as telling it to "continue", so this channel suppresses too.
+        briefing_present: worker_briefing_present(store, &mol.id),
+        // Not this channel's warrant: the briefing tier is judged by
+        // `decide_nudge`, which never reads the field.
+        api_error_stalled: false,
+        progress_age: now.signed_duration_since(mol.updated_at),
+        pane_idle,
+        // The same background-work rule as the propulsion tier: a worker
+        // waiting on a background command must not be told to re-read its
+        // briefing either.
+        background_work_age: super::patrol_background::background_work_age(store, &mol.id, now),
+        // The gate-slot queue (ADR-190): a run queued behind a live slot holder is
+        // not a stall, whichever channel looks at the worker.
+        gate_queued: super::patrol_background::gate_run_queued(store, &mol.id),
+        // Deliberately not `mol.nudge_count`: that field is a *lifetime*
+        // total the briefing tier never resets, so feeding it as the
+        // per-stall attempt count would silence this channel permanently
+        // after the fourth nudge of a molecule's whole life. This tier
+        // brings its own spacing rule (the idempotence window the caller
+        // applies) and no ceiling; the ledger-and-ceiling arithmetic belongs to the
+        // propulsion tier, which keeps a per-stall register.
+        attempts: 0,
+        since_last_propel: mol
+            .last_nudged_at
+            .map(|at| now.signed_duration_since(at).max(chrono::Duration::zero())),
+    }
 }
 
 /// Render the patrol report in human-readable format.
@@ -7102,6 +7121,51 @@ mod tests {
         ));
     }
 
+    /// What the briefing tier (`cs patrol --nudge`) decides for the same molecule.
+    fn briefing_verdict(store: &FileStore, mol: &MoleculeData) -> NudgeDecision {
+        let view = build_briefing_view(
+            store,
+            mol,
+            Some(chrono::Duration::seconds(9_000)),
+            Utc::now(),
+        );
+        assert_eq!(view.channel, NudgeChannel::Briefing);
+        assert_eq!(view.attempts, 0, "this tier keeps no per-stall ceiling");
+        decide_nudge(&view, chrono::Duration::seconds(NUDGE_IDEMPOTENCE_SECS))
+    }
+
+    /// The briefing tier obeys the background rule too: a worker waiting on a
+    /// command it started is not told to re-read its briefing.
+    #[test]
+    fn the_briefing_tier_leaves_a_worker_with_background_work_alone() {
+        let (tmp, store, mol) = stale_molecule_with_briefing();
+        assert!(
+            matches!(briefing_verdict(&store, &mol), NudgeDecision::Nudge { .. }),
+            "control: silent, stale, nothing in flight"
+        );
+        report_background(&tmp, &mol, 10);
+        assert!(is_background_skip(briefing_verdict(&store, &mol)));
+    }
+
+    /// Its own spacing rule is fed from the molecule's last nudge, and a clock
+    /// that ran backwards cannot make the gap negative.
+    #[test]
+    fn the_briefing_view_measures_the_gap_since_the_last_nudge() {
+        let (_tmp, store, mut mol) = stale_molecule_with_briefing();
+        let now = Utc::now();
+        mol.last_nudged_at = Some(now - chrono::Duration::seconds(120));
+        let view = build_briefing_view(&store, &mol, None, now);
+        assert_eq!(view.since_last_propel, Some(chrono::Duration::seconds(120)));
+        mol.last_nudged_at = Some(now + chrono::Duration::seconds(30));
+        let view = build_briefing_view(&store, &mol, None, now);
+        assert_eq!(view.since_last_propel, Some(chrono::Duration::zero()));
+        mol.last_nudged_at = None;
+        assert_eq!(
+            build_briefing_view(&store, &mol, None, now).since_last_propel,
+            None
+        );
+    }
+
     /// (b) A detached gate run: `gates.pid` names a live process, no `gates.exit`.
     #[test]
     fn a_live_gate_run_suppresses_the_nudge() {
@@ -7162,6 +7226,24 @@ mod tests {
             nudge
         });
         assert!(nudged);
+    }
+
+    /// The briefing tier obeys the gate-slot queue too: a worker waiting for a
+    /// slot behind a live holder is not told to re-read its briefing, exactly as
+    /// the propulsion tier leaves it alone (ADR-190, "Queued is not a stall").
+    #[test]
+    fn the_briefing_tier_leaves_a_worker_queued_for_a_gate_slot_alone() {
+        let (tmp, store, mol) = stale_molecule_with_briefing();
+        assert!(
+            matches!(briefing_verdict(&store, &mol), NudgeDecision::Nudge { .. }),
+            "control: silent, stale, nothing queued"
+        );
+        let _holder =
+            cosmon_filestore::gate_slots::try_acquire_gate_slot_in(tmp.path(), "full_gate", 1)
+                .unwrap()
+                .unwrap();
+        queue_for_slot(&tmp, &mol, &std::process::id().to_string());
+        assert!(is_queued_skip(briefing_verdict(&store, &mol)));
     }
 
     /// A `gates.queued` left by a dead process does not silence patrol, even

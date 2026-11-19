@@ -534,6 +534,41 @@ mod tests {
         assert!(!store.detach(&mine.session_id).unwrap());
     }
 
+    /// A session written under the old unprefixed name is still readable, so
+    /// detaching it must remove that file too, and only that one: its legacy
+    /// whisper log is not a presence snapshot.
+    #[test]
+    fn detach_also_removes_a_legacy_unprefixed_snapshot() {
+        let (_tmp, store) = make_store();
+        let row = sample("sid-legacy", Utc::now(), std::process::id());
+        let legacy = store.root.join("sid-legacy.json");
+        let legacy_log = store.root.join("sid-legacy.log");
+        fs::create_dir_all(&store.root).unwrap();
+        fs::write(&legacy, serde_json::to_string(&row).unwrap()).unwrap();
+        fs::write(&legacy_log, "a whisper\n").unwrap();
+        assert!(store.load(&row.session_id).unwrap().is_some(), "readable");
+
+        assert!(store.detach(&row.session_id).unwrap());
+        assert!(!legacy.exists());
+        assert!(store.load(&row.session_id).unwrap().is_none());
+        assert_eq!(fs::read_to_string(&legacy_log).unwrap(), "a whisper\n");
+    }
+
+    /// An unlink that fails for a reason other than "not there" is an error,
+    /// never a silent `false`: the session believes it withdrew and did not.
+    #[test]
+    fn detach_reports_a_snapshot_it_cannot_remove() {
+        let (_tmp, store) = make_store();
+        let sid = SessionId::new("sid-stuck").unwrap();
+        // A directory where the snapshot file belongs cannot be unlinked as a file.
+        fs::create_dir_all(store.snapshot_path(&sid)).unwrap();
+        let err = store.detach(&sid).expect_err("not removable");
+        assert!(
+            err.to_string().contains("failed to remove presence"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn gc_removes_stale_dead_pids() {
         let (_tmp, store) = make_store();

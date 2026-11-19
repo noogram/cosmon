@@ -1092,6 +1092,15 @@ mod tests {
             .expect("the hook wrote a presence row")
     }
 
+    /// Every byte the hook left under the presence directory, as one string.
+    fn presence_dir_text(dir: &std::path::Path) -> String {
+        std::fs::read_dir(dir.join("presence"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+            .collect()
+    }
+
     #[test]
     fn a_stop_payload_with_a_running_shell_yields_one_task_of_kind_shell() {
         let parsed = hook_payload(HookProvider::Claude, STOP_WITH_BACKGROUND_SHELL);
@@ -1145,20 +1154,7 @@ mod tests {
             (1, &["shell".to_owned()][..])
         );
 
-        let raw = std::fs::read_to_string(
-            dir.path()
-                .join("presence")
-                .join("session-session-bg-1.json"),
-        )
-        .or_else(|_| std::fs::read_to_string(dir.path().join("presence").join("session-bg-1.json")))
-        .unwrap_or_else(|_| {
-            // Whatever the file is called, scan every file the hook wrote.
-            std::fs::read_dir(dir.path().join("presence"))
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-                .collect::<String>()
-        });
+        let raw = presence_dir_text(dir.path());
         assert!(raw.contains("background_tasks"), "{raw}");
         for forbidden in [
             "SECRET-COMMAND-5520",
@@ -1170,6 +1166,58 @@ mod tests {
                 "presence leaked {forbidden:?}: {raw}"
             );
         }
+    }
+
+    /// `kinds` is the one free-text channel left in the record: a `type` that
+    /// is not a short plain token (a command line, a sentence, a path) must not
+    /// reach the stored row, whatever field it arrived in.
+    #[test]
+    fn a_type_that_is_not_a_plain_token_never_reaches_the_stored_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = r#"{"background_tasks":[
+            {"type":"sleep 900 && echo SECRET-TYPE-9981","status":"running"},
+            {"type":"/usr/bin/SECRET-PATH-4410","status":"running"},
+            {"type":"shell","status":"running"}]}"#;
+        run_hook(&hook_ctx(dir.path()), &stop_args("session-bg-4", payload));
+        let bg = stored(dir.path(), "session-bg-4").background_tasks.unwrap();
+        assert_eq!(
+            (bg.running, bg.kinds.as_slice()),
+            (3, &["shell".to_owned()][..])
+        );
+        let raw = presence_dir_text(dir.path());
+        for forbidden in ["SECRET-TYPE-9981", "SECRET-PATH-4410", "sleep 900"] {
+            assert!(
+                !raw.contains(forbidden),
+                "presence leaked {forbidden:?}: {raw}"
+            );
+        }
+    }
+
+    /// Only a Claude turn end replaces the record. A Codex notify, a Claude
+    /// event that is not a turn end, and a Claude Stop with the field absent
+    /// are three different moments with three different effects.
+    #[test]
+    fn only_a_claude_turn_end_replaces_the_background_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = hook_ctx(dir.path());
+        run_hook(&ctx, &stop_args("session-bg-5", STOP_WITH_BACKGROUND_SHELL));
+
+        // Codex reports its own envelope at turn end: it cannot clear Claude's record.
+        let mut codex = stop_args("session-bg-5", r#"{"background_tasks":[]}"#);
+        codex.provider = Some("codex".to_owned());
+        run_hook(&ctx, &codex);
+        assert!(stored(dir.path(), "session-bg-5")
+            .background_tasks
+            .is_some());
+
+        // A Claude event that is not a turn end leaves it alone even when the
+        // payload says nothing is running.
+        let mut start = stop_args("session-bg-5", r#"{"background_tasks":[]}"#);
+        start.event = "turn-start".to_owned();
+        run_hook(&ctx, &start);
+        assert!(stored(dir.path(), "session-bg-5")
+            .background_tasks
+            .is_some());
     }
 
     #[test]

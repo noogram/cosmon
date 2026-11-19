@@ -71,7 +71,9 @@ pub(crate) fn gate_run_age(molecule_dir: &Path, now: DateTime<Utc>) -> Option<Du
         .trim()
         .parse()
         .ok()?;
-    if !pid_is_alive(pid) {
+    // `kill(0, 0)` addresses the caller's process group and succeeds, so pid 0
+    // would read as a live run. It is not a pid the runner can write.
+    if pid == 0 || !pid_is_alive(pid) {
         return None;
     }
     let modified: DateTime<Utc> = std::fs::metadata(&pid_path).ok()?.modified().ok()?.into();
@@ -221,6 +223,28 @@ mod tests {
         assert_eq!(gate_run_age(dir.path(), Utc::now()), None);
     }
 
+    /// `kill(0, 0)` signals the caller's own process group and succeeds, so a
+    /// pid file holding `0` would read as a live run. No runner writes it; a
+    /// truncated or hand-edited file must not suppress a nudge.
+    #[test]
+    fn pid_zero_never_names_a_gate_run() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("gates.pid"), "0").unwrap();
+        assert_eq!(gate_run_age(dir.path(), Utc::now()), None);
+    }
+
+    /// Whitespace around the pid (the runner writes a trailing newline) is
+    /// accepted; a pid with trailing text is not a pid.
+    #[test]
+    fn the_pid_file_is_parsed_strictly() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = dir.path().join("gates.pid");
+        std::fs::write(&pid, format!("{}\n", std::process::id())).unwrap();
+        assert!(gate_run_age(dir.path(), Utc::now()).is_some());
+        std::fs::write(&pid, format!("{} extra", std::process::id())).unwrap();
+        assert_eq!(gate_run_age(dir.path(), Utc::now()), None);
+    }
+
     #[test]
     fn the_gate_age_is_the_age_of_the_pid_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -358,5 +382,14 @@ mod tests {
         let dir = Path::new("/g/.cosmon/state/fleets/default/molecules/task-1");
         assert_eq!(state_root_of(dir), Some(PathBuf::from("/g/.cosmon/state")));
         assert_eq!(state_root_of(Path::new("/tmp/flat/task-1")), None);
+        // Each of the two named levels is checked on its own.
+        assert_eq!(
+            state_root_of(Path::new("/g/state/fleets/default/other/task-1")),
+            None
+        );
+        assert_eq!(
+            state_root_of(Path::new("/g/state/other/default/molecules/task-1")),
+            None
+        );
     }
 }

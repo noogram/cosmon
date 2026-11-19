@@ -659,4 +659,99 @@ mod tests {
             Some(0)
         );
     }
+
+    /// Which buckets of the sweep hold anything, by name.
+    fn filled(out: &ApiStallSweep) -> Vec<&'static str> {
+        let s = &out.sweep;
+        let mut v = Vec::new();
+        if !s.propelled.is_empty() {
+            v.push("propelled");
+        }
+        if !s.active.is_empty() {
+            v.push("active");
+        }
+        if !s.deferred.is_empty() {
+            v.push("deferred");
+        }
+        if !s.escalated.is_empty() {
+            v.push("escalated");
+        }
+        if !s.gated.is_empty() {
+            v.push("gated");
+        }
+        if !s.orphaned.is_empty() {
+            v.push("orphaned");
+        }
+        v
+    }
+
+    /// File one verdict on a throwaway store and a tmux handle whose socket
+    /// has no server behind it, so a verdict that tried to speak would fail
+    /// to send and file nothing.
+    fn file(decision: NudgeDecision) -> Vec<&'static str> {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = cosmon_filestore::FileStore::new(tmp.path());
+        let be = TmuxBackend::new("cosmon-test-no-such-socket");
+        let mut out = ApiStallSweep::default();
+        apply_decision(
+            &store,
+            &be,
+            &mut out,
+            (
+                WorkerId::new("w1").unwrap(),
+                MoleculeId::new("task-20261116-e643").unwrap(),
+                600,
+            ),
+            decision,
+            Utc::now(),
+        );
+        filled(&out)
+    }
+
+    /// Background work in flight is a refusal that files nothing: no nudge, and
+    /// no bucket claiming the worker was thinking, gated or deferred (#216).
+    #[test]
+    fn a_worker_waiting_on_background_work_is_filed_nowhere() {
+        assert!(file(NudgeDecision::Skip(NudgeSkip::BackgroundWork {
+            age_secs: 60,
+            ceiling_secs: 2700,
+        }))
+        .is_empty());
+    }
+
+    /// The other refusals keep their own buckets, so the one above is not
+    /// simply "every skip files nothing".
+    #[test]
+    fn the_other_refusals_are_filed_in_their_own_buckets() {
+        assert_eq!(
+            file(NudgeDecision::Skip(NudgeSkip::PaneActive {
+                idle_secs: 5,
+                threshold_secs: 300,
+            })),
+            ["active"]
+        );
+        assert_eq!(
+            file(NudgeDecision::Skip(NudgeSkip::AwaitingOperator)),
+            ["gated"]
+        );
+        assert_eq!(
+            file(NudgeDecision::Skip(NudgeSkip::Backoff {
+                since_secs: 10,
+                window_secs: 600,
+                attempts: 1,
+            })),
+            ["deferred"]
+        );
+        assert!(file(NudgeDecision::Skip(NudgeSkip::NoTypedApiError)).is_empty());
+    }
+
+    /// A nudge that cannot be delivered is not recorded as propelled.
+    #[test]
+    fn an_undeliverable_nudge_is_not_recorded() {
+        assert!(file(NudgeDecision::Nudge {
+            attempt: 1,
+            next_window_secs: 600,
+        })
+        .is_empty());
+    }
 }

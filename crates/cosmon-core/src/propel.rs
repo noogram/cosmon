@@ -1224,6 +1224,90 @@ mod tests {
         ));
     }
 
+    /// The rule order of [`decide_nudge`] is its contract: operator gate,
+    /// not-running, orphan, background work, active pane, attempt ceiling,
+    /// spacing. Every pair of rules is armed at once and the earlier one must
+    /// speak, so swapping any two rules in the function fails here.
+    #[test]
+    fn rule_order_is_pinned_pair_by_pair() {
+        type Arm = fn(&mut NudgeView);
+        // Name, how to arm the rule on a view that would otherwise be nudged,
+        // and the verdict that rule gives on its own.
+        let rules: [(&str, Arm, fn(&NudgeDecision) -> bool); 7] = [
+            (
+                "operator",
+                |v| v.awaiting_operator = true,
+                |d| matches!(d, NudgeDecision::Skip(NudgeSkip::AwaitingOperator)),
+            ),
+            (
+                "not-running",
+                |v| v.status = MoleculeStatus::Completed,
+                |d| matches!(d, NudgeDecision::Skip(NudgeSkip::NotRunning { .. })),
+            ),
+            (
+                "orphan",
+                |v| v.briefing_present = false,
+                |d| {
+                    matches!(
+                        d,
+                        NudgeDecision::Escalate {
+                            reason: EscalateReason::Orphaned,
+                            ..
+                        }
+                    )
+                },
+            ),
+            (
+                "background",
+                |v| v.background_work_age = Some(Duration::seconds(60)),
+                |d| matches!(d, NudgeDecision::Skip(NudgeSkip::BackgroundWork { .. })),
+            ),
+            (
+                "pane",
+                |v| v.pane_idle = Some(Duration::seconds(5)),
+                |d| matches!(d, NudgeDecision::Skip(NudgeSkip::PaneActive { .. })),
+            ),
+            (
+                "ceiling",
+                |v| v.attempts = PROPEL_MAX_ATTEMPTS,
+                |d| {
+                    matches!(
+                        d,
+                        NudgeDecision::Escalate {
+                            reason: EscalateReason::AttemptsExhausted,
+                            ..
+                        }
+                    )
+                },
+            ),
+            (
+                "spacing",
+                |v| {
+                    v.attempts = v.attempts.max(1);
+                    v.since_last_propel = Some(Duration::seconds(1));
+                },
+                |d| matches!(d, NudgeDecision::Skip(NudgeSkip::Backoff { .. })),
+            ),
+        ];
+        for (name, arm, verdict) in &rules {
+            let mut alone = view(1800, Some(1800), 0, None);
+            arm(&mut alone);
+            assert!(verdict(&decide_nudge(&alone, STALE)), "{name} alone");
+        }
+        for (i, (early, arm_early, verdict_early)) in rules.iter().enumerate() {
+            for (late, arm_late, _) in &rules[i + 1..] {
+                let mut v = view(1800, Some(1800), 0, None);
+                arm_late(&mut v);
+                arm_early(&mut v);
+                let got = decide_nudge(&v, STALE);
+                assert!(
+                    verdict_early(&got),
+                    "{early} must outrank {late}, got {got:?}"
+                );
+            }
+        }
+    }
+
     /// The narrow channel keeps its extra warrant and then obeys the same rule.
     #[test]
     fn the_api_stall_channel_obeys_the_background_rule_too() {
