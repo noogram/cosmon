@@ -2109,6 +2109,7 @@ pub(crate) fn build_propulsion_view(
         // Background work the worker is waiting on (provider report or a
         // detached gate run); `None` when neither source reports any.
         background_work_age: super::patrol_background::background_work_age(store, mid, now),
+        gate_queued: super::patrol_background::gate_run_queued(store, mid),
         attempts: attempts.count,
         since_last_propel: attempts
             .last_at
@@ -2221,7 +2222,9 @@ pub(crate) fn propel_stale_molecules(
         // thinking nor stuck: its terminal is silent because it is waiting for
         // the completion notification. No nudge, and no liveness witness
         // either, for the same reason as a thinking worker.
-        if let NudgeDecision::Skip(NudgeSkip::BackgroundWork { .. }) = decision {
+        if let NudgeDecision::Skip(NudgeSkip::BackgroundWork { .. } | NudgeSkip::GateQueued) =
+            decision
+        {
             continue;
         }
 
@@ -2271,6 +2274,7 @@ pub(crate) fn propel_stale_molecules(
                 | NudgeSkip::AwaitingOperator
                 | NudgeSkip::NotRunning { .. }
                 | NudgeSkip::BackgroundWork { .. }
+                | NudgeSkip::GateQueued
                 // Never produced by `decide_nudge`; it is the api-stall
                 // channel's own refusal.
                 | NudgeSkip::NoTypedApiError,
@@ -2590,6 +2594,7 @@ pub(crate) fn nudge_stalled_molecules(
             // waiting on a background command must not be told to re-read its
             // briefing either.
             background_work_age: super::patrol_background::background_work_age(store, &mol.id, now),
+            gate_queued: super::patrol_background::gate_run_queued(store, &mol.id),
             // Deliberately not `mol.nudge_count`: that field is a *lifetime*
             // total the briefing tier never resets, so feeding it as the
             // per-stall attempt count would silence this channel permanently
@@ -4775,6 +4780,7 @@ mod tests {
             progress_age: chrono::Duration::seconds(644),
             pane_idle: Some(chrono::Duration::seconds(2)),
             background_work_age: None,
+            gate_queued: false,
             attempts: 0,
             since_last_propel: None,
         };
@@ -4933,6 +4939,7 @@ mod tests {
                     progress_age: chrono::Duration::seconds(300 + pass * 70),
                     pane_idle: Some(chrono::Duration::seconds(300 + pass * 70)),
                     background_work_age: None,
+                    gate_queued: false,
                     attempts: 0,
                     since_last_propel: None,
                 };
@@ -4993,6 +5000,7 @@ mod tests {
             progress_age: chrono::Duration::hours(3),
             pane_idle: Some(chrono::Duration::hours(3)),
             background_work_age: None,
+            gate_queued: false,
             attempts: 0,
             since_last_propel: None,
         };
@@ -7101,6 +7109,75 @@ mod tests {
         let dir = store.molecule_dir(&mol.id);
         std::fs::write(dir.join("gates.pid"), std::process::id().to_string()).unwrap();
         assert!(is_background_skip(background_verdict(&store, &mol)));
+    }
+
+    /// Queue a gate run of `mol` behind a pool of one slot, as the runner does.
+    fn queue_for_slot(tmp: &TempDir, mol: &MoleculeData, pid: &str) {
+        let dir = tmp
+            .path()
+            .join("fleets/default/molecules")
+            .join(mol.id.as_str());
+        std::fs::write(dir.join("gates.queued"), format!("{pid}\nfull_gate\n")).unwrap();
+    }
+
+    fn is_queued_skip(d: NudgeDecision) -> bool {
+        matches!(d, NudgeDecision::Skip(NudgeSkip::GateQueued))
+    }
+
+    /// ADR-190: N=1, two workers. The first holds the slot; the second has been
+    /// queued for longer than the 45-minute ceiling (progress and terminal
+    /// silent for 9000 s) and is not nudged.
+    #[test]
+    fn a_worker_queued_behind_a_live_slot_holder_is_not_nudged() {
+        let (tmp, store, mol) = stale_molecule_with_briefing();
+        let _first =
+            cosmon_filestore::gate_slots::try_acquire_gate_slot_in(tmp.path(), "full_gate", 1)
+                .unwrap()
+                .unwrap();
+        queue_for_slot(&tmp, &mol, &std::process::id().to_string());
+        assert!(is_queued_skip(background_verdict(&store, &mol)));
+    }
+
+    /// The first holder's process dies: the pool has no live holder, so the
+    /// queue has moved and patrol decides as before (nudge), not silence.
+    #[test]
+    fn a_queued_worker_whose_pool_has_no_live_holder_is_nudged_as_before() {
+        let (tmp, store, mol) = stale_molecule_with_briefing();
+        let first =
+            cosmon_filestore::gate_slots::try_acquire_gate_slot_in(tmp.path(), "full_gate", 1)
+                .unwrap()
+                .unwrap();
+        queue_for_slot(&tmp, &mol, &std::process::id().to_string());
+        drop(first);
+        // A sibling test's `fork` can keep a copy of the released descriptor
+        // for a few milliseconds, so the release is awaited, not assumed.
+        let nudged = (0..100).any(|_| {
+            let nudge = matches!(
+                background_verdict(&store, &mol),
+                NudgeDecision::Nudge { attempt: 1, .. }
+            );
+            if !nudge {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            nudge
+        });
+        assert!(nudged);
+    }
+
+    /// A `gates.queued` left by a dead process does not silence patrol, even
+    /// while the pool is busy.
+    #[test]
+    fn a_stale_queued_file_with_a_dead_process_does_not_silence_patrol() {
+        let (tmp, store, mol) = stale_molecule_with_briefing();
+        let _first =
+            cosmon_filestore::gate_slots::try_acquire_gate_slot_in(tmp.path(), "full_gate", 1)
+                .unwrap()
+                .unwrap();
+        queue_for_slot(&tmp, &mol, "4000000000");
+        assert!(matches!(
+            background_verdict(&store, &mol),
+            NudgeDecision::Nudge { attempt: 1, .. }
+        ));
     }
 
     /// (b) A pid file whose process is gone, with no exit file, is a dead run.

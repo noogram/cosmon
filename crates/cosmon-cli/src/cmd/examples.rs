@@ -955,6 +955,17 @@ members are closed.
 
 See docs/guides/train-landing.md.";
 
+pub const GATES: &str = "EXAMPLES:
+  cs gates slot -- just gates                     # full gate, one slot of the `full_gate` pool
+  cs gates slot --pool docker_build -- make image # a project's own heavy command, its own pool
+  cs gates slot --pool docker_build --configured  # print the pool's size; exit 3 when unbounded
+
+Pools and sizes come from `[gate_slots]` in .cosmon/config.toml
+(`full_gate = N`, `[gate_slots.pools] <name> = N`). The verb waits for a free slot,
+runs the command with your stdio, frees the slot when it ends, and exits with the
+command's own exit code. A pool with no configured size is unbounded: the command
+runs at once, as before. A killed holder frees its slot. `cs done` never takes one.";
+
 pub const STITCH: &str = "EXAMPLES:
   cs stitch <root-id>                    # merge mission's DAG into base under one lock
   cs stitch <root-id> --dry-run          # show planned order, do not touch git

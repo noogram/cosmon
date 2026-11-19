@@ -1,0 +1,19 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Run a command while holding a slot of a pool, waiting for one to be free
+
+Usage: cs gates slot [OPTIONS] [-- <COMMAND>...]
+
+Arguments:
+  [COMMAND]...  The command to run, after `--`
+
+Options:
+      --config <PATH>      Path to the state directory (default: the galaxy's .cosmon/state/)
+      --pool <NAME>        Pool to take a slot from (sized by `[gate_slots]` in `.cosmon/config.toml`) [default: full_gate]
+      --configured         Print the configured slot count of the pool and exit 0, or exit 3 when the pool is unbounded; runs no command
+  -v, --verbose            Enable verbose output
+      --json               Output in JSON format
+      --ready-file <PATH>  Create this file once the slot is held, just before the command starts
+  -h, --help               Print help

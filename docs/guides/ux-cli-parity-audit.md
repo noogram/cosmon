@@ -2,6 +2,19 @@
 
 # CLI and UI parity audit
 
+## Gate slots
+
+`cs gates slot [--pool <name>] [--configured] [--ready-file <path>] -- <command…>`
+runs a command while holding one slot of a pool sized by `[gate_slots]` in
+`.cosmon/config.toml` (`full_gate = N`, named pools under `[gate_slots.pools]`).
+It waits for a free slot, runs the command with the caller's stdio, releases the
+slot on exit and returns the command's exit code. A pool with no configured
+size is unbounded. It is a local, operator-side verb: a slot is a kernel `flock`
+on a file under the main checkout's state directory, so there is no remote route
+and no UI control (cs-thin allowlist: `operator_only`). Patrol reads the same
+files and leaves a worker whose gate run is queued behind a live holder alone;
+no patrol flag changes.
+
 ## Briefing edits on step changes
 
 The shared evolve operation preserves a briefing that differs from its last
