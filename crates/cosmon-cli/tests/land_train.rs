@@ -599,6 +599,20 @@ fn a_member_whose_branch_moved_after_the_pin_is_refused() {
     );
 }
 
+#[test]
+fn a_non_commit_train_revision_names_the_argument_and_leaves_members_open() {
+    let t = happy_train(Fixture::new("", false));
+    let blob = rev(&t.fx.repo, "main:base.txt");
+    let refused = t.fx.land(&t.base, &blob, &t.members());
+    t.assert_refused_naming(&refused, "--train-tip", &t.base);
+    let text = combined(&refused);
+    assert!(text.contains(&blob), "{text}");
+    assert!(
+        text.contains("does not resolve to a single commit"),
+        "{text}"
+    );
+}
+
 /// The base moved after the train was gated: the compare-and-swap base no
 /// longer matches, and the base is left where the other writer put it.
 #[test]
@@ -703,6 +717,76 @@ fn a_base_checked_out_in_another_worktree_prevents_landing() {
     assert!(!checkout.join("a.txt").exists());
     assert_eq!(git_ok(&checkout, &["status", "--porcelain"]), "");
     assert_eq!(rev(repo, "HEAD"), t.tip);
+}
+
+#[test]
+fn landing_from_another_branch_preserves_that_checkout() {
+    let t = happy_train(Fixture::new("", false));
+    let repo = &t.fx.repo;
+    git_ok(repo, &["checkout", "-qb", "operator-draft"]);
+    fs::write(repo.join("a.txt"), "operator draft\n").unwrap();
+
+    let out = t.land();
+    let text = combined(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("HEAD is on `operator-draft`"), "{text}");
+    assert_eq!(rev(repo, "main"), t.tip);
+    assert_eq!(
+        git_ok(repo, &["symbolic-ref", "--short", "HEAD"]),
+        "operator-draft"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("a.txt")).unwrap(),
+        "operator draft\n"
+    );
+    assert!(!repo.join("b.txt").exists());
+    assert_eq!(git_ok(repo, &["status", "--porcelain"]), "?? a.txt");
+    assert!(!t.fx.is_closed(&t.a) && !t.fx.is_closed(&t.b));
+
+    fs::rename(repo.join("a.txt"), repo.join(".cosmon/draft.txt")).unwrap();
+    git_ok(repo, &["checkout", "-q", "main"]);
+    let resumed = t.land();
+    assert!(resumed.status.success(), "{}", combined(&resumed));
+    assert_eq!(rev(repo, "main"), t.tip);
+    assert!(t.fx.is_closed(&t.a) && t.fx.is_closed(&t.b));
+}
+
+#[test]
+fn json_landing_reports_the_members_and_resumption_without_text_progress() {
+    let t = happy_train(Fixture::new("", false));
+    for (landing, closed, already_closed) in [
+        ("landed", vec![&t.a, &t.b], vec![]),
+        ("already_landed", vec![], vec![&t.a, &t.b]),
+    ] {
+        let out =
+            t.fx.land_command(&t.base, &t.tip, &t.members())
+                .arg("--json")
+                .output()
+                .unwrap();
+        assert!(out.status.success(), "{}", combined(&out));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let reports: Vec<serde_json::Value> = stdout
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap_or_else(|err| panic!("{err}: {line}")))
+            .collect();
+        let (summary, child_reports) = reports.split_last().unwrap();
+        assert_eq!(child_reports.len(), closed.len(), "{stdout}");
+        for (child, id) in child_reports.iter().zip(&closed) {
+            assert_eq!(child["command"], "done", "{stdout}");
+            assert_eq!(child["molecule"], id.as_str(), "{stdout}");
+        }
+        assert_eq!(summary["command"], "land-train", "{stdout}");
+        assert_eq!(summary["landing"], landing, "{stdout}");
+        assert_eq!(summary["base_branch"], "main", "{stdout}");
+        assert_eq!(summary["train_base"], t.base, "{stdout}");
+        assert_eq!(summary["train_tip"], t.tip, "{stdout}");
+        assert_eq!(summary["closed"], serde_json::json!(closed), "{stdout}");
+        assert_eq!(
+            summary["already_closed"],
+            serde_json::json!(already_closed),
+            "{stdout}"
+        );
+    }
 }
 
 /// `[harvest_authority] required = true`: this increment refuses the train.
