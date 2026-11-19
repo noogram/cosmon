@@ -396,7 +396,9 @@ const IMPLICIT_DEFAULTS: &[(&str, &[&str])] = &[
 /// the fail-closed direction for a security gate is to hash *more*.
 fn clone_invisible(key_root: &Path, rels: &[String]) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
-    if rels.is_empty() {
+    // An extracted tree has no index of its own. Git would otherwise discover
+    // an enclosing checkout and apply that checkout's ignore rules to it.
+    if rels.is_empty() || !key_root.join(".git").exists() {
         return out;
     }
     let mut cmd = Command::new("git");
@@ -632,12 +634,16 @@ fn grant_file(store: &Path, key_root: &Path) -> PathBuf {
 #[must_use]
 pub fn evaluate(start: &Path, store: &Path) -> TrustStatus {
     let key_root = key_root_or_fallback(start);
-    let grant = grant_file(store, &key_root);
+    evaluate_grant(&key_root, &key_root, store)
+}
+
+fn evaluate_grant(key_root: &Path, content_root: &Path, store: &Path) -> TrustStatus {
+    let grant = grant_file(store, key_root);
     let recorded = match std::fs::read_to_string(&grant) {
         Ok(s) => s.trim().to_owned(),
         Err(_) => return TrustStatus::Untrusted,
     };
-    if recorded == surface_hash(&key_root) {
+    if recorded == surface_hash(content_root) {
         TrustStatus::Trusted
     } else {
         TrustStatus::Stale
@@ -685,16 +691,7 @@ pub fn revoke(start: &Path, store: &Path) -> std::io::Result<(PathBuf, bool)> {
 #[must_use]
 pub fn evaluate_content(start: &Path, content_root: &Path, store: &Path) -> TrustStatus {
     let key_root = key_root_or_fallback(start);
-    let grant = grant_file(store, &key_root);
-    let recorded = match std::fs::read_to_string(&grant) {
-        Ok(s) => s.trim().to_owned(),
-        Err(_) => return TrustStatus::Untrusted,
-    };
-    if recorded == surface_hash(content_root) {
-        TrustStatus::Trusted
-    } else {
-        TrustStatus::Stale
-    }
+    evaluate_grant(&key_root, content_root, store)
 }
 
 /// [`evaluate_content`] against the default [`store_dir`], honoring the
@@ -815,6 +812,47 @@ mod tests {
                 "scripts/deploy.sh".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn detached_content_uses_its_own_paths_and_the_checkout_grant() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        make_repo(repo.path(), "sh scripts/deploy.sh");
+        std::fs::write(repo.path().join(".gitignore"), "archive/\n").unwrap();
+        std::fs::create_dir(repo.path().join("scripts")).unwrap();
+        std::fs::write(repo.path().join("scripts/deploy.sh"), "exit 0\n").unwrap();
+        git_commit_all(repo.path());
+        let archive = repo.path().join("archive");
+        std::fs::create_dir_all(archive.join(".cosmon")).unwrap();
+        std::fs::copy(
+            repo.path().join(".cosmon/config.toml"),
+            archive.join(".cosmon/config.toml"),
+        )
+        .unwrap();
+        std::fs::create_dir(archive.join("scripts")).unwrap();
+        let script = archive.join("scripts/deploy.sh");
+        std::fs::write(&script, "exit 0\n").unwrap();
+
+        assert_eq!(
+            surface_paths_in(&archive),
+            [".cosmon/config.toml", "scripts/deploy.sh"]
+        );
+        assert_eq!(
+            evaluate_content(repo.path(), &archive, store.path()),
+            TrustStatus::Untrusted
+        );
+        grant(repo.path(), store.path()).unwrap();
+        assert_eq!(
+            evaluate_content(repo.path(), &archive, store.path()),
+            TrustStatus::Trusted
+        );
+        std::fs::write(script, "exit 1\n").unwrap();
+        assert_eq!(
+            evaluate_content(repo.path(), &archive, store.path()),
+            TrustStatus::Stale
+        );
+        assert_eq!(evaluate(repo.path(), store.path()), TrustStatus::Trusted);
     }
 
     #[test]

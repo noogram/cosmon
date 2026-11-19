@@ -236,6 +236,17 @@ struct Fixture {
 /// Branch staged and trusted, then landed by hand, then trust made stale.
 /// `branch_changes` is what the worker commits; `landing` how it reaches main.
 fn landed_fixture(landing: Landing, branch_changes: &[(&str, &str)], stale: bool) -> Fixture {
+    landed_fixture_with(landing, branch_changes, stale, |_, _| {})
+}
+
+/// [`landed_fixture`] with a step between staging the branch and landing it,
+/// given the repository and the branch name.
+fn landed_fixture_with(
+    landing: Landing,
+    branch_changes: &[(&str, &str)],
+    stale: bool,
+    before_landing: impl FnOnce(&Path, &str),
+) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let store = tempfile::tempdir().unwrap();
     let repo = tmp.path().to_path_buf();
@@ -252,6 +263,7 @@ fn landed_fixture(landing: Landing, branch_changes: &[(&str, &str)], stale: bool
     let mol_id = nucleate_terminal(&repo, store.path());
     let branch = stage_branch(&repo, &mol_id, branch_changes);
     grant_trust(&repo, store.path());
+    before_landing(&repo, &branch);
     land_by_hand(&repo, &branch, landing);
     if stale {
         make_trust_stale(&repo, store.path(), &script);
@@ -398,6 +410,28 @@ fn closure_does_not_warn_when_the_landing_changed_no_surface_path() {
             "a surface edit outside the landed range must not be reported:\n{text}"
         );
     }
+}
+
+/// The warning uses the current surface, which omits a deleted delegated script.
+#[test]
+fn closure_does_not_name_a_delegated_script_deleted_by_the_landing() {
+    let fx = landed_fixture_with(
+        Landing::NoFf,
+        &[("src/work.py", "print('w')\n")],
+        false,
+        |repo, branch| {
+            git_ok(repo, &["checkout", "-q", branch]);
+            git_ok(repo, &["rm", "scripts/build.sh"]);
+            git_ok(repo, &["commit", "-qm", "worker: remove delegated script"]);
+            git_ok(repo, &["checkout", "-q", "main"]);
+        },
+    );
+    assert!(!fx.repo.join("scripts/build.sh").exists());
+    let out = done(&fx.repo, &fx.store, &fx.mol_id);
+    assert_closed_without_gate(&fx, &out);
+    let text = combined(&out);
+    assert!(!text.contains("scripts/build.sh"), "{text}");
+    assert!(!text.contains("trusted shell surface"), "{text}");
 }
 
 /// Unchanged behaviour: a real merge performed by `cs done` still runs the gate
@@ -568,5 +602,85 @@ fn pre_done_under_stale_trust_is_refused_with_its_own_wording() {
     assert!(
         molecule_state(repo, &mol_id)["merged_at"].is_null(),
         "a refused closure stamps nothing:\n{text}"
+    );
+}
+
+/// The branch's reflog is the first choice for the fork point. Without it a
+/// `--no-ff` landing still has a fork point: the merge base of the branch tip
+/// with the landing commit's first parent. The warning says which evidence it
+/// used.
+#[test]
+fn closure_falls_back_to_the_merge_base_when_the_reflog_is_gone() {
+    let fx = landed_fixture_with(
+        Landing::NoFf,
+        &[("scripts/build.sh", "touch ignored\nexit 1\n")],
+        false,
+        |repo, branch| {
+            let log = repo.join(".git/logs/refs/heads").join(branch);
+            assert!(log.exists(), "fixture assumes git wrote a branch reflog");
+            fs::remove_file(log).unwrap();
+        },
+    );
+    let out = done(&fx.repo, &fx.store, &fx.mol_id);
+    let text = combined(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(text.contains("scripts/build.sh"), "{text}");
+    assert!(
+        text.contains("merge base with the pre-landing base"),
+        "the warning must name the evidence the fork point came from:\n{text}"
+    );
+    assert!(!text.contains("branch reflog"), "{text}");
+}
+
+/// A fast-forwarded branch has no pre-landing base to take a merge base with:
+/// its landing commit is its own tip. Without a reflog the fork point is
+/// therefore unknown, and the closure says so. It must not fall back to the
+/// tip's parent, which would cover only the branch's last commit and report
+/// "nothing changed" for a surface edit made by an earlier commit.
+#[test]
+fn closure_says_the_range_is_unknown_for_a_fast_forward_without_a_reflog() {
+    let fx = landed_fixture_with(
+        Landing::FastForward,
+        &[("scripts/build.sh", "touch ignored\nexit 1\n")],
+        false,
+        |repo, branch| {
+            git_ok(repo, &["checkout", "-q", branch]);
+            write_file(repo, "src/work.py", "print('second commit')\n");
+            git_ok(repo, &["add", "-A"]);
+            git_ok(repo, &["commit", "-qm", "worker: second commit"]);
+            git_ok(repo, &["checkout", "-q", "main"]);
+            fs::remove_file(repo.join(".git/logs/refs/heads").join(branch)).unwrap();
+        },
+    );
+    let out = done(&fx.repo, &fx.store, &fx.mol_id);
+    let text = combined(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(
+        text.contains("could not establish the branch's fork point or landing commit"),
+        "an unknown range must be reported as unknown, not as unchanged:\n{text}"
+    );
+}
+
+/// The range is fork point to landing commit, so a surface edit made by
+/// another commit on the base inside that range is named too, although the
+/// branch itself did not touch it.
+#[test]
+fn closure_names_a_surface_edit_made_by_another_commit_inside_the_range() {
+    let fx = landed_fixture_with(
+        Landing::NoFf,
+        &[("src/work.py", "print('w')\n")],
+        false,
+        |repo, _branch| {
+            write_file(repo, "scripts/build.sh", "touch ignored\nexit 1\n");
+            git_ok(repo, &["add", "-A"]);
+            git_ok(repo, &["commit", "-qm", "edit the gate script on main"]);
+        },
+    );
+    let out = done(&fx.repo, &fx.store, &fx.mol_id);
+    let text = combined(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(
+        text.contains("scripts/build.sh") && text.contains("not reviewed"),
+        "{text}"
     );
 }

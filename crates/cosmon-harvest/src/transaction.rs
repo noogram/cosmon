@@ -1110,8 +1110,7 @@ fn branch_never_had_commits(repo_root: &Path, branch: &str, base: &str) -> bool 
 /// fast-forward, so it cannot tell an empty branch from landed work.
 /// Cosmon does not store the base object id at tackle time (`MoleculeData`
 /// records only the base branch *name*), so the fork point is read from the
-/// best durable evidence git keeps: the branch's reflog, whose oldest entry is
-/// the creation. The tip equals that entry only if no commit was ever added.
+/// best durable evidence git keeps: the branch's creation entry in its reflog.
 ///
 /// Unknown stays unknown: an absent, expired or empty reflog, or any git
 /// failure, answers `false`, so the caller does not claim `empty_branch`
@@ -1119,30 +1118,13 @@ fn branch_never_had_commits(repo_root: &Path, branch: &str, base: &str) -> bool 
 /// emptiness. A branch whose reflog was pruned is therefore never reported
 /// empty, even if it is.
 fn branch_never_advanced(repo_root: &Path, branch: &str) -> bool {
-    let git_out = |args: &[&str]| {
-        Command::new("git")
-            .arg("-C")
-            .arg(repo_root)
-            .args(args)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-    };
-    let Some(tip) = git_out(&["rev-parse", "--verify", &format!("{branch}^{{commit}}")]) else {
+    let Some(tip) = git_stdout(
+        repo_root,
+        &["rev-parse", "--verify", &format!("{branch}^{{commit}}")],
+    ) else {
         return false;
     };
-    let Some(log) = git_out(&[
-        "reflog",
-        "show",
-        "--format=%H",
-        &format!("refs/heads/{branch}"),
-    ]) else {
-        return false;
-    };
-    log.lines()
-        .last()
-        .is_some_and(|creation| creation == tip.trim())
+    branch_creation_oid(repo_root, branch).is_some_and(|creation| creation == tip.trim())
 }
 
 /// What `cs done` could establish about a branch that reached the base outside
@@ -1171,6 +1153,24 @@ fn git_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
+/// An expired reflog can retain commits after losing the creation entry.
+/// An unrecognized oldest entry does not establish a fork point.
+fn branch_creation_oid(repo_root: &Path, branch: &str) -> Option<String> {
+    let log = git_stdout(
+        repo_root,
+        &[
+            "reflog",
+            "show",
+            "--format=%H%x09%gs",
+            &format!("refs/heads/{branch}"),
+        ],
+    )?;
+    let (oid, action) = log.lines().last()?.split_once('\t')?;
+    action
+        .starts_with("branch: Created from ")
+        .then(|| oid.to_owned())
+}
+
 /// Establish how `branch` reached `base` without `cs done`.
 ///
 /// Why: when the closure skips the gate it also skips the only review of what
@@ -1180,10 +1180,11 @@ fn git_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
 /// - **landing commit** — the oldest commit on `base`'s first-parent chain that
 ///   descends from the branch tip (`rev-list --first-parent --ancestry-path`);
 ///   the tip itself when the tip is on that chain (fast-forward).
-/// - **fork point** — the oldest reflog entry of the branch (its creation),
+/// - **fork point** — the creation entry at the start of the branch reflog,
 ///   when it is an ancestor of the tip; otherwise the merge base of the tip with
-///   the landing commit's first parent (the pre-landing base). A fast-forward
-///   with no usable reflog has neither, and stays unknown.
+///   the landing commit's first parent (the pre-landing base). That fallback
+///   exists only for a landing by merge commit: a fast-forward with no usable
+///   reflog has no pre-landing base and stays unknown.
 ///
 /// Every git failure degrades to `None` for the affected field.
 fn outside_landing(repo_root: &Path, branch: &str, base: &str) -> OutsideLanding {
@@ -1227,20 +1228,19 @@ fn outside_landing(repo_root: &Path, branch: &str, base: &str) -> OutsideLanding
             .status()
             .is_ok_and(|s| s.success())
     };
-    let reflog_fork = git_stdout(
-        repo_root,
-        &[
-            "reflog",
-            "show",
-            "--format=%H",
-            &format!("refs/heads/{branch}"),
-        ],
-    )
-    .and_then(|s| s.lines().last().map(str::to_owned))
-    .filter(|c| is_ancestor(c, &tip));
+    let reflog_fork = branch_creation_oid(repo_root, branch).filter(|c| is_ancestor(c, &tip));
+    // The merge-base fallback needs a pre-landing base: the landing commit's
+    // first parent. A fast-forward lands the branch tip itself, whose first
+    // parent is the branch's own previous commit, so a merge base with it would
+    // cover the last commit only and understate the range. No reflog there
+    // means no fork point.
+    let landed_by_merge = landing != tip;
     let fork = reflog_fork
         .map(|c| (c, "branch reflog (creation entry)"))
         .or_else(|| {
+            if !landed_by_merge {
+                return None;
+            }
             git_stdout(
                 repo_root,
                 &["rev-parse", "--verify", &format!("{landing}^1")],
@@ -6586,7 +6586,7 @@ fn remove_worktree_with(
 /// Remove what is left of a worktree directory whose removal was authorised.
 ///
 /// Refuses anything that is not exactly `<repo_root>/.worktrees/<name>` (one
-/// level, no `..`), and refuses a path that is itself a symlink. Below that
+/// level, no `..`), and refuses symlinks at `.worktrees` or `<name>`. Below that
 /// root `std::fs::remove_dir_all` unlinks symbolic links instead of following
 /// them, so a link pointing outside the tree is removed and its destination
 /// is left alone.
@@ -6600,6 +6600,9 @@ fn finish_orphaned_worktree_removal(repo_root: &Path, worktree_path: &Path) -> s
             .any(|c| matches!(c, std::path::Component::ParentDir))
     {
         return Err(invalid("not a direct child of .worktrees/"));
+    }
+    if !std::fs::symlink_metadata(&parent)?.is_dir() {
+        return Err(invalid(".worktrees is not a real directory"));
     }
     if std::fs::symlink_metadata(worktree_path)?
         .file_type()
@@ -7417,7 +7420,9 @@ fn refuse_post_merge_and_rollback(
             } else {
                 String::new()
             };
-            format!("{cause}; git reset --hard restored main to its pre-merge revision{restored}")
+            format!(
+                "{cause}; restored the base and its checkout to the pre-merge revision{restored}"
+            )
         }
         Err(reset_err) => {
             let revoked = if restore_pre_merge_trust {
@@ -8264,8 +8269,8 @@ fn require_security_review_verdict(state_dir: &Path, mol: &MoleculeData) -> anyh
 /// Issue #214 / ADR-110 I1: a rollback must never discard a commit it did not
 /// write. The ref move is an atomic compare-and-swap
 /// (`git update-ref HEAD <new> <old>`); when the base has moved it fails and
-/// nothing is touched. Only after the swap succeeds is the working tree reset
-/// to match (the base is the checked-out branch of `repo_root`).
+/// nothing is touched. After the swap the index and working tree are restored
+/// without another ref write (the base is checked out in `repo_root`).
 fn rollback_base_if_unmoved(
     repo_root: &Path,
     pre_merge_head: &str,
@@ -8287,18 +8292,21 @@ fn rollback_base_if_unmoved(
             String::from_utf8_lossy(&swap.stderr).trim()
         );
     }
-    reset_hard(repo_root, pre_merge_head)
-}
-
-/// Restore main to the revision captured before a gated merge.
-fn reset_hard(repo_root: &Path, revision: &str) -> anyhow::Result<()> {
+    let current = git_head(repo_root)?;
+    anyhow::ensure!(
+        current == pre_merge_head,
+        "{ROLLBACK_BASE_MOVED}: it moved again after the rollback ref swap, from \
+         {pre_merge_head} to {current}. The checkout was left untouched."
+    );
+    // `git reset --hard` would write HEAD a second time without the CAS.
     let output = Command::new("git")
         .args([
             "-C",
             &repo_root.to_string_lossy(),
-            "reset",
-            "--hard",
-            revision,
+            "read-tree",
+            "--reset",
+            "-u",
+            pre_merge_head,
         ])
         .output()?;
     if output.status.success() {
@@ -10052,6 +10060,63 @@ mod tests {
 
         finish_orphaned_worktree_removal(&repo, &wts.join("mol")).unwrap();
         assert!(!wts.join("mol").exists());
+    }
+
+    #[test]
+    fn finishing_a_removal_refuses_a_symlinked_worktrees_directory() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let outside = tmp.path().join("outside/mol");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep"), "outside").unwrap();
+        std::os::unix::fs::symlink(outside.parent().unwrap(), repo.join(".worktrees")).unwrap();
+
+        let result = finish_orphaned_worktree_removal(&repo, &repo.join(".worktrees/mol"));
+        assert!(result.is_err(), "the symlinked parent must be refused");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("keep")).unwrap(),
+            "outside"
+        );
+    }
+
+    /// Only the "failed to delete" race is retried. A locked worktree is a
+    /// decision git took on purpose: the removal is reported as git worded it,
+    /// the directory stays, and no retry (which would delete it) runs.
+    #[test]
+    fn a_locked_worktree_is_refused_not_retried_and_stays_on_disk() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().canonicalize().unwrap();
+        init_repo(&repo);
+        let wt = repo.join(".worktrees/locked");
+        assert!(git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat/locked",
+                wt.to_str().unwrap()
+            ]
+        )
+        .status
+        .success());
+        assert!(git(&repo, &["worktree", "lock", wt.to_str().unwrap()])
+            .status
+            .success());
+
+        // A retry would sleep for a minute and then delete the directory.
+        let started = std::time::Instant::now();
+        let err = remove_worktree_with(&repo, &wt, 3, std::time::Duration::from_secs(60))
+            .expect_err("git refuses to remove a locked worktree");
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+        assert!(
+            err.to_string().contains("locked"),
+            "git's own refusal must be reported: {err}"
+        );
+        assert!(!err.to_string().contains("retries"), "{err}");
+        assert!(wt.join(".git").exists(), "a locked worktree must survive");
     }
 
     fn make_store() -> (TempDir, FileStore) {

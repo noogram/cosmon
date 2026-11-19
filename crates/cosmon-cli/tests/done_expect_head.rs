@@ -286,3 +286,27 @@ fn an_unresolvable_pin_is_refused() {
     assert_eq!(main_before, rev(repo, "main"));
     assert!(state(repo, &mol_id)["merged_at"].is_null());
 }
+
+#[test]
+fn a_resolvable_pin_for_a_missing_branch_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo(repo);
+    let mol_id = completed_molecule(repo);
+    let branch = format!("feat/{mol_id}");
+    let pin = commit_on_branch(repo, &mol_id, "gated.txt");
+    let main_before = rev(repo, "main");
+    git_ok(repo, &["branch", "-D", &branch]);
+    assert_eq!(rev(repo, &pin), pin, "the pin still resolves to a commit");
+
+    let refused = done(repo, &mol_id, &["--expect-head", &pin]);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&branch) && stderr.contains(&pin),
+        "{stderr}"
+    );
+    assert!(stderr.contains("does not exist"), "{stderr}");
+    assert_eq!(rev(repo, "main"), main_before);
+    assert!(state(repo, &mol_id)["merged_at"].is_null());
+}
