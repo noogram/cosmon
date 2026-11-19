@@ -119,6 +119,19 @@ fn live_holders_counts_held_slots_only() {
 }
 
 #[test]
+fn the_store_counts_locks_for_its_pool_and_ignores_other_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileStore::new(dir.path());
+    let slots = dir.path().join("gate-slots/p");
+    std::fs::create_dir_all(&slots).unwrap();
+    let other = std::fs::File::create(slots.join("unrelated.txt")).unwrap();
+    fs2::FileExt::try_lock_exclusive(&other).unwrap();
+    assert_eq!(store.live_gate_slot_holders("p").unwrap(), 0);
+    let _slot = store.try_acquire_gate_slot("p", 1).unwrap().unwrap();
+    assert_eq!(store.live_gate_slot_holders("p").unwrap(), 1);
+}
+
+#[test]
 fn a_pool_directory_that_is_a_file_is_reported_as_a_lock_error() {
     let dir = tempfile::tempdir().unwrap();
     let slots = dir.path().join("gate-slots");
