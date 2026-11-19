@@ -28,7 +28,7 @@ HEAD="$2"
 # ERE, so it runs with BSD grep too. The prefix stands for a word boundary:
 # `debug_assert!` must not match as `assert!`, and an identifier ending in
 # `assert!` is not an assertion macro.
-PATTERN='^-(.*[^A-Za-z0-9_])?(assert!|assert_eq!|assert_ne!|debug_assert!|debug_assert_eq!|debug_assert_ne!)|^-.*#\[should_panic'
+PATTERN='^-(.*[^A-Za-z0-9_])?(assert|assert_eq|assert_ne|debug_assert|debug_assert_eq|debug_assert_ne)[[:blank:]]*!|^-.*#\[should_panic'
 
 DIFF=$(git diff "$BASE"..."$HEAD" -- '*.rs') || {
   echo "check-removed-assertions: git diff $BASE...$HEAD failed" >&2
