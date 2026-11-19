@@ -41,6 +41,8 @@ this stage.
 
 - `task-work`, `producer-work`, and `merge-conflict` use the project's own verification gates; `cs nucleate` includes declared `[gates]` commands in the briefing. Existing formula copies need updating: `cs init --upgrade` only backfills missing files and preserves existing ones.
 
+- `cs purge --worktrees` reclaims external build directories a project declares with `[[worktree_reclaim.external]]` (`root`, `base`, optional `suffix`): a worktree's `target` link to `<base>/<molecule-id><suffix>`, and orphans left under a base after `cs done`, for molecules of this store that are Completed or Collapsed and whose build locks are acquired; each item is reported with its base and size, an unmounted base is reported and skipped, an invalid declaration stops the pass, and nothing changes without a declaration (ADR-191, #218).
+
 - `cs complete`: when `surface_visual` refuses and the galaxy lacks `verify-surface`, show `cs init --upgrade` before the nucleation command.
 
 - The resident runtime stamps `merged_at` only when `cs done` exited 0 and git shows the molecule branch reachable from its base; a failed or unmerged `cs done` is logged with the molecule and exit code, leaves `merged_at` unset and keeps dependents blocked (#214).
