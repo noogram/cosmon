@@ -88,6 +88,12 @@ fn the_verb_returns_the_commands_exit_code() {
             .unwrap();
         assert_eq!(status.code(), Some(code));
     }
+
+    let status = cs(&state)
+        .args(["gates", "slot", "--", "sh", "-c", "kill -TERM $$"])
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(143), "128 + SIGTERM");
 }
 
 /// `kill -9` of the holder while another run waits: the waiter starts. The

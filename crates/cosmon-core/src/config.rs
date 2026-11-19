@@ -2961,6 +2961,14 @@ mod tests {
     }
 
     #[test]
+    fn gate_slots_zero_full_gate_does_not_use_the_reserved_name_from_named_pools() {
+        let config: ProjectConfig =
+            toml::from_str("[gate_slots]\nfull_gate = 0\n[gate_slots.pools]\nfull_gate = 2\n")
+                .unwrap();
+        assert_eq!(config.gate_slots.count_for(FULL_GATE_POOL), None);
+    }
+
+    #[test]
     fn test_gates_default_is_empty() {
         let config = ProjectConfig::default();
         assert!(config.gates.is_empty());
