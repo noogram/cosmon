@@ -358,6 +358,32 @@ mod tests {
     }
 
     #[test]
+    fn client_path_classification_covers_each_literal_path_form() {
+        for locator in [
+            " /notes.md ",
+            r"\notes.md",
+            "~/notes.md",
+            "FiLe:///notes.md",
+            r"C:\notes.md",
+            "a/../notes.md",
+            r"a\..\notes.md",
+        ] {
+            assert!(EvidenceRef::new(locator).is_client_path(), "{locator:?}");
+        }
+        for locator in [
+            "artifact",
+            "artifact/notes.md",
+            "archive..old",
+            "notes:v1",
+            "1:note",
+            "a",
+            "",
+        ] {
+            assert!(!EvidenceRef::new(locator).is_client_path(), "{locator:?}");
+        }
+    }
+
+    #[test]
     fn a_checkpoint_round_trips_through_json() {
         let mut cp = PilotCheckpoint::new("cp-1", "task-1", "sess-a", 3, at(1_000)).unwrap();
         cp.scope = Scope::new(["the port".to_owned()], ["the cockpit".to_owned()]);

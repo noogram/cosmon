@@ -11,14 +11,13 @@
 //!
 //! Two properties are enforced here rather than documented:
 //!
-//! - **Append-only.** Publishing over an existing id is
-//!   [`CheckpointError::AlreadyPublished`], not a silent overwrite. A published
-//!   checkpoint is what a relief pilot resumes from and what a finding cites;
-//!   rewriting one changes history under a reader that already quoted it.
-//! - **Atomic.** A record is written to a temporary file in the same directory
-//!   and renamed into place, so a reader polling the directory never sees half
-//!   a checkpoint.
+//! - **Append-only.** A retry with the same content leaves the record intact.
+//!   Different content under the same id returns [`CheckpointError::AlreadyPublished`].
+//! - **Atomic.** Each publisher writes to its own temporary file in the same
+//!   directory and installs the complete record only if that id is still free.
 
+use std::fs::File;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::checkpoint::{PilotCheckpoint, MAX_CHECKPOINT_BYTES, MAX_EVIDENCE_REFS};
@@ -125,23 +124,28 @@ impl CheckpointStore {
         })?;
         let path = self.path_of(&checkpoint.mission_id, &checkpoint.id);
 
-        // Same directory as the destination, so the link cannot cross a
-        // filesystem boundary. A hard link fails if the target exists, which
-        // makes the publication atomic *and* no-clobber: two concurrent
-        // publishers of one id cannot both win.
-        let tmp = dir.join(format!(".{}.json.tmp", checkpoint.id.as_str()));
-        std::fs::write(&tmp, &body).map_err(|source| CheckpointError::Io {
-            path: tmp.clone(),
+        // Each publisher writes a separate inode before attempting to install it.
+        let mut builder = tempfile::Builder::new();
+        builder.prefix(".checkpoint-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            // Preserve the permissions of a normal record creation, subject to umask.
+            builder.permissions(std::fs::Permissions::from_mode(0o666));
+        }
+        let mut tmp = builder
+            .tempfile_in(&dir)
+            .map_err(|source| CheckpointError::Io { path: dir, source })?;
+        tmp.write_all(&body).map_err(|source| CheckpointError::Io {
+            path: tmp.path().to_path_buf(),
             source,
         })?;
-        let linked = std::fs::hard_link(&tmp, &path);
-        std::fs::remove_file(&tmp).ok();
-        match linked {
-            Ok(()) => Ok(Publication {
+        match tmp.persist_noclobber(&path) {
+            Ok(_) => Ok(Publication {
                 path,
                 written: true,
             }),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let existing = read_record(&path)?;
                 if existing.same_content_as(checkpoint) {
                     Ok(Publication {
@@ -155,7 +159,10 @@ impl CheckpointStore {
                     })
                 }
             }
-            Err(source) => Err(CheckpointError::Io { path, source }),
+            Err(e) => Err(CheckpointError::Io {
+                path,
+                source: e.error,
+            }),
         }
     }
 
@@ -274,25 +281,29 @@ impl CheckpointStore {
 }
 
 fn read_record(path: &Path) -> Result<PilotCheckpoint, CheckpointError> {
-    // Measured before the read, so an oversized or swapped-in record cannot make
-    // the store allocate past the contract's limit.
-    let len = std::fs::metadata(path)
-        .map_err(|source| CheckpointError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?
-        .len();
-    if len > MAX_CHECKPOINT_BYTES {
-        return Err(CheckpointError::TooLarge {
-            subject: path.display().to_string(),
-            bytes: len,
-            limit: MAX_CHECKPOINT_BYTES,
-        });
-    }
-    let bytes = std::fs::read(path).map_err(|source| CheckpointError::Io {
+    let io_error = |source| CheckpointError::Io {
         path: path.to_path_buf(),
         source,
-    })?;
+    };
+    let too_large = |bytes| CheckpointError::TooLarge {
+        subject: path.display().to_string(),
+        bytes,
+        limit: MAX_CHECKPOINT_BYTES,
+    };
+    let file = File::open(path).map_err(io_error)?;
+    let len = file.metadata().map_err(io_error)?.len();
+    if len > MAX_CHECKPOINT_BYTES {
+        return Err(too_large(len));
+    }
+    // A record can grow after the metadata check. Read one extra byte to
+    // distinguish an exact-limit record from a truncated oversized record.
+    let mut bytes = Vec::new();
+    file.take(MAX_CHECKPOINT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
+        return Err(too_large(bytes.len() as u64));
+    }
     serde_json::from_slice(&bytes).map_err(|source| CheckpointError::Malformed {
         path: path.to_path_buf(),
         source,
@@ -364,6 +375,57 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_publishers_keep_the_winners_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(tmp.path());
+        for round in 0..8 {
+            let id = format!("cp-concurrent-{round}");
+            let candidates: Vec<_> = ('a'..='h')
+                .map(|label| {
+                    let mut checkpoint = cp(&id, "sess-a", 100);
+                    checkpoint
+                        .open_risks
+                        .push(label.to_string().repeat(200_000));
+                    checkpoint
+                })
+                .collect();
+            let barrier = std::sync::Barrier::new(candidates.len());
+            let results = std::thread::scope(|scope| {
+                let publishers: Vec<_> = candidates
+                    .iter()
+                    .map(|checkpoint| {
+                        let (barrier, store) = (&barrier, &store);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            store.publish(checkpoint)
+                        })
+                    })
+                    .collect();
+                publishers
+                    .into_iter()
+                    .map(|publisher| publisher.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            let mut winners = Vec::new();
+            for (checkpoint, result) in candidates.iter().zip(results) {
+                match result {
+                    Ok(publication) if publication.written => winners.push(checkpoint),
+                    Err(CheckpointError::AlreadyPublished { .. }) => {}
+                    outcome => panic!("unexpected publication outcome: {outcome:?}"),
+                }
+            }
+            let [winner] = winners.as_slice() else {
+                panic!("expected exactly one publication, saw {}", winners.len());
+            };
+            let saved = store.load(&winner.mission_id, &winner.id).unwrap().unwrap();
+            assert!(
+                saved == **winner,
+                "winner's record changed in round {round}"
+            );
+        }
+    }
+
+    #[test]
     fn republishing_the_same_id_with_other_content_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::new(tmp.path());
@@ -390,6 +452,92 @@ mod tests {
             Err(CheckpointError::ClientPathEvidence { .. })
         ));
         assert!(!store.mission_dir(&checkpoint.mission_id).exists());
+    }
+
+    #[test]
+    fn the_reference_limit_combines_checkpoint_hypothesis_and_next_action_refs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(tmp.path());
+        let mut checkpoint = cp("cp-refs", "sess-a", 100);
+        let reference = crate::EvidenceRef::new("artifact/notes");
+        checkpoint.evidence_refs = vec![reference.clone(); 98];
+        for claims in [
+            &mut checkpoint.current_hypotheses,
+            &mut checkpoint.intended_next_actions,
+        ] {
+            claims.push(
+                crate::Claim::new("claim-1", "cursor", crate::Stance::Affirm, "byte offsets")
+                    .unwrap()
+                    .with_evidence([reference.clone()]),
+            );
+        }
+        assert!(store.publish(&checkpoint).unwrap().written);
+        checkpoint.intended_next_actions[0].evidence.push(reference);
+        assert!(matches!(
+            store.publish(&checkpoint),
+            Err(CheckpointError::TooManyEvidenceRefs {
+                count: 101,
+                limit: 100,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn publication_and_reads_apply_the_exact_byte_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(tmp.path());
+        let mut checkpoint = cp("cp-bound", "sess-a", 100);
+        checkpoint.open_risks.push(String::new());
+        let overhead = serde_json::to_vec_pretty(&checkpoint).unwrap().len();
+        checkpoint.open_risks[0] = "x".repeat(262_144 - overhead);
+
+        let publication = store.publish(&checkpoint).unwrap();
+        let bytes = std::fs::read(&publication.path).unwrap();
+        assert_eq!(bytes.len(), 262_144);
+        assert_eq!(
+            store.list(&checkpoint.mission_id).unwrap(),
+            [checkpoint.clone()]
+        );
+        assert_eq!(
+            store
+                .load(&checkpoint.mission_id, &checkpoint.id)
+                .unwrap()
+                .as_ref(),
+            Some(&checkpoint)
+        );
+
+        checkpoint.open_risks[0].push('x');
+        assert!(matches!(
+            store.publish(&checkpoint),
+            Err(CheckpointError::TooLarge {
+                bytes: 262_145,
+                limit: 262_144,
+                ..
+            })
+        ));
+        assert_eq!(std::fs::read(&publication.path).unwrap(), bytes);
+
+        // Trailing JSON whitespace is valid data but still counts toward the limit.
+        let mut enlarged = bytes;
+        enlarged.push(b' ');
+        std::fs::write(publication.path, enlarged).unwrap();
+        assert!(matches!(
+            store.load(&checkpoint.mission_id, &checkpoint.id),
+            Err(CheckpointError::TooLarge {
+                bytes: 262_145,
+                limit: 262_144,
+                ..
+            })
+        ));
+        assert!(matches!(
+            store.list(&checkpoint.mission_id),
+            Err(CheckpointError::TooLarge {
+                bytes: 262_145,
+                limit: 262_144,
+                ..
+            })
+        ));
     }
 
     #[test]
