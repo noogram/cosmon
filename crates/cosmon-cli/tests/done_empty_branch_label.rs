@@ -27,16 +27,21 @@ fn cs_isolated(repo: &Path) -> Command {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Output {
-    Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    git_command(repo)
         .args(args)
+        .output()
+        .expect("git spawn failed")
+}
+
+fn git_command(repo: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(repo)
         .env_remove("GIT_AUTHOR_NAME")
         .env_remove("GIT_AUTHOR_EMAIL")
         .env_remove("GIT_COMMITTER_NAME")
-        .env_remove("GIT_COMMITTER_EMAIL")
-        .output()
-        .expect("git spawn failed")
+        .env_remove("GIT_COMMITTER_EMAIL");
+    cmd
 }
 
 fn git_ok(repo: &Path, args: &[&str]) {
@@ -188,5 +193,57 @@ fn a_branch_whose_reflog_is_gone_is_never_reported_empty() {
     assert!(
         actions.iter().any(|a| a == "already_merged"),
         "the fallback label is already_merged: {actions:?}"
+    );
+}
+
+#[test]
+fn a_reflog_without_its_creation_entry_does_not_prove_emptiness_or_the_landing_range() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo(repo);
+    let mol_id = completed_molecule(repo);
+    let branch = format!("feat/{mol_id}");
+    let dated_git_ok = |date: &str, args: &[&str]| {
+        let out = git_command(repo)
+            .env("GIT_COMMITTER_DATE", date)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {:?}", out.stderr);
+    };
+    dated_git_ok("2000-01-01T00:00:00Z", &["checkout", "-qb", &branch]);
+    fs::write(repo.join("work.txt"), "landed\n").unwrap();
+    git_ok(repo, &["add", "work.txt"]);
+    dated_git_ok("2020-01-01T00:00:00Z", &["commit", "-qm", "landed work"]);
+    git_ok(repo, &["checkout", "-q", "main"]);
+    git_ok(repo, &["merge", "-q", "--ff-only", &branch]);
+    git_ok(
+        repo,
+        &["reflog", "expire", "--expire=2010-01-01T00:00:00Z", &branch],
+    );
+    let log = git(repo, &["reflog", "show", "--format=%gs", &branch]);
+    assert!(log.status.success(), "{:?}", log.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&log.stdout),
+        "commit: landed work\n"
+    );
+
+    let out = cs_isolated(repo)
+        .args(["--json", "done", &mol_id, "--no-auto-propel"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let actions = v["actions"].as_array().unwrap();
+    assert!(actions.iter().any(|a| a == "already_merged"), "{actions:?}");
+    assert!(!actions.iter().any(|a| a == "empty_branch"), "{actions:?}");
+    let warnings = v["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .filter_map(|w| w.as_str())
+            .any(|w| w.contains("could not establish the branch's fork point")),
+        "{warnings:?}"
     );
 }

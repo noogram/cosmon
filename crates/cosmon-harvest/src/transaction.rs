@@ -1110,8 +1110,7 @@ fn branch_never_had_commits(repo_root: &Path, branch: &str, base: &str) -> bool 
 /// fast-forward, so it cannot tell an empty branch from landed work.
 /// Cosmon does not store the base object id at tackle time (`MoleculeData`
 /// records only the base branch *name*), so the fork point is read from the
-/// best durable evidence git keeps: the branch's reflog, whose oldest entry is
-/// the creation. The tip equals that entry only if no commit was ever added.
+/// best durable evidence git keeps: the branch's creation entry in its reflog.
 ///
 /// Unknown stays unknown: an absent, expired or empty reflog, or any git
 /// failure, answers `false`, so the caller does not claim `empty_branch`
@@ -1119,30 +1118,13 @@ fn branch_never_had_commits(repo_root: &Path, branch: &str, base: &str) -> bool 
 /// emptiness. A branch whose reflog was pruned is therefore never reported
 /// empty, even if it is.
 fn branch_never_advanced(repo_root: &Path, branch: &str) -> bool {
-    let git_out = |args: &[&str]| {
-        Command::new("git")
-            .arg("-C")
-            .arg(repo_root)
-            .args(args)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-    };
-    let Some(tip) = git_out(&["rev-parse", "--verify", &format!("{branch}^{{commit}}")]) else {
+    let Some(tip) = git_stdout(
+        repo_root,
+        &["rev-parse", "--verify", &format!("{branch}^{{commit}}")],
+    ) else {
         return false;
     };
-    let Some(log) = git_out(&[
-        "reflog",
-        "show",
-        "--format=%H",
-        &format!("refs/heads/{branch}"),
-    ]) else {
-        return false;
-    };
-    log.lines()
-        .last()
-        .is_some_and(|creation| creation == tip.trim())
+    branch_creation_oid(repo_root, branch).is_some_and(|creation| creation == tip.trim())
 }
 
 /// What `cs done` could establish about a branch that reached the base outside
@@ -1171,6 +1153,24 @@ fn git_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
+/// An expired reflog can retain commits after losing the creation entry.
+/// An unrecognized oldest entry does not establish a fork point.
+fn branch_creation_oid(repo_root: &Path, branch: &str) -> Option<String> {
+    let log = git_stdout(
+        repo_root,
+        &[
+            "reflog",
+            "show",
+            "--format=%H%x09%gs",
+            &format!("refs/heads/{branch}"),
+        ],
+    )?;
+    let (oid, action) = log.lines().last()?.split_once('\t')?;
+    action
+        .starts_with("branch: Created from ")
+        .then(|| oid.to_owned())
+}
+
 /// Establish how `branch` reached `base` without `cs done`.
 ///
 /// Why: when the closure skips the gate it also skips the only review of what
@@ -1180,7 +1180,7 @@ fn git_stdout(repo_root: &Path, args: &[&str]) -> Option<String> {
 /// - **landing commit** — the oldest commit on `base`'s first-parent chain that
 ///   descends from the branch tip (`rev-list --first-parent --ancestry-path`);
 ///   the tip itself when the tip is on that chain (fast-forward).
-/// - **fork point** — the oldest reflog entry of the branch (its creation),
+/// - **fork point** — the creation entry at the start of the branch reflog,
 ///   when it is an ancestor of the tip; otherwise the merge base of the tip with
 ///   the landing commit's first parent (the pre-landing base). That fallback
 ///   exists only for a landing by merge commit: a fast-forward with no usable
@@ -1228,17 +1228,7 @@ fn outside_landing(repo_root: &Path, branch: &str, base: &str) -> OutsideLanding
             .status()
             .is_ok_and(|s| s.success())
     };
-    let reflog_fork = git_stdout(
-        repo_root,
-        &[
-            "reflog",
-            "show",
-            "--format=%H",
-            &format!("refs/heads/{branch}"),
-        ],
-    )
-    .and_then(|s| s.lines().last().map(str::to_owned))
-    .filter(|c| is_ancestor(c, &tip));
+    let reflog_fork = branch_creation_oid(repo_root, branch).filter(|c| is_ancestor(c, &tip));
     // The merge-base fallback needs a pre-landing base: the landing commit's
     // first parent. A fast-forward lands the branch tip itself, whose first
     // parent is the branch's own previous commit, so a merge base with it would
