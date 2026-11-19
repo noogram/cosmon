@@ -27,6 +27,8 @@ this stage.
 
 - `cs sessions ack <key>` acknowledges one pilot-mailbox envelope separately from reading it; duplicate acknowledgments succeed without writing, and unknown keys are refused.
 
+- `cs sessions checkpoint publish` is idempotent on `--id`: the same id with the same content succeeds without writing, other content is refused. It also refuses a checkpoint over 262144 bytes or citing more than 100 evidence references, and evidence that names a path on the publisher's machine; `checkpoint show` refuses a stored record over 262144 bytes.
+
 - Step changes preserve edited `briefing.md` bytes as `briefing.md.edited-<step>` and warn with the saved path and `--var-file` guidance; retries never overwrite an existing backup.
 
 - `cs done --expect-head <oid>` refuses, on the merge path and the already-merged path alike, when the molecule branch tip is not that object id; `cs done --print-merge-message` prints the exact completion merge message (subject and trailers) without changing state (#213).

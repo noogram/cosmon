@@ -39,6 +39,45 @@ pub enum CheckpointError {
         path: PathBuf,
     },
 
+    /// The serialised checkpoint, or a stored record, is larger than
+    /// [`crate::MAX_CHECKPOINT_BYTES`].
+    ///
+    /// A checkpoint is a bounded structured record (collaboration contract §4,
+    /// S-CKPUT and S-CKGET): the bound is enforced before the bytes are
+    /// written or read, so no caller can make the store allocate without limit.
+    #[error("checkpoint {subject} is {bytes} bytes, over the {limit}-byte limit")]
+    TooLarge {
+        /// The checkpoint id or the record path that was measured.
+        subject: String,
+        /// The size found.
+        bytes: u64,
+        /// The limit it exceeds.
+        limit: u64,
+    },
+
+    /// The checkpoint cites more evidence references than
+    /// [`crate::MAX_EVIDENCE_REFS`] allow.
+    #[error("checkpoint {id} cites {count} evidence references, over the limit of {limit}")]
+    TooManyEvidenceRefs {
+        /// The checkpoint id being published.
+        id: String,
+        /// The number of references it cites, claims included.
+        count: usize,
+        /// The limit it exceeds.
+        limit: usize,
+    },
+
+    /// An evidence locator names a filesystem path or URL of the publisher's
+    /// machine instead of an artifact reference.
+    ///
+    /// Evidence moves as a digest-bound reference into canonical custody, never
+    /// as a client path (collaboration contract §4 and refusal X-PATH).
+    #[error("evidence locator \"{locator}\" is a client path, not an artifact reference")]
+    ClientPathEvidence {
+        /// The offending locator, as given.
+        locator: String,
+    },
+
     /// A file in the store could not be read or written.
     #[error("checkpoint store I/O at {path}: {source}")]
     Io {

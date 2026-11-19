@@ -7,7 +7,7 @@ Leave — or read — the note that lets someone else resume this mission
 Usage: cs sessions checkpoint [OPTIONS] <COMMAND>
 
 Commands:
-  publish  Publish this pilot's hand-over record for a mission
+  publish  Publish this pilot's hand-over record for a mission. At most 262144 bytes and 100 evidence references; republishing the same `--id` with the same content succeeds without writing, with other content it is refused
   stage    Write the same record as a draft, for the hook to publish at the next natural transition. Takes exactly the flags `publish` takes
   list     List the checkpoints published for a mission
   show     Show one checkpoint in full
