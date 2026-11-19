@@ -7420,7 +7420,9 @@ fn refuse_post_merge_and_rollback(
             } else {
                 String::new()
             };
-            format!("{cause}; git reset --hard restored main to its pre-merge revision{restored}")
+            format!(
+                "{cause}; restored the base and its checkout to the pre-merge revision{restored}"
+            )
         }
         Err(reset_err) => {
             let revoked = if restore_pre_merge_trust {
@@ -8267,8 +8269,8 @@ fn require_security_review_verdict(state_dir: &Path, mol: &MoleculeData) -> anyh
 /// Issue #214 / ADR-110 I1: a rollback must never discard a commit it did not
 /// write. The ref move is an atomic compare-and-swap
 /// (`git update-ref HEAD <new> <old>`); when the base has moved it fails and
-/// nothing is touched. Only after the swap succeeds is the working tree reset
-/// to match (the base is the checked-out branch of `repo_root`).
+/// nothing is touched. After the swap the index and working tree are restored
+/// without another ref write (the base is checked out in `repo_root`).
 fn rollback_base_if_unmoved(
     repo_root: &Path,
     pre_merge_head: &str,
@@ -8290,18 +8292,21 @@ fn rollback_base_if_unmoved(
             String::from_utf8_lossy(&swap.stderr).trim()
         );
     }
-    reset_hard(repo_root, pre_merge_head)
-}
-
-/// Restore main to the revision captured before a gated merge.
-fn reset_hard(repo_root: &Path, revision: &str) -> anyhow::Result<()> {
+    let current = git_head(repo_root)?;
+    anyhow::ensure!(
+        current == pre_merge_head,
+        "{ROLLBACK_BASE_MOVED}: it moved again after the rollback ref swap, from \
+         {pre_merge_head} to {current}. The checkout was left untouched."
+    );
+    // `git reset --hard` would write HEAD a second time without the CAS.
     let output = Command::new("git")
         .args([
             "-C",
             &repo_root.to_string_lossy(),
-            "reset",
-            "--hard",
-            revision,
+            "read-tree",
+            "--reset",
+            "-u",
+            pre_merge_head,
         ])
         .output()?;
     if output.status.success() {

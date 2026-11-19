@@ -1513,6 +1513,68 @@ fn a_refused_rollback_leaves_the_foreign_commits_files_in_the_working_tree() {
     );
 }
 
+#[test]
+fn a_foreign_update_after_the_rollback_swap_survives_checkout_restoration() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo_with_config(repo, "\n[gates]\nintegrity_command = 'exit 7'\n");
+    let mol_id = nucleate_terminal(repo);
+    let (_branch, pre_merge) = stage_clean_merge(repo, &mol_id);
+    git_ok(repo, &["checkout", "-qb", "foreign"]);
+    fs::write(repo.join("foreign.txt"), "foreign\n").unwrap();
+    git_ok(repo, &["add", "foreign.txt"]);
+    git_ok(repo, &["commit", "-qm", "foreign writer"]);
+    git_ok(repo, &["checkout", "-q", "main"]);
+
+    let shim_dir = repo.join(".cosmon/bin");
+    fs::create_dir(&shim_dir).unwrap();
+    let shim = shim_dir.join("git");
+    fs::write(
+        &shim,
+        r#"#!/bin/sh
+set -eu
+export PATH="$DONE_REAL_PATH"
+if [ "$#" -eq 6 ] && [ "$3" = update-ref ] && [ "$4" = HEAD ] && [ "$5" = "$DONE_PRE_MERGE" ]; then
+    git "$@"
+    git -C "$2" reset -q --hard foreign
+    exit 0
+fi
+exec git "$@"
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::var_os("PATH").unwrap();
+    let shim_path =
+        std::env::join_paths(std::iter::once(shim_dir).chain(std::env::split_paths(&path)))
+            .unwrap();
+    let done = cs_isolated(repo)
+        .args(["--json", "done", &mol_id, "--no-auto-propel"])
+        .env("PATH", shim_path)
+        .env("DONE_REAL_PATH", path)
+        .env("DONE_PRE_MERGE", &pre_merge)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&done.stdout);
+    assert!(!done.status.success(), "{stdout}");
+    assert_eq!(
+        git(repo, &["rev-parse", "main"]).stdout,
+        git(repo, &["rev-parse", "foreign"]).stdout,
+        "a second ref write discarded the foreign tip: {stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("foreign.txt")).unwrap(),
+        "foreign\n"
+    );
+    assert!(git(repo, &["status", "--porcelain"]).stdout.is_empty());
+    assert!(
+        stdout.contains("moved again after the rollback ref swap"),
+        "{stdout}"
+    );
+}
+
 /// Issue #214: the post-merge rollback is a compare-and-swap. A gate command
 /// that commits to the base (a foreign writer that does not take the trunk
 /// lock) and then fails must NOT have that commit discarded by the rollback:
