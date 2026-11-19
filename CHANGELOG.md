@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-11-19
+
 - `cs tackle --if-needed` exits 0 and prints `already dispatched to <session> (adapter <a>, model <m>)` when the molecule already has a live worker matching any explicit `--adapter`/`--model`; a different adapter or model, or a dead worker, fails as before, and it conflicts with `--force` (#217).
 
 - `cs done` rolls a refused post-merge gate back with a compare-and-swap: the base is restored to its pre-merge revision only while it still points at this invocation's own merge; if it moved, nothing is touched, the refusal names the pre-merge, own-merge and current revisions, and the branch, worktree and session are kept (#214).
@@ -4858,7 +4860,8 @@ release **is**, not how it was built.
   `#![deny(missing_docs)]` on the core, and CI gates on build, test, clippy,
   and fmt.
 
-[Unreleased]: https://github.com/noogram/cosmon/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/noogram/cosmon/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/noogram/cosmon/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/noogram/cosmon/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/noogram/cosmon/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/noogram/cosmon/compare/v0.7.2...v0.7.3
