@@ -136,6 +136,14 @@ mod tests {
     }
 
     #[test]
+    fn either_bound_enables_admission_fact_collection() {
+        assert!(!cfg(None, None).is_enabled());
+        assert!(cfg(Some(0), None).is_enabled());
+        assert!(cfg(None, Some(0)).is_enabled());
+        assert!(cfg(Some(2), Some(1024)).is_enabled());
+    }
+
+    #[test]
     fn at_the_cap_the_spawn_is_refused_naming_the_observed_count() {
         assert_eq!(
             admit(&cfg(Some(2), None), &facts(Some(2), None)),
