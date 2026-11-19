@@ -108,6 +108,21 @@ fn republishing_the_same_key_and_content_succeeds_without_writing() {
 }
 
 #[test]
+fn json_exposes_whether_publication_was_a_retry() {
+    let g = Galaxy::new();
+    let args = ["--json", "--risk", "network connection could drop"];
+    let first = success(&g.publish("cp-json", &args));
+    let before = g.files();
+    let retry = success(&g.publish("cp-json", &args));
+    let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+    let retry: serde_json::Value = serde_json::from_str(&retry).unwrap();
+    assert_eq!(first["duplicate"], false);
+    assert_eq!(retry["duplicate"], true);
+    assert_eq!(first["path"], retry["path"]);
+    assert_eq!(before, g.files());
+}
+
+#[test]
 fn republishing_the_same_key_with_different_content_is_refused_and_keeps_the_record() {
     let g = Galaxy::new();
     success(&g.publish("cp-collide", &["--hypothesis", "cursor=byte offsets"]));
@@ -148,15 +163,30 @@ fn a_hundred_evidence_references_are_accepted_and_a_hundred_and_one_are_refused(
 fn evidence_on_claims_counts_toward_the_same_hundred() {
     let g = Galaxy::new();
     let digest = "b".repeat(64);
-    let mut args: Vec<String> = vec!["--hypothesis".into(), "cursor=byte offsets".into()];
-    for i in 0..101 {
+    let mut args: Vec<String> = vec![
+        "--hypothesis".into(),
+        "cursor=byte offsets".into(),
+        "--next".into(),
+        "scan=read the remaining bytes".into(),
+        "--checkpoint-evidence".into(),
+        format!("artifact-index#{digest}"),
+    ];
+    for i in 0..99 {
         args.push("--evidence".into());
-        args.push(format!("cursor=artifact-{i}#{digest}"));
+        let subject = if i % 2 == 0 { "cursor" } else { "scan" };
+        args.push(format!("{subject}=artifact-{i}#{digest}"));
     }
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let error = refused(&g.publish("cp-claims", &args));
-    assert!(error.contains("100"), "{error}");
-    assert!(g.files().is_empty(), "nothing is written");
+    let hundred: Vec<_> = args.iter().map(String::as_str).collect();
+    success(&g.publish("cp-claims-100", &hundred));
+    let before = g.files();
+    args.extend(["--evidence".into(), format!("scan=artifact-extra#{digest}")]);
+    let over: Vec<_> = args.iter().map(String::as_str).collect();
+    let error = refused(&g.publish("cp-claims-101", &over));
+    assert!(
+        error.contains("cites 101 evidence references, over the limit of 100"),
+        "{error}"
+    );
+    assert_eq!(g.files(), before, "nothing is written");
 }
 
 #[test]

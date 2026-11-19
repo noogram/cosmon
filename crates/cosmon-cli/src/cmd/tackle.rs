@@ -727,10 +727,10 @@ fn run_with_transport(
         );
     }
 
-    // Admission (issue #214, ADR-190 D2): refuse on a configured active-molecule
-    // cap or free-space floor, before the dispatch claim and before any
-    // worktree, branch or session exists. Unset config costs nothing.
-    if !args.dry_run {
+    // Admission (ADR-190 D2) applies to spawns before any worktree, branch or
+    // session is created. Ordinary tackle keeps its pre-claim admission check.
+    // A caller using --if-needed may already have the worker it requested.
+    let enforce_admission = || -> anyhow::Result<()> {
         let admission_config =
             cosmon_filestore::load_project_config(&super::resolve_config_from_context(ctx))
                 .unwrap_or_default()
@@ -754,6 +754,10 @@ fn run_with_transport(
                 &mut |msg| eprintln!("{msg}"),
             )?;
         }
+        Ok(())
+    };
+    if !args.dry_run && !args.if_needed {
+        enforce_admission()?;
     }
 
     // Claim the molecule before resolving its adapter or model. The resident
@@ -828,6 +832,9 @@ fn run_with_transport(
     }
     if dispatch_claim.is_some() {
         mol = refresh_after_dispatch_claim(&store, &mol, args.force, &tackled_by)?;
+        if args.if_needed {
+            enforce_admission()?;
+        }
     }
 
     // 2. Load formula for context.

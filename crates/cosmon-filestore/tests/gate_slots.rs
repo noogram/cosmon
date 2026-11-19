@@ -104,6 +104,9 @@ fn live_holders_counts_held_slots_only() {
     let b = try_acquire_gate_slot_in(dir.path(), "p", 2)
         .unwrap()
         .unwrap();
+    assert_eq!(a.index(), 0);
+    assert_eq!(b.index(), 1);
+    assert_eq!(b.path(), dir.path().join("gate-slots/p/1.lock"));
     assert_eq!(live_gate_slot_holders_in(dir.path(), "p").unwrap(), 2);
     drop(a);
     assert!(eventually(|| live_gate_slot_holders_in(dir.path(), "p")
@@ -115,16 +118,64 @@ fn live_holders_counts_held_slots_only() {
         == 0));
 }
 
+#[test]
+fn the_store_counts_locks_for_its_pool_and_ignores_other_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileStore::new(dir.path());
+    let slots = dir.path().join("gate-slots/p");
+    std::fs::create_dir_all(&slots).unwrap();
+    let other = std::fs::File::create(slots.join("unrelated.txt")).unwrap();
+    fs2::FileExt::try_lock_exclusive(&other).unwrap();
+    assert_eq!(store.live_gate_slot_holders("p").unwrap(), 0);
+    let _slot = store.try_acquire_gate_slot("p", 1).unwrap().unwrap();
+    assert_eq!(store.live_gate_slot_holders("p").unwrap(), 1);
+}
+
+#[test]
+fn a_pool_directory_that_is_a_file_is_reported_as_a_lock_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let slots = dir.path().join("gate-slots");
+    std::fs::create_dir(&slots).unwrap();
+    let pool = slots.join("p");
+    std::fs::write(&pool, "not a directory").unwrap();
+
+    let acquire = try_acquire_gate_slot_in(dir.path(), "p", 1).unwrap_err();
+    assert!(
+        acquire
+            .to_string()
+            .contains("failed to create gate-slot directory"),
+        "{acquire}"
+    );
+    let probe = live_gate_slot_holders_in(dir.path(), "p").unwrap_err();
+    assert!(probe.to_string().contains("failed to read pool"), "{probe}");
+}
+
 /// A pool name comes from configuration and must not escape `gate-slots/`.
 #[test]
 fn a_pool_name_cannot_escape_the_slot_directory() {
     let dir = tempfile::tempdir().unwrap();
-    for bad in ["", ".", "..", "../x", "a/b"] {
+    for bad in ["", ".", "..", "../x", "a/b", r"a\b", "a\0b"] {
         assert!(
             try_acquire_gate_slot_in(dir.path(), bad, 1).is_err(),
             "{bad:?}"
         );
     }
+}
+
+#[test]
+fn a_zero_capacity_blocking_pool_refuses_without_queuing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FileStore::new(dir.path());
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(store.acquire_gate_slot("full_gate", 0));
+    });
+    let error = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("size 0"), "{error}");
+    assert!(!dir.path().join("gate-slots").exists());
 }
 
 fn git(dir: &Path, args: &[&str]) {

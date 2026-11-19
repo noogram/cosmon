@@ -64,6 +64,30 @@ PR_BODY="$body" bash "$GUARD" main feature >/dev/null 2>&1; rc=$?
 if [ $rc -eq 1 ] && [ ! -e "$sentinel" ]; then ok "hostile body without marker still fails, nothing runs"
 else bad "hostile body without marker (rc=$rc)"; fi
 
+# Remove one line at a time so a different match cannot mask the result.
+case_number=0
+for case_line in 'debug_assert!(true);' 'custom_assert!(true);' '#[should_panic]' 'assert_eq !(1, 1);'; do
+  case_number=$((case_number + 1))
+  new_repo "$WORK/macro-$case_number"
+  printf '%s\n' "$case_line" > extra.rs
+  git add extra.rs && git commit -qm "add candidate"
+  git checkout -qb feature
+  git rm -q extra.rs && git commit -qm "remove candidate"
+  out=$(PR_BODY="" bash "$GUARD" main feature 2>&1); rc=$?
+  if [ "$case_line" = 'custom_assert!(true);' ]; then
+    [ "$rc" -eq 0 ] && ok "identifier ending in assert is ignored" || bad "suffix matched (rc=$rc): $out"
+  elif [ "$rc" -eq 1 ] && printf '%s\n' "$out" | grep -qFx -- "-$case_line"; then
+    ok "removed $case_line is listed"
+  else
+    bad "expected rc=1 with $case_line listed (rc=$rc): $out"
+  fi
+done
+
+bash "$GUARD" main >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] && ok "missing revision exits 2" || bad "missing revision exited $rc"
+bash "$GUARD" main no-such-revision >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] && ok "unresolvable revision exits 2" || bad "unresolvable revision exited $rc"
+
 [ "$failures" -eq 0 ] && { echo "check-removed-assertions.test: OK"; exit 0; }
 echo "check-removed-assertions.test: $failures failure(s)" >&2
 exit 1

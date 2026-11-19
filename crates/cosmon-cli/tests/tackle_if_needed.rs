@@ -15,6 +15,8 @@ use std::path::Path;
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
+const MODEL: &str = "claude-sonnet-4-6";
+
 fn cs(cwd: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
     cmd.current_dir(cwd)
@@ -33,6 +35,7 @@ fn install_stub_claude(dir: &Path, launched: &Path) -> std::path::PathBuf {
     let script = format!(
         "#!/bin/sh\n\
          case \"$1\" in --version|-v) echo 'stub-claude 0.0.0'; exit 0;; esac\n\
+         for arg do [ \"$arg\" != '-p' ] || exit 0; done\n\
          : > '{}'\n\
          stty -echo 2>/dev/null\n\
          printf '\\342\\235\\257 Type your message\\n'\n\
@@ -156,7 +159,7 @@ fn tackle_if_needed_succeeds_only_on_a_matching_live_dispatch() {
     };
     let state_json = || fs::read(find_state_json(&state_dir, &mol_id)).unwrap();
 
-    let first = tackle(&["--adapter", "claude"]);
+    let first = tackle(&["--adapter", "claude", "--model", MODEL]);
     let ran = wait_for(&launched);
     if !first.status.success() || !ran {
         kill_server();
@@ -181,10 +184,11 @@ fn tackle_if_needed_succeeds_only_on_a_matching_live_dispatch() {
         && line.starts_with("already dispatched to ")
         && line
             .trim_end()
-            .ends_with("(adapter claude, model adapter default (unrecorded))")
+            .ends_with(&format!("(adapter claude, model {MODEL})"))
         && line.trim_end().lines().count() == 1;
     let explicit = tackle(&["--if-needed", "--adapter", "claude"]);
     let explicit_ok = explicit.status.success();
+    let model_only = tackle(&["--json", "--if-needed", "--model", MODEL]);
     let workers = session_count(&socket);
     let unchanged = state_json() == recorded;
 
@@ -202,6 +206,12 @@ fn tackle_if_needed_succeeds_only_on_a_matching_live_dispatch() {
 
     assert!(accepted, "--if-needed: {line:?} / {}", stderr(&again));
     assert!(explicit_ok, "{}", stderr(&explicit));
+    assert!(model_only.status.success(), "{}", stderr(&model_only));
+    let json: serde_json::Value = serde_json::from_slice(&model_only.stdout).unwrap();
+    assert_eq!(json["already_dispatched"], true);
+    assert_eq!(json["molecule_id"], mol_id);
+    assert_eq!(json["adapter"], "claude");
+    assert_eq!(json["model"], MODEL);
     assert_eq!(workers, 1, "--if-needed must not spawn a second worker");
     assert!(unchanged, "--if-needed must not change state.json");
     assert!(!other_adapter.status.success());
