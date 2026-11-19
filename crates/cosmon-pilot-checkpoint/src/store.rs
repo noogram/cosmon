@@ -17,7 +17,7 @@
 //!   directory and installs the complete record only if that id is still free.
 
 use std::fs::File;
-use std::io::{Read as _, Write as _};
+use std::io::{Read, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::checkpoint::{PilotCheckpoint, MAX_CHECKPOINT_BYTES, MAX_EVIDENCE_REFS};
@@ -285,29 +285,38 @@ fn read_record(path: &Path) -> Result<PilotCheckpoint, CheckpointError> {
         path: path.to_path_buf(),
         source,
     };
+    let file = File::open(path).map_err(io_error)?;
+    let len = file.metadata().map_err(io_error)?.len();
+    let bytes = read_record_bytes(path, file, len)?;
+    serde_json::from_slice(&bytes).map_err(|source| CheckpointError::Malformed {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn read_record_bytes(path: &Path, source: impl Read, len: u64) -> Result<Vec<u8>, CheckpointError> {
     let too_large = |bytes| CheckpointError::TooLarge {
         subject: path.display().to_string(),
         bytes,
         limit: MAX_CHECKPOINT_BYTES,
     };
-    let file = File::open(path).map_err(io_error)?;
-    let len = file.metadata().map_err(io_error)?.len();
     if len > MAX_CHECKPOINT_BYTES {
         return Err(too_large(len));
     }
     // A record can grow after the metadata check. Read one extra byte to
     // distinguish an exact-limit record from a truncated oversized record.
     let mut bytes = Vec::new();
-    file.take(MAX_CHECKPOINT_BYTES + 1)
+    source
+        .take(MAX_CHECKPOINT_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(io_error)?;
+        .map_err(|source| CheckpointError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
     if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
         return Err(too_large(bytes.len() as u64));
     }
-    serde_json::from_slice(&bytes).map_err(|source| CheckpointError::Malformed {
-        path: path.to_path_buf(),
-        source,
-    })
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -538,6 +547,46 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_record_that_grows_after_its_size_check_is_still_refused() {
+        let mut input = std::io::Cursor::new(vec![b' '; 262_146]);
+        let result = read_record_bytes(Path::new("checkpoint.json"), &mut input, 262_144);
+        assert!(matches!(
+            result,
+            Err(CheckpointError::TooLarge {
+                bytes: 262_145,
+                limit: 262_144,
+                ..
+            })
+        ));
+        assert_eq!(
+            input.position(),
+            262_145,
+            "stop reading at the first excess byte"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installation_io_errors_keep_the_destination_and_underlying_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::new(tmp.path());
+        let long_id = "a".repeat(512);
+        let checkpoint = cp(&long_id, "sess-a", 100);
+        let expected_path = store.path_of(&checkpoint.mission_id, &checkpoint.id);
+        let result = store.publish(&checkpoint);
+        assert!(
+            matches!(result, Err(CheckpointError::Io { ref path, ref source }) if *path == expected_path && source.kind() == std::io::ErrorKind::InvalidFilename),
+            "{result:?}"
+        );
+        assert_eq!(
+            std::fs::read_dir(store.mission_dir(&checkpoint.mission_id))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[test]
