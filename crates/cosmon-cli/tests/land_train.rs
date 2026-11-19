@@ -13,6 +13,8 @@
 //! each is refuted if the base moves or a member is closed (ADR-190 §4 D1).
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -253,12 +255,18 @@ impl Fixture {
     }
 
     fn land(&self, base: &str, tip: &str, members: &[(&str, &str)]) -> Output {
+        self.land_command(base, tip, members)
+            .output()
+            .expect("cs land-train")
+    }
+
+    fn land_command(&self, base: &str, tip: &str, members: &[(&str, &str)]) -> Command {
         let mut cmd = self.cs();
         cmd.args(["land-train", "--train-base", base, "--train-tip", tip]);
         for (mol, head) in members {
             cmd.arg("--member").arg(format!("{mol}={head}"));
         }
-        cmd.output().expect("cs land-train")
+        cmd
     }
 
     fn state(&self, mol_id: &str) -> serde_json::Value {
@@ -304,6 +312,21 @@ impl Train {
 
     fn land(&self) -> Output {
         self.fx.land(&self.base, &self.tip, &self.members())
+    }
+
+    fn land_through_git(&self, shim_script: &str) -> Command {
+        let shim_dir = self.fx._tmp.path().join("bin");
+        fs::create_dir(&shim_dir).unwrap();
+        let shim = shim_dir.join("git");
+        fs::write(&shim, shim_script).unwrap();
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var_os("PATH").unwrap();
+        let shim_path =
+            std::env::join_paths(std::iter::once(shim_dir).chain(std::env::split_paths(&path)))
+                .unwrap();
+        let mut cmd = self.fx.land_command(&self.base, &self.tip, &self.members());
+        cmd.env("PATH", shim_path).env("LAND_TRAIN_REAL_PATH", path);
+        cmd
     }
 
     /// The refusal invariants every defect test shares: the command failed,
@@ -588,6 +611,98 @@ fn the_base_moving_after_the_gate_is_refused() {
     let moved = rev(&t.fx.repo, "main");
     let out = t.land();
     t.assert_refused_naming(&out, "main moved after the gate", &moved);
+    let text = combined(&out);
+    assert!(text.contains("the train was built and gated on"), "{text}");
+    assert!(!text.contains("compare-and-swap"), "{text}");
+}
+
+#[test]
+fn a_base_move_at_the_compare_and_swap_preserves_the_ref_and_checkout() {
+    let t = happy_train(Fixture::new("", false));
+    let repo = &t.fx.repo;
+    // Make a foreign commit with the same tree, and leave unrelated work on disk.
+    let tree = rev(repo, "main^{tree}");
+    let foreign = git_ok(
+        repo,
+        &["commit-tree", &tree, "-p", &t.base, "-m", "foreign"],
+    );
+    fs::write(repo.join("base.txt"), "local edit\n").unwrap();
+    let before = git_ok(repo, &["status", "--porcelain"]);
+
+    // Forward every command to real Git. Just before the train's ref write,
+    // verify its index/checkout update has happened and move main once.
+    let out = t
+        .land_through_git(
+            r#"#!/bin/sh
+set -eu
+export PATH="$LAND_TRAIN_REAL_PATH"
+if [ "$#" -ge 6 ] && [ "$3" = update-ref ] && [ "$4" = -m ] && [ "$6" = refs/heads/main ]; then
+    test -f "$2/a.txt"
+    git -C "$2" diff --cached --name-only | grep -qx a.txt
+    git -C "$2" update-ref refs/heads/main "$LAND_TRAIN_FOREIGN" "$LAND_TRAIN_BASE"
+fi
+exec git "$@"
+"#,
+        )
+        .env("LAND_TRAIN_FOREIGN", &foreign)
+        .env("LAND_TRAIN_BASE", &t.base)
+        .output()
+        .unwrap();
+
+    t.assert_refused_naming(&out, "compare-and-swap", &foreign);
+    assert_eq!(git_ok(repo, &["status", "--porcelain"]), before);
+    assert_eq!(
+        fs::read_to_string(repo.join("base.txt")).unwrap(),
+        "local edit\n"
+    );
+    assert!(!repo.join("a.txt").exists() && !repo.join("b.txt").exists());
+}
+
+#[test]
+fn a_train_reachable_only_through_a_second_parent_is_not_a_resumable_landing() {
+    let t = happy_train(Fixture::new("", false));
+    let repo = &t.fx.repo;
+    git_ok(repo, &["commit", "-q", "--allow-empty", "-m", "other base"]);
+    git_ok(
+        repo,
+        &["merge", "-q", "--no-ff", "-m", "side merge", "train"],
+    );
+    let moved = rev(repo, "main");
+    assert!(t.fx.is_ancestor(&t.tip, &moved));
+    t.assert_refused_naming(&t.land(), "main moved after the gate", &moved);
+}
+
+#[test]
+fn an_overlapping_checkout_change_prevents_landing() {
+    let t = happy_train(Fixture::new("", false));
+    let repo = &t.fx.repo;
+    fs::write(repo.join("a.txt"), "local work\n").unwrap();
+
+    t.assert_refused_naming(&t.land(), "local changes that overlap", &t.base);
+    assert_eq!(
+        fs::read_to_string(repo.join("a.txt")).unwrap(),
+        "local work\n"
+    );
+    assert!(!repo.join("b.txt").exists());
+    assert_eq!(git_ok(repo, &["status", "--porcelain"]), "?? a.txt");
+}
+
+#[test]
+fn a_base_checked_out_in_another_worktree_prevents_landing() {
+    let t = happy_train(Fixture::new("", false));
+    let repo = &t.fx.repo;
+    git_ok(repo, &["checkout", "-q", "train"]);
+    let checkout = t.fx._tmp.path().join("checkout with a space");
+    git_ok(
+        repo,
+        &["worktree", "add", "-q", checkout.to_str().unwrap(), "main"],
+    );
+
+    let out = t.land();
+    t.assert_refused_naming(&out, "checkout with a space", &t.base);
+    assert!(!checkout.join("a.txt").exists());
+    assert_eq!(git_ok(&checkout, &["status", "--porcelain"]), "");
+    assert_eq!(rev(repo, "HEAD"), t.tip);
 }
 
 /// `[harvest_authority] required = true`: this increment refuses the train.
@@ -680,8 +795,29 @@ fn trust_store_listing(dir: &Path) -> Vec<(String, String)> {
 #[test]
 fn a_rerun_after_a_kill_before_any_closure_closes_each_member_once() {
     let t = happy_train(Fixture::new("", false));
-    // The state a kill right after the fast-forward leaves behind.
-    git_ok(&t.fx.repo, &["merge", "--ff-only", "-q", &t.tip]);
+    // Let Git publish the ref, then kill the waiting cs before the Git child returns.
+    let interrupted = t
+        .land_through_git(
+            r#"#!/bin/sh
+set -eu
+export PATH="$LAND_TRAIN_REAL_PATH"
+if [ "$#" -ge 6 ] && [ "$3" = update-ref ] && [ "$4" = -m ] && [ "$6" = refs/heads/main ]; then
+    git "$@"
+    kill -KILL "$PPID"
+    exit 0
+fi
+exec git "$@"
+"#,
+        )
+        .output()
+        .unwrap();
+    assert_eq!(
+        interrupted.status.signal(),
+        Some(9),
+        "{}",
+        combined(&interrupted)
+    );
+    assert_eq!(rev(&t.fx.repo, "main"), t.tip);
     assert!(!t.fx.is_closed(&t.a) && !t.fx.is_closed(&t.b));
 
     let rerun = t.land();

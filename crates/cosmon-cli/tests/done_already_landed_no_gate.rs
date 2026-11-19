@@ -412,6 +412,28 @@ fn closure_does_not_warn_when_the_landing_changed_no_surface_path() {
     }
 }
 
+/// The warning uses the current surface, which omits a deleted delegated script.
+#[test]
+fn closure_does_not_name_a_delegated_script_deleted_by_the_landing() {
+    let fx = landed_fixture_with(
+        Landing::NoFf,
+        &[("src/work.py", "print('w')\n")],
+        false,
+        |repo, branch| {
+            git_ok(repo, &["checkout", "-q", branch]);
+            git_ok(repo, &["rm", "scripts/build.sh"]);
+            git_ok(repo, &["commit", "-qm", "worker: remove delegated script"]);
+            git_ok(repo, &["checkout", "-q", "main"]);
+        },
+    );
+    assert!(!fx.repo.join("scripts/build.sh").exists());
+    let out = done(&fx.repo, &fx.store, &fx.mol_id);
+    assert_closed_without_gate(&fx, &out);
+    let text = combined(&out);
+    assert!(!text.contains("scripts/build.sh"), "{text}");
+    assert!(!text.contains("trusted shell surface"), "{text}");
+}
+
 /// Unchanged behaviour: a real merge performed by `cs done` still runs the gate
 /// and still refuses under stale trust.
 #[test]
