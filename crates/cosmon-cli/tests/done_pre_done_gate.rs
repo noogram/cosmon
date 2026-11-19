@@ -33,6 +33,10 @@ fn cs() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
     cmd.env_remove("COSMON_PARENT_MOL_ID")
         .env_remove("COSMON_MOL_DIR")
+        .env_remove("GIT_AUTHOR_NAME")
+        .env_remove("GIT_AUTHOR_EMAIL")
+        .env_remove("GIT_COMMITTER_NAME")
+        .env_remove("GIT_COMMITTER_EMAIL")
         // Ensure a stray env kill-switch in the outer shell never leaks in.
         .env_remove("COSMON_SKIP_PRE_DONE_HOOK")
         // This fixture exercises the pre_done gate itself in a throwaway repo;
@@ -58,6 +62,10 @@ fn git(repo: &Path, args: &[&str]) -> std::process::Output {
     full.extend_from_slice(args);
     Command::new("git")
         .args(&full)
+        .env_remove("GIT_AUTHOR_NAME")
+        .env_remove("GIT_AUTHOR_EMAIL")
+        .env_remove("GIT_COMMITTER_NAME")
+        .env_remove("GIT_COMMITTER_EMAIL")
         .output()
         .expect("git spawn failed")
 }
