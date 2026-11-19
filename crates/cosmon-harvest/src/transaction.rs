@@ -6586,7 +6586,7 @@ fn remove_worktree_with(
 /// Remove what is left of a worktree directory whose removal was authorised.
 ///
 /// Refuses anything that is not exactly `<repo_root>/.worktrees/<name>` (one
-/// level, no `..`), and refuses a path that is itself a symlink. Below that
+/// level, no `..`), and refuses symlinks at `.worktrees` or `<name>`. Below that
 /// root `std::fs::remove_dir_all` unlinks symbolic links instead of following
 /// them, so a link pointing outside the tree is removed and its destination
 /// is left alone.
@@ -6600,6 +6600,9 @@ fn finish_orphaned_worktree_removal(repo_root: &Path, worktree_path: &Path) -> s
             .any(|c| matches!(c, std::path::Component::ParentDir))
     {
         return Err(invalid("not a direct child of .worktrees/"));
+    }
+    if !std::fs::symlink_metadata(&parent)?.is_dir() {
+        return Err(invalid(".worktrees is not a real directory"));
     }
     if std::fs::symlink_metadata(worktree_path)?
         .file_type()
@@ -10052,6 +10055,24 @@ mod tests {
 
         finish_orphaned_worktree_removal(&repo, &wts.join("mol")).unwrap();
         assert!(!wts.join("mol").exists());
+    }
+
+    #[test]
+    fn finishing_a_removal_refuses_a_symlinked_worktrees_directory() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let outside = tmp.path().join("outside/mol");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("keep"), "outside").unwrap();
+        std::os::unix::fs::symlink(outside.parent().unwrap(), repo.join(".worktrees")).unwrap();
+
+        let result = finish_orphaned_worktree_removal(&repo, &repo.join(".worktrees/mol"));
+        assert!(result.is_err(), "the symlinked parent must be refused");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("keep")).unwrap(),
+            "outside"
+        );
     }
 
     /// Only the "failed to delete" race is retried. A locked worktree is a
