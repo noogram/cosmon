@@ -360,9 +360,10 @@ pub fn evolve(
 
     // Hold the fleet lock for the load → evolve → save cycle (ADR-131
     // Decision 2) so concurrent evolves cannot clobber each other.
-    let (mut updated, outcome) = {
+    let (mut updated, outcome, previous_status) = {
         let _g = store.lock_fleet().map_err(store_err)?;
         let mol_data = store.load_molecule(id).map_err(store_err)?;
+        let previous_status = mol_data.status;
 
         // Terminal calls refuse before the energy breaker can park them.
         if matches!(
@@ -510,7 +511,7 @@ Use --var-file key=path at nucleation to pass durable task content.",
         store
             .save_molecule(&updated.id.clone(), &updated)
             .map_err(store_err)?;
-        (updated, outcome)
+        (updated, outcome, previous_status)
     };
 
     effects
@@ -540,16 +541,21 @@ Use --var-file key=path at nucleation to pass durable task content.",
     )
     .ok();
     if matches!(outcome.new_state, NewState::Completed) {
-        let _ = event_log::emit_one(
-            &events_path,
+        let event = if updated.status == MoleculeStatus::Frozen {
+            EventV2::MoleculeStatusChanged {
+                molecule_id: id.clone(),
+                from: previous_status.to_string(),
+                to: updated.status.to_string(),
+            }
+        } else {
             EventV2::MoleculeCompleted {
                 molecule_id: id.clone(),
                 duration_ms: None,
                 reason: "all steps completed".to_owned(),
                 summary: non_empty(request.evidence),
-            },
-            step_seq,
-        );
+            }
+        };
+        let _ = event_log::emit_one(&events_path, event, step_seq);
     }
 
     // Append to log.md in the molecule directory.

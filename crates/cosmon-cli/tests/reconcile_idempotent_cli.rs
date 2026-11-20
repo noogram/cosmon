@@ -159,6 +159,77 @@ fn reconcile_can_rebuild_a_molecule_nucleated_after_a_torn_event() {
 }
 
 #[test]
+fn reconcile_rebuilds_a_final_step_freeze_as_frozen() {
+    assert_rebuilt_final_status(true, "frozen");
+}
+
+#[test]
+fn reconcile_rebuilds_an_ordinary_final_step_as_completed() {
+    assert_rebuilt_final_status(false, "completed");
+}
+
+fn assert_rebuilt_final_status(freeze_on_last_step: bool, expected_status: &str) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = setup_multi_surface_project(tmp.path());
+    let formula = state_dir
+        .parent()
+        .unwrap()
+        .join("formulas/task-work.formula.toml");
+    fs::write(
+        &formula,
+        format!(
+            r#"
+formula = "task-work"
+version = 1
+freeze_on_last_step = {freeze_on_last_step}
+[vars.topic]
+required = true
+[[steps]]
+id = "work"
+title = "Work"
+description = "Finish the work."
+"#
+        ),
+    )
+    .unwrap();
+    let molecule = nucleate_task(&state_dir, "persist the final step status");
+    let cache = state_dir
+        .join("fleets/default/molecules")
+        .join(&molecule)
+        .join("state.json");
+    let mut seeded: serde_json::Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    // Start the transition from an already-running molecule without a worker session.
+    seeded["status"] = serde_json::json!("running");
+    fs::write(&cache, serde_json::to_vec(&seeded).unwrap()).unwrap();
+
+    let out = cosmon_bin_isolated(&state_dir)
+        .args([
+            "evolve",
+            &molecule,
+            "--evidence",
+            "final step evidence",
+            "--formula",
+        ])
+        .arg(&formula)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "cs evolve failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let live: serde_json::Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    assert_eq!(live["status"], expected_status);
+    fs::remove_file(&cache).unwrap();
+
+    run_reconcile(&state_dir);
+
+    let rebuilt: serde_json::Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    assert_eq!(rebuilt["status"], expected_status);
+    assert_eq!(rebuilt["current_step"], 1);
+}
+
+#[test]
 fn reconcile_twice_is_byte_identical_at_cli_level() {
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = setup_multi_surface_project(tmp.path());

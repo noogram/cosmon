@@ -27,6 +27,10 @@ Step renders and generated posture additions replace the live file atomically,
 so an existing hard-linked backup also keeps its bytes. The API uses the same
 preservation operation; no UI control changes.
 
+When the shared evolve operation freezes a molecule after its final step,
+it records the frozen status in the event journal. The CLI and API use the
+same write path, so rebuilding the cache preserves the status either way.
+
 ## Project verification gates in briefings
 
 `cs nucleate` renders the galaxy's `[gates]` commands in `briefing.md` using
