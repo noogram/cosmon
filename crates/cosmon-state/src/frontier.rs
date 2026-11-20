@@ -239,9 +239,9 @@ pub fn path(state_dir: &Path) -> PathBuf {
 
 /// Serialize and atomically persist a [`Frontier`] under `state_dir`.
 ///
-/// Uses the write-temp-then-rename pattern so a crash mid-write never
-/// leaves a half-flushed projection on disk. Creates `state_dir` if
-/// missing. Idempotent: calling [`save`] twice with the same [`Frontier`]
+/// Each writer uses its own temporary file, synced before rename, so a
+/// crash or concurrent write cannot publish a partial projection. Creates
+/// `state_dir` if missing. Idempotent: calling [`save`] twice with the same [`Frontier`]
 /// content produces the same file byte-for-byte **only if the caller
 /// preserves `computed_at` across calls**. Use [`compute`] once per
 /// reconcile cycle and reuse the result if you need byte equality.
@@ -255,24 +255,33 @@ pub fn save(state_dir: &Path, frontier: &Frontier) -> Result<(), CosmonError> {
         reason: format!("frontier mkdir: {e}"),
     })?;
     let final_path = path(state_dir);
-    let tmp_path = final_path.with_extension("json.tmp");
     let body = serde_json::to_vec_pretty(frontier).map_err(|e| CosmonError::StateStore {
         reason: format!("frontier serialize: {e}"),
     })?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".frontier-").suffix(".tmp");
+    #[cfg(unix)]
     {
-        let mut f = fs::File::create(&tmp_path).map_err(|e| CosmonError::StateStore {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+    let mut temp = builder
+        .tempfile_in(state_dir)
+        .map_err(|e| CosmonError::StateStore {
             reason: format!("frontier create tmp: {e}"),
         })?;
-        f.write_all(&body).map_err(|e| CosmonError::StateStore {
-            reason: format!("frontier write tmp: {e}"),
-        })?;
-        f.sync_all().map_err(|e| CosmonError::StateStore {
+    temp.write_all(&body).map_err(|e| CosmonError::StateStore {
+        reason: format!("frontier write tmp: {e}"),
+    })?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|e| CosmonError::StateStore {
             reason: format!("frontier fsync tmp: {e}"),
         })?;
-    }
-    fs::rename(&tmp_path, &final_path).map_err(|e| CosmonError::StateStore {
-        reason: format!("frontier rename: {e}"),
-    })?;
+    temp.persist(&final_path)
+        .map_err(|e| CosmonError::StateStore {
+            reason: format!("frontier rename: {e}"),
+        })?;
     Ok(())
 }
 
@@ -715,6 +724,50 @@ mod tests {
         save(&state_dir, &f).unwrap();
         let loaded = load(&state_dir).unwrap().unwrap();
         assert_eq!(loaded, f);
+    }
+
+    #[test]
+    fn save_ignores_an_occupied_legacy_temp_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let previous_temp = dir.path().join("frontier.json.tmp");
+        fs::create_dir(&previous_temp).unwrap();
+        let frontier = Frontier::empty();
+
+        save(dir.path(), &frontier).unwrap();
+
+        assert_eq!(load(dir.path()).unwrap(), Some(frontier));
+        assert!(previous_temp.is_dir());
+    }
+
+    #[test]
+    fn concurrent_saves_publish_complete_frontiers() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path();
+        let snapshots = [
+            Frontier {
+                ready: vec![MoleculeId::new("task-20261120-aaaa").unwrap()],
+                ..Frontier::empty()
+            },
+            Frontier {
+                ready: vec![MoleculeId::new("task-20261120-bbbb").unwrap(); 256],
+                ..Frontier::empty()
+            },
+        ];
+        let barrier = std::sync::Barrier::new(4);
+
+        std::thread::scope(|scope| {
+            for snapshot in snapshots.iter().cycle().take(4) {
+                let allowed = &snapshots;
+                let start = &barrier;
+                scope.spawn(move || {
+                    start.wait();
+                    for _ in 0..8 {
+                        save(state_dir, snapshot).unwrap();
+                        assert!(allowed.contains(&load(state_dir).unwrap().unwrap()));
+                    }
+                });
+            }
+        });
     }
 
     #[test]
