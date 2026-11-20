@@ -59,6 +59,7 @@ use std::path::PathBuf;
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::cas::ContentHash;
+use crate::collaboration::AttachmentId;
 use crate::id::{FleetId, MoleculeId, SessionId};
 
 fn presence_file_stem(session: &SessionId) -> String {
@@ -121,6 +122,13 @@ pub enum CosmonPathKind {
     /// `presence/<session>.inbox.ack.jsonl` — acknowledgements of those
     /// envelopes, keyed by message id rather than by byte offset.
     PresenceInboxAck,
+    /// `presence/remote/<mission>/<attachment>.json` — remote presence of one
+    /// bound pilot attachment (issue #212, W7a). A subdirectory, so the
+    /// session snapshot scan never reads it as a local session.
+    RemotePresence,
+    /// `presence/remote/<mission>.lock` — exclusive lock serialising the
+    /// attachment cap and key check of one mission.
+    RemotePresenceLock,
     /// `pilot-lease/<mission>.requests.jsonl` — takeover asks, written by
     /// pilots (mission co-pilotage M4).
     PilotLeaseRequests,
@@ -185,6 +193,8 @@ impl CosmonPathKind {
             Self::PresenceSeek => "presence/<session>.seek",
             Self::PresenceInbox => "presence/<session>.inbox.jsonl",
             Self::PresenceInboxAck => "presence/<session>.inbox.ack.jsonl",
+            Self::RemotePresence => "presence/remote/<mission>/<attachment>.json",
+            Self::RemotePresenceLock => "presence/remote/<mission>.lock",
             Self::PilotLeaseRequests => "pilot-lease/<mission>.requests.jsonl",
             Self::PilotLeaseGrants => "pilot-lease/<mission>.grants.jsonl",
             Self::Cas => "cas/<prefix>/<hash>",
@@ -216,9 +226,11 @@ impl CosmonPathKind {
             // `cosmon-cli` sites via `resolve_state_dir(None).join(...)`.
             Self::FleetEvents => "cosmon-cli (scattered, migration tail)",
             Self::MoleculeEvents => "cosmon-filestore::event",
-            Self::PresenceSnapshot | Self::PresenceLog | Self::PresenceSeek => {
-                "cosmon-filestore::PresenceStore"
-            }
+            Self::PresenceSnapshot
+            | Self::PresenceLog
+            | Self::PresenceSeek
+            | Self::RemotePresence
+            | Self::RemotePresenceLock => "cosmon-filestore::PresenceStore",
             Self::PresenceInbox | Self::PresenceInboxAck => "cosmon-filestore::PilotMailbox",
             Self::PilotLeaseRequests | Self::PilotLeaseGrants => {
                 "cosmon-filestore::PilotLeaseStore"
@@ -250,6 +262,8 @@ impl CosmonPathKind {
             Self::PresenceSeek => "whisper read-offset pointer for a session",
             Self::PresenceInbox => "pilot-message envelopes delivered to a session",
             Self::PresenceInboxAck => "acknowledgements of a session's pilot messages",
+            Self::RemotePresence => "remote presence of one bound pilot attachment",
+            Self::RemotePresenceLock => "advisory lock for one mission's remote attachments",
             Self::PilotLeaseRequests => "takeover requests on a mission (no authority)",
             Self::PilotLeaseGrants => "operator-granted PRIMARY lease ledger for a mission",
             Self::Cas => "content-addressed blob (response hashes, attachments)",
@@ -265,7 +279,10 @@ impl CosmonPathKind {
     #[must_use]
     pub fn persistence(self) -> Persistence {
         match self {
-            Self::FleetLock | Self::TrunkLock | Self::MoleculeWriteLock => Persistence::Lock,
+            Self::FleetLock
+            | Self::TrunkLock
+            | Self::MoleculeWriteLock
+            | Self::RemotePresenceLock => Persistence::Lock,
             Self::ArchiveMolecule | Self::ArchiveFleetEvents | Self::ArchiveSchemaVersion => {
                 Persistence::ArchiveTracked
             }
@@ -351,6 +368,18 @@ pub enum CosmonPath<'a> {
         /// Session id.
         session: &'a SessionId,
     },
+    /// See [`CosmonPathKind::RemotePresence`].
+    RemotePresence {
+        /// Mission the attachment is bound to.
+        mission: &'a MoleculeId,
+        /// Host-issued attachment.
+        attachment: &'a AttachmentId,
+    },
+    /// See [`CosmonPathKind::RemotePresenceLock`].
+    RemotePresenceLock {
+        /// Mission whose attachments the lock serialises.
+        mission: &'a MoleculeId,
+    },
     /// See [`CosmonPathKind::PilotLeaseRequests`].
     PilotLeaseRequests {
         /// Mission the requests are about.
@@ -414,6 +443,8 @@ impl CosmonPath<'_> {
             Self::PresenceSeek { .. } => CosmonPathKind::PresenceSeek,
             Self::PresenceInbox { .. } => CosmonPathKind::PresenceInbox,
             Self::PresenceInboxAck { .. } => CosmonPathKind::PresenceInboxAck,
+            Self::RemotePresence { .. } => CosmonPathKind::RemotePresence,
+            Self::RemotePresenceLock { .. } => CosmonPathKind::RemotePresenceLock,
             Self::PilotLeaseRequests { .. } => CosmonPathKind::PilotLeaseRequests,
             Self::PilotLeaseGrants { .. } => CosmonPathKind::PilotLeaseGrants,
             Self::Cas { .. } => CosmonPathKind::Cas,
@@ -469,6 +500,16 @@ impl CosmonPath<'_> {
             Self::PresenceInboxAck { session } => {
                 PathBuf::from("presence").join(format!("{}.inbox.ack.jsonl", session.as_str()))
             }
+            Self::RemotePresence {
+                mission,
+                attachment,
+            } => PathBuf::from("presence")
+                .join("remote")
+                .join(mission.as_str())
+                .join(format!("{}.json", attachment.as_str())),
+            Self::RemotePresenceLock { mission } => PathBuf::from("presence")
+                .join("remote")
+                .join(format!("{}.lock", mission.as_str())),
             Self::PilotLeaseRequests { mission } => {
                 PathBuf::from("pilot-lease").join(format!("{}.requests.jsonl", mission.as_str()))
             }
@@ -535,6 +576,11 @@ mod tests {
             CosmonPathKind::PresenceSeek => CosmonPath::PresenceSeek { session: session() },
             CosmonPathKind::PresenceInbox => CosmonPath::PresenceInbox { session: session() },
             CosmonPathKind::PresenceInboxAck => CosmonPath::PresenceInboxAck { session: session() },
+            CosmonPathKind::RemotePresence => CosmonPath::RemotePresence {
+                mission: mol(),
+                attachment: Box::leak(Box::new(AttachmentId::from_random([7; 8]))),
+            },
+            CosmonPathKind::RemotePresenceLock => CosmonPath::RemotePresenceLock { mission: mol() },
             CosmonPathKind::PilotLeaseRequests => CosmonPath::PilotLeaseRequests { mission: mol() },
             CosmonPathKind::PilotLeaseGrants => CosmonPath::PilotLeaseGrants { mission: mol() },
             CosmonPathKind::Cas => CosmonPath::Cas { hash: hash() },
@@ -627,6 +673,8 @@ mod tests {
             "presence/<session>.seek",
             "presence/<session>.inbox.jsonl",
             "presence/<session>.inbox.ack.jsonl",
+            "presence/remote/<mission>/<attachment>.json",
+            "presence/remote/<mission>.lock",
             "pilot-lease/<mission>.requests.jsonl",
             "pilot-lease/<mission>.grants.jsonl",
             "cas/<prefix>/<hash>",

@@ -281,6 +281,8 @@ pub mod query;
 #[doc(hidden)]
 pub mod reconcile;
 #[doc(hidden)]
+pub mod remote_presence;
+#[doc(hidden)]
 pub mod reproducibility;
 pub mod retackle_lease;
 #[doc(hidden)]

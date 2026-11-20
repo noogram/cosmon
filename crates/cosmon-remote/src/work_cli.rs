@@ -78,7 +78,7 @@ pub(crate) enum WorkCmd {
     StoreProof,
 }
 
-fn slot(profile: &Profile) -> Result<AttachmentSlot> {
+pub(crate) fn slot(profile: &Profile) -> Result<AttachmentSlot> {
     let attachment = profile.attachment.as_deref().ok_or_else(|| {
         Error::Config("set the host-issued attachment with `config set attachment <id>`".into())
     })?;

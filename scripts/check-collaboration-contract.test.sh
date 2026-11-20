@@ -112,7 +112,24 @@ out="$(run "$WORK/valid.md")"; rc=$?
 if [ $rc -ne 0 ] && grep -qF 'shipped W4 route is missing' <<<"$out"; then ok "shipped route must stay mounted"
 else bad "missing shipped route (rc=$rc): $out"; fi
 cp "$WORK/surface.saved" "$SURFACE"
-expect_fail "W7 remains unmounted" 's#\| advisory-write \| W4#| advisory-write | W7#' "only the five W4 work routes are shipped"
+expect_fail "W7 remains unmounted" 's#\| advisory-write \| W4#| advisory-write | W7#' "only the five W4 work routes and the four W7a presence routes are shipped"
+
+# W7a: the four presence routes are shipped under W7; any other session route
+# mounted next to them is refused.
+printf '%s\n' 'POST /v1/pilot/{mission}/attachments | task-x | 2026-01-01 | tenant | cosmon:sessions:write | adapter-only | x' >> "$SURFACE"
+# The W4 list row becomes a W7a presence row; everything else stays valid.
+sed -E 's#^\| R2 .*$#| S1 | attach | `POST /v1/pilot/{mission}/attachments` | `cosmon:work:write` | `cs sessions attach` | `owner-store` | 2 attachments per mission | idempotent-key | advisory-write | W7 |#' "$WORK/valid.md" > "$WORK/w7a.md"
+out="$(run "$WORK/w7a.md")" && ok "a mounted W7a presence route passes" || bad "W7a presence route should pass: $out"
+sed -E 's#\| W7 \|#| W4 |#' "$WORK/w7a.md" > "$WORK/case.md"
+out="$(run "$WORK/case.md")"; rc=$?
+if [ $rc -ne 0 ] && grep -qF "already mounted" <<<"$out"; then ok "a W7a route declared under W4 is refused"
+else bad "W7a route under W4 (rc=$rc): $out"; fi
+printf '%s\n' 'POST /v1/pilot/{mission}/messages | task-x | 2026-01-01 | tenant | cosmon:sessions:write | adapter-only | x' >> "$SURFACE"
+sed -E 's#`POST /v1/pilot/\{mission\}/attachments`#`POST /v1/pilot/{mission}/messages`#' "$WORK/w7a.md" > "$WORK/case.md"
+out="$(run "$WORK/case.md")"; rc=$?
+if [ $rc -ne 0 ] && grep -qF "already mounted" <<<"$out"; then ok "a later session route stays refused"
+else bad "later session route (rc=$rc): $out"; fi
+cp "$WORK/surface.saved" "$SURFACE"
 
 # The real contract.
 if out="$(python3 "$CHECK" 2>&1)"; then ok "real contract passes"; else bad "real contract: $out"; fi

@@ -68,3 +68,6 @@ pub use oidc::{
 
 /// Versioned advisory work request DTOs.
 pub mod work;
+
+/// Pilot presence request DTOs.
+pub mod pilot;

@@ -38,6 +38,98 @@ security:
   - bearerAuth: []
 
 paths:
+  /v1/pilot/{mission}/attachments:
+    get:
+      operationId: listPilotAttachments
+      summary: List the mission's attached pilot attachments (S-PEERS).
+      tags: [pilot]
+      description: Requires cosmon:sessions:read (or write), a pilot binding for this exact mission and attachment proof. At most 100 attachments per page, sorted by attachment id; `after` is the last attachment of the previous page. Read-only; takes no lock and writes nothing. No host path, native handle, role, lease or retry key is returned.
+      parameters:
+        - {name: cosmon-attachment, in: header, required: true, schema: {type: string}, description: Host-issued attachment identifier.}
+        - {name: cosmon-attachment-proof, in: header, required: true, schema: {type: string, writeOnly: true}, description: Secret attachment proof from the private credential store; never record in logs.}
+        - {name: mission, in: path, required: true, schema: {type: string}}
+        - {name: after, in: query, schema: {type: string}, description: Cursor; the last attachment id of the previous page.}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 100}}
+      responses:
+        "200":
+          description: One page of attachments.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PilotPeersResponse"}
+        "400": {description: Invalid query, cursor or unknown parameter}
+        "401": {description: unauthenticated}
+        "403": {description: scope_missing, binding_missing or binding_revoked}
+        "500": {description: corrupt_evidence}
+        "503": {description: custody_unavailable; outcome unknown}
+    post:
+      operationId: attachPilot
+      summary: Attach the bound attachment to its mission (S-ATTACH).
+      tags: [pilot]
+      description: Requires cosmon:sessions:write and attachment proof. Mission and attachment come from the binding; the body cannot name them, a role or a lease epoch. At most 2 attachments per mission. The same idempotency key with the same body returns the same attachment and writes nothing; the same key or attachment with another body is key_collision. Confers no lifecycle or lease authority.
+      parameters:
+        - {name: cosmon-attachment, in: header, required: true, schema: {type: string}, description: Host-issued attachment identifier.}
+        - {name: cosmon-attachment-proof, in: header, required: true, schema: {type: string, writeOnly: true}, description: Secret attachment proof from the private credential store; never record in logs.}
+        - {name: mission, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PilotAttachRequest"}
+      responses:
+        "200":
+          description: The attachment's presence record, with a duplicate replay indicator.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PilotAttachmentResponse"}
+        "400": {description: Invalid or unknown request field, or an invalid label}
+        "401": {description: unauthenticated}
+        "403": {description: scope_missing, binding_missing or binding_revoked}
+        "409": {description: key_collision or attachment_limit}
+        "500": {description: corrupt_evidence}
+        "503": {description: custody_unavailable; outcome unknown}
+  /v1/pilot/{mission}/attachments/{attachment}:
+    delete:
+      operationId: detachPilot
+      summary: Withdraw the bound attachment's presence (S-DETACH).
+      tags: [pilot]
+      description: Requires cosmon:sessions:write and attachment proof. The path attachment must be the proven one; another is binding_missing and is never rewritten. Removes the presence record only. Safe to repeat; a repeat reports detached=false and writes nothing.
+      parameters:
+        - {name: cosmon-attachment, in: header, required: true, schema: {type: string}, description: Host-issued attachment identifier.}
+        - {name: cosmon-attachment-proof, in: header, required: true, schema: {type: string, writeOnly: true}, description: Secret attachment proof from the private credential store; never record in logs.}
+        - {name: mission, in: path, required: true, schema: {type: string}}
+        - {name: attachment, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Whether a presence record was removed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PilotDetachResponse"}
+        "401": {description: unauthenticated}
+        "403": {description: scope_missing, binding_missing or binding_revoked}
+        "503": {description: custody_unavailable; outcome unknown}
+  /v1/pilot/{mission}/attachments/{attachment}/heartbeat:
+    put:
+      operationId: heartbeatPilot
+      summary: Record a server-observed heartbeat (S-BEAT).
+      tags: [pilot]
+      description: Requires cosmon:sessions:write and attachment proof. The path attachment must be the proven one. The heartbeat time is the server's. At most one heartbeat per 10 seconds; an earlier one is heartbeat_too_soon with Retry-After and writes nothing.
+      parameters:
+        - {name: cosmon-attachment, in: header, required: true, schema: {type: string}, description: Host-issued attachment identifier.}
+        - {name: cosmon-attachment-proof, in: header, required: true, schema: {type: string, writeOnly: true}, description: Secret attachment proof from the private credential store; never record in logs.}
+        - {name: mission, in: path, required: true, schema: {type: string}}
+        - {name: attachment, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: The updated presence record.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PilotAttachmentResponse"}
+        "401": {description: unauthenticated}
+        "403": {description: scope_missing, binding_missing or binding_revoked}
+        "404": {description: not_attached}
+        "429": {description: heartbeat_too_soon}
+        "500": {description: corrupt_evidence}
+        "503": {description: custody_unavailable; outcome unknown}
   /v1/work/{owner}:
     get:
       operationId: listWork
@@ -3882,6 +3974,53 @@ components:
         `RS384`, `RS512` are rejected at parse time.
 
   schemas:
+    PilotAttachRequest:
+      type: object
+      additionalProperties: false
+      required: [idempotency_key]
+      properties:
+        idempotency_key: {type: string, maxLength: 80, description: Retry key; keep it unchanged when retrying a lost response.}
+        label: {type: [string, "null"], maxLength: 128, description: Display metadata only; never authority.}
+    PilotAttachment:
+      type: object
+      required: [attachment, attached_at, heartbeat_at, self]
+      properties:
+        attachment: {type: string}
+        mission: {type: string}
+        label: {type: string}
+        attached_at: {type: string, format: date-time}
+        heartbeat_at: {type: string, format: date-time, description: Server time of the last accepted heartbeat.}
+        self: {type: boolean, description: True for the caller's own attachment.}
+    PilotAttachmentResponse:
+      type: object
+      required: [schema_version, received_at, mission, attachment]
+      properties:
+        schema_version: {type: integer, const: 1}
+        received_at: {type: string, format: date-time}
+        mission: {type: string}
+        attachment: {$ref: "#/components/schemas/PilotAttachment"}
+        duplicate: {type: boolean}
+    PilotDetachResponse:
+      type: object
+      required: [schema_version, received_at, mission, attachment, detached]
+      properties:
+        schema_version: {type: integer, const: 1}
+        received_at: {type: string, format: date-time}
+        mission: {type: string}
+        attachment: {type: string}
+        detached: {type: boolean}
+    PilotPeersResponse:
+      type: object
+      required: [schema_version, received_at, mission, attachments, next_cursor]
+      properties:
+        schema_version: {type: integer, const: 1}
+        received_at: {type: string, format: date-time}
+        mission: {type: string}
+        attachments:
+          type: array
+          maxItems: 100
+          items: {$ref: "#/components/schemas/PilotAttachment"}
+        next_cursor: {type: [string, "null"]}
     WorkSendRequest:
       type: object
       additionalProperties: false
@@ -5749,6 +5888,8 @@ components:
             `tmux -L <socket> attach -t <session>` would target.
 
 tags:
+  - name: pilot
+    description: Bound pilot presence (attach, heartbeat, detach, peers); no lifecycle, mailbox, checkpoint or lease effects.
   - name: work
     description: Bound advisory work exchange; no lifecycle, worker or lease effects.
   - name: harvest

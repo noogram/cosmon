@@ -1,0 +1,16 @@
+Pilot presence of the bound attachment; no lease or lifecycle authority
+
+Usage: cosmon-remote pilot [OPTIONS] <COMMAND>
+
+Commands:
+  attach     Attach the bound attachment to its mission, at most two per mission (`POST /v1/pilot/{mission}/attachments`)
+  heartbeat  Record a server-observed heartbeat, at most one per 10 seconds (`PUT /v1/pilot/{mission}/attachments/{attachment}/heartbeat`)
+  detach     Withdraw the bound attachment's presence; safe to repeat (`DELETE /v1/pilot/{mission}/attachments/{attachment}`)
+  peers      List one page of the mission's attachments (`GET /v1/pilot/{mission}/attachments`)
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --profile <PROFILE>  Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --json               Render machine-readable JSON instead of human text where applicable
+      --token <TOKEN>      Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+  -h, --help               Print help
