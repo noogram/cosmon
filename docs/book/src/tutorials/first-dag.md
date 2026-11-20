@@ -131,8 +131,8 @@ To resolve:
 collapsed blocker keeps its `--blocked-by` dependents pending. The runtime
 requires each blocker to be `completed` with a recorded merge before it
 dispatches a dependent. `cs tackle` also refuses a dependent of a collapsed
-blocker. There is no `cs unlink`. To change the prerequisite, collapse and
-re-nucleate the dependent with the intended `--blocked-by` edge.
+blocker. The `cs` CLI has no `unlink` command. To change the prerequisite,
+collapse and re-nucleate the dependent with the intended `--blocked-by` edge.
 
 To land a completed molecule by hand, check out the base recorded by
 `cs tackle --base` in the target repository and pin the worker branch's tip
