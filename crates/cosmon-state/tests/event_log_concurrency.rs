@@ -17,6 +17,8 @@
 //!   `WRITERS * EVENTS_PER_WRITER`.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::sync::Arc;
 use std::thread;
 
@@ -31,6 +33,80 @@ const EVENTS_PER_WRITER: usize = 1_000;
 fn mol_id(idx: usize) -> MoleculeId {
     // 4-hex-digit suffix keeps the `MoleculeId` validator happy.
     MoleculeId::new(format!("cs-20260419-w{idx:03x}")).unwrap()
+}
+
+#[test]
+fn retry_after_a_torn_append_preserves_the_next_event() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let id = mol_id(0);
+    let event = |step| EventV2::MoleculeStepCompleted {
+        molecule_id: id.clone(),
+        step,
+        total: 3,
+        duration_ms: None,
+        step_hash: None,
+        evidence: None,
+    };
+
+    let mut writer = EventLogWriter::open(&path).unwrap();
+    assert_eq!(writer.emit(event(0), None).unwrap(), Seq(0));
+    drop(writer);
+
+    let mut interrupted = OpenOptions::new().append(true).open(&path).unwrap();
+    interrupted.write_all(b"{\"unfinished\":\"\xc3").unwrap();
+    drop(interrupted);
+
+    let before_open = fs::read(&path).unwrap();
+    let mut restarted = EventLogWriter::open(&path).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), before_open);
+    assert_eq!(restarted.emit(event(1), None).unwrap(), Seq(1));
+    assert_eq!(restarted.emit(event(2), None).unwrap(), Seq(2));
+    restarted.sync().unwrap();
+
+    let envelopes = read_all(&path).unwrap();
+    let observed: Vec<_> = envelopes.iter().map(|row| (row.seq, row.mol_seq)).collect();
+    assert_eq!(
+        observed,
+        [
+            (Seq(0), Some(Seq(0))),
+            (Seq(1), Some(Seq(1))),
+            (Seq(2), Some(Seq(2)))
+        ]
+    );
+    assert!(fs::read(&path)
+        .unwrap()
+        .split(|byte| *byte == b'\n')
+        .any(|line| line == b"{\"unfinished\":\"\xc3"));
+}
+
+#[test]
+fn a_complete_event_missing_its_newline_keeps_its_sequence() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let id = mol_id(0);
+    let event = |step| EventV2::MoleculeStepCompleted {
+        molecule_id: id.clone(),
+        step,
+        total: 2,
+        duration_ms: None,
+        step_hash: None,
+        evidence: None,
+    };
+    let mut writer = EventLogWriter::open(&path).unwrap();
+    assert_eq!(writer.emit(event(0), None).unwrap(), Seq(0));
+    writer.sync().unwrap();
+    drop(writer);
+    let file = OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_len(file.metadata().unwrap().len() - 1).unwrap();
+    drop(file);
+
+    let mut restarted = EventLogWriter::open(&path).unwrap();
+    assert_eq!(restarted.emit(event(1), None).unwrap(), Seq(1));
+
+    let envelopes = read_all(&path).unwrap();
+    let observed: Vec<_> = envelopes.iter().map(|row| (row.seq, row.mol_seq)).collect();
+    assert_eq!(observed, [(Seq(0), Some(Seq(0))), (Seq(1), Some(Seq(1)))]);
 }
 
 #[test]

@@ -134,6 +134,31 @@ fn reconcile_publishes_the_frontier_even_if_the_old_temp_name_is_occupied() {
 }
 
 #[test]
+fn reconcile_can_rebuild_a_molecule_nucleated_after_a_torn_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = setup_multi_surface_project(tmp.path());
+    nucleate_task(&state_dir, "before interruption");
+    let mut events = OpenOptions::new()
+        .append(true)
+        .open(state_dir.join("events.jsonl"))
+        .unwrap();
+    events.write_all(b"{\"unfinished\":").unwrap();
+    drop(events);
+    let molecule = nucleate_task(&state_dir, "after interruption");
+    let cache = state_dir
+        .join("fleets/default/molecules")
+        .join(&molecule)
+        .join("state.json");
+    fs::remove_file(&cache).unwrap();
+
+    run_reconcile(&state_dir);
+
+    let rebuilt: serde_json::Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    assert_eq!(rebuilt["id"], molecule);
+    assert_eq!(rebuilt["formula_id"], "task-work");
+}
+
+#[test]
 fn reconcile_twice_is_byte_identical_at_cli_level() {
     let tmp = tempfile::tempdir().unwrap();
     let state_dir = setup_multi_surface_project(tmp.path());

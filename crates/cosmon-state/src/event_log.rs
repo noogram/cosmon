@@ -280,7 +280,7 @@ impl EventLogWriter {
         // full walk — same answer, slower.
         writer.restore_checkpoint();
         writer.primed_from = writer.scanned_to;
-        writer.catch_up_scan()?;
+        writer.catch_up_scan(false)?;
         Ok(writer)
     }
 
@@ -364,8 +364,9 @@ impl EventLogWriter {
         causal_parent: Option<Seq>,
         emitter: &EmitterHeader,
     ) -> std::io::Result<Seq> {
-        // Read any bytes another writer landed since our last emit.
-        self.catch_up_scan()?;
+        // Read anything another writer appended and close an unterminated
+        // tail under the lock before assigning the next sequence.
+        self.catch_up_scan(true)?;
 
         let global_seq = self.next_seq;
         let mol_seq = event
@@ -399,11 +400,8 @@ impl EventLogWriter {
 
         // Reflect our own append into the caches without re-reading.
         self.next_seq = global_seq.next();
-        if let Some(m) = env.event.molecule_id() {
-            let next = mol_seq
-                .expect("event has molecule_id ⇒ mol_seq is Some")
-                .next();
-            self.mol_seqs.insert(m.clone(), next);
+        if let (Some(m), Some(seq)) = (env.event.molecule_id(), mol_seq) {
+            self.mol_seqs.insert(m.clone(), seq.next());
         }
         if is_verb {
             self.last_verb_ts = Some(env.timestamp);
@@ -526,8 +524,9 @@ impl EventLogWriter {
 
     /// Read any bytes appended past `scanned_to` and fold them into the
     /// in-memory caches. Called from `open` (full file) and from
-    /// `emit_locked` (delta only).
-    fn catch_up_scan(&mut self) -> std::io::Result<()> {
+    /// `emit_locked` (delta only). Only a caller holding the exclusive lock
+    /// may close an unterminated line.
+    fn catch_up_scan(&mut self, close_partial: bool) -> std::io::Result<()> {
         let end = self.file.metadata()?.len();
         if end < self.scanned_to {
             // File was truncated or rotated. Reset and rescan from the
@@ -548,10 +547,16 @@ impl EventLogWriter {
         // Restore the seek to end so the next append lands at the tail.
         self.file.seek(SeekFrom::End(0))?;
 
-        // Walk the delta byte-by-byte, absorbing only *complete* lines
-        // (those followed by a `\n`). A trailing partial line — from a
-        // still-in-flight write by an external writer — stays in the
-        // file; we will pick it up on the next catch-up.
+        // Keep all bytes of an interrupted append. Framing it separately
+        // lets a complete JSON object keep its sequence and prevents an
+        // incomplete object from swallowing the next event.
+        if close_partial && !delta.is_empty() && !delta.ends_with(b"\n") {
+            self.file.write_all(b"\n")?;
+            delta.push(b'\n');
+        }
+
+        // During unlocked priming, a writer may still be filling a line.
+        // Leave those bytes unread until the next scan checks under lock.
         let mut cursor: usize = 0;
         while let Some(rel) = delta[cursor..].iter().position(|b| *b == b'\n') {
             let line_end = cursor + rel; // byte index of the '\n'
@@ -757,27 +762,31 @@ pub(crate) fn note_journal_bytes_read(n: u64) {
 
 /// Read every line of the log and yield (best-effort coerced) envelopes.
 ///
-/// Lines that cannot be coerced at all are skipped — this function is for
-/// replay and tooling, not for enforcing invariants.
+/// Malformed lines, including invalid UTF-8, are skipped so a torn append
+/// does not prevent replay of the subsequent lines.
 ///
 /// # Errors
 ///
 /// Returns `std::io::Error` if the file cannot be opened or read.
 pub fn read_all(path: impl AsRef<Path>) -> std::io::Result<Vec<Envelope>> {
     let file = File::open(path.as_ref())?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut out = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        note_journal_bytes_read(line.len() as u64 + 1);
-        if line.trim().is_empty() {
-            continue;
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        let count = reader.read_until(b'\n', &mut bytes)?;
+        if count == 0 {
+            return Ok(out);
         }
-        if let Ok(env) = Envelope::from_line(&line) {
+        note_journal_bytes_read(count as u64);
+        let Ok(line) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        if let Ok(env) = Envelope::from_line(line) {
             out.push(env);
         }
     }
-    Ok(out)
 }
 
 /// An incremental reader of `events.jsonl`: each [`Self::read_new`] returns
