@@ -6,9 +6,9 @@
 **Decider:** Noogram.
 **Authoring molecule:** `task-20261120-83c1`.
 **Parent deliberation:** `delib-20261120-9b6f` (a panel of four).
-**Answers:** a report from an operator who ran trains under
-[ADR-190](190-bounded-verification-and-train-landing.md) D3 (follow-up to
-GitHub issue #213).
+**Answers:** operating data that the reporter of GitHub issue #213 published
+on that issue after running trains under
+[ADR-190](190-bounded-verification-and-train-landing.md) D3.
 
 **Amends:** [ADR-190](190-bounded-verification-and-train-landing.md) D3, by
 the text in §3 below, which is proposed and not applied: ADR-190's D3 is not
@@ -72,8 +72,8 @@ time of writing.
 |---|---|
 | `cs land-train` takes `--train-base`, `--train-tip`, one `--member <id>=<head>` per member and repeatable `--exclude <id>=<head>`. It has no check-only mode. | `crates/cosmon-cli/src/cmd/land_train.rs:41-57` |
 | Under the trunk lock, the base must equal `--train-base`, or already have the tip on its first-parent chain (a rerun); otherwise "moved after the gate". | `crates/cosmon-harvest/src/train.rs:408-424` |
-| The first-parent chain of `train_base..tip` must be exactly one two-parent merge per member, in order, each with the member's pinned head as second parent and its rendered `cs done` message. | `train.rs:200-268` (`check_train_chain`), called at `:426-429` |
-| Each member must be Completed, integrate into this base (a member with another base branch is refused), and, unless already closed, have its branch at the pinned head. | `train.rs:431-489`; the base-branch refusal at `:440-453` |
+| The first-parent chain of `train_base..tip` must be exactly one two-parent merge per member, in order, each with the member's pinned head as second parent. Its message must start with the member's rendered `cs done` message, byte for byte, and may continue only with trailer lines (what a sign-off hook appends). | `train.rs:200-268` (`check_train_chain`), called at `:426-429`; message rule `:270-296` (`merge_message_matches`) |
+| Each member must be Completed, integrate into this base (a member with another base branch is refused), and, unless already closed, have its branch at the pinned head. | `train.rs:431-489`; the base-branch refusal at `:443-453` |
 | An exclusion is refused when its id is also a member; otherwise its head must resolve, and a member is refused when `git merge-base --is-ancestor <excluded head> <member head>` succeeds. Only the exact head the operator passes is tested. | `train.rs:510-550`; the ancestry test at `:529-531`; called at `:491` |
 | The exclusion check runs inside `land`, after the trunk lock is taken, so after the operator has paid for the gate. | `train.rs:408-410`, `:491` |
 | An integration test asserts that a member carrying an earlier commit of the excluded molecule lands when the operator names a later head of that molecule. | `crates/cosmon-cli/tests/land_train.rs:494-502` (`exclusion_allows_landing_when_no_member_contains_the_pinned_head`) |
@@ -97,6 +97,12 @@ time of writing.
   (added after acceptance, CHANGELOG [Unreleased]), while §6 keeps
   "train-sync with carrier detection" as a non-goal. The two are compatible
   only if `--exclude` is read as a landing backstop; §3 says so.
+- **Merge message.** ADR-190 D3 and §3 ("Merge shape") require each member
+  merge to carry exactly, byte-identically, the message `cs done` would
+  write. The check accepts that message followed by trailer lines
+  (`train.rs:270-296`), because a `prepare-commit-msg` sign-off hook appends
+  one to `cs done`'s own merge as well. The rendered text itself stays
+  byte-exact; this ADR does not change the rule.
 - **Increment status.** ADR-190's increment table said A1, B1–B3 and D1 had
   not landed although they had. Its table is refreshed with a dated
   annotation in the same change as this ADR.
@@ -133,9 +139,10 @@ between them can still conflict.
 Train build stays in the operator's tool. Under the resident runtime a
 polymer never accumulates a batch of Completed, unmerged molecules: each is
 landed as it completes, before its dependents are dispatched. A train built
-by a polymer would race that sweep. The condition ADR-190 §6 set for moving
-train build into cosmon (operator use showing a stable shape; a second
-operator script converging on it) is not met.
+by a polymer would race that sweep. The conditions ADR-190 set for moving
+train build into cosmon are not met: operator use showing a stable shape
+(§6), and a second operator script converging on the same shape (the
+condition §5's last alternative keeps for train build).
 
 What cosmon owes the operator's tool is on the landing side:
 
@@ -193,7 +200,8 @@ the culprit (a Collapsed blocker never clears, so its dependents are
 stranded); refusing the whole batch on any red; ejection by blame or by
 train order; detecting carriers by repeated removal.
 
-**What cosmon checks today.** Partly. `--exclude <id>=<head>` refuses a
+**Can `cs land-train` today refuse a member whose pinned head reaches
+commits of a member removed from an earlier train?** Partly. `--exclude <id>=<head>` refuses a
 member that contains that exact head, only at landing, and only if the
 operator passes the head the removed member had in the earlier train
 (§1.2). A carrier of an earlier commit lands, and a test asserts it. I4
@@ -221,7 +229,7 @@ rebasing a green tip onto a moved base. Both land a tree nobody gated.
 ## 3 · Amendment to ADR-190 D3 (proposed, not applied)
 
 > **Proposed.** The paragraphs below would replace the last two sentences of
-> ADR-190 D3 if this ADR is accepted. Until then ADR-190's D3 is unchanged.
+> the first paragraph of ADR-190 D3 if this ADR is accepted. Until then ADR-190's D3 is unchanged.
 
 > **Red train.** No member is ejected without a green gate verdict on the
 > exact train base, obtained in the same environment as the red verdict on
@@ -229,9 +237,10 @@ rebasing a green tip onto a moved base. Both land a tree nobody gated.
 > base, a red train is rebuilt from the current base without the member
 > found by prefix bisection over the train's first-parent states.
 >
-> **Carriers.** A member whose first-parent chain above the train base
-> contains a merge of a commit that has not landed (I3) is refused, with or
-> without `--exclude`. At landing, repeat `--exclude <id>=<head>` for every
+> **Carriers.** Once a survey of legitimate flows has shown that none fails
+> it, a member whose first-parent chain above the train base contains a
+> merge of a commit that has not landed (I3) is refused, with or without
+> `--exclude`. At landing, repeat `--exclude <id>=<head>` for every
 > removed member; `cs land-train` refuses a member whose pinned head contains
 > the first own commit of an excluded molecule (I4). `--exclude` is a
 > landing backstop. It does not lift the ADR-190 §6 non-goal "train-sync
@@ -258,7 +267,7 @@ member's first-parent chain above the base: `cs sync` from the base,
 `Base-Sync` trailers, stacked molecules (one tackled on another's branch)
 and integration bases. A `cs sync` merge is expected to pass, because its
 second parent is an older base commit; this is unverified. Integration bases
-are already refused (`train.rs:440-453`). If the survey finds a legitimate
+are already refused (`train.rs:443-453`). If the survey finds a legitimate
 flow that fails I3, I3 is not enforced and the operator decides again.
 
 ## 4 · Invariants
@@ -282,9 +291,9 @@ invariant that an existing test already exercises.
 
 ## 5 · Open decisions
 
-None of the following is decided. Each is recorded with the recommended
-option and the alternative, in the order the operator is expected to take
-them.
+O1 is decided by the operator. O2 to O5 are open: each is recorded with
+the recommended option and the alternative, in the order the operator is
+expected to take them.
 
 - **O1 — Form of the carrier rule. Decided by the operator:** I3 together
   with I4, I3 subject to the survey in §3. Alternatives that were weighed: a
