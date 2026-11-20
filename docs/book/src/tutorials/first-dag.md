@@ -80,10 +80,11 @@ cs run <A>
 2. finds the **ready frontier**: every molecule whose upstream is already done
    (at the start, just `<A>`),
 3. advances the ready molecules,
-4. when one finishes, unlocks whatever it was blocking, recomputing the frontier,
+4. when a blocker completes and is merged, recomputes the frontier,
 5. repeats until nothing is left, then exits.
 
-So `<A>` runs first; only when it completes does `<B>` become ready; then `<C>`.
+So `<A>` runs first. Once it completes and lands, `<B>` can run, followed by
+`<C>` once `<B>` completes and lands.
 You wired the order once, declaratively, and the runtime enforces it.
 
 `cs run` blocks your terminal until the whole graph drains. For anything
@@ -124,6 +125,33 @@ To resolve:
   cd - && cs done <mol-id>
 ```
 
+## When a blocker collapses or needs a manual landing
+
+`cs deps <id>` shows the upstream molecule with status `[collapsed]`. A
+collapsed blocker keeps its `--blocked-by` dependents pending. The runtime
+requires each blocker to be `completed` with a recorded merge before it
+dispatches a dependent. `cs tackle` also refuses a dependent of a collapsed
+blocker. There is no `cs unlink`. To change the prerequisite, collapse and
+re-nucleate the dependent with the intended `--blocked-by` edge.
+
+To land a completed molecule by hand, check out the base recorded by
+`cs tackle --base` in the target repository and pin the worker branch's tip
+as `<head>`. After the merge succeeds, close the molecule with the same
+commit. `--expect-head` checks that the worker branch still points to that
+commit. Omit `--no-merge` so `cs done` checks ancestry and records `merged_at`.
+
+```sh
+git merge --no-ff -m "$(cs done <id> --print-merge-message)" <head>
+cs done <id> --expect-head <head>
+```
+
+When the pinned head is already reachable from the recorded base, `cs done`
+closes the molecule without running the post-merge integrity gate or its
+trust check. A configured `pre_done` hook still requires trust when it runs.
+Cosmon warns if trusted shell files changed between the fork point and
+landing commit, or if it cannot establish that range. See the [ADR-158 amendment](https://github.com/noogram/cosmon/blob/main/docs/adr/158-post-merge-integrity-delegation-cascade.md#amendment-2026-11-17--no-merge-nothing-to-verify-issues-215-213)
+and the [train landing guide](https://github.com/noogram/cosmon/blob/main/docs/guides/train-landing.md).
+
 ## Diamonds and parallelism
 
 A chain is the simplest DAG. The same flags build a diamond, where two molecules
@@ -137,9 +165,8 @@ cs nucleate task-work --var topic="Integration tests" \
     --blocked-by <api> --blocked-by <ui>                              # → tests
 ```
 
-Under `cs run`, `api` and `ui` become ready *together* the moment `infra`
-completes, run in parallel, and `tests` waits for both. You describe the shape;
-the runtime finds the parallelism.
+Under `cs run`, `api` and `ui` become ready *together* once `infra`
+completes and lands. They run in parallel, and `tests` waits for both.
 
 ## What just happened
 

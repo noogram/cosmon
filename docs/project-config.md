@@ -22,6 +22,9 @@ configuration surface without reading cosmon source code.
 | `[worker]` | Worker behavior on completion; `deny_rules` permission denials | no |
 | `[hooks]` | Lifecycle hook commands | no |
 | `[gates]` | Verification gate commands (language-agnostic) | no |
+| `[gate_slots]` | Concurrency limits for verification commands across worktrees | no |
+| `[admission]` | Active-worker and free-space bounds for `cs tackle` | no |
+| `[[worktree_reclaim.external]]` | External bases for reclaimable build output | no |
 | `[archive]` | Durable proof-of-work archive: on/off and retention | no |
 | `[adapters.codex]` / `[adapters.opencode]` | External CLI launch policy and optional gateway binding | no |
 | `[harvest]` | What the `pane-died` hook does after recording a worker's exit | no |
@@ -323,6 +326,83 @@ renders the configured gates into the bootstrap prompt.
 This replaces a previous Rust-biased hardcoded line in the worker prompt
 (`cargo check && cargo test && cargo clippy -- -D warnings && cargo fmt
 --check`), which silently broke Python, Node, and Go projects.
+
+## `[gate_slots]` — concurrent verification commands
+
+```toml
+[gate_slots]
+full_gate = 2
+
+[gate_slots.pools]
+docker_build = 1
+```
+
+| Field | Meaning |
+|-------|---------|
+| `full_gate` | Slot count for the default `full_gate` pool, used by `scripts/run-gates-bg.sh`. |
+| `pools.<name>` | Slot count for an independent pool selected with `cs gates slot --pool <name>`. |
+
+Omitting a count or setting it to `0` leaves that pool unbounded. Set the
+`full_gate` count directly under `[gate_slots]`. If the project config is
+missing, unreadable, or invalid, `cs gates slot` uses the default config,
+in which every pool is unbounded. See the
+[gate slots and admission guide](guides/gate-slots-and-admission.md).
+
+## `[admission]` — bounds on worker dispatch
+
+```toml
+[admission]
+max_active = 4
+min_free_bytes = 10737418240 # 10 GiB
+```
+
+| Field | Refusal condition |
+|-------|-------------------|
+| `max_active` | The active count is at or above this value. |
+| `min_free_bytes` | The volume holding `.worktrees/` has fewer free bytes than this value. |
+
+Each bound is optional and applies only when set. `cs tackle` checks the
+bounds before creating a worktree, branch, or worker session. A molecule
+counts as active if its status is `running` and its recorded worker is
+reported alive. The molecule being tackled is excluded. A matching live
+worker returned by `cs tackle --if-needed` needs no new admission check.
+
+The admission check uses unset bounds if the project config is missing or
+if loading it returns a read or parse error. A read or parse error that
+persists still stops worker dispatch at the later project-config load.
+If listing molecules or probing free space fails, the check prints a notice
+and skips the corresponding bound. The other bound can still refuse dispatch.
+
+## `[[worktree_reclaim.external]]` — external build-output directories
+
+```toml
+[worktree_reclaim]
+evict = ["target"]
+
+[[worktree_reclaim.external]]
+root = "target"
+base = "REPLACE_WITH_ABSOLUTE_BASE_A"
+suffix = "-wt"
+
+[[worktree_reclaim.external]]
+root = "target"
+base = "REPLACE_WITH_ABSOLUTE_BASE_B"
+```
+
+Replace each `base` placeholder with an absolute directory path. Repeat the
+entry to declare several bases for the same root. The list defaults to empty.
+
+| Field | Meaning |
+|-------|---------|
+| `root` | Worktree-relative path to the derived root, also listed in `[worktree_reclaim].evict`. |
+| `base` | External directory whose direct children are per-molecule build directories. |
+| `suffix` | Fixed text appended to the molecule ID in a child directory name. Defaults to the empty string. |
+
+Each declaration lets `cs purge --worktrees` consider `<base>/<id><suffix>`
+for molecule `<id>`. A project-config read or parse error stops the pass.
+See the [worktree reclamation guide](guides/worktree-reclamation.md) and
+[ADR-191](adr/191-a-project-may-declare-an-external-derived-root.md) for
+validation and reclamation rules.
 
 ## `[hooks]` — lifecycle hook commands
 
