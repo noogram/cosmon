@@ -2,7 +2,7 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Land-train — land an operator-gated train on the base, then close each member
+Land-train — land an operator-gated train and close its members, with optional `--exclude` checks
 
 The train is built off-trunk by the operator: one `git merge --no-ff` per member, each with the message `cs done --print-merge-message` prints, merging the member's pinned head. Under the trunk lock the base moves by a compare-and-swap fast-forward to the train tip, after every check passed; the lock is released, then each member is closed by `cs done <id> --expect-head <head>`. A rerun after a kill skips the landing and closes only the members still open.
 
@@ -28,6 +28,9 @@ Options:
 
       --member <ID=HEAD>
           One member, as `<molecule id>=<pinned branch head>`. Repeat once per member merge, in the order the train merged them (oldest first)
+
+      --exclude <ID=HEAD>
+          Repeat once per removed member with its pinned head. Refuses any train member whose pinned head contains an excluded head in its ancestry. An excluded ID must be absent from --member, and its head must resolve to a commit
 
   -h, --help
           Print help (see a summary with '-h')

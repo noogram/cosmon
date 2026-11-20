@@ -27,7 +27,7 @@
 use std::process::Command;
 
 use anyhow::Context as _;
-use cosmon_harvest::train::{self, LandTrainRequest, Landing, TrainMember};
+use cosmon_harvest::train::{self, ExcludedHead, LandTrainRequest, Landing, TrainMember};
 
 use super::Context;
 
@@ -49,6 +49,13 @@ pub struct Args {
     /// member merge, in the order the train merged them (oldest first).
     #[arg(long = "member", value_name = "ID=HEAD", required = true)]
     pub members: Vec<String>,
+
+    /// Repeat once per removed member with its pinned head. Refuses any
+    /// train member whose pinned head contains an excluded head in its
+    /// ancestry. An excluded ID must be absent from --member, and its
+    /// head must resolve to a commit.
+    #[arg(long = "exclude", value_name = "ID=HEAD")]
+    pub exclusions: Vec<String>,
 }
 
 /// Execute `cs land-train`.
@@ -64,10 +71,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .iter()
         .map(|m| TrainMember::parse(m))
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let exclusions = args
+        .exclusions
+        .iter()
+        .map(|spec| ExcludedHead::parse(spec))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let request = LandTrainRequest {
         train_base: args.train_base.clone(),
         train_tip: args.train_tip.clone(),
         members,
+        exclusions,
     };
     let harvest_ctx = cosmon_harvest::HarvestContext {
         verbose: ctx.verbose,

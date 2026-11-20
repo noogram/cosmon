@@ -236,11 +236,11 @@ SEE ALSO: cs complete (state transition only), cs tackle (counterpart).
 
 ## `cs land-train`
 
-Land-train — land an operator-gated train on the base, then close each member
+Land-train — land an operator-gated train and close its members, with optional `--exclude` checks
 
 The train is built off-trunk by the operator: one `git merge --no-ff` per member, each with the message `cs done --print-merge-message` prints, merging the member's pinned head. Under the trunk lock the base moves by a compare-and-swap fast-forward to the train tip, after every check passed; the lock is released, then each member is closed by `cs done <id> --expect-head <head>`. A rerun after a kill skips the landing and closes only the members still open.
 
-**Usage:** `cs land-train --train-base <REV> --train-tip <REV> --member <ID=HEAD>`
+**Usage:** `cs land-train [OPTIONS] --train-base <REV> --train-tip <REV> --member <ID=HEAD>`
 
 EXAMPLES:
   git switch -c train main
@@ -274,6 +274,7 @@ See docs/guides/train-landing.md.
    The landing is a compare-and-swap: the base branch must still be at this commit, or the train is refused as "moved after the gate".
 * `--train-tip <REV>` — The train's tip: the gated commit the base branch fast-forwards to
 * `--member <ID=HEAD>` — One member, as `<molecule id>=<pinned branch head>`. Repeat once per member merge, in the order the train merged them (oldest first)
+* `--exclude <ID=HEAD>` — Repeat once per removed member with its pinned head. Refuses any train member whose pinned head contains an excluded head in its ancestry. An excluded ID must be absent from --member, and its head must resolve to a commit
 
 
 

@@ -375,6 +375,205 @@ fn happy_train(fx: Fixture) -> Train {
     }
 }
 
+/// Three train members. Only the middle member descends from the removed
+/// member's pinned head. The removed member is absent from the train list.
+struct CarrierTrain {
+    fx: Fixture,
+    base: String,
+    tip: String,
+    members: [(String, String); 3],
+    excluded: (String, String),
+}
+
+impl CarrierTrain {
+    fn new() -> Self {
+        let fx = Fixture::new("", false);
+        let base = rev(&fx.repo, "main");
+        let removed = fx.completed_molecule("removed member");
+        let removed_head = fx.commit_on_branch(&removed, &base, "removed.txt", "removed\n");
+        let members = ["first", "middle", "last"].map(|name| {
+            let id = fx.completed_molecule(name);
+            let mut head = fx.commit_on_branch(&id, &base, &format!("{name}.txt"), "member\n");
+            if name == "middle" {
+                git_ok(&fx.repo, &["checkout", "-q", &format!("feat/{id}")]);
+                git_ok(
+                    &fx.repo,
+                    &[
+                        "merge",
+                        "--no-ff",
+                        "-qm",
+                        "merge removed member",
+                        &removed_head,
+                    ],
+                );
+                head = rev(&fx.repo, "HEAD");
+                git_ok(&fx.repo, &["checkout", "-q", "main"]);
+            }
+            fx.merge_member_into_train(&id);
+            (id, head)
+        });
+        let tip = rev(&fx.repo, "train");
+        Self {
+            fx,
+            base,
+            tip,
+            members,
+            excluded: (removed, removed_head),
+        }
+    }
+
+    fn land(&self, exclusions: &[(&str, &str)]) -> Output {
+        let members = self
+            .members
+            .each_ref()
+            .map(|(id, head)| (id.as_str(), head.as_str()));
+        let mut cmd = self.fx.land_command(&self.base, &self.tip, &members);
+        for (id, head) in exclusions {
+            cmd.arg("--exclude").arg(format!("{id}={head}"));
+        }
+        cmd.output().expect("cs land-train")
+    }
+
+    fn assert_refusal(&self, out: &Output, needles: &[&str]) {
+        let output = combined(out);
+        assert!(!out.status.success(), "the train must be refused: {output}");
+        assert_eq!(rev(&self.fx.repo, "main"), self.base);
+        for (id, _) in self.members.iter().chain([&self.excluded]) {
+            assert!(!self.fx.is_closed(id), "{id} must stay open");
+        }
+        for needle in needles {
+            assert!(output.contains(needle), "expected `{needle}`: {output}");
+        }
+    }
+
+    fn assert_landed(&self, out: &Output) {
+        assert!(out.status.success(), "landing failed: {}", combined(out));
+        assert_eq!(rev(&self.fx.repo, "main"), self.tip);
+        for (id, _) in &self.members {
+            assert!(self.fx.is_closed(id), "{id} must be closed");
+        }
+        assert!(!self.fx.is_closed(&self.excluded.0));
+    }
+}
+
+#[test]
+fn exclusion_refuses_the_middle_carrier_without_landing_or_closing() {
+    let train = CarrierTrain::new();
+    let (id, head) = &train.excluded;
+    train
+        .fx
+        .commit_on_branch(id, &train.base, "later.txt", "later\n");
+    let out = train.land(&[(id, head)]);
+    train.assert_refusal(
+        &out,
+        &["carries excluded member", &train.members[1].0, id, head],
+    );
+}
+
+#[test]
+fn exclusion_checks_later_exclusions_after_an_unrelated_one() {
+    let train = CarrierTrain::new();
+    let (id, head) = &train.excluded;
+    let other = train.fx.completed_molecule("other removed member");
+    let unrelated = train
+        .fx
+        .commit_on_branch(&other, &train.base, "other.txt", "other\n");
+    let out = train.land(&[(&other, &unrelated), (id, head)]);
+    train.assert_refusal(
+        &out,
+        &["carries excluded member", &train.members[1].0, id, head],
+    );
+}
+
+#[test]
+fn without_exclusions_the_same_train_lands_and_closes_its_members() {
+    let train = CarrierTrain::new();
+    train.assert_landed(&train.land(&[]));
+}
+
+#[test]
+fn exclusion_allows_landing_when_no_member_contains_the_pinned_head() {
+    let train = CarrierTrain::new();
+    let (id, _) = &train.excluded;
+    let head = train
+        .fx
+        .commit_on_branch(id, &train.base, "later.txt", "later\n");
+    train.assert_landed(&train.land(&[(id, &head)]));
+}
+
+#[test]
+fn exclusion_refuses_an_id_also_listed_as_a_member() {
+    let train = CarrierTrain::new();
+    let (id, _) = &train.members[0];
+    let head = &train.excluded.1;
+    train.assert_refusal(
+        &train.land(&[(id, head)]),
+        &[id, "also listed as a train member"],
+    );
+}
+
+#[test]
+fn exclusion_refuses_an_unknown_pinned_head() {
+    let train = CarrierTrain::new();
+    let (id, _) = &train.excluded;
+    let unknown = "f".repeat(train.base.len());
+    train.assert_refusal(
+        &train.land(&[(id, &unknown)]),
+        &["excluded head", id, &unknown],
+    );
+}
+
+#[test]
+fn exclusion_refuses_a_missing_id_or_head() {
+    let train = happy_train(Fixture::new("", false));
+    for malformed in [
+        train.a.clone(),
+        format!("={}", train.ha),
+        format!("{}=", train.a),
+    ] {
+        let out = train
+            .fx
+            .land_command(&train.base, &train.tip, &train.members())
+            .args(["--exclude", &malformed])
+            .output()
+            .unwrap();
+        train.assert_refused_naming(
+            &out,
+            "expected `<molecule id>=<pinned branch head>`",
+            &train.base,
+        );
+        assert!(combined(&out).contains(&format!("--exclude `{malformed}`")));
+    }
+}
+
+#[test]
+fn exclusion_refuses_when_git_cannot_check_ancestry() {
+    let train = happy_train(Fixture::new("", false));
+    let id = train.fx.completed_molecule("removed member");
+    let head = train
+        .fx
+        .commit_on_branch(&id, &train.base, "removed.txt", "removed\n");
+    let out = train.land_through_git(r#"#!/bin/sh
+set -eu
+export PATH="$LAND_TRAIN_REAL_PATH"
+if [ "$#" -ge 6 ] && [ "$3" = merge-base ] && [ "$4" = --is-ancestor ] && [ "$5" = "$LAND_TRAIN_EXCLUDED_HEAD" ]; then
+    echo 'test ancestry failure' >&2
+    exit 128
+fi
+exec git "$@"
+"#)
+        .env("LAND_TRAIN_EXCLUDED_HEAD", &head)
+        .arg("--exclude")
+        .arg(format!("{id}={head}"))
+        .output()
+        .unwrap();
+    train.assert_refused_naming(&out, "test ancestry failure", &train.base);
+    let text = combined(&out);
+    for needle in [&id, &head, &train.a] {
+        assert!(text.contains(needle), "expected `{needle}`: {text}");
+    }
+}
+
 /// `(tree, parent count, second parent, raw message)` of every first-parent
 /// commit in `from..to`, oldest first: the shape two histories must share.
 fn first_parent_shape(repo: &Path, from: &str, to: &str) -> Vec<(String, usize, String, String)> {

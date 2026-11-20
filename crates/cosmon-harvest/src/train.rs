@@ -71,19 +71,40 @@ impl TrainMember {
     /// When the text has no `=`, either side is empty, or the molecule id is
     /// not a valid id.
     pub fn parse(spec: &str) -> anyhow::Result<Self> {
-        let (mol, head) = spec.split_once('=').ok_or_else(|| {
-            anyhow::anyhow!("--member `{spec}`: expected `<molecule id>=<pinned branch head>`")
-        })?;
-        let (mol, head) = (mol.trim(), head.trim());
-        anyhow::ensure!(
-            !mol.is_empty() && !head.is_empty(),
-            "--member `{spec}`: expected `<molecule id>=<pinned branch head>`"
-        );
-        Ok(Self {
-            molecule: MoleculeId::new(mol)?,
-            head: head.to_owned(),
-        })
+        let (molecule, head) = parse_pin(spec, "--member")?;
+        Ok(Self { molecule, head })
     }
+}
+
+/// A removed molecule and the head it contributed to an earlier train.
+#[derive(Debug, Clone)]
+pub struct ExcludedHead {
+    molecule: MoleculeId,
+    head: String,
+}
+
+impl ExcludedHead {
+    /// Parse the `<mol_id>=<head>` spelling of `cs land-train --exclude`.
+    ///
+    /// # Errors
+    ///
+    /// When the text has no `=`, either side is empty, or the molecule id is
+    /// invalid.
+    pub fn parse(spec: &str) -> anyhow::Result<Self> {
+        let (molecule, head) = parse_pin(spec, "--exclude")?;
+        Ok(Self { molecule, head })
+    }
+}
+
+fn parse_pin(spec: &str, flag: &str) -> anyhow::Result<(MoleculeId, String)> {
+    let invalid =
+        || anyhow::anyhow!("{flag} `{spec}`: expected `<molecule id>=<pinned branch head>`");
+    let (mol, head) = spec.split_once('=').ok_or_else(invalid)?;
+    let (mol, head) = (mol.trim(), head.trim());
+    if mol.is_empty() || head.is_empty() {
+        return Err(invalid());
+    }
+    Ok((MoleculeId::new(mol)?, head.to_owned()))
 }
 
 /// What the operator asks [`land`] to do.
@@ -96,6 +117,9 @@ pub struct LandTrainRequest {
     /// The members, in the order their merges sit on the train's
     /// first-parent chain (oldest first).
     pub members: Vec<TrainMember>,
+    /// Removed members' pinned heads, which the train's members must exclude
+    /// from their ancestry.
+    pub exclusions: Vec<ExcludedHead>,
 }
 
 /// Whether [`land`] moved the base or found it already moved.
@@ -303,11 +327,13 @@ fn indent(text: &str) -> String {
 /// 3. [`check_train_chain`] over `train_base..tip`.
 /// 4. Every member is Completed, has no other base branch, and — unless
 ///    already closed — its branch is still at its pinned head.
-/// 5. The shell-surface predicate over `train_base..tip` (ADR-190 §7): a
+/// 5. Each excluded ID is absent from the member list. Its head resolves to
+///    a commit outside the ancestry of every pinned member head.
+/// 6. The shell-surface predicate over `train_base..tip` (ADR-190 §7): a
 ///    train that changes a trusted-shell-surface path lands only when the
 ///    repository's grant already covers the surface the landing leaves on
 ///    disk. This function never grants trust.
-/// 6. When the base is checked out in the main checkout, local changes must
+/// 7. When the base is checked out in the main checkout, local changes must
 ///    not overlap the files the train changes.
 ///
 /// # Errors
@@ -462,6 +488,8 @@ pub fn land(ctx: &HarvestContext, req: &LandTrainRequest) -> anyhow::Result<Land
         });
     }
 
+    check_exclusions(&repo_root, &expected, &req.exclusions)?;
+
     if landing == Landing::Landed {
         check_shell_surface(&repo_root, &base_branch, &train_base, &train_tip)?;
         fast_forward(&repo_root, &base_branch, &train_base, &train_tip)?;
@@ -477,6 +505,48 @@ pub fn land(ctx: &HarvestContext, req: &LandTrainRequest) -> anyhow::Result<Land
         already_closed,
         warnings,
     })
+}
+
+fn check_exclusions(
+    repo_root: &Path,
+    members: &[ExpectedMerge],
+    exclusions: &[ExcludedHead],
+) -> anyhow::Result<()> {
+    for excluded in exclusions {
+        let id = &excluded.molecule;
+        if members.iter().any(|member| member.molecule == *id) {
+            anyhow::bail!(
+                "cs land-train refused: excluded molecule {id} is also listed as a train member. \
+                 Nothing was moved or closed."
+            );
+        }
+        let head = resolve_commit(
+            repo_root,
+            &excluded.head,
+            &format!("excluded head for {id}"),
+        )?;
+        for member in members {
+            let carrier = &member.molecule;
+            let out = git(repo_root)
+                .args(["merge-base", "--is-ancestor", &head, &member.head])
+                .output()?;
+            match out.status.code() {
+                Some(1) => {}
+                Some(0) => anyhow::bail!(
+                    "cs land-train refused: member {carrier} carries excluded member {id} at \
+                     head {head}. Nothing was moved or closed."
+                ),
+                _ => anyhow::bail!(
+                    "cs land-train refused: could not check member {carrier} for excluded \
+                     member {id} at head {head}: git merge-base exited with {}: {}. Nothing \
+                     was moved or closed.",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn short(oid: &str) -> &str {
