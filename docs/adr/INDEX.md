@@ -176,4 +176,5 @@
 | 189-msrv-1-89-for-patched-sqlite | [189-msrv-1-89-for-patched-sqlite.md](189-msrv-1-89-for-patched-sqlite.md) |
 | 190-bounded-verification-and-train-landing | [190-bounded-verification-and-train-landing.md](190-bounded-verification-and-train-landing.md) |
 | 191-a-project-may-declare-an-external-derived-root | [191-a-project-may-declare-an-external-derived-root.md](191-a-project-may-declare-an-external-derived-root.md) |
+| 192-a-train-is-a-landing-mode-that-refuses-carriers | [192-a-train-is-a-landing-mode-that-refuses-carriers.md](192-a-train-is-a-landing-mode-that-refuses-carriers.md) |
 
