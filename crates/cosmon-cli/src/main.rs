@@ -322,7 +322,7 @@ enum Command {
     /// Configure and inspect remote harvest authority; reset a lost root only on the host.
     HarvestAuthority(cmd::harvest_authority::Args),
 
-    /// Land-train — land an operator-gated train on the base, then close each member
+    /// Land-train — land an operator-gated train and close its members, with optional `--exclude` checks
     ///
     /// The train is built off-trunk by the operator: one `git merge --no-ff`
     /// per member, each with the message `cs done --print-merge-message`

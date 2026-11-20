@@ -62,11 +62,13 @@ failure moves nothing, closes nothing, and names the offending commit or member:
    after it. There are as many merges as members.
 4. Each member is Completed (not collapsed), integrates into this base, and its
    branch is still at its pinned head.
-5. If the train changes a file of the trusted shell surface
+5. Each `--exclude` head resolves to a commit, the excluded ID is absent from
+   the member list, and none of the pinned member heads contains that commit.
+6. If the train changes a file of the trusted shell surface
    (`.cosmon/config.toml`, the formulas, and the scripts they invoke), an
    existing trust grant must already cover the surface the train will leave on
    disk. `cs land-train` never grants trust.
-6. If the base is checked out in the main checkout, no local change may overlap
+7. If the base is checked out in the main checkout, no local change may overlap
    a file the train changes.
 
 The base then moves by `git update-ref <base> <tip> <train-base>`, a
@@ -74,6 +76,22 @@ compare-and-swap. A checked-out index and working tree are moved first, with
 `git read-tree -m -u`, and moved back if the swap fails. The lock is released
 before any member is closed: `cs done` takes the trunk lock itself, and a child
 blocked on a lock its parent holds would wait forever.
+
+## Rebuilding a red train and checking for carriers
+
+1. Run the same gate against the current base by itself before dropping any
+   members. If the base fails the gate, investigate the base failure first.
+2. Identify the failing member, record its pinned head and rebuild the train
+   without it. Gate the rebuilt train.
+3. When landing the rebuilt train, add `--exclude <id>=<head>` for each removed
+   member. Use the head that member contributed to the earlier train.
+
+A carrier is a member whose pinned head contains an excluded head in its Git
+ancestry. For example, a branch that merged the earlier train can carry the
+removed member's commits into the rebuilt train. `cs land-train` refuses that
+landing and names the carrier, the excluded member and its head. Rebuild the
+carrier without the excluded commits or remove it as well, then gate the new
+train again. Keep the excluded commits available to Git until landing.
 
 ## Closing the members
 

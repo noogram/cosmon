@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- Repeat `cs land-train --exclude <id>=<head>` for each removed member when landing a rebuilt train. Landing is refused before moving the base or closing members if a pinned member head contains an excluded head, an excluded ID also appears in the member list, or an excluded head cannot be resolved (#213).
+
 ## [0.10.0] — 2026-11-19
 
 - `cs tackle --if-needed` on a live worker that matches the request now succeeds even when spawn admission is closed (cap reached or disk floor unmet); a call that would start a new worker is still refused before any worktree, branch or session exists.

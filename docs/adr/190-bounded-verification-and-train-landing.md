@@ -140,8 +140,9 @@ main under the trunk lock, inside a cosmon verb, after the #109 surface
 predicate has passed over the landing range. Each member is then closed by
 `cs done --expect-head <pinned head>`, which stays the writer of `merged_at`
 for train members. A red train is rebuilt from the current main tip without
-the member found by prefix bisection, and members do not merge the train
-until carrier detection exists.
+the member found by prefix bisection. At landing, repeat `--exclude <id>=<head>`
+for every removed member so `cs land-train` can refuse a member whose pinned
+head contains an excluded head.
 
 D3 constrains the *shape* of a train build and of a red-train rebuild,
 whichever tool performs it. Building trains, gating them and bisecting a red
