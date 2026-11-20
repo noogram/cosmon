@@ -368,29 +368,6 @@ fn project_single(id: &MoleculeId, envelopes: &[Envelope]) -> Option<MoleculeDat
     projection.remove(id)
 }
 
-/// "Consistent" here means: the status, step counter, seals, and `merged_at`
-/// derivable from events match what the cache claims. Fields the event log
-/// cannot know (variables, tags, `session_name`, …) are ignored — otherwise
-/// every healthy cache would look stale on every reconcile.
-///
-/// Reserved for future `cs verify` audit work; the rebuild path itself
-/// no longer consults this — see [`rebuild_molecule_state`] for the
-/// read-only-on-valid-cache invariant.
-#[allow(dead_code)]
-fn is_consistent(cache: &MoleculeData, projected: Option<&MoleculeData>) -> bool {
-    let Some(p) = projected else {
-        return true;
-    };
-    cache.status == p.status
-        && cache.current_step == p.current_step
-        && cache.total_steps == p.total_steps
-        && cache.completed_steps == p.completed_steps
-        && cache.merged_at == p.merged_at
-        && cache.prompt_seal == p.prompt_seal
-        && cache.briefing_seals == p.briefing_seals
-        && cache.bootstrap_seals == p.bootstrap_seals
-}
-
 #[allow(clippy::too_many_lines)]
 fn apply_event(env: &Envelope, out: &mut HashMap<MoleculeId, MoleculeData>) {
     match &env.event {
@@ -993,11 +970,11 @@ mod tests {
     /// fields the projection cannot reconstruct (variables, kind,
     /// `project_id`, `session_name`, formula's named `StepId`s) MUST NOT be
     /// overwritten. The bug previously sat in [`rebuild_molecule_state`]:
-    /// when `is_consistent` returned `false` because the cache carried
+    /// when the old consistency check returned `false` because the cache carried
     /// named `completed_steps = [implement, verify]` while events
     /// emitted positional `[step-0, step-1]`, the function silently
     /// wrote the lossy projection on top of the cache, stripping every
-    /// operator-visible field. the voicelab galaxy lost variables from 37
+    /// operator-visible field. The voicelab galaxy lost variables from 37
     /// molecules this way before the bug was caught.
     #[test]
     #[allow(clippy::too_many_lines)]
