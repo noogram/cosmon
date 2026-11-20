@@ -108,6 +108,12 @@ drift, takeover). `hook` wires the routine ones into the agent itself.
 a Codex app-server connection; cosmon does not open that connection. It
 requires a presence row previously established by attach or a provider hook.
 
+From another machine, `cosmon-remote pilot attach/heartbeat/detach/peers`
+reaches the host RPP with an operator-provisioned pilot binding and its
+attachment proof: at most two attachments per mission, one heartbeat per
+10 seconds, server-timed. A remote attachment is advisory presence only; it
+takes no seat role and no lease, and it is not listed by the local `peers`.
+
 Both seats are live sessions of the SAME mission, and only a human signature
 moves the controls between them. For separate molecules — each with its own
 lifecycle, visible in `cs peek` and harvested on its own — exchanging bounded

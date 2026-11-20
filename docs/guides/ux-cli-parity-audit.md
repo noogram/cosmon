@@ -45,6 +45,29 @@ and JSON refusal name the missing formula and give `cs init --upgrade` before
 `cs nucleate verify-surface --var target=<MOL>`. Galaxies with the formula keep
 the existing refusal message. No UI control or remote route changes.
 
+## Cross-machine pilot presence (issue #212 W7a)
+
+| Capability | Local CLI | Remote CLI / API |
+|---|---|---|
+| Announce presence on a mission | `cs sessions attach` | `cosmon-remote pilot attach`; `POST /v1/pilot/{mission}/attachments` |
+| Refresh the heartbeat | `cs presence ping` | `cosmon-remote pilot heartbeat`; `PUT /v1/pilot/{mission}/attachments/{attachment}/heartbeat` |
+| Withdraw presence | `cs presence detach` | `cosmon-remote pilot detach`; `DELETE /v1/pilot/{mission}/attachments/{attachment}` |
+| List who is present | `cs sessions peers` | `cosmon-remote pilot peers`; `GET /v1/pilot/{mission}/attachments` |
+
+The two columns do not address the same records. Local verbs act on local
+session snapshots keyed by session id; the remote routes act on remote
+attachment records keyed by the host-issued attachment of an
+operator-provisioned pilot binding. The local `peers` does not list remote
+attachments, and the remote `peers` does not list local sessions. Remote
+attach takes no role, follow target, capability or lease epoch; the request
+names neither mission nor attachment beyond the path, which must match the
+binding and is refused otherwise. A mission holds at most two remote
+attachments, a heartbeat is server-timed and accepted at most once per 10
+seconds, detach is safe to repeat, and peers returns at most 100 attachments
+per page with a stable cursor and writes nothing. The client profile and proof
+setup are those of `work` (`config set attachment ID`, `work store-proof`).
+Mailbox (W7b) and checkpoint (W7c) routes are not mounted.
+
 ## Cross-machine work exchange (issue #147 W4)
 
 | Capability | Local CLI | Remote CLI / API |

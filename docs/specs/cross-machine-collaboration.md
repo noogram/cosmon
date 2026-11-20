@@ -12,12 +12,13 @@ and [ADR-182](../adr/182-declared-advisory-work-under-a-provider-neutral-contrac
 **Machine check:** `scripts/check-collaboration-contract.py` validates the tables
 below; `scripts/check-collaboration-contract.test.sh` holds its fixtures.
 
-The semantic contract remains frozen. W4 now mounts the five work routes
+The semantic contract remains frozen. W4 mounts the five work routes
 W-LIST through W-ACK together with their remote client, canon, OpenAPI and
-help changes. Session routes in §4 remain **proposed** and absent from
-`crates/cosmon-rpp-adapter/data/surface_events.txt` until W7. The contract
-checker requires the shipped W4 routes and continues to refuse other mounted
-collaboration routes.
+help changes. W7a mounts the four presence routes S-ATTACH, S-BEAT, S-DETACH
+and S-PEERS the same way. The other session routes in §4 remain **proposed**
+and absent from `crates/cosmon-rpp-adapter/data/surface_events.txt` until
+their own W7 increment. The contract checker requires the shipped W4 and W7a
+routes and continues to refuse other mounted collaboration routes.
 
 ## 1. Decisions
 
@@ -258,6 +259,9 @@ added by amendment, never reused for another meaning.
 | envelope_expired | 410 | The envelope's lifetime ended before the operation. |
 | digest_mismatch | 422 | The supplied digest does not match the stored payload. |
 | evidence_unreadable | 422 | Referenced evidence is missing, unreadable or fails its digest. |
+| attachment_limit | 409 | The mission already holds its two attachments (S-ATTACH); pending operator confirmation, see §11 2026-11-20. |
+| not_attached | 404 | The attachment has no presence record on the mission (S-BEAT); pending operator confirmation, see §11 2026-11-20. |
+| heartbeat_too_soon | 429 | The attachment's last heartbeat is less than 10 seconds old; carries Retry-After; pending operator confirmation, see §11 2026-11-20. |
 | corrupt_evidence | 500 | Stored records fail validation; nothing is returned or repaired silently. |
 | unsupported_feature | 501 | The deployment predates the requested operation; there is no local fallback. |
 | custody_unavailable | 503 | The owning store cannot be reached or locked; the outcome is unknown, not failed. |
@@ -318,7 +322,7 @@ harvest grants remain mandatory.
 | 3 | W4 | Work routes W-LIST … W-ACK, remote client commands, canon, OpenAPI, help and parity updates | Session routes |
 | 4 | W5 | Portable presence, pilot mailbox acknowledgment and checkpoint custody on the local side: `cs presence detach`, `cs sessions ack`, `cs sessions checkpoint publish\|show\|list`, `cs sessions drift` (done 2026-11-17, see §11) | Lease fencing; evidence-reference resolution |
 | 5 | W6 | Nothing: not shipped, by decision of 2026-11-17 (see §8 and §11) | Fencing of every covered effect; control handover |
-| 6 | W7 | Session routes S-ATTACH … S-CKCMP and client commands | Remote signing; takeover routes |
+| 6 | W7 | Session routes S-ATTACH … S-CKCMP and client commands, in four serialized increments. W7a, the presence routes S-ATTACH, S-BEAT, S-DETACH, S-PEERS and `cosmon-remote pilot`, is delivered (2026-11-20, see §11). W7b (mailbox routes), W7c (checkpoint routes) and W7d are not delivered | Remote signing; takeover routes |
 | 7 | W8 | Two-machine acceptance evidence and the off-host restore check | New features |
 
 W4 is the work-only release boundary. Units that share exports, route
@@ -366,6 +370,30 @@ lives in the lease ledger directory, which §2 says no route writes; they are
 therefore dropped from §4 and refused as X-TAKEOVER, and the local
 `cs sessions takeover` verbs are unchanged. O1 and O8 stand as written: no
 route confers or exercises lifecycle authority.
+
+**2026-11-20 amendment (W7a, pending operator confirmation).** W7a mounts
+S-ATTACH, S-BEAT, S-DETACH and S-PEERS; W7b to W7d are not delivered. Remote
+presence is its own record class in the presence store,
+`presence/remote/<mission>/<attachment>.json`, tagged by attachment and
+carrying only mission, attachment, attach key, optional display label (at
+most 128 bytes) and the server times of attach and last heartbeat. No host
+path, pid, native handle, seat role or lease epoch is stored or returned, and
+the local session scan, `gc` and `cs sessions peers` do not read it. The
+S-ATTACH body is `idempotency_key` plus optional `label`; mission and
+attachment come from the binding. The same key and label return the stored
+record without a write; another key or label for an attached attachment is
+`key_collision`. Every stored record of the mission counts toward the cap of
+two, whatever its heartbeat age or the state of its binding; only S-DETACH
+frees a place, and an attach after detach is a new attach whatever its key.
+S-BEAT refuses a heartbeat sooner than 10 seconds after the last accepted
+one, including on a repeat. S-DETACH removes the record only and reports
+`detached=false` without writing when there is none. S-PEERS lists attachments
+sorted by attachment id, at most 100 per page, with the last id of a page as
+the cursor; it takes no lock and creates no file. Three codes are added to §6
+for these refusals (`attachment_limit`, `not_attached`, `heartbeat_too_soon`)
+because no existing code has their meaning and `budget_exhausted` is reserved
+for seat allowances. The local verbs keep their current behaviour: the caps
+apply to the remote routes only.
 
 **Amendments**, recorded in the ADRs themselves:
 
