@@ -63,7 +63,8 @@ failure moves nothing, closes nothing, and names the offending commit or member:
 4. Each member is Completed (not collapsed), integrates into this base, and its
    branch is still at its pinned head.
 5. Each `--exclude` head resolves to a commit, the excluded ID is absent from
-   the member list, and none of the pinned member heads contains that commit.
+   the member list, and no pinned member head contains the excluded member's
+   first own commit, if it has one above the train base.
 6. If the train changes a file of the trusted shell surface
    (`.cosmon/config.toml`, the formulas, and the scripts they invoke), an
    existing trust grant must already cover the surface the train will leave on
@@ -84,14 +85,19 @@ blocked on a lock its parent holds would wait forever.
 2. Identify the failing member, record its pinned head and rebuild the train
    without it. Gate the rebuilt train.
 3. When landing the rebuilt train, add `--exclude <id>=<head>` for each removed
-   member. Use the head that member contributed to the earlier train.
+   member. Use the head that member contributed to the earlier train or a
+   later head on the same first-parent history.
 
-A carrier is a member whose pinned head contains an excluded head in its Git
-ancestry. For example, a branch that merged the earlier train can carry the
-removed member's commits into the rebuilt train. `cs land-train` refuses that
-landing and names the carrier, the excluded member and its head. Rebuild the
-carrier without the excluded commits or remove it as well, then gate the new
-train again. Keep the excluded commits available to Git until landing.
+A carrier is a member whose pinned head contains the excluded member's first
+own commit. Git finds it as the oldest entry in
+`git rev-list --first-parent <head> ^<train-base>`. An empty range has no
+carrier. A branch can carry the first own commit even if it merged the removed
+member before that member reached its pinned head. `cs land-train` refuses the
+landing and names the carrier, the excluded member and the first own commit.
+Rebuild the carrier without the excluded commits or remove it as well, then
+gate the new train again. Keep the excluded commits available to Git until
+landing. The check misses a rebased culprit when the rebase replaces the
+commit IDs that a carrier contains.
 
 ## Closing the members
 

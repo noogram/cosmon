@@ -274,7 +274,7 @@ See docs/guides/train-landing.md.
    The landing is a compare-and-swap: the base branch must still be at this commit, or the train is refused as "moved after the gate".
 * `--train-tip <REV>` — The train's tip: the gated commit the base branch fast-forwards to
 * `--member <ID=HEAD>` — One member, as `<molecule id>=<pinned branch head>`. Repeat once per member merge, in the order the train merged them (oldest first)
-* `--exclude <ID=HEAD>` — Repeat once per removed member with its pinned head. Refuses any train member whose pinned head contains an excluded head in its ancestry. An excluded ID must be absent from --member, and its head must resolve to a commit
+* `--exclude <ID=HEAD>` — Repeat once per removed member with its pinned head. Refuses a train member carrying that head's oldest first-parent commit outside the train base's ancestry, if any. An excluded ID must be absent from --member, and its head must resolve to a commit
 
 
 

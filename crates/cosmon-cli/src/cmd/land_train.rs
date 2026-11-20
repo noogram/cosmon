@@ -50,10 +50,10 @@ pub struct Args {
     #[arg(long = "member", value_name = "ID=HEAD", required = true)]
     pub members: Vec<String>,
 
-    /// Repeat once per removed member with its pinned head. Refuses any
-    /// train member whose pinned head contains an excluded head in its
-    /// ancestry. An excluded ID must be absent from --member, and its
-    /// head must resolve to a commit.
+    /// Repeat once per removed member with its pinned head. Refuses a train
+    /// member carrying that head's oldest first-parent commit outside the
+    /// train base's ancestry, if any. An excluded ID must be absent from
+    /// --member, and its head must resolve to a commit.
     #[arg(long = "exclude", value_name = "ID=HEAD")]
     pub exclusions: Vec<String>,
 }
