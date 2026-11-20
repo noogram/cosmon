@@ -312,6 +312,49 @@ mod tests {
         ));
     }
 
+    /// Only "absent" reads as absent: a record or directory that exists but
+    /// cannot be read or removed is an unavailable store, never an empty one.
+    #[test]
+    fn an_unreadable_store_is_an_error_not_an_absence() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = PresenceStore::new(dir.path());
+        let att = AttachmentId::from_random([1; 8]);
+        store
+            .attach_remote(&mission(), &att, request("k"), t(0))
+            .unwrap();
+        let record = store.remote_presence_path(&mission(), &att);
+        let mission_dir = record.parent().unwrap().to_path_buf();
+        let mode = |path: &std::path::Path, bits| {
+            fs::set_permissions(path, fs::Permissions::from_mode(bits)).unwrap();
+        };
+
+        mode(&record, 0o000);
+        let unreadable = store.heartbeat_remote(&mission(), &att, t(60));
+        mode(&record, 0o644);
+        assert!(
+            matches!(unreadable, Err(RemotePresenceStoreError::Io(_))),
+            "{unreadable:?}"
+        );
+
+        mode(&mission_dir, 0o000);
+        let listing = store.remote_presences(&mission());
+        mode(&mission_dir, 0o755);
+        assert!(
+            matches!(listing, Err(RemotePresenceStoreError::Io(_))),
+            "{listing:?}"
+        );
+
+        mode(&mission_dir, 0o555);
+        let detach = store.detach_remote(&mission(), &att);
+        mode(&mission_dir, 0o755);
+        assert!(
+            matches!(detach, Err(RemotePresenceStoreError::Io(_))),
+            "{detach:?}"
+        );
+        assert!(record.exists());
+    }
+
     #[test]
     fn reading_an_unknown_mission_creates_nothing() {
         let dir = tempfile::tempdir().unwrap();
