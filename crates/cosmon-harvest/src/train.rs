@@ -38,9 +38,8 @@
 //!
 //! # The decision is pure
 //!
-//! The shape rule — which first-parent commits a landing range may hold — is
-//! [`check_train_chain`], a function of plain data. Git is read by the thin
-//! layer around it.
+//! The shape and carrier rules are functions of plain data. The surrounding
+//! layer reads the train chain and ancestry from Git.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -76,7 +75,7 @@ impl TrainMember {
     }
 }
 
-/// A removed molecule and the head it contributed to an earlier train.
+/// A removed molecule and the pinned head used to find its first own commit.
 #[derive(Debug, Clone)]
 pub struct ExcludedHead {
     molecule: MoleculeId,
@@ -117,8 +116,8 @@ pub struct LandTrainRequest {
     /// The members, in the order their merges sit on the train's
     /// first-parent chain (oldest first).
     pub members: Vec<TrainMember>,
-    /// Removed members' pinned heads, which the train's members must exclude
-    /// from their ancestry.
+    /// Removed members' pinned heads. The train's members must exclude the
+    /// first own commit of each such head from their ancestry.
     pub exclusions: Vec<ExcludedHead>,
 }
 
@@ -488,7 +487,7 @@ pub fn land(ctx: &HarvestContext, req: &LandTrainRequest) -> anyhow::Result<Land
         });
     }
 
-    check_exclusions(&repo_root, &expected, &req.exclusions)?;
+    check_exclusions(&repo_root, &train_base, &expected, &req.exclusions)?;
 
     if landing == Landing::Landed {
         check_shell_surface(&repo_root, &base_branch, &train_base, &train_tip)?;
@@ -509,6 +508,7 @@ pub fn land(ctx: &HarvestContext, req: &LandTrainRequest) -> anyhow::Result<Land
 
 fn check_exclusions(
     repo_root: &Path,
+    train_base: &str,
     members: &[ExpectedMerge],
     exclusions: &[ExcludedHead],
 ) -> anyhow::Result<()> {
@@ -525,28 +525,79 @@ fn check_exclusions(
             &excluded.head,
             &format!("excluded head for {id}"),
         )?;
+        let Some(first_commit) = first_own_commit(repo_root, train_base, &head, id)? else {
+            continue;
+        };
         for member in members {
-            let carrier = &member.molecule;
-            let out = git(repo_root)
-                .args(["merge-base", "--is-ancestor", &head, &member.head])
-                .output()?;
-            match out.status.code() {
-                Some(1) => {}
-                Some(0) => anyhow::bail!(
-                    "cs land-train refused: member {carrier} carries excluded member {id} at \
-                     head {head}. Nothing was moved or closed."
-                ),
-                _ => anyhow::bail!(
-                    "cs land-train refused: could not check member {carrier} for excluded \
-                     member {id} at head {head}: git merge-base exited with {}: {}. Nothing \
-                     was moved or closed.",
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-            }
+            let carries = read_carrier_ancestry(repo_root, member, id, &first_commit)?;
+            check_carrier(&member.molecule, id, &first_commit, carries)?;
         }
     }
     Ok(())
+}
+
+/// Refuse a member when its ancestry includes the excluded first own commit.
+fn check_carrier(
+    member: &MoleculeId,
+    excluded: &MoleculeId,
+    first_commit: &str,
+    carries: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !carries,
+        "cs land-train refused: member {member} carries excluded member {excluded} at first own \
+         commit {first_commit}. Nothing was moved or closed."
+    );
+    Ok(())
+}
+
+/// Read ancestry, preserving the distinction between false and a Git error.
+fn read_carrier_ancestry(
+    repo_root: &Path,
+    member: &ExpectedMerge,
+    excluded: &MoleculeId,
+    first_commit: &str,
+) -> anyhow::Result<bool> {
+    let out = git(repo_root)
+        .args(["merge-base", "--is-ancestor", first_commit, &member.head])
+        .output()?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => anyhow::bail!(
+            "cs land-train refused: could not check member {} for excluded member {excluded} at \
+             first own commit {first_commit}: git merge-base exited with {}: {}. Nothing was \
+             moved or closed.",
+            member.molecule,
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    }
+}
+
+/// The oldest first-parent commit of `head` outside the train base's ancestry.
+fn first_own_commit(
+    repo_root: &Path,
+    train_base: &str,
+    head: &str,
+    excluded: &MoleculeId,
+) -> anyhow::Result<Option<String>> {
+    let range = format!("{train_base}..{head}");
+    let out = git(repo_root)
+        .args(["rev-list", "--first-parent", &range])
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "cs land-train refused: could not read own commits for excluded member {excluded} at \
+         head {head}: git rev-list exited with {}: {}. Nothing was moved or closed.",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    // Git lists the range newest first. An empty range has no commit to exclude.
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .last()
+        .map(str::to_owned))
 }
 
 fn short(oid: &str) -> &str {
@@ -884,6 +935,26 @@ mod tests {
             expected("task-20260101-aaaa", "ha"),
             expected("task-20260101-bbbb", "hb"),
         ]
+    }
+
+    #[test]
+    fn a_carrier_refusal_names_both_members_and_the_carried_commit() {
+        let member = mol("task-20260101-aaaa");
+        let excluded = mol("task-20260101-bbbb");
+        let commit = "3bc0ffc";
+        let refusal = check_carrier(&member, &excluded, commit, true)
+            .unwrap_err()
+            .to_string();
+        for needle in [member.as_str(), excluded.as_str(), commit] {
+            assert!(refusal.contains(needle), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn a_member_without_the_excluded_commit_passes_the_carrier_check() {
+        let member = mol("task-20260101-aaaa");
+        let excluded = mol("task-20260101-bbbb");
+        assert!(check_carrier(&member, &excluded, "3bc0ffc", false).is_ok());
     }
 
     /// The shape two serial `cs done` merges leave is accepted.

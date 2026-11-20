@@ -387,7 +387,10 @@ struct CarrierTrain {
 
 impl CarrierTrain {
     fn new() -> Self {
-        let fx = Fixture::new("", false);
+        Self::from_fixture(Fixture::new("", false))
+    }
+
+    fn from_fixture(fx: Fixture) -> Self {
         let base = rev(&fx.repo, "main");
         let removed = fx.completed_molecule("removed member");
         let removed_head = fx.commit_on_branch(&removed, &base, "removed.txt", "removed\n");
@@ -492,22 +495,58 @@ fn without_exclusions_the_same_train_lands_and_closes_its_members() {
 }
 
 #[test]
-fn exclusion_allows_landing_when_no_member_contains_the_pinned_head() {
+fn exclusion_refuses_a_carrier_of_an_earlier_commit_than_the_pinned_head() {
     let train = CarrierTrain::new();
-    let (id, _) = &train.excluded;
+    let (id, first_commit) = &train.excluded;
     let head = train
         .fx
         .commit_on_branch(id, &train.base, "later.txt", "later\n");
-    train.assert_landed(&train.land(&[(id, &head)]));
+    assert!(train.fx.is_ancestor(first_commit, &train.members[1].1));
+    assert!(!train.fx.is_ancestor(&head, &train.members[1].1));
+    train.assert_refusal(
+        &train.land(&[(id, &head)]),
+        &[
+            "carries excluded member",
+            &train.members[1].0,
+            id,
+            first_commit,
+        ],
+    );
+}
+
+#[test]
+fn exclusion_allows_a_branch_at_the_train_base_with_no_own_commits() {
+    let train = CarrierTrain::new();
+    let id = train.fx.completed_molecule("empty removed branch");
+    git_ok(
+        &train.fx.repo,
+        &["branch", &format!("feat/{id}"), &train.base],
+    );
+    train.assert_landed(&train.land(&[(&id, &train.base)]));
+    assert!(!train.fx.is_closed(&id));
+}
+
+#[test]
+fn exclusion_allows_a_head_already_merged_into_the_train_base() {
+    let fx = Fixture::new("", false);
+    let id = fx.completed_molecule("already on the base");
+    let head = fx.commit_on_branch(&id, "main", "already.txt", "already on the base\n");
+    git_ok(
+        &fx.repo,
+        &["merge", "--no-ff", "-qm", "merge into base", &head],
+    );
+    let train = CarrierTrain::from_fixture(fx);
+    assert_eq!(head, rev(&train.fx.repo, "main^2"));
+    train.assert_landed(&train.land(&[(&id, &head)]));
+    assert!(!train.fx.is_closed(&id));
 }
 
 #[test]
 fn exclusion_refuses_an_id_also_listed_as_a_member() {
     let train = CarrierTrain::new();
     let (id, _) = &train.members[0];
-    let head = &train.excluded.1;
     train.assert_refusal(
-        &train.land(&[(id, head)]),
+        &train.land(&[(id, &train.base)]),
         &[id, "also listed as a train member"],
     );
 }
@@ -570,6 +609,35 @@ exec git "$@"
     train.assert_refused_naming(&out, "test ancestry failure", &train.base);
     let text = combined(&out);
     for needle in [&id, &head, &train.a] {
+        assert!(text.contains(needle), "expected `{needle}`: {text}");
+    }
+}
+
+#[test]
+fn exclusion_refuses_when_git_cannot_read_own_commits() {
+    let train = happy_train(Fixture::new("", false));
+    let id = train.fx.completed_molecule("removed member");
+    let head = train
+        .fx
+        .commit_on_branch(&id, &train.base, "removed.txt", "removed\n");
+    let out = train
+        .land_through_git(r#"#!/bin/sh
+set -eu
+export PATH="$LAND_TRAIN_REAL_PATH"
+if [ "$#" -eq 5 ] && [ "$3" = rev-list ] && [ "$4" = --first-parent ] && [ "$5" = "$LAND_TRAIN_EXCLUDED_RANGE" ]; then
+    echo 'test own-commit range failure' >&2
+    exit 128
+fi
+exec git "$@"
+"#)
+        .env("LAND_TRAIN_EXCLUDED_RANGE", format!("{}..{head}", train.base))
+        .arg("--exclude")
+        .arg(format!("{id}={head}"))
+        .output()
+        .unwrap();
+    train.assert_refused_naming(&out, "test own-commit range failure", &train.base);
+    let text = combined(&out);
+    for needle in [&id, &head] {
         assert!(text.contains(needle), "expected `{needle}`: {text}");
     }
 }

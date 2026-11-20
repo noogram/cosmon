@@ -19,7 +19,9 @@ this stage.
 
 ## [Unreleased]
 
-- Repeat `cs land-train --exclude <id>=<head>` for each removed member when landing a rebuilt train. Landing is refused before moving the base or closing members if a pinned member head contains an excluded head, an excluded ID also appears in the member list, or an excluded head cannot be resolved (#213).
+- Repeat `cs land-train --exclude <id>=<head>` for each removed member when landing a rebuilt train. Landing is refused before moving the base or closing members if a member carries excluded work, an excluded ID also appears in the member list, or Git cannot resolve an excluded head (#213).
+
+- `cs land-train --exclude` detects carriers of the removed member's first own commit even when they lack its later pinned head. An excluded head already reachable from the train base has no own commits to check.
 
 ## [0.10.0] — 2026-11-19
 
