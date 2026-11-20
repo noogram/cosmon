@@ -206,7 +206,12 @@ pub(crate) async fn attach(
     headers: HeaderMap,
     body: Result<Json<AttachBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let door = door(&state, &headers, &mission, CollaborationScope::SessionsWrite)?;
+    let door = door(
+        &state,
+        &headers,
+        &mission,
+        CollaborationScope::SessionsWrite,
+    )?;
     let Json(body) = body.map_err(|_| invalid())?;
     commit(&door, || {
         let (record, written) = door
@@ -234,7 +239,12 @@ pub(crate) async fn heartbeat(
     Path((mission, attachment)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let door = door(&state, &headers, &mission, CollaborationScope::SessionsWrite)?;
+    let door = door(
+        &state,
+        &headers,
+        &mission,
+        CollaborationScope::SessionsWrite,
+    )?;
     let attachment = own_attachment(&door, &attachment)?;
     commit(&door, || {
         let record = door
@@ -253,7 +263,12 @@ pub(crate) async fn detach(
     Path((mission, attachment)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    let door = door(&state, &headers, &mission, CollaborationScope::SessionsWrite)?;
+    let door = door(
+        &state,
+        &headers,
+        &mission,
+        CollaborationScope::SessionsWrite,
+    )?;
     let attachment = own_attachment(&door, &attachment)?;
     commit(&door, || {
         let detached = door

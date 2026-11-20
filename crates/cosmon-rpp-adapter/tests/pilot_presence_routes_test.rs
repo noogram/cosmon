@@ -583,7 +583,9 @@ async fn peers_list_a_bounded_page_without_writing_anything() {
     assert_eq!(first["attachments"].as_array().unwrap().len(), 1);
     let cursor = first["next_cursor"].as_str().unwrap().to_owned();
     assert_eq!(cursor, expected[0]);
-    let (status, second) = fx.peers("laptop", &format!("?limit=1&after={cursor}")).await;
+    let (status, second) = fx
+        .peers("laptop", &format!("?limit=1&after={cursor}"))
+        .await;
     assert_eq!(status, StatusCode::OK, "{second}");
     assert_eq!(second["attachments"][0]["attachment"], expected[1]);
     assert_eq!(second["next_cursor"], Value::Null);

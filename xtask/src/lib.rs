@@ -380,10 +380,7 @@ mod tests {
         );
         assert_eq!(family("/v1/work/{owner}").unwrap(), "work");
         assert_eq!(family("/v1/work/{owner}/inbox").unwrap(), "work");
-        assert_eq!(
-            family("/v1/pilot/{mission}/attachments").unwrap(),
-            "pilot"
-        );
+        assert_eq!(family("/v1/pilot/{mission}/attachments").unwrap(), "pilot");
         assert!(family("/v2/surprise").is_err());
     }
 

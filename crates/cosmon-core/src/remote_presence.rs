@@ -301,7 +301,13 @@ mod tests {
     fn the_same_key_with_another_body_is_a_collision() {
         let present = vec![attached(1, "k1")];
         assert_eq!(
-            decide_attach(&present, &mission(), &att(1), request("k1", Some("laptop")), t(1)),
+            decide_attach(
+                &present,
+                &mission(),
+                &att(1),
+                request("k1", Some("laptop")),
+                t(1)
+            ),
             Err(RemotePresenceError::KeyCollision)
         );
         assert_eq!(
@@ -354,7 +360,9 @@ mod tests {
         let present = vec![attached(3, "c"), attached(1, "a"), attached(2, "b")];
         let (page, next) = page_peers(&present, &mission(), None, 2);
         assert_eq!(
-            page.iter().map(|r| r.attachment.clone()).collect::<Vec<_>>(),
+            page.iter()
+                .map(|r| r.attachment.clone())
+                .collect::<Vec<_>>(),
             vec![att(1), att(2)]
         );
         assert_eq!(next, Some(att(2)));
@@ -371,7 +379,11 @@ mod tests {
         let cases = [
             (RemotePresenceError::InvalidLabel, "invalid_json_body", 400),
             (RemotePresenceError::KeyCollision, "key_collision", 409),
-            (RemotePresenceError::AttachmentLimit, "attachment_limit", 409),
+            (
+                RemotePresenceError::AttachmentLimit,
+                "attachment_limit",
+                409,
+            ),
             (
                 RemotePresenceError::HeartbeatTooSoon {
                     retry_after_secs: 1,

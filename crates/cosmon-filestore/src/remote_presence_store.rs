@@ -58,7 +58,8 @@ impl PresenceStore {
         // The record path's parent is the mission directory by construction.
         let probe = AttachmentId::from_random([0; 8]);
         let path = self.remote_presence_path(mission, &probe);
-        path.parent().map_or_else(|| self.dir().join("remote"), PathBuf::from)
+        path.parent()
+            .map_or_else(|| self.dir().join("remote"), PathBuf::from)
     }
 
     fn remote_lock(&self, mission: &MoleculeId) -> Result<File, RemotePresenceStoreError> {
