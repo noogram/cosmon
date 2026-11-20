@@ -331,6 +331,9 @@ async fn attach_takes_mission_and_attachment_from_the_binding_and_retries_by_key
     assert_eq!(body["attachment"]["attachment"], fx.attachment("laptop"));
     assert_eq!(body["attachment"]["mission"], MISSION);
     assert_eq!(body["duplicate"], false);
+    assert_eq!(body["schema_version"], 1);
+    assert_eq!(body["mission"], MISSION);
+    assert!(body["received_at"].is_string());
     let stored = fx.records();
     assert_eq!(stored.len(), 1);
     let before = fx.snapshot();
@@ -365,6 +368,33 @@ async fn attach_refuses_authority_fields_and_unknown_fields() {
         let (status, body) = fx.attach("laptop", forged.clone()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{forged} -> {body}");
     }
+    let long = "x".repeat(129);
+    for label in [json!(long), json!("two\nlines")] {
+        let (status, body) = fx
+            .attach("laptop", json!({"idempotency_key":"a1","label":label}))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], "invalid_json_body");
+    }
+    assert!(fx.records().is_empty());
+}
+
+/// Bindings that exist but cannot be read leave the outcome unknown: 503,
+/// never a refusal or a server fault.
+#[tokio::test]
+async fn unreadable_bindings_are_custody_unavailable() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = fixture(&["laptop"], &[], &[]).await;
+    let bindings = fx.tenant_state.join("collaboration");
+    assert!(bindings.is_dir(), "{}", bindings.display());
+    let mode = |bits| {
+        std::fs::set_permissions(&bindings, std::fs::Permissions::from_mode(bits)).unwrap();
+    };
+    mode(0o000);
+    let (status, body) = fx.attach("laptop", json!({"idempotency_key":"k"})).await;
+    mode(0o755);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["error"], "custody_unavailable");
     assert!(fx.records().is_empty());
 }
 
