@@ -59,6 +59,24 @@ and marked with their date:
 | B3 | Admission at `cs tackle` | Not started |
 | D1 | Landing verb | Not started |
 
+**Increment status (2026-11-20).** The table above is the status at
+acceptance and is kept as written. Since then the following landed on main,
+as recorded in the CHANGELOG (release 0.10.0 and [Unreleased]):
+
+| Increment | What | Status |
+|---|---|---|
+| A1 | Compare-and-swap rollback in `cs done` | Landed, pull request #227 (0.10.0) |
+| B1, B2 | Gate slots and named pools (`[gate_slots]`, `cs gates slot`, `scripts/run-gates-bg.sh` through it, `gates.queued`) | Landed, pull request #233 (0.10.0) |
+| B3 | Admission at `cs tackle` (`[admission].max_active`, `min_free_bytes`) | Landed, pull request #231 (0.10.0) |
+| D1 | Landing verb `cs land-train` | Landed, pull request #232 (0.10.0) |
+| — | `cs land-train --exclude <id>=<head>`: refuses a member whose pinned head contains the exact excluded head | Landed on main, molecule `task-20261120-29c3`; unreleased |
+
+Statements elsewhere in this ADR that call A1 pending (§1.1, §10) were true
+on 2026-11-17 and are superseded by this table. A proposed amendment to D3,
+[ADR-192](192-a-train-is-a-landing-mode-that-refuses-carriers.md), would
+replace the exact-head exclusion test and add a base-first precondition to
+ejection; until it is accepted, D3 below is unchanged.
+
 ---
 
 ## 1 · Context
