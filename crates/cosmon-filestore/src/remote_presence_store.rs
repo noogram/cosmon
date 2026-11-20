@@ -13,6 +13,7 @@
 //! it, so two concurrent attaches cannot both pass the attachment cap. Reads
 //! take no lock and create nothing: a listing leaves the store byte-identical.
 
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::path::PathBuf;
 
@@ -153,8 +154,13 @@ impl PresenceStore {
 
     /// Attach `attachment` to `mission` (S-ATTACH).
     ///
-    /// Returns the record and whether this call wrote it. A retry of the
-    /// request that created the record writes nothing.
+    /// `live` names the attachments whose binding is valid for the mission
+    /// (see [`cosmon_core::remote_presence::live_attachments`]). Returns the
+    /// record and whether this call wrote it. A retry of the request that
+    /// created the record writes nothing. When the cap would otherwise refuse
+    /// the attach, records of attachments outside `live` are removed first,
+    /// under the mission lock; a removal that finds the record already gone
+    /// is not an error, so an interrupted attach is safe to repeat.
     ///
     /// # Errors
     /// Returns the refusal of [`decide_attach`], or a corrupt or unavailable
@@ -163,14 +169,22 @@ impl PresenceStore {
         &self,
         mission: &MoleculeId,
         attachment: &AttachmentId,
+        live: &BTreeSet<AttachmentId>,
         request: AttachRequest,
         now: DateTime<Utc>,
     ) -> Result<(RemotePresence, bool), RemotePresenceStoreError> {
         let _lock = self.remote_lock(mission)?;
         let present = self.remote_presences(mission)?;
-        match decide_attach(&present, mission, attachment, request, now)? {
+        match decide_attach(&present, live, mission, attachment, request, now)? {
             AttachDecision::Existing(record) => Ok((record, false)),
-            AttachDecision::Create(record) => {
+            AttachDecision::Create { record, evict } => {
+                for stale in &evict {
+                    match fs::remove_file(self.remote_presence_path(mission, stale)) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
                 self.write_remote(&record)?;
                 Ok((record, true))
             }
@@ -235,6 +249,10 @@ mod tests {
     fn mission() -> MoleculeId {
         MoleculeId::new("task-20261120-aaaa").unwrap()
     }
+    /// Every attachment the tests use, each with a valid binding.
+    fn live() -> BTreeSet<AttachmentId> {
+        (0..=9).map(|n| AttachmentId::from_random([n; 8])).collect()
+    }
     fn request(key: &str) -> AttachRequest {
         AttachRequest {
             idempotency_key: MessageKey::new(key).unwrap(),
@@ -248,7 +266,7 @@ mod tests {
         let store = PresenceStore::new(dir.path());
         let att = AttachmentId::from_random([1; 8]);
         let (record, written) = store
-            .attach_remote(&mission(), &att, request("k"), t(0))
+            .attach_remote(&mission(), &att, &live(), request("k"), t(0))
             .unwrap();
         assert!(written);
         assert_eq!(store.remote_presences(&mission()).unwrap(), vec![record]);
@@ -263,10 +281,10 @@ mod tests {
         let store = PresenceStore::new(dir.path());
         let att = AttachmentId::from_random([1; 8]);
         store
-            .attach_remote(&mission(), &att, request("k"), t(0))
+            .attach_remote(&mission(), &att, &live(), request("k"), t(0))
             .unwrap();
         let (again, written) = store
-            .attach_remote(&mission(), &att, request("k"), t(5))
+            .attach_remote(&mission(), &att, &live(), request("k"), t(5))
             .unwrap();
         assert!(!written);
         assert_eq!(again.attached_at, t(0));
@@ -293,6 +311,57 @@ mod tests {
         ));
     }
 
+    /// Records of invalid bindings are removed to make room, a repeat of the
+    /// same attach changes nothing, and a removal that cannot happen leaves
+    /// every record in place and writes nothing.
+    #[test]
+    fn records_outside_live_are_removed_only_to_make_room() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = PresenceStore::new(dir.path());
+        let att = |n| AttachmentId::from_random([n; 8]);
+        for n in [1, 2] {
+            store
+                .attach_remote(&mission(), &att(n), &live(), request("k"), t(0))
+                .unwrap();
+        }
+        let only_one: BTreeSet<_> = [att(1)].into_iter().collect();
+
+        let mission_dir = store
+            .remote_presence_path(&mission(), &att(1))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        fs::set_permissions(&mission_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let blocked = store.attach_remote(&mission(), &att(3), &only_one, request("k"), t(1));
+        fs::set_permissions(&mission_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(blocked, Err(RemotePresenceStoreError::Io(_))),
+            "{blocked:?}"
+        );
+        assert_eq!(store.remote_presences(&mission()).unwrap().len(), 2);
+
+        let (record, written) = store
+            .attach_remote(&mission(), &att(3), &only_one, request("k"), t(1))
+            .unwrap();
+        assert!(written);
+        let kept = |store: &PresenceStore| {
+            store
+                .remote_presences(&mission())
+                .unwrap()
+                .into_iter()
+                .map(|r| r.attachment)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kept(&store), vec![att(1), att(3)]);
+        let (again, written) = store
+            .attach_remote(&mission(), &att(3), &only_one, request("k"), t(2))
+            .unwrap();
+        assert!(!written);
+        assert_eq!(again, record);
+        assert_eq!(kept(&store), vec![att(1), att(3)]);
+    }
+
     #[test]
     fn a_record_that_names_another_attachment_is_corrupt() {
         let dir = tempfile::tempdir().unwrap();
@@ -300,7 +369,7 @@ mod tests {
         let a = AttachmentId::from_random([1; 8]);
         let b = AttachmentId::from_random([2; 8]);
         store
-            .attach_remote(&mission(), &a, request("k"), t(0))
+            .attach_remote(&mission(), &a, &live(), request("k"), t(0))
             .unwrap();
         fs::copy(
             store.remote_presence_path(&mission(), &a),
@@ -322,7 +391,7 @@ mod tests {
         let store = PresenceStore::new(dir.path());
         let att = AttachmentId::from_random([1; 8]);
         store
-            .attach_remote(&mission(), &att, request("k"), t(0))
+            .attach_remote(&mission(), &att, &live(), request("k"), t(0))
             .unwrap();
         let record = store.remote_presence_path(&mission(), &att);
         let mission_dir = record.parent().unwrap().to_path_buf();
