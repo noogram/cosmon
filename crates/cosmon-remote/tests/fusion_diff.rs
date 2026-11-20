@@ -189,6 +189,8 @@ fn root_commands_catalogue_gains_the_blessed_verbs() {
     // 10. `harvest` \u{2014} operator-side grant and authority workflow (#120 W7).
     // 11. `work`    \u{2014} W4 explicit advisory work exchange over the
     //    binding-admitted work routes; no lifecycle authority (#147 W4).
+    // 12. `pilot`   \u{2014} W7a pilot presence (attach, heartbeat, detach,
+    //    peers) of a bound attachment; no lease or lifecycle (#212 W7a).
     // Plus four in-place description edits: the diagnostic verbs
     // (healthz, quota, workers, noyaux) gained an explicit
     // `(diagnostic)` marker in the B2+C1 integration (stitch 828e) \u{2014}
@@ -221,8 +223,8 @@ fn root_commands_catalogue_gains_the_blessed_verbs() {
     }
     assert_eq!(
         added.len(),
-        11 + inplace_subs.len(),
-        "root commands: blessed additions are avatar, do, doctor, converse, run, login, logout, token, wait, harvest, work \
+        12 + inplace_subs.len(),
+        "root commands: blessed additions are avatar, do, doctor, converse, run, login, logout, token, wait, harvest, work, pilot \
          + the in-place edits, got {added:?}"
     );
     for verb in [
@@ -237,6 +239,7 @@ fn root_commands_catalogue_gains_the_blessed_verbs() {
         "  wait  ",
         "  harvest  ",
         "  work  ",
+        "  pilot  ",
     ] {
         assert!(
             added.iter().any(|l| l.starts_with(verb)),

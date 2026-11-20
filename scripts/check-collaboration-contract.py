@@ -34,14 +34,24 @@ CUSTODY_COLUMNS = ["Writer", "Record class", "Location"]
 EFFECTS = {"read-only", "observation-write", "advisory-write"}
 RETRIES = {"idempotent-key", "idempotent-ack", "safe-repeat", "bounded-redelivery"}
 PHASES = {"W4", "W7"}
-# W4 is shipped. Session routes stay proposed until their separately
-# authorized W7 increment updates this exact exposure set.
-SHIPPED_WORK_ROUTES = {
-    "GET /v1/work/{owner}",
-    "POST /v1/work/{owner}/messages",
-    "GET /v1/work/{owner}/inbox",
-    "POST /v1/work/{owner}/inbox",
-    "POST /v1/work/{owner}/messages/{key}/ack",
+# Routes mounted so far, by the phase their row must declare. W4 shipped the
+# five work routes; W7a (issue #212) ships the four presence routes. Every
+# other session route stays proposed until its own W7 increment updates
+# this exact exposure set.
+SHIPPED_ROUTES = {
+    "W4": {
+        "GET /v1/work/{owner}",
+        "POST /v1/work/{owner}/messages",
+        "GET /v1/work/{owner}/inbox",
+        "POST /v1/work/{owner}/inbox",
+        "POST /v1/work/{owner}/messages/{key}/ack",
+    },
+    "W7": {
+        "POST /v1/pilot/{mission}/attachments",
+        "PUT /v1/pilot/{mission}/attachments/{attachment}/heartbeat",
+        "DELETE /v1/pilot/{mission}/attachments/{attachment}",
+        "GET /v1/pilot/{mission}/attachments",
+    },
 }
 DECISION_STATUS = {"adopted-default", "operator-confirmed"}
 REQUIRED_DECISIONS = {f"O{n}" for n in range(1, 9)}
@@ -143,12 +153,14 @@ def check(spec_text, surface_path):
             if rec["Route"] in seen_routes:
                 findings.append(f"route {rid}: duplicate route {rec['Route']}")
             seen_routes.add(rec["Route"])
-            shipped = rec["Route"] in SHIPPED_WORK_ROUTES and rec["Phase"] == "W4"
+            shipped = rec["Route"] in SHIPPED_ROUTES.get(rec["Phase"], set())
             if rec["Route"] in mounted and not shipped:
                 findings.append(f"route {rid}: {rec['Route']} is already mounted; "
-                                "only the five W4 work routes are shipped")
+                                "only the five W4 work routes and the four W7a "
+                                "presence routes are shipped")
             if shipped and rec["Route"] not in mounted:
-                findings.append(f"route {rid}: shipped W4 route is missing from the surface")
+                findings.append(f"route {rid}: shipped {rec['Phase']} route is "
+                                "missing from the surface")
         if not empty(rec["Scope"]) and rec["Scope"] not in scopes:
             findings.append(f"route {rid}: scope {rec['Scope']} is not in the scope table")
         if not empty(rec["Writer"]) and rec["Writer"] not in writers:

@@ -34,6 +34,7 @@ use cosmon_remote::{doctor, hints, phone_home, pkce};
 use tracing_subscriber::EnvFilter;
 
 mod harvest;
+mod pilot_cli;
 mod root_help;
 mod work_cli;
 
@@ -179,6 +180,11 @@ enum Cmd {
     Work {
         #[command(subcommand)]
         sub: work_cli::WorkCmd,
+    },
+    /// Pilot presence of the bound attachment; no lease or lifecycle authority.
+    Pilot {
+        #[command(subcommand)]
+        sub: pilot_cli::PilotCmd,
     },
     /// Artifact endpoints.
     #[command(display_order = 2)]
@@ -1240,6 +1246,10 @@ async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
         Cmd::Work { sub } => {
             let (_, profile) = store.resolve(cli.profile.as_deref())?;
             work_cli::run(&profile, sub, cli.token, cli.json).await
+        }
+        Cmd::Pilot { sub } => {
+            let (_, profile) = store.resolve(cli.profile.as_deref())?;
+            pilot_cli::run(&profile, sub, cli.token, cli.json).await
         }
         Cmd::Artifact { sub } => {
             let (_, profile) = store.resolve(cli.profile.as_deref())?;
