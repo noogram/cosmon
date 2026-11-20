@@ -110,6 +110,36 @@ fn a_complete_event_missing_its_newline_keeps_its_sequence() {
 }
 
 #[test]
+fn an_open_writer_rescans_a_truncated_log_before_emitting() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let id = mol_id(0);
+    let event = |step| EventV2::MoleculeStepCompleted {
+        molecule_id: id.clone(),
+        step,
+        total: 2,
+        duration_ms: None,
+        step_hash: None,
+        evidence: None,
+    };
+    let mut writer = EventLogWriter::open(&path).unwrap();
+    assert_eq!(writer.emit(event(0), None).unwrap(), Seq(0));
+    OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+
+    assert_eq!(writer.emit(event(1), None).unwrap(), Seq(0));
+
+    let envelopes = read_all(&path).unwrap();
+    assert_eq!(envelopes.len(), 1);
+    assert_eq!(envelopes[0].mol_seq, Some(Seq(0)));
+    assert_eq!(envelopes[0].event, event(1));
+}
+
+#[test]
 fn ten_concurrent_writers_emit_one_thousand_events_each_without_corruption() {
     let dir = TempDir::new().unwrap();
     let path = Arc::new(dir.path().join("events.jsonl"));

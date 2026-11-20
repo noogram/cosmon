@@ -740,6 +740,39 @@ mod tests {
     }
 
     #[test]
+    fn save_refuses_a_state_path_that_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state");
+        fs::write(&state_path, b"existing file").unwrap();
+
+        assert!(matches!(
+            save(&state_path, &Frontier::empty()),
+            Err(CosmonError::StateStore { .. })
+        ));
+        assert_eq!(fs::read(&state_path).unwrap(), b"existing file");
+    }
+
+    #[test]
+    fn failed_publication_preserves_the_destination_and_removes_its_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = path(dir.path());
+        fs::create_dir(&destination).unwrap();
+        let existing = destination.join("existing");
+        fs::write(&existing, b"existing file").unwrap();
+
+        assert!(matches!(
+            save(dir.path(), &Frontier::empty()),
+            Err(CosmonError::StateStore { .. })
+        ));
+        assert_eq!(fs::read(&existing).unwrap(), b"existing file");
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(entries, [destination]);
+    }
+
+    #[test]
     fn concurrent_saves_publish_complete_frontiers() {
         let dir = tempfile::tempdir().unwrap();
         let state_dir = dir.path();
