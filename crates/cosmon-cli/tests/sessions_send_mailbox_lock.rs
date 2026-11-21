@@ -143,3 +143,43 @@ fn a_local_send_to_an_unregistered_session_still_delivers() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(inbox_lines(dir.path()), 1);
 }
+
+#[test]
+fn a_local_send_keeps_its_lifetime_after_the_lock_is_taken() {
+    let dir = tempfile::tempdir().expect("state");
+    register_recipient(dir.path(), Some(MISSION));
+    let output = Command::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/no-pilot-env.sh"
+    ))
+    .arg(env!("CARGO_BIN_EXE_cs"))
+    .arg("--config")
+    .arg(dir.path())
+    .args([
+        "sessions",
+        "send",
+        "--to",
+        RECIPIENT,
+        "--from",
+        "lock-sender",
+        "--message",
+        "expires",
+        "--expires-in",
+        "3600",
+    ])
+    .current_dir(dir.path())
+    .output()
+    .expect("run cs");
+    assert!(output.status.success(), "{output:?}");
+    let sid = SessionId::new(RECIPIENT).expect("session id");
+    let text = std::fs::read_to_string(
+        dir.path()
+            .join(CosmonPath::PresenceInbox { session: &sid }.rel()),
+    )
+    .expect("inbox");
+    let line: serde_json::Value =
+        serde_json::from_str(text.lines().next().expect("line")).expect("envelope");
+    let created: chrono::DateTime<Utc> = line["created_at"].as_str().unwrap().parse().unwrap();
+    let expires: chrono::DateTime<Utc> = line["expires_at"].as_str().unwrap().parse().unwrap();
+    assert_eq!((expires - created).num_seconds(), 3600);
+}
