@@ -3,7 +3,7 @@
 //! Pilot messages of a bound attachment (issue #212, W7b): S-SEND, S-PULL
 //! and S-ACK of `docs/specs/cross-machine-collaboration.md`.
 //!
-//! Admission is the W7a door ([`super::pilot::door`]): the mission in the
+//! Admission is the W7a door (`door` in [`super::pilot`]): the mission in the
 //! path must be the binding's, and the attachment is the one the caller
 //! proved. The sender written into a message is that attachment's mailbox
 //! ([`mailbox_of`]); no request field can name another author or mission.
