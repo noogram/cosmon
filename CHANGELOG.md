@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- FileCas can read blobs with a caller-supplied size limit, repairs corrupt blobs on re-upload, and publishes concurrent writes atomically.
+
 - `cs sessions send` takes the mission's mailbox lock when the recipient's presence names a mission, the lock the remote pilot send already takes, so a local and a remote sender no longer pick the same sequence (#212 W7b). Mailbox format, output and exit codes are unchanged.
 
 - `cosmon-remote pilot send/inbox/ack` reaches three new RPP routes under `/v1/pilot/{mission}/messages` (#212 W7b) on the existing pilot mailbox. The author is the bound attachment and the recipient must pilot the mission; a send is idempotent by key, at most 65536 bytes and 1000 unacknowledged messages per attachment; inbox reads without acknowledging, 100 messages or 1048576 bytes per page; ack is safe to repeat.

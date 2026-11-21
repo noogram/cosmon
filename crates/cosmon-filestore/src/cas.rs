@@ -10,13 +10,14 @@
 //!   0a/0a1b2c3d...
 //! ```
 //!
-//! Writes are atomic: data lands in a `.tmp` sibling, is fsynced, then renamed
-//! into place. A crash mid-write leaves the previous blob intact. A matching
-//! blob is deduplicated and corrupt contents are replaced.
+//! Writes are atomic: each writer stages data in a unique sibling file,
+//! syncs it, then renames it into place. A crash mid-write leaves the
+//! previous blob intact. Matching blobs are deduplicated and corrupt
+//! contents are replaced.
 
 #![forbid(unsafe_code)]
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -108,16 +109,7 @@ impl CasStore for FileCas {
             return Ok(hash);
         }
 
-        // Ensure the shard directory exists.
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        // Atomic write: write to .tmp, fsync, rename.
-        let tmp = target.with_extension("tmp");
-        atomic_write_with_fsync(&tmp, data)?;
-        fs::rename(&tmp, &target)?;
-
+        atomic_write_with_fsync(&target, data)?;
         Ok(hash)
     }
 
@@ -136,15 +128,26 @@ impl CasStore for FileCas {
     }
 }
 
-/// Write `data` to `path` with an fsync before returning.
-fn atomic_write_with_fsync(path: &Path, data: &[u8]) -> Result<(), CosmonError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
-    file.write_all(data)?;
-    file.sync_all()?;
+/// Publish fully written bytes by replacing the destination atomically.
+fn atomic_write_with_fsync(target: &Path, data: &[u8]) -> io::Result<()> {
+    let shard = target
+        .parent()
+        .ok_or_else(|| io::Error::other("CAS blob path has no parent"))?;
+    fs::create_dir_all(shard)?;
+
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".cas-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Preserve normal file creation permissions, subject to umask.
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+    let mut temporary = builder.tempfile_in(shard)?;
+    temporary.write_all(data)?;
+    temporary.as_file().sync_all()?;
+    // Concurrent writers for this address publish the same bytes.
+    temporary.persist(target).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -225,6 +228,43 @@ mod tests {
             assert_eq!(fs::read(&path).unwrap(), expected, "after {corrupt:?}");
             assert_eq!(store.get(&hash).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn concurrent_puts_publish_only_complete_bytes_and_all_succeed() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        const WRITERS: usize = 4;
+        let (_tmp, store) = make_store();
+        let data = vec![0xA5; 8 * 1024 * 1024];
+        // SHA-256 computed independently with shasum over the fixture bytes.
+        let hash =
+            ContentHash::new("e474a45740e5efac02e9f7e0626b3f86111b293f8363e477786dfad64e98df3b")
+                .unwrap();
+        let start = Barrier::new(WRITERS + 1);
+        thread::scope(|scope| {
+            let writers: Vec<_> = (0..WRITERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        store.put(&data)
+                    })
+                })
+                .collect();
+            start.wait();
+            while writers.iter().any(|writer| !writer.is_finished()) {
+                if store.exists(&hash).unwrap() {
+                    let visible = store.get(&hash).unwrap();
+                    assert!(visible == data, "reader saw {} bytes", visible.len());
+                }
+                thread::yield_now();
+            }
+            for writer in writers {
+                assert_eq!(writer.join().unwrap().unwrap(), hash);
+            }
+        });
+        assert!(store.get(&hash).unwrap() == data);
     }
 
     #[test]

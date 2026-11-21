@@ -173,3 +173,26 @@ fn plain_inbox_still_acknowledges_and_explicit_ack_then_reports_duplicate() {
     assert!(read["read_at"].is_string());
     assert_eq!(before, m.files());
 }
+
+#[test]
+fn local_mailbox_keeps_a_large_body_in_the_cas_and_reads_it_in_full() {
+    let m = Mailbox::new();
+    let body = "x".repeat(65_537);
+    // Independently computed SHA-256 of the 65,537 ASCII x bytes.
+    let digest = "1abe08ebecf1c18cab71f6fe28aaddf20268f85bad78bb9a72f88ca47c874662";
+    let blob = format!("cas/1a/{digest}");
+    let key = m.send("ack-reader", &body);
+    let files = m.files();
+    assert_eq!(files[&blob], body.as_bytes());
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&files["presence/ack-reader.inbox.jsonl"]).expect("envelope");
+    assert_eq!(envelope["id"], key);
+    assert_eq!(envelope["payload_hash"], digest);
+    assert_eq!(envelope["payload_ref"], blob);
+
+    let peek = json(&m.cs(&["inbox", "--peek", "--json"]));
+    assert_eq!(peek["id"], key);
+    assert_eq!(peek["body"], body);
+    assert_eq!(peek["state"], "queued");
+    assert_eq!(m.files(), files);
+}
