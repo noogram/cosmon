@@ -35,7 +35,8 @@ EFFECTS = {"read-only", "observation-write", "advisory-write"}
 RETRIES = {"idempotent-key", "idempotent-ack", "safe-repeat", "bounded-redelivery"}
 PHASES = {"W4", "W7"}
 # Routes mounted so far, by the phase their row must declare. W4 shipped the
-# five work routes; W7a (issue #212) ships the four presence routes. Every
+# five work routes; W7a (issue #212) ships the four presence routes and W7b
+# the three mailbox routes. Every
 # other session route stays proposed until its own W7 increment updates
 # this exact exposure set.
 SHIPPED_ROUTES = {
@@ -51,6 +52,9 @@ SHIPPED_ROUTES = {
         "PUT /v1/pilot/{mission}/attachments/{attachment}/heartbeat",
         "DELETE /v1/pilot/{mission}/attachments/{attachment}",
         "GET /v1/pilot/{mission}/attachments",
+        "POST /v1/pilot/{mission}/messages",
+        "GET /v1/pilot/{mission}/messages",
+        "POST /v1/pilot/{mission}/messages/{key}/ack",
     },
 }
 DECISION_STATUS = {"adopted-default", "operator-confirmed"}
@@ -156,8 +160,9 @@ def check(spec_text, surface_path):
             shipped = rec["Route"] in SHIPPED_ROUTES.get(rec["Phase"], set())
             if rec["Route"] in mounted and not shipped:
                 findings.append(f"route {rid}: {rec['Route']} is already mounted; "
-                                "only the five W4 work routes and the four W7a "
-                                "presence routes are shipped")
+                                "only the five W4 work routes, the four W7a "
+                                "presence routes and the three W7b mailbox "
+                                "routes are shipped")
             if shipped and rec["Route"] not in mounted:
                 findings.append(f"route {rid}: shipped {rec['Phase']} route is "
                                 "missing from the surface")

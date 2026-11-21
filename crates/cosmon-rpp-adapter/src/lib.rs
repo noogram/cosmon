@@ -437,6 +437,14 @@ pub fn router(state: AppState) -> Router {
             "/v1/pilot/{mission}/attachments/{attachment}/heartbeat",
             put(routes::pilot::heartbeat),
         )
+        .route(
+            "/v1/pilot/{mission}/messages",
+            get(routes::pilot_mailbox::pull).post(routes::pilot_mailbox::send),
+        )
+        .route(
+            "/v1/pilot/{mission}/messages/{key}/ack",
+            post(routes::pilot_mailbox::ack),
+        )
         .route("/v1/work/{owner}", get(routes::work::list))
         .route("/v1/work/{owner}/messages", post(routes::work::send))
         .route(

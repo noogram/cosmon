@@ -68,7 +68,28 @@ a valid record leaves only by its own detach. A heartbeat is server-timed and ac
 seconds, detach is safe to repeat, and peers returns at most 100 attachments
 per page with a stable cursor and writes nothing. The client profile and proof
 setup are those of `work` (`config set attachment ID`, `work store-proof`).
-Mailbox (W7b) and checkpoint (W7c) routes are not mounted.
+The mailbox routes (W7b) follow below; the checkpoint routes (W7c) are not
+mounted.
+
+## Cross-machine pilot messages (issue #212 W7b)
+
+| Capability | Local CLI | Remote CLI / API |
+|---|---|---|
+| Send a pilot message | `cs sessions send --to SID` | `cosmon-remote pilot send MISSION --to SID --key KEY --message TEXT`; `POST /v1/pilot/{mission}/messages` |
+| Read pending messages | `cs sessions inbox` (acknowledges what it prints); `cs sessions inbox --peek` (does not) | `cosmon-remote pilot inbox MISSION`; `GET /v1/pilot/{mission}/messages` (never acknowledges) |
+| Acknowledge one message | `cs sessions ack KEY` | `cosmon-remote pilot ack MISSION KEY`; `POST /v1/pilot/{mission}/messages/{key}/ack` |
+
+Both columns address the same records: the existing pilot mailbox. A remote
+attachment's mailbox is the one named by its attachment id, so the host
+reaches it with `cs sessions send --to <attachment>`, and a remote send to a
+local pilot lands in that session's mailbox, read by `cs sessions inbox`. The
+differences are deliberate. The remote sender is the proven attachment and
+cannot be chosen (`--from` has no remote counterpart); the recipient must
+pilot the mission; the remote send is idempotent by a caller key, bounded to
+65536 bytes and to 1000 unacknowledged messages per sending attachment; the
+remote inbox is the local `--peek`, paged at 100 messages and 1048576 bytes
+with a sequence cursor, and has no `--all` or `--follow`; the remote ack
+reaches only the caller's own mailbox. The local verbs keep no such limits.
 
 ## Cross-machine work exchange (issue #147 W4)
 

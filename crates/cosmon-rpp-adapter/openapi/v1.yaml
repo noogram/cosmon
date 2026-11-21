@@ -130,6 +130,78 @@ paths:
         "429": {description: heartbeat_too_soon}
         "500": {description: corrupt_evidence}
         "503": {description: custody_unavailable; outcome unknown}
+  /v1/pilot/{mission}/messages:
+    get:
+      operationId: pullPilotMessages
+      summary: List the bound attachment's unacknowledged messages without consuming them (S-PULL).
+      tags: [pilot]
+      description: Requires cosmon:sessions:read (or write), a pilot binding for this exact mission and attachment proof. Reads the caller's own mailbox only, in sequence order, at most 100 messages and 1048576 response bytes per page; `after` is the last sequence of the previous page and does not shift when an earlier message is acknowledged. Read-only; takes no lock, records no delivery and writes nothing. A message whose body is unreadable, not UTF-8 or larger than one response is listed under `undeliverable` with its metadata and a reason.
+      parameters:
+        - {name: cosmon-attachment, in: header, required: true, schema: {type: string}, description: Host-issued attachment identifier.}
+        - {name: cosmon-attachment-proof, in: header, required: true, schema: {type: string, writeOnly: true}, description: Secret attachment proof from the private credential store; never record in logs.}
+        - {name: mission, in: path, required: true, schema: {type: string}}
+        - {name: after, in: query, schema: {type: integer, minimum: 0}, description: Cursor; the last sequence of the previous page.}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 100}}
+      responses:
+        "200":
+          description: One page of unacknowledged messages.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PilotPullResponse"}
+        "400": {description: Invalid query, cursor or unknown parameter}
+        "401": {description: unauthenticated}
+        "403": {description: scope_missing, binding_missing or binding_revoked}
+        "500": {description: corrupt_evidence}
+        "503": {description: custody_unavailable; outcome unknown}
+    post:
+      operationId: sendPilotMessage
+      summary: Send a pilot message from the bound attachment (S-SEND).
+      tags: [pilot]
+      description: Requires cosmon:sessions:write and attachment proof. The author is the proven attachment and the mission is the binding's; the body cannot name either, nor a sequence. The recipient must pilot the mission (an attachment with an active pilot binding of it, or a local session whose presence names it). At most 65536 bytes per message and 1000 unacknowledged messages per sending attachment. The same idempotency key with the same recipient, body and lifetime returns the same message and writes nothing; the same key with any other content is key_collision. Confers no lifecycle or lease authority and wakes no peer.
+      parameters:
+        - {name: cosmon-attachment, in: header, required: true, schema: {type: string}, description: Host-issued attachment identifier.}
+        - {name: cosmon-attachment-proof, in: header, required: true, schema: {type: string, writeOnly: true}, description: Secret attachment proof from the private credential store; never record in logs.}
+        - {name: mission, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/PilotSendRequest"}
+      responses:
+        "200":
+          description: The admitted message envelope, with a duplicate replay indicator.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PilotSendResponse"}
+        "400": {description: Invalid or unknown request field, or a lifetime out of range}
+        "401": {description: unauthenticated}
+        "403": {description: scope_missing, binding_missing, binding_revoked or not_a_member (recipient)}
+        "409": {description: key_collision}
+        "413": {description: payload_too_large}
+        "429": {description: pending_limit}
+        "503": {description: custody_unavailable; outcome unknown}
+  /v1/pilot/{mission}/messages/{key}/ack:
+    post:
+      operationId: ackPilotMessage
+      summary: Acknowledge one message of the bound attachment's mailbox (S-ACK).
+      tags: [pilot]
+      description: Requires cosmon:sessions:write and attachment proof. Acknowledges a message of the caller's own mailbox only; a key of another mailbox is unknown_envelope. Idempotent; a repeat reports duplicate=true and writes nothing.
+      parameters:
+        - {name: cosmon-attachment, in: header, required: true, schema: {type: string}, description: Host-issued attachment identifier.}
+        - {name: cosmon-attachment-proof, in: header, required: true, schema: {type: string, writeOnly: true}, description: Secret attachment proof from the private credential store; never record in logs.}
+        - {name: mission, in: path, required: true, schema: {type: string}}
+        - {name: key, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: The acknowledged key, with a duplicate indicator.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PilotAckResponse"}
+        "400": {description: Invalid key}
+        "401": {description: unauthenticated}
+        "403": {description: scope_missing, binding_missing or binding_revoked}
+        "404": {description: unknown_envelope}
+        "503": {description: custody_unavailable; outcome unknown}
   /v1/work/{owner}:
     get:
       operationId: listWork
@@ -4021,6 +4093,63 @@ components:
           maxItems: 100
           items: {$ref: "#/components/schemas/PilotAttachment"}
         next_cursor: {type: [string, "null"]}
+    PilotSendRequest:
+      type: object
+      additionalProperties: false
+      required: [idempotency_key, to, message]
+      properties:
+        idempotency_key: {type: string, maxLength: 80, description: Retry key; keep it unchanged when retrying a lost response.}
+        to: {type: string, description: Recipient mailbox; an attachment or local session piloting the mission.}
+        message: {type: string, description: Message body, at most 65536 bytes.}
+        expires_in_secs: {type: [integer, "null"], minimum: 0, description: Seconds after which an unacknowledged message reads as expired.}
+    PilotMessage:
+      type: object
+      required: [id, from, to, sequence, payload_hash, created_at]
+      properties:
+        id: {type: string}
+        from: {type: string, description: Sender mailbox; for a remote send, the sending attachment.}
+        to: {type: string}
+        sequence: {type: integer, minimum: 1, description: Position in the recipient's mailbox.}
+        payload_hash: {type: string, description: SHA-256 of the body.}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: [string, "null"], format: date-time}
+        state: {type: string, enum: [queued, read, expired]}
+        body: {type: string}
+        reason: {type: string, enum: [payload_unreadable, payload_not_utf8, payload_too_large]}
+    PilotSendResponse:
+      type: object
+      required: [schema_version, received_at, mission, message, duplicate]
+      properties:
+        schema_version: {type: integer, const: 1}
+        received_at: {type: string, format: date-time}
+        mission: {type: string}
+        message: {$ref: "#/components/schemas/PilotMessage"}
+        duplicate: {type: boolean}
+    PilotPullResponse:
+      type: object
+      required: [schema_version, received_at, mission, messages, undeliverable, next_cursor]
+      properties:
+        schema_version: {type: integer, const: 1}
+        received_at: {type: string, format: date-time}
+        mission: {type: string}
+        messages:
+          type: array
+          maxItems: 100
+          items: {$ref: "#/components/schemas/PilotMessage"}
+        undeliverable:
+          type: array
+          maxItems: 100
+          items: {$ref: "#/components/schemas/PilotMessage"}
+        next_cursor: {type: [integer, "null"]}
+    PilotAckResponse:
+      type: object
+      required: [schema_version, received_at, mission, id, duplicate]
+      properties:
+        schema_version: {type: integer, const: 1}
+        received_at: {type: string, format: date-time}
+        mission: {type: string}
+        id: {type: string}
+        duplicate: {type: boolean}
     WorkSendRequest:
       type: object
       additionalProperties: false
@@ -5889,7 +6018,7 @@ components:
 
 tags:
   - name: pilot
-    description: Bound pilot presence (attach, heartbeat, detach, peers); no lifecycle, mailbox, checkpoint or lease effects.
+    description: Bound pilot presence (attach, heartbeat, detach, peers) and pilot messages (send, pull, ack) through the existing pilot mailbox; no lifecycle, checkpoint or lease effects.
   - name: work
     description: Bound advisory work exchange; no lifecycle, worker or lease effects.
   - name: harvest

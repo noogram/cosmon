@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- `cosmon-remote pilot send/inbox/ack` reaches three new RPP routes under `/v1/pilot/{mission}/messages` (#212 W7b) on the existing pilot mailbox. The author is the bound attachment and the recipient must pilot the mission; a send is idempotent by key, at most 65536 bytes and 1000 unacknowledged messages per attachment; inbox reads without acknowledging, 100 messages or 1048576 bytes per page; ack is safe to repeat.
+
 - A revoked pilot binding no longer keeps its remote attachment place: when a mission already holds two attachments, `cosmon-remote pilot attach` removes the records whose binding was revoked and is accepted if that leaves room. Records of valid bindings are still removed only by their own detach (#212 W7a).
 
 - `cosmon-remote pilot attach/heartbeat/detach/peers` reaches four new RPP routes under `/v1/pilot/{mission}/attachments` (#212 W7a). Mission and attachment come from the operator-provisioned pilot binding; a mission holds at most two attachments, a heartbeat is server-timed and accepted at most once per 10 seconds, detach is safe to repeat and peers writes nothing. Presence takes no role and no lease.

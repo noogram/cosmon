@@ -31,6 +31,7 @@ pub mod noyaux;
 pub mod oauth_discovery;
 pub mod observability;
 pub mod pilot;
+pub mod pilot_mailbox;
 pub mod quota;
 pub mod result;
 pub mod session;

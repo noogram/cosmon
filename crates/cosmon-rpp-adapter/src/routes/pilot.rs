@@ -54,18 +54,22 @@ pub(crate) struct PeersQuery {
     limit: Option<usize>,
 }
 
-struct Door {
-    admitted: AdmittedCollaborator,
-    bindings: CollaborationBindingReader,
-    store: PresenceStore,
-    mission: MoleculeId,
+/// An admitted pilot request: the caller's binding, the tenant's binding
+/// reader and stores, and the mission the binding fixes. Shared with the
+/// mailbox routes ([`super::pilot_mailbox`]).
+pub(crate) struct Door {
+    pub(crate) admitted: AdmittedCollaborator,
+    pub(crate) bindings: CollaborationBindingReader,
+    pub(crate) store: PresenceStore,
+    pub(crate) state_dir: std::path::PathBuf,
+    pub(crate) mission: MoleculeId,
 }
 
-fn api(status: StatusCode, code: &'static str) -> ApiError {
+pub(crate) fn api(status: StatusCode, code: &'static str) -> ApiError {
     ApiError::with_status(status, code)
 }
 
-fn invalid() -> ApiError {
+pub(crate) fn invalid() -> ApiError {
     api(StatusCode::BAD_REQUEST, "invalid_json_body")
 }
 
@@ -73,7 +77,7 @@ fn binding_missing() -> ApiError {
     api(StatusCode::FORBIDDEN, "binding_missing")
 }
 
-fn admission_error(error: &CollaborationAdmissionError) -> ApiError {
+pub(crate) fn admission_error(error: &CollaborationAdmissionError) -> ApiError {
     let status = match error.http_status() {
         403 => StatusCode::FORBIDDEN,
         503 => StatusCode::SERVICE_UNAVAILABLE,
@@ -112,7 +116,7 @@ fn store_error(error: RemotePresenceStoreError) -> ApiError {
 
 /// Admit the caller for `mission` with `scope`. The scope is checked before
 /// any binding or presence record is read.
-fn door(
+pub(crate) fn door(
     state: &Arc<AppState>,
     headers: &HeaderMap,
     mission: &str,
@@ -153,6 +157,7 @@ fn door(
         admitted,
         bindings,
         store: PresenceStore::new(&state_dir),
+        state_dir,
         mission,
     })
 }
@@ -167,7 +172,10 @@ fn own_attachment(door: &Door, path: &str) -> Result<AttachmentId, ApiError> {
     Ok(own.clone())
 }
 
-fn commit<T>(door: &Door, effect: impl FnOnce() -> Result<T, ApiError>) -> Result<T, ApiError> {
+pub(crate) fn commit<T>(
+    door: &Door,
+    effect: impl FnOnce() -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
     commit_collaboration(&door.bindings, &door.admitted, effect).map_err(|error| match error {
         CommitError::Binding(error) => admission_error(&error.into()),
         CommitError::Effect(error) => error,
@@ -189,7 +197,7 @@ fn view(record: &RemotePresence, caller: &AttachmentId) -> Value {
     value
 }
 
-fn envelope(door: &Door) -> Value {
+pub(crate) fn envelope(door: &Door) -> Value {
     json!({"schema_version": 1, "received_at": Utc::now(), "mission": door.mission})
 }
 

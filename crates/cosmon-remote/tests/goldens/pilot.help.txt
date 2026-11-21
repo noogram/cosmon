@@ -1,4 +1,4 @@
-Pilot presence of the bound attachment; no lease or lifecycle authority
+Pilot presence and messages of the bound attachment; no lease or lifecycle authority
 
 Usage: cosmon-remote pilot [OPTIONS] <COMMAND>
 
@@ -7,6 +7,9 @@ Commands:
   heartbeat  Record a server-observed heartbeat, at most one per 10 seconds (`PUT /v1/pilot/{mission}/attachments/{attachment}/heartbeat`)
   detach     Withdraw the bound attachment's presence; safe to repeat (`DELETE /v1/pilot/{mission}/attachments/{attachment}`)
   peers      List one page of the mission's attachments (`GET /v1/pilot/{mission}/attachments`)
+  send       Send a message to a pilot of the mission, at most 65536 bytes (`POST /v1/pilot/{mission}/messages`)
+  inbox      List unacknowledged messages without consuming them (`GET /v1/pilot/{mission}/messages`)
+  ack        Acknowledge one message after its safe point; safe to repeat (`POST /v1/pilot/{mission}/messages/{key}/ack`)
   help       Print this message or the help of the given subcommand(s)
 
 Options:

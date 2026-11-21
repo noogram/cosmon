@@ -129,6 +129,10 @@ pub enum CosmonPathKind {
     /// `presence/remote/<mission>.lock` — exclusive lock serialising the
     /// attachment cap and key check of one mission.
     RemotePresenceLock,
+    /// `presence/remote/<mission>.mailbox.lock` — exclusive lock serialising
+    /// the key check, pending cap and sequence of remote pilot sends and
+    /// acknowledgments on one mission (issue #212, W7b).
+    RemoteMailboxLock,
     /// `pilot-lease/<mission>.requests.jsonl` — takeover asks, written by
     /// pilots (mission co-pilotage M4).
     PilotLeaseRequests,
@@ -195,6 +199,7 @@ impl CosmonPathKind {
             Self::PresenceInboxAck => "presence/<session>.inbox.ack.jsonl",
             Self::RemotePresence => "presence/remote/<mission>/<attachment>.json",
             Self::RemotePresenceLock => "presence/remote/<mission>.lock",
+            Self::RemoteMailboxLock => "presence/remote/<mission>.mailbox.lock",
             Self::PilotLeaseRequests => "pilot-lease/<mission>.requests.jsonl",
             Self::PilotLeaseGrants => "pilot-lease/<mission>.grants.jsonl",
             Self::Cas => "cas/<prefix>/<hash>",
@@ -231,7 +236,9 @@ impl CosmonPathKind {
             | Self::PresenceSeek
             | Self::RemotePresence
             | Self::RemotePresenceLock => "cosmon-filestore::PresenceStore",
-            Self::PresenceInbox | Self::PresenceInboxAck => "cosmon-filestore::PilotMailbox",
+            Self::PresenceInbox | Self::PresenceInboxAck | Self::RemoteMailboxLock => {
+                "cosmon-filestore::PilotMailbox"
+            }
             Self::PilotLeaseRequests | Self::PilotLeaseGrants => {
                 "cosmon-filestore::PilotLeaseStore"
             }
@@ -264,6 +271,7 @@ impl CosmonPathKind {
             Self::PresenceInboxAck => "acknowledgements of a session's pilot messages",
             Self::RemotePresence => "remote presence of one bound pilot attachment",
             Self::RemotePresenceLock => "advisory lock for one mission's remote attachments",
+            Self::RemoteMailboxLock => "advisory lock for one mission's remote pilot messages",
             Self::PilotLeaseRequests => "takeover requests on a mission (no authority)",
             Self::PilotLeaseGrants => "operator-granted PRIMARY lease ledger for a mission",
             Self::Cas => "content-addressed blob (response hashes, attachments)",
@@ -282,7 +290,8 @@ impl CosmonPathKind {
             Self::FleetLock
             | Self::TrunkLock
             | Self::MoleculeWriteLock
-            | Self::RemotePresenceLock => Persistence::Lock,
+            | Self::RemotePresenceLock
+            | Self::RemoteMailboxLock => Persistence::Lock,
             Self::ArchiveMolecule | Self::ArchiveFleetEvents | Self::ArchiveSchemaVersion => {
                 Persistence::ArchiveTracked
             }
@@ -380,6 +389,11 @@ pub enum CosmonPath<'a> {
         /// Mission whose attachments the lock serialises.
         mission: &'a MoleculeId,
     },
+    /// See [`CosmonPathKind::RemoteMailboxLock`].
+    RemoteMailboxLock {
+        /// Mission whose remote pilot messages the lock serialises.
+        mission: &'a MoleculeId,
+    },
     /// See [`CosmonPathKind::PilotLeaseRequests`].
     PilotLeaseRequests {
         /// Mission the requests are about.
@@ -445,6 +459,7 @@ impl CosmonPath<'_> {
             Self::PresenceInboxAck { .. } => CosmonPathKind::PresenceInboxAck,
             Self::RemotePresence { .. } => CosmonPathKind::RemotePresence,
             Self::RemotePresenceLock { .. } => CosmonPathKind::RemotePresenceLock,
+            Self::RemoteMailboxLock { .. } => CosmonPathKind::RemoteMailboxLock,
             Self::PilotLeaseRequests { .. } => CosmonPathKind::PilotLeaseRequests,
             Self::PilotLeaseGrants { .. } => CosmonPathKind::PilotLeaseGrants,
             Self::Cas { .. } => CosmonPathKind::Cas,
@@ -510,6 +525,9 @@ impl CosmonPath<'_> {
             Self::RemotePresenceLock { mission } => PathBuf::from("presence")
                 .join("remote")
                 .join(format!("{}.lock", mission.as_str())),
+            Self::RemoteMailboxLock { mission } => PathBuf::from("presence")
+                .join("remote")
+                .join(format!("{}.mailbox.lock", mission.as_str())),
             Self::PilotLeaseRequests { mission } => {
                 PathBuf::from("pilot-lease").join(format!("{}.requests.jsonl", mission.as_str()))
             }
@@ -581,6 +599,7 @@ mod tests {
                 attachment: Box::leak(Box::new(AttachmentId::from_random([7; 8]))),
             },
             CosmonPathKind::RemotePresenceLock => CosmonPath::RemotePresenceLock { mission: mol() },
+            CosmonPathKind::RemoteMailboxLock => CosmonPath::RemoteMailboxLock { mission: mol() },
             CosmonPathKind::PilotLeaseRequests => CosmonPath::PilotLeaseRequests { mission: mol() },
             CosmonPathKind::PilotLeaseGrants => CosmonPath::PilotLeaseGrants { mission: mol() },
             CosmonPathKind::Cas => CosmonPath::Cas { hash: hash() },
@@ -654,6 +673,21 @@ mod tests {
     /// the same change — the diff is the review surface that replaces the old
     /// hand-maintained P1 list (now generated, never typed).
     #[test]
+    fn the_remote_mailbox_lock_is_a_pilot_mailbox_lock() {
+        let kind = CosmonPathKind::RemoteMailboxLock;
+        assert_eq!(kind.owner(), "cosmon-filestore::PilotMailbox");
+        assert_eq!(kind.persistence(), Persistence::Lock);
+        assert_eq!(
+            kind.description(),
+            "advisory lock for one mission's remote pilot messages"
+        );
+        assert_eq!(
+            CosmonPathKind::RemotePresenceLock.persistence(),
+            Persistence::Lock
+        );
+    }
+
+    #[test]
     fn write_path_taxonomy_snapshot() {
         let got: Vec<&'static str> = CosmonPathKind::all()
             .map(CosmonPathKind::template)
@@ -675,6 +709,7 @@ mod tests {
             "presence/<session>.inbox.ack.jsonl",
             "presence/remote/<mission>/<attachment>.json",
             "presence/remote/<mission>.lock",
+            "presence/remote/<mission>.mailbox.lock",
             "pilot-lease/<mission>.requests.jsonl",
             "pilot-lease/<mission>.grants.jsonl",
             "cas/<prefix>/<hash>",
