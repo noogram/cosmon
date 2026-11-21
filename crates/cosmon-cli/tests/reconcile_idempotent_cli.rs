@@ -20,7 +20,8 @@
 //! `projected_at` wall-clock by design, and is bookkeeping rather than a
 //! user-facing surface.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::process::Command;
 
 fn cosmon_bin() -> Command {
@@ -82,7 +83,7 @@ fn setup_multi_surface_project(tmp: &std::path::Path) -> std::path::PathBuf {
     state_dir
 }
 
-fn nucleate_task(state_dir: &std::path::Path, topic: &str) {
+fn nucleate_task(state_dir: &std::path::Path, topic: &str) -> String {
     let out = cosmon_bin_isolated(state_dir)
         .arg("--json")
         .arg("nucleate")
@@ -96,6 +97,8 @@ fn nucleate_task(state_dir: &std::path::Path, topic: &str) {
         "cs nucleate task-work failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let result: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    result["id"].as_str().unwrap().to_owned()
 }
 
 fn run_reconcile(state_dir: &std::path::Path) {
@@ -113,6 +116,118 @@ fn run_reconcile(state_dir: &std::path::Path) {
 /// The surface files declared in the fixture's `surfaces.toml`, relative to
 /// the project root (parent of `.cosmon/`).
 const SURFACE_FILES: [&str; 2] = ["STATUS.md", "ISSUES.md"];
+
+#[test]
+fn reconcile_publishes_the_frontier_even_if_the_old_temp_name_is_occupied() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = setup_multi_surface_project(tmp.path());
+    let molecule = nucleate_task(&state_dir, "frontier publication");
+    let occupied = state_dir.join("frontier.json.tmp");
+    fs::create_dir(&occupied).unwrap();
+
+    run_reconcile(&state_dir);
+
+    let frontier: serde_json::Value =
+        serde_json::from_slice(&fs::read(state_dir.join("frontier.json")).unwrap()).unwrap();
+    assert_eq!(frontier["ready"], serde_json::json!([molecule]));
+    assert!(occupied.is_dir());
+}
+
+#[test]
+fn reconcile_can_rebuild_a_molecule_nucleated_after_a_torn_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = setup_multi_surface_project(tmp.path());
+    nucleate_task(&state_dir, "before interruption");
+    let mut events = OpenOptions::new()
+        .append(true)
+        .open(state_dir.join("events.jsonl"))
+        .unwrap();
+    events.write_all(b"{\"unfinished\":").unwrap();
+    drop(events);
+    let molecule = nucleate_task(&state_dir, "after interruption");
+    let cache = state_dir
+        .join("fleets/default/molecules")
+        .join(&molecule)
+        .join("state.json");
+    fs::remove_file(&cache).unwrap();
+
+    run_reconcile(&state_dir);
+
+    let rebuilt: serde_json::Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    assert_eq!(rebuilt["id"], molecule);
+    assert_eq!(rebuilt["formula_id"], "task-work");
+}
+
+#[test]
+fn reconcile_rebuilds_a_final_step_freeze_as_frozen() {
+    assert_rebuilt_final_status(true, "frozen");
+}
+
+#[test]
+fn reconcile_rebuilds_an_ordinary_final_step_as_completed() {
+    assert_rebuilt_final_status(false, "completed");
+}
+
+fn assert_rebuilt_final_status(freeze_on_last_step: bool, expected_status: &str) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = setup_multi_surface_project(tmp.path());
+    let formula = state_dir
+        .parent()
+        .unwrap()
+        .join("formulas/task-work.formula.toml");
+    fs::write(
+        &formula,
+        format!(
+            r#"
+formula = "task-work"
+version = 1
+freeze_on_last_step = {freeze_on_last_step}
+[vars.topic]
+required = true
+[[steps]]
+id = "work"
+title = "Work"
+description = "Finish the work."
+"#
+        ),
+    )
+    .unwrap();
+    let molecule = nucleate_task(&state_dir, "persist the final step status");
+    let cache = state_dir
+        .join("fleets/default/molecules")
+        .join(&molecule)
+        .join("state.json");
+    let mut seeded: serde_json::Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    // Start the transition from an already-running molecule without a worker session.
+    seeded["status"] = serde_json::json!("running");
+    fs::write(&cache, serde_json::to_vec(&seeded).unwrap()).unwrap();
+
+    let out = cosmon_bin_isolated(&state_dir)
+        .args([
+            "evolve",
+            &molecule,
+            "--evidence",
+            "final step evidence",
+            "--formula",
+        ])
+        .arg(&formula)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "cs evolve failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let live: serde_json::Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    assert_eq!(live["status"], expected_status);
+    fs::remove_file(&cache).unwrap();
+
+    run_reconcile(&state_dir);
+
+    let rebuilt: serde_json::Value = serde_json::from_slice(&fs::read(&cache).unwrap()).unwrap();
+    assert_eq!(rebuilt["status"], expected_status);
+    assert_eq!(rebuilt["current_step"], 1);
+}
 
 #[test]
 fn reconcile_twice_is_byte_identical_at_cli_level() {
