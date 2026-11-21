@@ -259,7 +259,7 @@ added by amendment, never reused for another meaning.
 | envelope_expired | 410 | The envelope's lifetime ended before the operation. |
 | digest_mismatch | 422 | The supplied digest does not match the stored payload. |
 | evidence_unreadable | 422 | Referenced evidence is missing, unreadable or fails its digest. |
-| attachment_limit | 409 | The mission already holds its two attachments (S-ATTACH); pending operator confirmation, see §11 2026-11-20. |
+| attachment_limit | 409 | The mission already holds two attachments with valid bindings (S-ATTACH); confirmed by the operator on 2026-11-20, see §11. |
 | not_attached | 404 | The attachment has no presence record on the mission (S-BEAT); pending operator confirmation, see §11 2026-11-20. |
 | heartbeat_too_soon | 429 | The attachment's last heartbeat is less than 10 seconds old; carries Retry-After; pending operator confirmation, see §11 2026-11-20. |
 | corrupt_evidence | 500 | Stored records fail validation; nothing is returned or repaired silently. |
@@ -371,7 +371,7 @@ therefore dropped from §4 and refused as X-TAKEOVER, and the local
 `cs sessions takeover` verbs are unchanged. O1 and O8 stand as written: no
 route confers or exercises lifecycle authority.
 
-**2026-11-20 amendment (W7a, pending operator confirmation).** W7a mounts
+**2026-11-20 amendment (W7a; the attachment cap rule is confirmed by the operator on 2026-11-20, the rest is pending operator confirmation).** W7a mounts
 S-ATTACH, S-BEAT, S-DETACH and S-PEERS; W7b to W7d are not delivered. Remote
 presence is its own record class in the presence store,
 `presence/remote/<mission>/<attachment>.json`, tagged by attachment and
@@ -382,9 +382,18 @@ the local session scan, `gc` and `cs sessions peers` do not read it. The
 S-ATTACH body is `idempotency_key` plus optional `label`; mission and
 attachment come from the binding. The same key and label return the stored
 record without a write; another key or label for an attached attachment is
-`key_collision`. Every stored record of the mission counts toward the cap of
-two, whatever its heartbeat age or the state of its binding; only S-DETACH
-frees a place, and an attach after detach is a new attach whatever its key.
+`key_collision`. A record counts toward the cap of two only while its
+attachment holds an active pilot binding of the mission (confirmed by the
+operator on 2026-11-20). When a new attach finds the mission full, the
+`presence-store` writer removes, under the mission lock, the records whose
+binding is revoked or gone, and accepts the attach if that leaves room;
+otherwise it refuses with `attachment_limit` and removes nothing. A record of
+a valid binding is removed only by its own S-DETACH. The binding set is read
+under the shared binding lock the attach already holds, so no revocation
+interleaves with the decision. Until an attach needs its place, a revoked
+record stays stored and S-PEERS lists it. Heartbeat age does not free a
+place: no staleness duration is specified, and none is assumed. An attach
+after detach is a new attach whatever its key.
 S-BEAT refuses a heartbeat sooner than 10 seconds after the last accepted
 one, including on a repeat. S-DETACH removes the record only and reports
 `detached=false` without writing when there is none. S-PEERS lists attachments

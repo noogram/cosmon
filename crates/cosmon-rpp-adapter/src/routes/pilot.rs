@@ -21,7 +21,7 @@ use cosmon_core::collaboration::{
     CollaborationTarget,
 };
 use cosmon_core::id::MoleculeId;
-use cosmon_core::remote_presence::{AttachRequest, RemotePresence, PEERS_PAGE};
+use cosmon_core::remote_presence::{live_attachments, AttachRequest, RemotePresence, PEERS_PAGE};
 use cosmon_core::work_message::MessageKey;
 use cosmon_filestore::{PresenceStore, RemotePresenceStoreError};
 use cosmon_state::collaboration::{CollaborationBindingReader, CommitError};
@@ -200,6 +200,9 @@ fn own_view(door: &Door, record: &RemotePresence) -> Value {
 }
 
 /// S-ATTACH: announce the bound attachment on its mission, idempotent by key.
+/// A record whose binding is no longer valid does not hold a place: when the
+/// mission is full, such records are removed and the attach is accepted if
+/// that leaves room. Valid records are never removed here.
 pub(crate) async fn attach(
     State(state): State<Arc<AppState>>,
     Path(mission): Path<String>,
@@ -214,11 +217,19 @@ pub(crate) async fn attach(
     )?;
     let Json(body) = body.map_err(|_| invalid())?;
     commit(&door, || {
+        // Read under the shared binding lock `commit` holds, so no
+        // revocation or provisioning interleaves with the cap decision.
+        let bindings = door
+            .bindings
+            .load()
+            .map_err(|error| admission_error(&error.into()))?;
+        let live = live_attachments(&bindings, &door.mission);
         let (record, written) = door
             .store
             .attach_remote(
                 &door.mission,
                 door.admitted.attachment(),
+                &live,
                 AttachRequest {
                     idempotency_key: body.idempotency_key,
                     label: body.label,

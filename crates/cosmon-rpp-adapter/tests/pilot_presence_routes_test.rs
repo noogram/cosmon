@@ -598,3 +598,118 @@ async fn peers_list_a_bounded_page_without_writing_anything() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fx.snapshot(), before, "S-PEERS must write nothing");
 }
+
+impl Fixture {
+    /// Revoke `name`'s binding the way the local `cs collaboration` command
+    /// does, through the binding-store writer.
+    fn revoke(&self, name: &str) {
+        CollaborationBindingStore::new(&self.tenant_state)
+            .revoke(&self.clients[name].binding.id, Utc::now())
+            .unwrap();
+    }
+
+    fn attachments(&self) -> Vec<String> {
+        self.records()
+            .iter()
+            .map(|record| record.attachment.to_string())
+            .collect()
+    }
+
+    fn record_bytes(&self, name: &str) -> Vec<u8> {
+        let mission = MoleculeId::new(MISSION).unwrap();
+        let attachment = &self.clients[name].binding.attachment;
+        std::fs::read(self.store().remote_presence_path(&mission, attachment)).unwrap()
+    }
+}
+
+/// A revoked binding does not keep its attachment place: the next attach
+/// that needs the room removes the revoked records and is accepted.
+#[tokio::test]
+async fn records_of_revoked_bindings_leave_room_for_a_new_attachment() {
+    let fx = fixture(&["one", "two", "three"], &[], &[]).await;
+    for name in ["one", "two"] {
+        let (status, body) = fx.attach(name, json!({"idempotency_key":"k"})).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+    }
+    fx.revoke("one");
+    fx.revoke("two");
+
+    let (status, body) = fx.attach("three", json!({"idempotency_key":"k3"})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["duplicate"], false);
+    assert_eq!(fx.attachments(), vec![fx.attachment("three")]);
+
+    // The repeat is a retry of the same request: same record, nothing written.
+    let after = fx.snapshot();
+    let (status, again) = fx.attach("three", json!({"idempotency_key":"k3"})).await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["duplicate"], true);
+    assert_eq!(again["attachment"], body["attachment"]);
+    assert_eq!(fx.snapshot(), after);
+
+    // Another key for the attached attachment is still a collision.
+    let (status, collision) = fx.attach("three", json!({"idempotency_key":"k4"})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{collision}");
+    assert_eq!(collision["error"], "key_collision");
+    assert_eq!(fx.snapshot(), after);
+
+    // S-PEERS lists neither removed record and writes nothing.
+    let (status, peers) = fx.peers("three", "").await;
+    assert_eq!(status, StatusCode::OK, "{peers}");
+    let listed = peers["attachments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["attachment"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(listed, vec![fx.attachment("three")]);
+    assert_eq!(fx.snapshot(), after, "S-PEERS must write nothing");
+}
+
+/// Two valid bindings keep their places: a third attach is refused and
+/// nothing is removed or written.
+#[tokio::test]
+async fn two_valid_bindings_still_refuse_a_third_attachment() {
+    let fx = fixture(&["one", "two", "three", "four"], &[], &[]).await;
+    for name in ["one", "two"] {
+        let (status, body) = fx.attach(name, json!({"idempotency_key":"k"})).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+    }
+    // A revoked binding that holds no record changes nothing.
+    fx.revoke("four");
+    let before = fx.snapshot();
+    for _ in 0..2 {
+        let (status, body) = fx.attach("three", json!({"idempotency_key":"k"})).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "attachment_limit");
+        assert_eq!(fx.snapshot(), before);
+    }
+}
+
+/// Only records whose binding is no longer valid are removed; a valid
+/// record keeps its place and its bytes.
+#[tokio::test]
+async fn a_valid_record_is_never_removed() {
+    let fx = fixture(&["valid", "revoked", "new", "late"], &[], &[]).await;
+    for name in ["valid", "revoked"] {
+        let (status, body) = fx.attach(name, json!({"idempotency_key":"k"})).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+    }
+    fx.age("valid", 30);
+    let valid_bytes = fx.record_bytes("valid");
+    fx.revoke("revoked");
+
+    let (status, body) = fx.attach("new", json!({"idempotency_key":"k"})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut expected = vec![fx.attachment("valid"), fx.attachment("new")];
+    expected.sort();
+    assert_eq!(fx.attachments(), expected);
+    assert_eq!(fx.record_bytes("valid"), valid_bytes);
+
+    // The mission is full of valid records again: refused, nothing removed.
+    let before = fx.snapshot();
+    let (status, body) = fx.attach("late", json!({"idempotency_key":"k"})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "attachment_limit");
+    assert_eq!(fx.snapshot(), before);
+}

@@ -17,11 +17,19 @@
 //!
 //! This module decides; it does no I/O. The store applies a decision under its
 //! own exclusive lock, so the cap and the key check see every committed record.
+//!
+//! A record whose binding is no longer valid (revoked, gone, or no longer a
+//! pilot binding of the mission) does not keep its place: an attach that the
+//! cap would otherwise refuse removes such records and is accepted when that
+//! leaves room. A record of a valid binding is never removed this way; only
+//! its own S-DETACH removes it.
+
+use std::collections::BTreeSet;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::collaboration::AttachmentId;
+use crate::collaboration::{AttachmentId, BindingSet, CollaborationCapability};
 use crate::id::MoleculeId;
 use crate::work_message::MessageKey;
 
@@ -77,8 +85,15 @@ pub struct AttachRequest {
 /// What an accepted attach does to the store.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AttachDecision {
-    /// Write this new record.
-    Create(RemotePresence),
+    /// Remove the records of `evict`, then write `record`.
+    Create {
+        /// The new record.
+        record: RemotePresence,
+        /// Attachments of the mission whose binding is no longer valid and
+        /// whose records are removed to make room. Empty unless the cap
+        /// would otherwise refuse the attach.
+        evict: Vec<AttachmentId>,
+    },
     /// A retry of the request that created this record: write nothing and
     /// return it unchanged.
     Existing(RemotePresence),
@@ -94,7 +109,8 @@ pub enum RemotePresenceError {
     /// The attachment is already attached under another key or label.
     #[error("the attachment is already attached by a different request")]
     KeyCollision,
-    /// The mission already holds [`MAX_ATTACHMENTS_PER_MISSION`] attachments.
+    /// The mission already holds [`MAX_ATTACHMENTS_PER_MISSION`] attachments
+    /// whose bindings are valid.
     #[error("the mission already holds its {MAX_ATTACHMENTS_PER_MISSION} attachments")]
     AttachmentLimit,
     /// The previous heartbeat was accepted less than
@@ -143,22 +159,43 @@ fn validate_label(label: Option<&str>) -> Result<(), RemotePresenceError> {
     }
 }
 
+/// Attachments whose binding currently admits them to `mission`: an active
+/// pilot binding of that mission. Every other attachment's record is held
+/// by a binding that is revoked, gone or for something else.
+#[must_use]
+pub fn live_attachments(bindings: &BindingSet, mission: &MoleculeId) -> BTreeSet<AttachmentId> {
+    bindings
+        .iter()
+        .filter(|binding| binding.is_active())
+        .filter(|binding| {
+            matches!(
+                &binding.capability,
+                CollaborationCapability::PilotMission { mission: bound } if bound == mission
+            )
+        })
+        .map(|binding| binding.attachment.clone())
+        .collect()
+}
+
 /// Decide an attach of `attachment` to `mission`, given every record the
-/// mission currently holds.
+/// mission currently holds and the attachments whose binding is valid.
 ///
 /// - A record of the same attachment with the same key and label is a retry:
 ///   [`AttachDecision::Existing`].
 /// - A record of the same attachment with another key or label is
 ///   [`RemotePresenceError::KeyCollision`]; the stored record is kept.
-/// - Otherwise the attach is new and refused with
-///   [`RemotePresenceError::AttachmentLimit`] when the mission already holds
-///   [`MAX_ATTACHMENTS_PER_MISSION`] other attachments.
+/// - Otherwise the attach is new. When the mission already holds
+///   [`MAX_ATTACHMENTS_PER_MISSION`] other records, the records whose
+///   attachment is not in `live` are evicted; if the live records alone
+///   still fill the mission, the attach is refused with
+///   [`RemotePresenceError::AttachmentLimit`] and nothing is evicted.
 ///
 /// # Errors
 /// Returns the refusal described above, or
 /// [`RemotePresenceError::InvalidLabel`].
 pub fn decide_attach(
     present: &[RemotePresence],
+    live: &BTreeSet<AttachmentId>,
     mission: &MoleculeId,
     attachment: &AttachmentId,
     request: AttachRequest,
@@ -178,19 +215,30 @@ pub fn decide_attach(
     let others = present
         .iter()
         .filter(|record| &record.mission == mission)
-        .count();
-    if others >= MAX_ATTACHMENTS_PER_MISSION {
-        return Err(RemotePresenceError::AttachmentLimit);
+        .collect::<Vec<_>>();
+    let mut evict = Vec::new();
+    if others.len() >= MAX_ATTACHMENTS_PER_MISSION {
+        evict = others
+            .iter()
+            .filter(|record| !live.contains(&record.attachment))
+            .map(|record| record.attachment.clone())
+            .collect();
+        if others.len() - evict.len() >= MAX_ATTACHMENTS_PER_MISSION {
+            return Err(RemotePresenceError::AttachmentLimit);
+        }
     }
-    Ok(AttachDecision::Create(RemotePresence {
-        schema_version: REMOTE_PRESENCE_SCHEMA_VERSION,
-        mission: mission.clone(),
-        attachment: attachment.clone(),
-        idempotency_key: request.idempotency_key,
-        label: request.label,
-        attached_at: now,
-        heartbeat_at: now,
-    }))
+    Ok(AttachDecision::Create {
+        record: RemotePresence {
+            schema_version: REMOTE_PRESENCE_SCHEMA_VERSION,
+            mission: mission.clone(),
+            attachment: attachment.clone(),
+            idempotency_key: request.idempotency_key,
+            label: request.label,
+            attached_at: now,
+            heartbeat_at: now,
+        },
+        evict,
+    })
 }
 
 /// Decide a heartbeat of an attached record at server time `now`.
@@ -261,6 +309,10 @@ mod tests {
     fn att(n: u8) -> AttachmentId {
         AttachmentId::from_random([n; 8])
     }
+    /// Every attachment the tests use, each with a valid binding.
+    fn all_live() -> BTreeSet<AttachmentId> {
+        (0..=9).map(att).collect()
+    }
     fn key(k: &str) -> MessageKey {
         MessageKey::new(k).unwrap()
     }
@@ -271,8 +323,17 @@ mod tests {
         }
     }
     fn attached(n: u8, k: &str) -> RemotePresence {
-        match decide_attach(&[], &mission(), &att(n), request(k, None), t(0)).unwrap() {
-            AttachDecision::Create(record) => record,
+        match decide_attach(
+            &[],
+            &all_live(),
+            &mission(),
+            &att(n),
+            request(k, None),
+            t(0),
+        )
+        .unwrap()
+        {
+            AttachDecision::Create { record, .. } => record,
             AttachDecision::Existing(_) => panic!("an empty mission has nothing to repeat"),
         }
     }
@@ -281,20 +342,148 @@ mod tests {
     fn the_third_attachment_of_a_mission_is_refused_and_a_retry_is_not_counted_twice() {
         let present = vec![attached(1, "k1"), attached(2, "k2")];
         assert_eq!(
-            decide_attach(&present, &mission(), &att(3), request("k3", None), t(1)),
+            decide_attach(
+                &present,
+                &all_live(),
+                &mission(),
+                &att(3),
+                request("k3", None),
+                t(1)
+            ),
             Err(RemotePresenceError::AttachmentLimit)
         );
         // The second attachment retrying its own request still succeeds.
         assert_eq!(
-            decide_attach(&present, &mission(), &att(2), request("k2", None), t(1)),
+            decide_attach(
+                &present,
+                &all_live(),
+                &mission(),
+                &att(2),
+                request("k2", None),
+                t(1)
+            ),
             Ok(AttachDecision::Existing(present[1].clone()))
         );
         // Another mission's records do not count against this one.
         let elsewhere = MoleculeId::new("task-20261120-bbbb").unwrap();
         assert!(matches!(
-            decide_attach(&present, &elsewhere, &att(3), request("k3", None), t(1)),
-            Ok(AttachDecision::Create(_))
+            decide_attach(
+                &present,
+                &all_live(),
+                &elsewhere,
+                &att(3),
+                request("k3", None),
+                t(1)
+            ),
+            Ok(AttachDecision::Create { .. })
         ));
+    }
+
+    #[test]
+    fn records_of_invalid_bindings_are_evicted_only_to_make_room() {
+        let present = vec![attached(1, "k1"), attached(2, "k2")];
+        let only_one: BTreeSet<_> = [att(1)].into_iter().collect();
+        // One valid, one invalid: the invalid one is evicted, the attach
+        // is accepted, and the valid one stays.
+        match decide_attach(
+            &present,
+            &only_one,
+            &mission(),
+            &att(3),
+            request("k3", None),
+            t(1),
+        ) {
+            Ok(AttachDecision::Create { record, evict }) => {
+                assert_eq!(record.attachment, att(3));
+                assert_eq!(evict, vec![att(2)]);
+            }
+            other => panic!("{other:?}"),
+        }
+        // None valid: both are evicted.
+        match decide_attach(
+            &present,
+            &BTreeSet::new(),
+            &mission(),
+            &att(3),
+            request("k3", None),
+            t(1),
+        ) {
+            Ok(AttachDecision::Create { evict, .. }) => assert_eq!(evict, vec![att(1), att(2)]),
+            other => panic!("{other:?}"),
+        }
+        // Below the cap nothing is evicted, valid or not.
+        match decide_attach(
+            &present[..1],
+            &BTreeSet::new(),
+            &mission(),
+            &att(3),
+            request("k3", None),
+            t(1),
+        ) {
+            Ok(AttachDecision::Create { evict, .. }) => assert!(evict.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        // A retry or a collision of an attached record evicts nothing, even
+        // when every other record is invalid.
+        assert_eq!(
+            decide_attach(
+                &present,
+                &BTreeSet::new(),
+                &mission(),
+                &att(2),
+                request("k2", None),
+                t(1)
+            ),
+            Ok(AttachDecision::Existing(present[1].clone()))
+        );
+        assert_eq!(
+            decide_attach(
+                &present,
+                &BTreeSet::new(),
+                &mission(),
+                &att(2),
+                request("x", None),
+                t(1)
+            ),
+            Err(RemotePresenceError::KeyCollision)
+        );
+    }
+
+    #[test]
+    fn only_active_pilot_bindings_of_the_mission_are_live() {
+        use crate::collaboration::{
+            AdmittedIdentity, AttachmentProof, BindingId, BindingSpec, CollaborationBinding,
+            CollaborationScope, PROOF_SECRET_BYTES,
+        };
+        let binding = |n: u8, capability: CollaborationCapability| {
+            CollaborationBinding::provision(
+                BindingSpec {
+                    identity: AdmittedIdentity::new("https://idp", "pilot", "aud", "demo").unwrap(),
+                    capability,
+                    scopes: [CollaborationScope::SessionsWrite].into_iter().collect(),
+                    label: None,
+                },
+                BindingId::from_random([n; 8]),
+                att(n),
+                &AttachmentProof::from_secret_bytes([n; PROOF_SECRET_BYTES]),
+                t(0),
+            )
+            .unwrap()
+        };
+        let here = || CollaborationCapability::PilotMission { mission: mission() };
+        let elsewhere = CollaborationCapability::PilotMission {
+            mission: MoleculeId::new("task-20261120-bbbb").unwrap(),
+        };
+        let set = BindingSet::new([
+            binding(1, here()),
+            binding(2, here()).revoked(t(5)),
+            binding(3, elsewhere),
+        ])
+        .unwrap();
+        assert_eq!(
+            live_attachments(&set, &mission()),
+            [att(1)].into_iter().collect::<BTreeSet<_>>()
+        );
     }
 
     #[test]
@@ -303,6 +492,7 @@ mod tests {
         assert_eq!(
             decide_attach(
                 &present,
+                &all_live(),
                 &mission(),
                 &att(1),
                 request("k1", Some("laptop")),
@@ -311,7 +501,14 @@ mod tests {
             Err(RemotePresenceError::KeyCollision)
         );
         assert_eq!(
-            decide_attach(&present, &mission(), &att(1), request("other", None), t(1)),
+            decide_attach(
+                &present,
+                &all_live(),
+                &mission(),
+                &att(1),
+                request("other", None),
+                t(1)
+            ),
             Err(RemotePresenceError::KeyCollision)
         );
     }
@@ -320,15 +517,37 @@ mod tests {
     fn a_label_is_bounded_and_printable() {
         let long = "x".repeat(MAX_LABEL_BYTES + 1);
         assert_eq!(
-            decide_attach(&[], &mission(), &att(1), request("k", Some(&long)), t(0)),
+            decide_attach(
+                &[],
+                &all_live(),
+                &mission(),
+                &att(1),
+                request("k", Some(&long)),
+                t(0)
+            ),
             Err(RemotePresenceError::InvalidLabel)
         );
         assert_eq!(
-            decide_attach(&[], &mission(), &att(1), request("k", Some("a\nb")), t(0)),
+            decide_attach(
+                &[],
+                &all_live(),
+                &mission(),
+                &att(1),
+                request("k", Some("a\nb")),
+                t(0)
+            ),
             Err(RemotePresenceError::InvalidLabel)
         );
         let exact = "x".repeat(MAX_LABEL_BYTES);
-        assert!(decide_attach(&[], &mission(), &att(1), request("k", Some(&exact)), t(0)).is_ok());
+        assert!(decide_attach(
+            &[],
+            &all_live(),
+            &mission(),
+            &att(1),
+            request("k", Some(&exact)),
+            t(0)
+        )
+        .is_ok());
     }
 
     #[test]
