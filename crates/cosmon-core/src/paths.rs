@@ -673,6 +673,21 @@ mod tests {
     /// the same change — the diff is the review surface that replaces the old
     /// hand-maintained P1 list (now generated, never typed).
     #[test]
+    fn the_remote_mailbox_lock_is_a_pilot_mailbox_lock() {
+        let kind = CosmonPathKind::RemoteMailboxLock;
+        assert_eq!(kind.owner(), "cosmon-filestore::PilotMailbox");
+        assert_eq!(kind.persistence(), Persistence::Lock);
+        assert_eq!(
+            kind.description(),
+            "advisory lock for one mission's remote pilot messages"
+        );
+        assert_eq!(
+            CosmonPathKind::RemotePresenceLock.persistence(),
+            Persistence::Lock
+        );
+    }
+
+    #[test]
     fn write_path_taxonomy_snapshot() {
         let got: Vec<&'static str> = CosmonPathKind::all()
             .map(CosmonPathKind::template)

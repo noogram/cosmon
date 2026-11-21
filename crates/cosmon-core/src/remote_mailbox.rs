@@ -35,8 +35,9 @@ pub const PULL_PAGE: usize = 100;
 pub const PULL_RESPONSE_BYTES: usize = 1_048_576;
 
 /// Bytes of [`PULL_RESPONSE_BYTES`] kept for the response envelope (schema
-/// version, mission, receipt time, cursor), so that the listed messages
-/// never push the whole response past its bound.
+/// version, mission, receipt time, cursor) and the separators between at
+/// most [`PULL_PAGE`] listed items, so that the listed messages never push
+/// the whole response past its bound.
 pub const PULL_ENVELOPE_RESERVE: usize = 4_096;
 
 /// Bytes available to the listed messages of one S-PULL page.
@@ -371,6 +372,18 @@ mod tests {
         assert_eq!(cut_page(items(3, 10), 5, 30), (vec![1, 2, 3], None));
         assert_eq!(cut_page(items(2, 50), 5, 20), (vec![1], Some(1)));
         assert_eq!(cut_page(items(0, 10), 5, 20), (vec![], None));
+    }
+
+    #[test]
+    fn the_item_budget_leaves_room_for_the_envelope_and_separators() {
+        assert_eq!(
+            PULL_ITEM_BUDGET + PULL_ENVELOPE_RESERVE,
+            PULL_RESPONSE_BYTES
+        );
+        assert_eq!(PULL_ITEM_BUDGET, 1_044_480);
+        // Two arrays of at most PULL_PAGE items need fewer commas than the
+        // reserve beyond the envelope's own few hundred bytes.
+        assert!(PULL_ENVELOPE_RESERVE > 2 * PULL_PAGE + 512);
     }
 
     #[test]

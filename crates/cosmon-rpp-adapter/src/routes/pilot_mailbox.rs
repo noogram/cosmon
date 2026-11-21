@@ -188,7 +188,7 @@ fn pulled(mailbox: &PilotMailbox, entry: &MailboxEntry, now: DateTime<Utc>) -> (
         Some(Ok(text)) => {
             let mut message = value.clone();
             message["body"] = json!(text);
-            let size = serde_json::to_vec(&message).map_or(usize::MAX, |bytes| bytes.len() + 1);
+            let size = serde_json::to_vec(&message).map_or(usize::MAX, |bytes| bytes.len());
             if size <= PULL_ITEM_BUDGET {
                 return (Pulled::Message(message), size);
             }
@@ -196,7 +196,7 @@ fn pulled(mailbox: &PilotMailbox, entry: &MailboxEntry, now: DateTime<Utc>) -> (
         }
     };
     value["reason"] = json!(reason);
-    let size = serde_json::to_vec(&value).map_or(usize::MAX, |bytes| bytes.len() + 1);
+    let size = serde_json::to_vec(&value).map_or(usize::MAX, |bytes| bytes.len());
     (Pulled::Undeliverable(value), size)
 }
 
