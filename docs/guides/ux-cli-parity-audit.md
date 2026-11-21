@@ -62,7 +62,9 @@ attachments, and the remote `peers` does not list local sessions. Remote
 attach takes no role, follow target, capability or lease epoch; the request
 names neither mission nor attachment beyond the path, which must match the
 binding and is refused otherwise. A mission holds at most two remote
-attachments, a heartbeat is server-timed and accepted at most once per 10
+attachments with valid bindings; an attach that finds the mission full
+removes the records whose binding was revoked and takes the freed place, while
+a valid record leaves only by its own detach. A heartbeat is server-timed and accepted at most once per 10
 seconds, detach is safe to repeat, and peers returns at most 100 attachments
 per page with a stable cursor and writes nothing. The client profile and proof
 setup are those of `work` (`config set attachment ID`, `work store-proof`).

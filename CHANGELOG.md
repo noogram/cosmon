@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- A revoked pilot binding no longer keeps its remote attachment place: when a mission already holds two attachments, `cosmon-remote pilot attach` removes the records whose binding was revoked and is accepted if that leaves room. Records of valid bindings are still removed only by their own detach (#212 W7a).
+
 - `cosmon-remote pilot attach/heartbeat/detach/peers` reaches four new RPP routes under `/v1/pilot/{mission}/attachments` (#212 W7a). Mission and attachment come from the operator-provisioned pilot binding; a mission holds at most two attachments, a heartbeat is server-timed and accepted at most once per 10 seconds, detach is safe to repeat and peers writes nothing. Presence takes no role and no lease.
 
 - Repeat `cs land-train --exclude <id>=<head>` for each removed member when landing a rebuilt train. Landing is refused before moving the base or closing members if a member carries excluded work, an excluded ID also appears in the member list, or Git cannot resolve an excluded head (#213).
