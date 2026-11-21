@@ -876,20 +876,32 @@ pub(crate) fn deliver(ctx: &Context, args: &SendArgs) -> anyhow::Result<(PilotMe
 
     let mailbox = mailbox(ctx);
     let now = Utc::now();
-    let sequence = mailbox.next_sequence(&to)?;
     let expires_at = args
         .expires_in
         .map(|secs| now + chrono::Duration::seconds(secs));
-    let message = PilotMessage::new(
-        from,
-        to.clone(),
-        sequence,
-        format!("cas/{}/{}", hash.prefix(), hash.as_str()),
-        hash.as_str(),
-        now,
-        expires_at,
-    );
-    let written = mailbox.deliver(&message)?;
+    // A recipient that names a mission shares its mailbox with that
+    // mission's remote senders, who number their sends under the mission's
+    // mailbox lock; take the same lock. An unreadable snapshot is no mission,
+    // as before: sending never depended on the recipient's presence.
+    let mission = store(ctx)
+        .load(&to)
+        .ok()
+        .flatten()
+        .and_then(|presence| presence.mission);
+    let payload_ref = format!("cas/{}/{}", hash.prefix(), hash.as_str());
+    let (message, written) = mailbox
+        .deliver_local(mission.as_ref(), &to, |sequence| {
+            PilotMessage::new(
+                from,
+                to.clone(),
+                sequence,
+                payload_ref,
+                hash.as_str(),
+                now,
+                expires_at,
+            )
+        })
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok((message, written))
 }
 
