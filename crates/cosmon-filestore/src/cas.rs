@@ -11,9 +11,8 @@
 //! ```
 //!
 //! Writes are atomic: data lands in a `.tmp` sibling, is fsynced, then renamed
-//! into place. A crash mid-write never corrupts the store. Identical content
-//! is deduplicated automatically — if the target path already exists, the write
-//! is skipped.
+//! into place. A crash mid-write leaves the previous blob intact. A matching
+//! blob is deduplicated and corrupt contents are replaced.
 
 #![forbid(unsafe_code)]
 
@@ -87,37 +86,25 @@ impl FileCas {
     }
 }
 
-/// Compute the SHA-256 hash of the given data, returning a [`ContentHash`].
-fn sha256(data: &[u8]) -> ContentHash {
+/// Rehash an existing blob, reading only enough to reject an oversized one.
+fn stored_blob_matches(path: &Path, size: u64, digest: &[u8]) -> io::Result<bool> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
     let mut hasher = Sha256::new();
-    hasher.update(data);
-    let digest = hasher.finalize();
-    let hex = hex_encode(&digest);
-    // Safety: SHA-256 always produces 64 lowercase hex chars.
-    ContentHash::new(hex).expect("SHA-256 always produces valid hex")
+    let bytes_read = io::copy(&mut file.take(size + 1), &mut hasher)?;
+    Ok(bytes_read == size && hasher.finalize().as_slice() == digest)
 }
-
-/// Encode bytes as lowercase hex.
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(HEX_CHARS[(b >> 4) as usize]);
-        s.push(HEX_CHARS[(b & 0x0f) as usize]);
-    }
-    s
-}
-
-const HEX_CHARS: [char; 16] = [
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
-];
 
 impl CasStore for FileCas {
     fn put(&self, data: &[u8]) -> Result<ContentHash, CosmonError> {
-        let hash = sha256(data);
+        let digest = Sha256::digest(data);
+        let hash = ContentHash::new(format!("{digest:x}"))?;
         let target = self.blob_path(&hash);
 
-        // Dedup: if the blob already exists, skip the write.
-        if target.exists() {
+        if stored_blob_matches(&target, data.len() as u64, &digest)? {
             return Ok(hash);
         }
 
@@ -208,8 +195,36 @@ mod tests {
         let (_tmp, store) = make_store();
         let data = b"dedup test";
         let h1 = store.put(data).unwrap();
+        let path = store.blob_path(&h1);
+        let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(12_345);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(stamp)
+            .unwrap();
         let h2 = store.put(data).unwrap();
         assert_eq!(h1, h2);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), stamp);
+    }
+
+    #[test]
+    fn put_repairs_corrupt_existing_bytes_and_returns_the_same_address() {
+        let (_tmp, store) = make_store();
+        let expected = b"hello world";
+        let hash = store.put(expected).unwrap();
+        let path = store.blob_path(&hash);
+
+        for corrupt in [
+            b"hello WORLD".as_slice(),
+            b"hello",
+            b"hello world with extra bytes",
+        ] {
+            fs::write(&path, corrupt).unwrap();
+            assert_eq!(store.put(expected).unwrap(), hash);
+            assert_eq!(fs::read(&path).unwrap(), expected, "after {corrupt:?}");
+            assert_eq!(store.get(&hash).unwrap(), expected);
+        }
     }
 
     #[test]
@@ -342,14 +357,14 @@ mod tests {
 
     #[test]
     fn test_sha256_known_vectors() {
-        // Verify our SHA-256 implementation against known test vectors.
-        let empty = sha256(b"");
+        let (_tmp, store) = make_store();
+        let empty = store.put(b"").unwrap();
         assert_eq!(
             empty.as_str(),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
 
-        let abc = sha256(b"abc");
+        let abc = store.put(b"abc").unwrap();
         assert_eq!(
             abc.as_str(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
