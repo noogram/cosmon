@@ -230,6 +230,23 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn put_propagates_open_errors_other_than_not_found() {
+        use std::os::unix::fs::symlink;
+
+        let (_tmp, store) = make_store();
+        let data = b"unreadable blob path";
+        let hash = store.put(data).unwrap();
+        let path = store.blob_path(&hash);
+        fs::remove_file(&path).unwrap();
+        symlink(path.file_name().unwrap(), &path).unwrap();
+
+        // Opening this path fails on the loop, but replacing it would succeed.
+        assert!(matches!(store.put(data), Err(CosmonError::Io(_))));
+        assert_eq!(fs::read_link(&path).unwrap(), Path::new(hash.as_str()));
+    }
+
     #[test]
     fn concurrent_puts_publish_only_complete_bytes_and_all_succeed() {
         use std::sync::Barrier;
