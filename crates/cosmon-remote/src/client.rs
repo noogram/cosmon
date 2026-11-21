@@ -1166,6 +1166,141 @@ impl Client {
         decode_json(self.send(rb).await?).await
     }
 
+    /// Attach the bound attachment to `mission`; idempotent by the request key.
+    pub async fn pilot_attach(
+        &self,
+        mission: &str,
+        attachment: &cosmon_core::collaboration::AttachmentId,
+        proof: &cosmon_core::collaboration::AttachmentProof,
+        body: &crate::pilot::AttachRequest,
+    ) -> Result<serde_json::Value> {
+        let rb = self
+            .work_req(
+                canon::POST_V1_PILOT_MISSION_ATTACHMENTS,
+                &[mission],
+                attachment,
+                proof,
+            )?
+            .json(body);
+        decode_json(self.send(rb).await?).await
+    }
+
+    /// Record a server-observed heartbeat of the bound attachment.
+    pub async fn pilot_heartbeat(
+        &self,
+        mission: &str,
+        attachment: &cosmon_core::collaboration::AttachmentId,
+        proof: &cosmon_core::collaboration::AttachmentProof,
+    ) -> Result<serde_json::Value> {
+        let rb = self.work_req(
+            canon::PUT_V1_PILOT_MISSION_ATTACHMENTS_ATTACHMENT_HEARTBEAT,
+            &[mission, attachment.as_str()],
+            attachment,
+            proof,
+        )?;
+        decode_json(self.send(rb).await?).await
+    }
+
+    /// Withdraw the bound attachment's presence; safe to repeat.
+    pub async fn pilot_detach(
+        &self,
+        mission: &str,
+        attachment: &cosmon_core::collaboration::AttachmentId,
+        proof: &cosmon_core::collaboration::AttachmentProof,
+    ) -> Result<serde_json::Value> {
+        let rb = self.work_req(
+            canon::DELETE_V1_PILOT_MISSION_ATTACHMENTS_ATTACHMENT,
+            &[mission, attachment.as_str()],
+            attachment,
+            proof,
+        )?;
+        decode_json(self.send(rb).await?).await
+    }
+
+    /// Read one page of the mission's attachments, after an optional cursor.
+    pub async fn pilot_peers(
+        &self,
+        mission: &str,
+        attachment: &cosmon_core::collaboration::AttachmentId,
+        proof: &cosmon_core::collaboration::AttachmentProof,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<serde_json::Value> {
+        let mut rb = self
+            .work_req(
+                canon::GET_V1_PILOT_MISSION_ATTACHMENTS,
+                &[mission],
+                attachment,
+                proof,
+            )?
+            .query(&[("limit", limit)]);
+        if let Some(after) = after {
+            rb = rb.query(&[("after", after)]);
+        }
+        decode_json(self.send(rb).await?).await
+    }
+
+    /// Send a pilot message from the bound attachment; idempotent by key.
+    pub async fn pilot_send(
+        &self,
+        mission: &str,
+        attachment: &cosmon_core::collaboration::AttachmentId,
+        proof: &cosmon_core::collaboration::AttachmentProof,
+        body: &crate::pilot::SendRequest,
+    ) -> Result<serde_json::Value> {
+        let rb = self
+            .work_req(
+                canon::POST_V1_PILOT_MISSION_MESSAGES,
+                &[mission],
+                attachment,
+                proof,
+            )?
+            .json(body);
+        decode_json(self.send(rb).await?).await
+    }
+
+    /// Read one page of the bound attachment's unacknowledged messages
+    /// without consuming them, after an optional sequence cursor.
+    pub async fn pilot_pull(
+        &self,
+        mission: &str,
+        attachment: &cosmon_core::collaboration::AttachmentId,
+        proof: &cosmon_core::collaboration::AttachmentProof,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<serde_json::Value> {
+        let mut rb = self
+            .work_req(
+                canon::GET_V1_PILOT_MISSION_MESSAGES,
+                &[mission],
+                attachment,
+                proof,
+            )?
+            .query(&[("limit", limit)]);
+        if let Some(after) = after {
+            rb = rb.query(&[("after", after)]);
+        }
+        decode_json(self.send(rb).await?).await
+    }
+
+    /// Acknowledge one message of the bound attachment's mailbox; safe to
+    /// repeat.
+    pub async fn pilot_ack(
+        &self,
+        mission: &str,
+        key: &str,
+        attachment: &cosmon_core::collaboration::AttachmentId,
+        proof: &cosmon_core::collaboration::AttachmentProof,
+    ) -> Result<serde_json::Value> {
+        let rb = self.work_req(
+            canon::POST_V1_PILOT_MISSION_MESSAGES_KEY_ACK,
+            &[mission, key],
+            attachment,
+            proof,
+        )?;
+        decode_json(self.send(rb).await?).await
+    }
+
     fn work_req(
         &self,
         route: &CanonRoute,

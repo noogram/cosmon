@@ -21,7 +21,9 @@
 //! The seat comes from the binding; no request field can choose it. The
 //! module holds only a [`CollaborationBindingReader`], which has no write
 //! method, so no request can edit its own grant. Work routes use this boundary
-//! in [`crate::routes::work`]; session routes remain reserved for W7.
+//! in [`crate::routes::work`], the W7a presence routes in
+//! [`crate::routes::pilot`] and the W7b mailbox routes in
+//! [`crate::routes::pilot_mailbox`]; the checkpoint routes remain reserved.
 
 use cosmon_core::collaboration::{
     AdmissionRequest, AdmittedCollaborator, AdmittedIdentity, AttachmentId, AttachmentProof,

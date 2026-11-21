@@ -12,12 +12,14 @@ and [ADR-182](../adr/182-declared-advisory-work-under-a-provider-neutral-contrac
 **Machine check:** `scripts/check-collaboration-contract.py` validates the tables
 below; `scripts/check-collaboration-contract.test.sh` holds its fixtures.
 
-The semantic contract remains frozen. W4 now mounts the five work routes
+The semantic contract remains frozen. W4 mounts the five work routes
 W-LIST through W-ACK together with their remote client, canon, OpenAPI and
-help changes. Session routes in §4 remain **proposed** and absent from
-`crates/cosmon-rpp-adapter/data/surface_events.txt` until W7. The contract
-checker requires the shipped W4 routes and continues to refuse other mounted
-collaboration routes.
+help changes. W7a mounts the four presence routes S-ATTACH, S-BEAT, S-DETACH
+and S-PEERS the same way, and W7b the three mailbox routes S-SEND, S-PULL and
+S-ACK. The checkpoint routes in §4 remain **proposed** and absent from
+`crates/cosmon-rpp-adapter/data/surface_events.txt` until their own W7
+increment. The contract checker requires the shipped W4, W7a and W7b routes
+and continues to refuse other mounted collaboration routes.
 
 ## 1. Decisions
 
@@ -138,7 +140,8 @@ to detach", which is the safe-repeat behavior S-DETACH needs.
 `cs sessions ack <key> [--session <SID>] [--json]` now acknowledges one envelope
 separately from reading it. A duplicate succeeds without writing; an unknown
 key is refused. The local mailbox read still acknowledges as it reads, while
-`inbox --peek` reads without acknowledging. The pilot routes remain W7 work.
+`inbox --peek` reads without acknowledging. W7a mounts the presence routes
+and W7b the mailbox routes; the checkpoint routes remain W7 work.
 `cs sessions checkpoint publish` is now idempotent on its id and bounded.
 The same id with the same content, publication time aside, succeeds and writes
 nothing; the same id with other content is refused and the first record stays.
@@ -258,6 +261,10 @@ added by amendment, never reused for another meaning.
 | envelope_expired | 410 | The envelope's lifetime ended before the operation. |
 | digest_mismatch | 422 | The supplied digest does not match the stored payload. |
 | evidence_unreadable | 422 | Referenced evidence is missing, unreadable or fails its digest. |
+| attachment_limit | 409 | The mission already holds two attachments with valid bindings (S-ATTACH); confirmed by the operator on 2026-11-20, see §11. |
+| not_attached | 404 | The attachment has no presence record on the mission (S-BEAT); pending operator confirmation, see §11 2026-11-20. |
+| heartbeat_too_soon | 429 | The attachment's last heartbeat is less than 10 seconds old; carries Retry-After; pending operator confirmation, see §11 2026-11-20. |
+| pending_limit | 429 | The sending attachment already has 1000 unacknowledged pilot messages (S-SEND); pending operator confirmation, see §11 2026-11-21. |
 | corrupt_evidence | 500 | Stored records fail validation; nothing is returned or repaired silently. |
 | unsupported_feature | 501 | The deployment predates the requested operation; there is no local fallback. |
 | custody_unavailable | 503 | The owning store cannot be reached or locked; the outcome is unknown, not failed. |
@@ -318,7 +325,7 @@ harvest grants remain mandatory.
 | 3 | W4 | Work routes W-LIST … W-ACK, remote client commands, canon, OpenAPI, help and parity updates | Session routes |
 | 4 | W5 | Portable presence, pilot mailbox acknowledgment and checkpoint custody on the local side: `cs presence detach`, `cs sessions ack`, `cs sessions checkpoint publish\|show\|list`, `cs sessions drift` (done 2026-11-17, see §11) | Lease fencing; evidence-reference resolution |
 | 5 | W6 | Nothing: not shipped, by decision of 2026-11-17 (see §8 and §11) | Fencing of every covered effect; control handover |
-| 6 | W7 | Session routes S-ATTACH … S-CKCMP and client commands | Remote signing; takeover routes |
+| 6 | W7 | Session routes S-ATTACH … S-CKCMP and client commands, in four serialized increments. W7a, the presence routes S-ATTACH, S-BEAT, S-DETACH, S-PEERS and `cosmon-remote pilot`, is delivered (2026-11-20, see §11). W7b, the mailbox routes S-SEND, S-PULL, S-ACK and `cosmon-remote pilot send\|inbox\|ack`, is delivered (2026-11-21, see §11). W7c (checkpoint routes) and W7d are not delivered | Remote signing; takeover routes |
 | 7 | W8 | Two-machine acceptance evidence and the off-host restore check | New features |
 
 W4 is the work-only release boundary. Units that share exports, route
@@ -366,6 +373,87 @@ lives in the lease ledger directory, which §2 says no route writes; they are
 therefore dropped from §4 and refused as X-TAKEOVER, and the local
 `cs sessions takeover` verbs are unchanged. O1 and O8 stand as written: no
 route confers or exercises lifecycle authority.
+
+**2026-11-20 amendment (W7a; the attachment cap rule is confirmed by the operator on 2026-11-20, the rest is pending operator confirmation).** W7a mounts
+S-ATTACH, S-BEAT, S-DETACH and S-PEERS; W7b to W7d are not delivered. Remote
+presence is its own record class in the presence store,
+`presence/remote/<mission>/<attachment>.json`, tagged by attachment and
+carrying only mission, attachment, attach key, optional display label (at
+most 128 bytes) and the server times of attach and last heartbeat. No host
+path, pid, native handle, seat role or lease epoch is stored or returned, and
+the local session scan, `gc` and `cs sessions peers` do not read it. The
+S-ATTACH body is `idempotency_key` plus optional `label`; mission and
+attachment come from the binding. The same key and label return the stored
+record without a write; another key or label for an attached attachment is
+`key_collision`. A record counts toward the cap of two only while its
+attachment holds an active pilot binding of the mission (confirmed by the
+operator on 2026-11-20). When a new attach finds the mission full, the
+`presence-store` writer removes, under the mission lock, the records whose
+binding is revoked or gone, and accepts the attach if that leaves room;
+otherwise it refuses with `attachment_limit` and removes nothing. A record of
+a valid binding is removed only by its own S-DETACH. The binding set is read
+under the shared binding lock the attach already holds, so no revocation
+interleaves with the decision. Until an attach needs its place, a revoked
+record stays stored and S-PEERS lists it. Heartbeat age does not free a
+place: no staleness duration is specified, and none is assumed. An attach
+after detach is a new attach whatever its key.
+S-BEAT refuses a heartbeat sooner than 10 seconds after the last accepted
+one, including on a repeat. S-DETACH removes the record only and reports
+`detached=false` without writing when there is none. S-PEERS lists attachments
+sorted by attachment id, at most 100 per page, with the last id of a page as
+the cursor; it takes no lock and creates no file. Three codes are added to §6
+for these refusals (`attachment_limit`, `not_attached`, `heartbeat_too_soon`)
+because no existing code has their meaning and `budget_exhausted` is reserved
+for seat allowances. The local verbs keep their current behaviour: the caps
+apply to the remote routes only.
+
+**2026-11-21 amendment (W7b; pending operator confirmation).** W7b mounts
+S-SEND, S-PULL and S-ACK; W7c and W7d are not delivered. The store is the
+existing pilot mailbox (`presence/<sid>.inbox.jsonl`, the body in the CAS,
+acknowledgments in `presence/<sid>.inbox.ack.jsonl`); no second store and no
+new record class is added. The contract does not say how a mailbox keyed by
+session id is addressed from a mission; the choice is that an attachment's
+mailbox is the one whose session id is its host-issued attachment id, which
+is unique on the host, so `cs sessions send --to <attachment>` reaches it from
+the host unchanged. The S-SEND body is `idempotency_key`, `to`, `message` and
+optional `expires_in_secs`; author, mission and sequence are not fields and
+unknown fields are refused. The author written into the envelope is the
+caller's attachment and the mission is the binding's. Who may receive is not
+specified; the choice is the pilots of the mission: an attachment with an
+active pilot binding of the mission, or a local session whose presence
+snapshot names the mission, whatever its heartbeat age. Any other recipient
+is refused with `not_a_member`, reused from §6 with the meaning "not a pilot
+of the mission", before any path is built from it. The retry identity is the
+mission, the sender, the key, the recipient, the body digest and the
+lifetime: the message id is derived from the first three (`rmsg-…`), the
+same key with the same rest returns the stored message without a write, and
+any other rest is `key_collision`. The key is looked up in the mailboxes of
+the current recipients only. "1000 pending per attachment" is not specified
+further; the choice is the sending attachment's envelopes that their
+recipient has not acknowledged, expired ones included, counted in the
+mailboxes of the current recipients; the 1001st is refused with the new code
+`pending_limit` (HTTP 429), because `budget_exhausted` is reserved for seat
+allowances. A retry of an accepted send is answered before the cap. The
+65536-byte limit applies to the message body; a larger body is
+`payload_too_large`. Sends and acknowledgments take a per-mission lock,
+`presence/remote/<mission>.mailbox.lock`; local `cs sessions send` takes
+it too when the recipient's presence snapshot names the mission, so a local
+and a remote sender cannot pick the same sequence for one recipient. Two
+local senders to a recipient that names no mission still race, as before;
+a local send to a remote attachment's mailbox is not specified. S-PULL reads the caller's own
+mailbox only, lists unacknowledged messages (expired ones included, with their
+state) in sequence order, at most 100 per page and 1048576 response bytes,
+with the last sequence of a page as the cursor; it takes no lock, records no
+delivery and writes nothing. A body that is unreadable, not UTF-8 or larger
+than one response is listed under `undeliverable` with its metadata and a
+reason, as W-PULL does. S-ACK acknowledges a message of the caller's own
+mailbox; a duplicate succeeds without writing and an unknown key, including a
+key of another mailbox, is `unknown_envelope`, reused from §6 with the
+meaning "names no envelope of this mailbox". Whether S-ACK refuses an expired
+message is not specified; the choice is to accept it, as the local
+`cs sessions ack` does. No route here wakes a peer: the local mailbox reader
+and the remote S-PULL see a message only when they ask. The local verbs keep
+their current behaviour: the limits apply to the remote routes only.
 
 **Amendments**, recorded in the ADRs themselves:
 

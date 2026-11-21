@@ -101,6 +101,32 @@ impl MessageId {
         Self(format!("msg-{hex}"))
     }
 
+    /// Derive the id of a remote pilot send (S-SEND, issue #212 W7b) from
+    /// the mission, the sending attachment's mailbox and the caller's retry
+    /// key.
+    ///
+    /// The sequence and the body are left out on purpose: a retry of a send
+    /// whose response was lost must land on the same id even though the
+    /// destination's next sequence has moved, and a retry with another body
+    /// must find the first message so it can be refused as a key collision.
+    /// The `rmsg-` prefix keeps these ids apart from [`Self::derive`]'s.
+    #[must_use]
+    pub fn from_remote_key(mission: &str, sender: &SessionId, key: &str) -> Self {
+        let mut h = Sha256::new();
+        h.update(mission.as_bytes());
+        h.update(b"\x00");
+        h.update(sender.as_str().as_bytes());
+        h.update(b"\x00");
+        h.update(key.as_bytes());
+        let digest = h.finalize();
+        let mut hex = String::with_capacity(24);
+        for b in digest.iter().take(12) {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{b:02x}");
+        }
+        Self(format!("rmsg-{hex}"))
+    }
+
     /// The id as a string slice.
     #[must_use]
     pub fn as_str(&self) -> &str {

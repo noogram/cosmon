@@ -45,6 +45,52 @@ and JSON refusal name the missing formula and give `cs init --upgrade` before
 `cs nucleate verify-surface --var target=<MOL>`. Galaxies with the formula keep
 the existing refusal message. No UI control or remote route changes.
 
+## Cross-machine pilot presence (issue #212 W7a)
+
+| Capability | Local CLI | Remote CLI / API |
+|---|---|---|
+| Announce presence on a mission | `cs sessions attach` | `cosmon-remote pilot attach`; `POST /v1/pilot/{mission}/attachments` |
+| Refresh the heartbeat | `cs presence ping` | `cosmon-remote pilot heartbeat`; `PUT /v1/pilot/{mission}/attachments/{attachment}/heartbeat` |
+| Withdraw presence | `cs presence detach` | `cosmon-remote pilot detach`; `DELETE /v1/pilot/{mission}/attachments/{attachment}` |
+| List who is present | `cs sessions peers` | `cosmon-remote pilot peers`; `GET /v1/pilot/{mission}/attachments` |
+
+The two columns do not address the same records. Local verbs act on local
+session snapshots keyed by session id; the remote routes act on remote
+attachment records keyed by the host-issued attachment of an
+operator-provisioned pilot binding. The local `peers` does not list remote
+attachments, and the remote `peers` does not list local sessions. Remote
+attach takes no role, follow target, capability or lease epoch; the request
+names neither mission nor attachment beyond the path, which must match the
+binding and is refused otherwise. A mission holds at most two remote
+attachments with valid bindings; an attach that finds the mission full
+removes the records whose binding was revoked and takes the freed place, while
+a valid record leaves only by its own detach. A heartbeat is server-timed and accepted at most once per 10
+seconds, detach is safe to repeat, and peers returns at most 100 attachments
+per page with a stable cursor and writes nothing. The client profile and proof
+setup are those of `work` (`config set attachment ID`, `work store-proof`).
+The mailbox routes (W7b) follow below; the checkpoint routes (W7c) are not
+mounted.
+
+## Cross-machine pilot messages (issue #212 W7b)
+
+| Capability | Local CLI | Remote CLI / API |
+|---|---|---|
+| Send a pilot message | `cs sessions send --to SID` | `cosmon-remote pilot send MISSION --to SID --key KEY --message TEXT`; `POST /v1/pilot/{mission}/messages` |
+| Read pending messages | `cs sessions inbox` (acknowledges what it prints); `cs sessions inbox --peek` (does not) | `cosmon-remote pilot inbox MISSION`; `GET /v1/pilot/{mission}/messages` (never acknowledges) |
+| Acknowledge one message | `cs sessions ack KEY` | `cosmon-remote pilot ack MISSION KEY`; `POST /v1/pilot/{mission}/messages/{key}/ack` |
+
+Both columns address the same records: the existing pilot mailbox. A remote
+attachment's mailbox is the one named by its attachment id, so the host
+reaches it with `cs sessions send --to <attachment>`, and a remote send to a
+local pilot lands in that session's mailbox, read by `cs sessions inbox`. The
+differences are deliberate. The remote sender is the proven attachment and
+cannot be chosen (`--from` has no remote counterpart); the recipient must
+pilot the mission; the remote send is idempotent by a caller key, bounded to
+65536 bytes and to 1000 unacknowledged messages per sending attachment; the
+remote inbox is the local `--peek`, paged at 100 messages and 1048576 bytes
+with a sequence cursor, and has no `--all` or `--follow`; the remote ack
+reaches only the caller's own mailbox. The local verbs keep no such limits.
+
 ## Cross-machine work exchange (issue #147 W4)
 
 | Capability | Local CLI | Remote CLI / API |
