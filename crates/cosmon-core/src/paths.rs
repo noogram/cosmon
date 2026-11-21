@@ -694,6 +694,7 @@ mod tests {
             "presence/<session>.inbox.ack.jsonl",
             "presence/remote/<mission>/<attachment>.json",
             "presence/remote/<mission>.lock",
+            "presence/remote/<mission>.mailbox.lock",
             "pilot-lease/<mission>.requests.jsonl",
             "pilot-lease/<mission>.grants.jsonl",
             "cas/<prefix>/<hash>",
