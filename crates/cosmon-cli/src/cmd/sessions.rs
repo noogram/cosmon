@@ -113,6 +113,11 @@ reaches the host RPP with an operator-provisioned pilot binding and its
 attachment proof: at most two attachments per mission, one heartbeat per
 10 seconds, server-timed. A remote attachment is advisory presence only; it
 takes no seat role and no lease, and it is not listed by the local `peers`.
+`cosmon-remote pilot send/inbox/ack` exchange messages through the same
+pilot mailbox: the attachment's mailbox is named by its attachment id, and
+`cs sessions send --to <attachment>` reaches it from the host. A remote send
+is at most 65536 bytes, the remote inbox reads without acknowledging, and
+the remote ack is explicit.
 
 Both seats are live sessions of the SAME mission, and only a human signature
 moves the controls between them. For separate molecules — each with its own

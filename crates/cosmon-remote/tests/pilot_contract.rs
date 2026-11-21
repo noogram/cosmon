@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Pilot presence requests carry attachment evidence and never a mission,
-//! attachment, role or lease field in the body (issue #212, W7a).
+//! Pilot presence and message requests carry attachment evidence and never a
+//! mission, attachment, author, role or lease field in the body (issue #212,
+//! W7a and W7b).
 
 use cosmon_core::collaboration::{AttachmentId, AttachmentProof};
 use cosmon_remote::pilot::AttachRequest;
