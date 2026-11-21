@@ -159,8 +159,8 @@ impl PresenceStore {
     /// record and whether this call wrote it. A retry of the request that
     /// created the record writes nothing. When the cap would otherwise refuse
     /// the attach, records of attachments outside `live` are removed first,
-    /// under the mission lock; a removal that finds the record already gone
-    /// is not an error, so an interrupted attach is safe to repeat.
+    /// under the mission lock. An attach interrupted after a removal is safe
+    /// to repeat: the next listing no longer holds the removed record.
     ///
     /// # Errors
     /// Returns the refusal of [`decide_attach`], or a corrupt or unavailable
@@ -178,12 +178,11 @@ impl PresenceStore {
         match decide_attach(&present, live, mission, attachment, request, now)? {
             AttachDecision::Existing(record) => Ok((record, false)),
             AttachDecision::Create { record, evict } => {
+                // Every writer of these records holds the mission lock, so a
+                // record listed above is still there; a removal that fails
+                // is an unavailable store and nothing new is written.
                 for stale in &evict {
-                    match fs::remove_file(self.remote_presence_path(mission, stale)) {
-                        Ok(()) => {}
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => return Err(error.into()),
-                    }
+                    fs::remove_file(self.remote_presence_path(mission, stale))?;
                 }
                 self.write_remote(&record)?;
                 Ok((record, true))
