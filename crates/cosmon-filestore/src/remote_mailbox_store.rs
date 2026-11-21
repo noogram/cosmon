@@ -347,4 +347,77 @@ mod tests {
             ))
         ));
     }
+    /// Run `deliver_local` on `mission` while a second handle over the same
+    /// directory tries to take the mission lock from another thread.
+    ///
+    /// Returns `(acquired_while_building, acquired_after_return)`. The
+    /// contender starts when `build` signals that it runs, and signals on a
+    /// channel when it holds the lock; `build` waits on that channel with a
+    /// bounded timeout, so the observation needs no sleep race.
+    fn contender_during_deliver_local(mission: Option<&MoleculeId>) -> (bool, bool) {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mb = PilotMailbox::new(dir.path());
+        let other = PilotMailbox::new(dir.path());
+        let lock_mission = mission_for_contender(mission);
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (building_tx, building_rx) = mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            let during = std::cell::Cell::new(false);
+            let other = &other;
+            let lock_mission = &lock_mission;
+            let contender = scope.spawn(move || {
+                // Start only once `build` runs, so the contender cannot win
+                // the lock before `deliver_local` has taken it.
+                building_rx.recv().unwrap();
+                let _held = other.remote_lock(lock_mission).unwrap();
+                acquired_tx.send(()).unwrap();
+            });
+            mb.deliver_local(mission, &sid("att-b"), |sequence| {
+                // Runs under the lock when there is a mission.
+                building_tx.send(()).unwrap();
+                during.set(acquired_rx.recv_timeout(Duration::from_millis(500)).is_ok());
+                PilotMessage::new(
+                    sid("att-a"),
+                    sid("att-b"),
+                    sequence,
+                    "cas/x",
+                    "x",
+                    t0(),
+                    None,
+                )
+            })
+            .unwrap();
+            let after = during.get() || acquired_rx.recv_timeout(Duration::from_secs(30)).is_ok();
+            contender.join().unwrap();
+            (during.get(), after)
+        })
+    }
+
+    fn mission_for_contender(mission: Option<&MoleculeId>) -> MoleculeId {
+        mission.cloned().unwrap_or_else(self::mission)
+    }
+
+    #[test]
+    fn a_local_send_keeps_the_mission_lock_until_the_message_is_written() {
+        let m = mission();
+        let (during, after) = contender_during_deliver_local(Some(&m));
+        assert!(
+            !during,
+            "another holder took the mission lock while `build` was still running"
+        );
+        assert!(after, "the lock was never released after `deliver_local`");
+    }
+
+    #[test]
+    fn a_local_send_without_a_mission_takes_no_lock() {
+        let (during, after) = contender_during_deliver_local(None);
+        assert!(
+            during,
+            "a send with no mission must not hold the mission lock"
+        );
+        assert!(after);
+    }
 }
