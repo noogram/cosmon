@@ -1,0 +1,14 @@
+List unacknowledged messages without consuming them (`GET /v1/pilot/{mission}/messages`)
+
+Usage: cosmon-remote pilot inbox [OPTIONS] <MISSION>
+
+Arguments:
+  <MISSION>  
+
+Options:
+      --after <AFTER>      Cursor: the last sequence of the previous page
+      --profile <PROFILE>  Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --json               Render machine-readable JSON instead of human text where applicable
+      --limit <LIMIT>      [default: 100]
+      --token <TOKEN>      Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+  -h, --help               Print help

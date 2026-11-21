@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Pilot presence commands (issue #212, W7a). The attachment and its proof
-//! come from the profile and the private credential store, exactly as for
-//! `work`; the host takes mission and attachment from the binding.
+//! Pilot presence and message commands (issue #212, W7a and W7b). The
+//! attachment and its proof come from the profile and the private credential
+//! store, exactly as for `work`; the host takes mission, attachment and
+//! author from the binding.
 
 use clap::Subcommand;
 use cosmon_remote::canon;
 use cosmon_remote::credential::CredentialStore;
-use cosmon_remote::pilot::AttachRequest;
+use cosmon_remote::pilot::{AttachRequest, SendRequest};
 use cosmon_remote::{Error, Profile, Result};
 
 #[derive(Debug, Subcommand)]
@@ -35,6 +36,33 @@ pub(crate) enum PilotCmd {
         #[arg(long, default_value_t = 100)]
         limit: usize,
     },
+    #[command(about = format!("Send a message to a pilot of the mission, at most 65536 bytes ({})", canon::POST_V1_PILOT_MISSION_MESSAGES.label()))]
+    Send {
+        mission: String,
+        /// Recipient: an attachment or local session piloting the mission.
+        #[arg(long)]
+        to: String,
+        /// Keep this key unchanged when retrying a lost response.
+        #[arg(long)]
+        key: String,
+        /// Message body.
+        #[arg(long)]
+        message: String,
+        /// Seconds after which an unacknowledged message reads as expired.
+        #[arg(long = "expires-in", value_name = "SECONDS")]
+        expires_in: Option<u64>,
+    },
+    #[command(about = format!("List unacknowledged messages without consuming them ({})", canon::GET_V1_PILOT_MISSION_MESSAGES.label()))]
+    Inbox {
+        mission: String,
+        /// Cursor: the last sequence of the previous page.
+        #[arg(long)]
+        after: Option<u64>,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    #[command(about = format!("Acknowledge one message after its safe point; safe to repeat ({})", canon::POST_V1_PILOT_MISSION_MESSAGES_KEY_ACK.label()))]
+    Ack { mission: String, key: String },
 }
 
 pub(crate) async fn run(
@@ -84,6 +112,39 @@ pub(crate) async fn run(
             client
                 .pilot_peers(&mission, attachment, &proof, after.as_deref(), limit)
                 .await?
+        }
+        PilotCmd::Send {
+            mission,
+            to,
+            key,
+            message,
+            expires_in,
+        } => {
+            client
+                .pilot_send(
+                    &mission,
+                    attachment,
+                    &proof,
+                    &SendRequest {
+                        idempotency_key: key,
+                        to,
+                        message,
+                        expires_in_secs: expires_in,
+                    },
+                )
+                .await?
+        }
+        PilotCmd::Inbox {
+            mission,
+            after,
+            limit,
+        } => {
+            client
+                .pilot_pull(&mission, attachment, &proof, after, limit)
+                .await?
+        }
+        PilotCmd::Ack { mission, key } => {
+            client.pilot_ack(&mission, &key, attachment, &proof).await?
         }
     };
     crate::print_json(json, &response);

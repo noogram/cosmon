@@ -181,7 +181,7 @@ enum Cmd {
         #[command(subcommand)]
         sub: work_cli::WorkCmd,
     },
-    /// Pilot presence of the bound attachment; no lease or lifecycle authority.
+    /// Pilot presence and messages of the bound attachment; no lease or lifecycle authority.
     Pilot {
         #[command(subcommand)]
         sub: pilot_cli::PilotCmd,

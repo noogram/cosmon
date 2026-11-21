@@ -112,7 +112,7 @@ out="$(run "$WORK/valid.md")"; rc=$?
 if [ $rc -ne 0 ] && grep -qF 'shipped W4 route is missing' <<<"$out"; then ok "shipped route must stay mounted"
 else bad "missing shipped route (rc=$rc): $out"; fi
 cp "$WORK/surface.saved" "$SURFACE"
-expect_fail "W7 remains unmounted" 's#\| advisory-write \| W4#| advisory-write | W7#' "only the five W4 work routes and the four W7a presence routes are shipped"
+expect_fail "W7 remains unmounted" 's#\| advisory-write \| W4#| advisory-write | W7#' "only the five W4 work routes, the four W7a presence routes and the three W7b mailbox routes are shipped"
 
 # W7a: the four presence routes are shipped under W7; any other session route
 # mounted next to them is refused.
@@ -124,8 +124,13 @@ sed -E 's#\| W7 \|#| W4 |#' "$WORK/w7a.md" > "$WORK/case.md"
 out="$(run "$WORK/case.md")"; rc=$?
 if [ $rc -ne 0 ] && grep -qF "already mounted" <<<"$out"; then ok "a W7a route declared under W4 is refused"
 else bad "W7a route under W4 (rc=$rc): $out"; fi
+# W7b: the three mailbox routes are shipped under W7 as well.
 printf '%s\n' 'POST /v1/pilot/{mission}/messages | task-x | 2026-01-01 | tenant | cosmon:sessions:write | adapter-only | x' >> "$SURFACE"
-sed -E 's#`POST /v1/pilot/\{mission\}/attachments`#`POST /v1/pilot/{mission}/messages`#' "$WORK/w7a.md" > "$WORK/case.md"
+sed -E 's#`POST /v1/pilot/\{mission\}/attachments`#`POST /v1/pilot/{mission}/messages`#' "$WORK/w7a.md" > "$WORK/w7b.md"
+out="$(run "$WORK/w7b.md")" && ok "a mounted W7b mailbox route passes" || bad "W7b mailbox route should pass: $out"
+# W7c onwards (checkpoints) stays refused while mounted.
+printf '%s\n' 'POST /v1/pilot/{mission}/checkpoints | task-x | 2026-01-01 | tenant | cosmon:sessions:write | adapter-only | x' >> "$SURFACE"
+sed -E 's#`POST /v1/pilot/\{mission\}/attachments`#`POST /v1/pilot/{mission}/checkpoints`#' "$WORK/w7a.md" > "$WORK/case.md"
 out="$(run "$WORK/case.md")"; rc=$?
 if [ $rc -ne 0 ] && grep -qF "already mounted" <<<"$out"; then ok "a later session route stays refused"
 else bad "later session route (rc=$rc): $out"; fi

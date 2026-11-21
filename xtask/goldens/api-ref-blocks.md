@@ -1,5 +1,5 @@
 ===== routes-v1 =====
-**66 routes `/v1/` gelées** — recomptées depuis le canon à chaque génération (`crates/cosmon-rpp-adapter/data/surface_events.txt`, cosmon). La colonne *Effet* est dérivée du scope requis (godel C5 : un scope distinct par effet coûteux ou irréversible, ADR-080 §6.5) — jamais éditée à la main.
+**69 routes `/v1/` gelées** — recomptées depuis le canon à chaque génération (`crates/cosmon-rpp-adapter/data/surface_events.txt`, cosmon). La colonne *Effet* est dérivée du scope requis (godel C5 : un scope distinct par effet coûteux ou irréversible, ADR-080 §6.5) — jamais éditée à la main.
 
 | # | Famille | Méthode | Path | Scope requis | §8p | Effet |
 |---|---|---|---|---|---|---|
@@ -69,8 +69,11 @@
 | 64 | pilot | PUT | `/v1/pilot/{mission}/attachments/{attachment}/heartbeat` | `cosmon:sessions:write` | adapter-only |  |
 | 65 | pilot | DELETE | `/v1/pilot/{mission}/attachments/{attachment}` | `cosmon:sessions:write` | adapter-only |  |
 | 66 | pilot | GET | `/v1/pilot/{mission}/attachments` | `cosmon:sessions:read` | adapter-only |  |
+| 67 | pilot | POST | `/v1/pilot/{mission}/messages` | `cosmon:sessions:write` | adapter-only |  |
+| 68 | pilot | GET | `/v1/pilot/{mission}/messages` | `cosmon:sessions:read` | adapter-only |  |
+| 69 | pilot | POST | `/v1/pilot/{mission}/messages/{key}/ack` | `cosmon:sessions:write` | adapter-only |  |
 
-Découpage : **22** molecule + **3** artifact + **3** harvest + **5** auth-claude + **8** observ. + **2** avatar-canal + **5** avatar-life + **9** admin + **5** work + **4** pilot = **66**.
+Découpage : **22** molecule + **3** artifact + **3** harvest + **5** auth-claude + **8** observ. + **2** avatar-canal + **5** avatar-life + **9** admin + **5** work + **7** pilot = **69**.
 
 ===== bijection-8p =====
 | Route | Statut bijection (§8p) |
@@ -141,6 +144,9 @@ Découpage : **22** molecule + **3** artifact + **3** harvest + **5** auth-claud
 | `PUT /v1/pilot/{mission}/attachments/{attachment}/heartbeat` | ⊘ exempte (adapter-only) |
 | `DELETE /v1/pilot/{mission}/attachments/{attachment}` | ⊘ exempte (adapter-only) |
 | `GET /v1/pilot/{mission}/attachments` | ⊘ exempte (adapter-only) |
+| `POST /v1/pilot/{mission}/messages` | ⊘ exempte (adapter-only) |
+| `GET /v1/pilot/{mission}/messages` | ⊘ exempte (adapter-only) |
+| `POST /v1/pilot/{mission}/messages/{key}/ack` | ⊘ exempte (adapter-only) |
 
-Bijection liée : **26** (20 molecule + 1 avatar-canal + 5 avatar-life). Exemptes : **40**. Total : **66** — recompté depuis le canon (colonne `exposure`) à chaque génération.
+Bijection liée : **26** (20 molecule + 1 avatar-canal + 5 avatar-life). Exemptes : **43**. Total : **69** — recompté depuis le canon (colonne `exposure`) à chaque génération.
 
