@@ -422,9 +422,29 @@ impl AppState {
 ///   `/install.sh`, …).
 #[allow(clippy::too_many_lines)]
 pub fn router(state: AppState) -> Router {
-    use axum::routing::{delete, post};
+    use axum::routing::{delete, post, put};
     let shared = Arc::new(state);
     Router::new()
+        .route(
+            "/v1/pilot/{mission}/attachments",
+            get(routes::pilot::peers).post(routes::pilot::attach),
+        )
+        .route(
+            "/v1/pilot/{mission}/attachments/{attachment}",
+            delete(routes::pilot::detach),
+        )
+        .route(
+            "/v1/pilot/{mission}/attachments/{attachment}/heartbeat",
+            put(routes::pilot::heartbeat),
+        )
+        .route(
+            "/v1/pilot/{mission}/messages",
+            get(routes::pilot_mailbox::pull).post(routes::pilot_mailbox::send),
+        )
+        .route(
+            "/v1/pilot/{mission}/messages/{key}/ack",
+            post(routes::pilot_mailbox::ack),
+        )
         .route("/v1/work/{owner}", get(routes::work::list))
         .route("/v1/work/{owner}/messages", post(routes::work::send))
         .route(

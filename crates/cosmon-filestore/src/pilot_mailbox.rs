@@ -88,6 +88,11 @@ impl PilotMailbox {
         }
     }
 
+    /// The cosmon state root this mailbox lives under.
+    pub(crate) fn state_root(&self) -> &std::path::Path {
+        &self.state_root
+    }
+
     /// Path of a session's envelope file.
     #[must_use]
     pub fn inbox_path(&self, sid: &SessionId) -> PathBuf {

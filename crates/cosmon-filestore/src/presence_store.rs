@@ -57,6 +57,11 @@ impl PresenceStore {
         Self { state_root, root }
     }
 
+    /// The state root this store decodes its paths against.
+    pub(crate) fn state_root(&self) -> &Path {
+        &self.state_root
+    }
+
     /// Return the directory all presence files live in.
     #[must_use]
     pub fn dir(&self) -> &Path {

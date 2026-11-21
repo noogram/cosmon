@@ -40,6 +40,8 @@ pub mod operator_trust;
 pub mod pilot_lease_store;
 pub mod pilot_mailbox;
 pub mod presence_store;
+pub mod remote_mailbox_store;
+pub mod remote_presence_store;
 // Project materialization (`cs init --upgrade` as a library) — see the
 // module docs for why it left the CLI.
 pub mod project_upgrade;
@@ -53,6 +55,8 @@ pub use operator_trust::{MinisignOperatorVerifier, TAKEOVER_PUBKEY_ENV, TAKEOVER
 pub use pilot_lease_store::{AuditedGrant, PilotLeaseStore};
 pub use pilot_mailbox::{MailboxEntry, MessageAck, PilotMailbox};
 pub use presence_store::PresenceStore;
+pub use remote_mailbox_store::{RemoteMailboxStoreError, RemoteSend};
+pub use remote_presence_store::RemotePresenceStoreError;
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};

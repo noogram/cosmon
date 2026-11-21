@@ -128,3 +128,14 @@ GET /v1/molecules/{id}/prime | task-20261028-3daf | 2026-10-28 | tenant | cosmon
 POST /v1/molecules/{id}/decay | task-20261028-5840 | 2026-10-28 | tenant | cosmon:molecule:write | tenant-verb | Decay a molecule into a product molecule (decay)
 POST /v1/molecules/merge | task-20261028-5840 | 2026-10-28 | tenant | cosmon:molecule:write | tenant-verb | Merge several molecules into one synthesis molecule (merge)
 POST /v1/molecules/{id}/transform | task-20261028-5840 | 2026-10-28 | tenant | cosmon:molecule:write | tenant-verb | Change a molecule's kind (transform)
+
+# Issue #212 W7a: remote presence of a bound pilot attachment; no lease, no lifecycle.
+POST /v1/pilot/{mission}/attachments | task-20261120-bb72 | 2026-11-20 | tenant | cosmon:sessions:write | adapter-only | Attach the binding's attachment to its mission (at most 2), idempotent by key
+PUT /v1/pilot/{mission}/attachments/{attachment}/heartbeat | task-20261120-bb72 | 2026-11-20 | tenant | cosmon:sessions:write | adapter-only | Record a server-observed heartbeat of the bound attachment, at most one per 10 seconds
+DELETE /v1/pilot/{mission}/attachments/{attachment} | task-20261120-bb72 | 2026-11-20 | tenant | cosmon:sessions:write | adapter-only | Withdraw the bound attachment's presence; safe to repeat
+GET /v1/pilot/{mission}/attachments | task-20261120-bb72 | 2026-11-20 | tenant | cosmon:sessions:read | adapter-only | List one page of the mission's attachments without writing
+
+# Issue #212 W7b: pilot messages of a bound attachment through the existing pilot mailbox; no lease, no lifecycle.
+POST /v1/pilot/{mission}/messages | task-20261121-cb2a | 2026-11-21 | tenant | cosmon:sessions:write | adapter-only | Send a pilot message from the bound attachment to a pilot of its mission, idempotent by key
+GET /v1/pilot/{mission}/messages | task-20261121-cb2a | 2026-11-21 | tenant | cosmon:sessions:read | adapter-only | List one page of the bound attachment's unacknowledged messages without consuming them
+POST /v1/pilot/{mission}/messages/{key}/ack | task-20261121-cb2a | 2026-11-21 | tenant | cosmon:sessions:write | adapter-only | Acknowledge one message of the bound attachment's mailbox; safe to repeat
