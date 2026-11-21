@@ -10,15 +10,15 @@
 //!   0a/0a1b2c3d...
 //! ```
 //!
-//! Writes are atomic: data lands in a `.tmp` sibling, is fsynced, then renamed
-//! into place. A crash mid-write never corrupts the store. Identical content
-//! is deduplicated automatically — if the target path already exists, the write
-//! is skipped.
+//! Writes are atomic: each writer stages data in a unique sibling file,
+//! syncs it, then renames it into place. A crash mid-write leaves the
+//! previous blob intact. Matching blobs are deduplicated and corrupt
+//! contents are replaced.
 
 #![forbid(unsafe_code)]
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -61,52 +61,55 @@ impl FileCas {
     fn blob_path(&self, hash: &ContentHash) -> PathBuf {
         self.root.join(hash.prefix()).join(hash.as_str())
     }
-}
 
-/// Compute the SHA-256 hash of the given data, returning a [`ContentHash`].
-fn sha256(data: &[u8]) -> ContentHash {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let digest = hasher.finalize();
-    let hex = hex_encode(&digest);
-    // Safety: SHA-256 always produces 64 lowercase hex chars.
-    ContentHash::new(hex).expect("SHA-256 always produces valid hex")
-}
-
-/// Encode bytes as lowercase hex.
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(HEX_CHARS[(b >> 4) as usize]);
-        s.push(HEX_CHARS[(b & 0x0f) as usize]);
+    /// Read a complete blob within the caller's byte limit.
+    ///
+    /// Reads at most one byte past the limit to distinguish EOF from an
+    /// oversized blob. Useful for callers with a payload budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error of kind [`io::ErrorKind::FileTooLarge`] when the
+    /// blob exceeds `max_bytes`, or the filesystem error if it cannot be read.
+    pub fn get_bounded(&self, hash: &ContentHash, max_bytes: u64) -> Result<Vec<u8>, CosmonError> {
+        let mut blob = Vec::new();
+        File::open(self.blob_path(hash))?
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut blob)?;
+        if blob.len() as u64 > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                format!("blob {hash} exceeds {max_bytes} bytes"),
+            )
+            .into());
+        }
+        Ok(blob)
     }
-    s
 }
 
-const HEX_CHARS: [char; 16] = [
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
-];
+/// Rehash an existing blob, reading only enough to reject an oversized one.
+fn stored_blob_matches(path: &Path, size: u64, digest: &[u8]) -> io::Result<bool> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut hasher = Sha256::new();
+    let bytes_read = io::copy(&mut file.take(size + 1), &mut hasher)?;
+    Ok(bytes_read == size && hasher.finalize().as_slice() == digest)
+}
 
 impl CasStore for FileCas {
     fn put(&self, data: &[u8]) -> Result<ContentHash, CosmonError> {
-        let hash = sha256(data);
+        let digest = Sha256::digest(data);
+        let hash = ContentHash::new(format!("{digest:x}"))?;
         let target = self.blob_path(&hash);
 
-        // Dedup: if the blob already exists, skip the write.
-        if target.exists() {
+        if stored_blob_matches(&target, data.len() as u64, &digest)? {
             return Ok(hash);
         }
 
-        // Ensure the shard directory exists.
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        // Atomic write: write to .tmp, fsync, rename.
-        let tmp = target.with_extension("tmp");
-        atomic_write_with_fsync(&tmp, data)?;
-        fs::rename(&tmp, &target)?;
-
+        atomic_write_with_fsync(&target, data)?;
         Ok(hash)
     }
 
@@ -125,15 +128,26 @@ impl CasStore for FileCas {
     }
 }
 
-/// Write `data` to `path` with an fsync before returning.
-fn atomic_write_with_fsync(path: &Path, data: &[u8]) -> Result<(), CosmonError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path)?;
-    file.write_all(data)?;
-    file.sync_all()?;
+/// Publish fully written bytes by replacing the destination atomically.
+fn atomic_write_with_fsync(target: &Path, data: &[u8]) -> io::Result<()> {
+    let shard = target
+        .parent()
+        .ok_or_else(|| io::Error::other("CAS blob path has no parent"))?;
+    fs::create_dir_all(shard)?;
+
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".cas-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Preserve normal file creation permissions, subject to umask.
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+    let mut temporary = builder.tempfile_in(shard)?;
+    temporary.write_all(data)?;
+    temporary.as_file().sync_all()?;
+    // Concurrent writers for this address publish the same bytes.
+    temporary.persist(target).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -184,8 +198,141 @@ mod tests {
         let (_tmp, store) = make_store();
         let data = b"dedup test";
         let h1 = store.put(data).unwrap();
+        let path = store.blob_path(&h1);
+        let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(12_345);
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(stamp)
+            .unwrap();
         let h2 = store.put(data).unwrap();
         assert_eq!(h1, h2);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), stamp);
+    }
+
+    #[test]
+    fn put_repairs_corrupt_existing_bytes_and_returns_the_same_address() {
+        let (_tmp, store) = make_store();
+        let expected = b"hello world";
+        let hash = store.put(expected).unwrap();
+        let path = store.blob_path(&hash);
+
+        for corrupt in [
+            b"hello WORLD".as_slice(),
+            b"hello",
+            b"hello world with extra bytes",
+        ] {
+            fs::write(&path, corrupt).unwrap();
+            assert_eq!(store.put(expected).unwrap(), hash);
+            assert_eq!(fs::read(&path).unwrap(), expected, "after {corrupt:?}");
+            assert_eq!(store.get(&hash).unwrap(), expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn put_propagates_open_errors_other_than_not_found() {
+        use std::os::unix::fs::symlink;
+
+        let (_tmp, store) = make_store();
+        let data = b"unreadable blob path";
+        let hash = store.put(data).unwrap();
+        let path = store.blob_path(&hash);
+        fs::remove_file(&path).unwrap();
+        symlink(path.file_name().unwrap(), &path).unwrap();
+
+        // Opening this path fails on the loop, but replacing it would succeed.
+        assert!(matches!(store.put(data), Err(CosmonError::Io(_))));
+        assert_eq!(fs::read_link(&path).unwrap(), Path::new(hash.as_str()));
+    }
+
+    #[test]
+    fn concurrent_puts_publish_only_complete_bytes_and_all_succeed() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        const WRITERS: usize = 4;
+        let (_tmp, store) = make_store();
+        let data = vec![0xA5; 8 * 1024 * 1024];
+        // SHA-256 computed independently with shasum over the fixture bytes.
+        let hash =
+            ContentHash::new("e474a45740e5efac02e9f7e0626b3f86111b293f8363e477786dfad64e98df3b")
+                .unwrap();
+        let start = Barrier::new(WRITERS + 1);
+        thread::scope(|scope| {
+            let writers: Vec<_> = (0..WRITERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        store.put(&data)
+                    })
+                })
+                .collect();
+            start.wait();
+            while writers.iter().any(|writer| !writer.is_finished()) {
+                if store.exists(&hash).unwrap() {
+                    let visible = store.get(&hash).unwrap();
+                    assert!(visible == data, "reader saw {} bytes", visible.len());
+                }
+                thread::yield_now();
+            }
+            for writer in writers {
+                assert_eq!(writer.join().unwrap().unwrap(), hash);
+            }
+        });
+        assert!(store.get(&hash).unwrap() == data);
+    }
+
+    #[test]
+    fn bounded_get_returns_complete_bytes_or_a_size_error() {
+        let (_tmp, store) = make_store();
+        let hash = store.put(b"abcde").unwrap();
+        for limit in [5, 6, u64::MAX] {
+            assert_eq!(store.get_bounded(&hash, limit).unwrap(), b"abcde");
+        }
+        for limit in [0, 4] {
+            assert!(matches!(
+                store.get_bounded(&hash, limit),
+                Err(CosmonError::Io(error)) if error.kind() == std::io::ErrorKind::FileTooLarge
+            ));
+        }
+        let empty = store.put(b"").unwrap();
+        assert!(store.get_bounded(&empty, 0).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_get_stops_when_the_size_limit_is_exceeded_before_eof() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let (_tmp, store) = make_store();
+        let hash = store.put(b"seed").unwrap();
+        let path = store.blob_path(&hash);
+        fs::remove_file(&path).unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        let mut fifo = fs::File::options()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        fifo.write_all(b"abcde").unwrap();
+
+        let (send, receive) = mpsc::channel();
+        let reader = thread::spawn(move || send.send(store.get_bounded(&hash, 4)));
+        let result = receive.recv_timeout(Duration::from_secs(3));
+        drop(fifo);
+        reader.join().unwrap().unwrap();
+        assert!(matches!(
+            result.expect("bounded read must return while the writer is still open"),
+            Err(CosmonError::Io(error)) if error.kind() == std::io::ErrorKind::FileTooLarge
+        ));
     }
 
     #[test]
@@ -267,14 +414,14 @@ mod tests {
 
     #[test]
     fn test_sha256_known_vectors() {
-        // Verify our SHA-256 implementation against known test vectors.
-        let empty = sha256(b"");
+        let (_tmp, store) = make_store();
+        let empty = store.put(b"").unwrap();
         assert_eq!(
             empty.as_str(),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
 
-        let abc = sha256(b"abc");
+        let abc = store.put(b"abc").unwrap();
         assert_eq!(
             abc.as_str(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
