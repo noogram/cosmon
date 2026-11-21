@@ -436,9 +436,11 @@ mailboxes of the current recipients; the 1001st is refused with the new code
 allowances. A retry of an accepted send is answered before the cap. The
 65536-byte limit applies to the message body; a larger body is
 `payload_too_large`. Sends and acknowledgments take a per-mission lock,
-`presence/remote/<mission>.mailbox.lock`; local `cs sessions send` does not
-take it, so a local and a remote sender can still race on one recipient's
-sequence, as two local senders already can. S-PULL reads the caller's own
+`presence/remote/<mission>.mailbox.lock`; local `cs sessions send` takes
+it too when the recipient's presence snapshot names the mission, so a local
+and a remote sender cannot pick the same sequence for one recipient. Two
+local senders to a recipient that names no mission still race, as before;
+a local send to a remote attachment's mailbox is not specified. S-PULL reads the caller's own
 mailbox only, lists unacknowledged messages (expired ones included, with their
 state) in sequence order, at most 100 per page and 1048576 response bytes,
 with the last sequence of a page as the cursor; it takes no lock, records no

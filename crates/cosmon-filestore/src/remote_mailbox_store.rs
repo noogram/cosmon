@@ -157,6 +157,33 @@ impl PilotMailbox {
         }
     }
 
+    /// Deliver a local message to `to`, taking the mission's mailbox lock
+    /// when `to` is a pilot of a mission.
+    ///
+    /// The remote writers number their sends under
+    /// [`CosmonPath::RemoteMailboxLock`]; a local sender that numbered its
+    /// own without that lock could pick the same sequence as a remote one.
+    /// `build` receives the next sequence of `to`, read under the lock, and
+    /// returns the envelope to append. With no mission the call is the
+    /// unlocked read-then-append local senders always did.
+    ///
+    /// Returns the envelope and whether this call wrote it.
+    ///
+    /// # Errors
+    /// Returns an unavailable mailbox when the lock, the read or the append
+    /// fails.
+    pub fn deliver_local(
+        &self,
+        mission: Option<&MoleculeId>,
+        to: &SessionId,
+        build: impl FnOnce(u64) -> PilotMessage,
+    ) -> Result<(PilotMessage, bool), RemoteMailboxStoreError> {
+        let _lock = mission.map(|m| self.remote_lock(m)).transpose()?;
+        let message = build(self.next_sequence(to)?);
+        let written = self.deliver(&message)?;
+        Ok((message, written))
+    }
+
     /// Acknowledge `id` in the mailbox `reader` on `mission` (S-ACK).
     ///
     /// Returns `true` when this call recorded the acknowledgment and `false`
