@@ -17,8 +17,8 @@
 
 #![forbid(unsafe_code)]
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -60,6 +60,30 @@ impl FileCas {
     /// The storage path for a given hash: `root/hash[:2]/hash`.
     fn blob_path(&self, hash: &ContentHash) -> PathBuf {
         self.root.join(hash.prefix()).join(hash.as_str())
+    }
+
+    /// Read a complete blob within the caller's byte limit.
+    ///
+    /// Reads at most one byte past the limit to distinguish EOF from an
+    /// oversized blob. Useful for callers with a payload budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error of kind [`io::ErrorKind::FileTooLarge`] when the
+    /// blob exceeds `max_bytes`, or the filesystem error if it cannot be read.
+    pub fn get_bounded(&self, hash: &ContentHash, max_bytes: u64) -> Result<Vec<u8>, CosmonError> {
+        let mut blob = Vec::new();
+        File::open(self.blob_path(hash))?
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut blob)?;
+        if blob.len() as u64 > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                format!("blob {hash} exceeds {max_bytes} bytes"),
+            )
+            .into());
+        }
+        Ok(blob)
     }
 }
 
@@ -186,6 +210,57 @@ mod tests {
         let h1 = store.put(data).unwrap();
         let h2 = store.put(data).unwrap();
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn bounded_get_returns_complete_bytes_or_a_size_error() {
+        let (_tmp, store) = make_store();
+        let hash = store.put(b"abcde").unwrap();
+        for limit in [5, 6, u64::MAX] {
+            assert_eq!(store.get_bounded(&hash, limit).unwrap(), b"abcde");
+        }
+        for limit in [0, 4] {
+            assert!(matches!(
+                store.get_bounded(&hash, limit),
+                Err(CosmonError::Io(error)) if error.kind() == std::io::ErrorKind::FileTooLarge
+            ));
+        }
+        let empty = store.put(b"").unwrap();
+        assert!(store.get_bounded(&empty, 0).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_get_stops_when_the_size_limit_is_exceeded_before_eof() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let (_tmp, store) = make_store();
+        let hash = store.put(b"seed").unwrap();
+        let path = store.blob_path(&hash);
+        fs::remove_file(&path).unwrap();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        let mut fifo = fs::File::options()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        fifo.write_all(b"abcde").unwrap();
+
+        let (send, receive) = mpsc::channel();
+        let reader = thread::spawn(move || send.send(store.get_bounded(&hash, 4)));
+        let result = receive.recv_timeout(Duration::from_secs(3));
+        drop(fifo);
+        reader.join().unwrap().unwrap();
+        assert!(matches!(
+            result.expect("bounded read must return while the writer is still open"),
+            Err(CosmonError::Io(error)) if error.kind() == std::io::ErrorKind::FileTooLarge
+        ));
     }
 
     #[test]
