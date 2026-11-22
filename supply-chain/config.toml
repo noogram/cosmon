@@ -498,6 +498,10 @@ criteria = "safe-to-deploy"
 version = "1.1.9"
 criteria = "safe-to-deploy"
 
+[[exemptions.form_urlencoded]]
+version = "1.2.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.fs2]]
 version = "0.4.3"
 criteria = "safe-to-deploy"
@@ -1651,7 +1655,7 @@ version = "0.9.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.url]]
-version = "2.5.8"
+version = "2.5.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.uuid]]

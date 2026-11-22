@@ -21,6 +21,8 @@ this stage.
 
 ## [0.10.1] — 2026-11-22
 
+- Dependencies: `url` 2.5.8 → 2.5.9 (RUSTSEC-2026-0592, stack overflow in `Url::origin()` on nested `blob:` URLs), which brings `form_urlencoded` 1.2.2 → 1.2.3; the cargo-vet exemption for `url` moves to 2.5.9 and `form_urlencoded` 1.2.3 is exempted, both unaudited.
+
 - The event journal keeps every acknowledged event replayable after an interrupted append: a torn final line, including one cut inside a UTF-8 character, no longer makes the next event reuse or lose a sequence number, and `cs reconcile` rebuilds molecules nucleated after such an append.
 
 - Concurrent writers of the frontier projection each publish a complete file instead of colliding on one temporary name, and a leftover temporary file from an older version no longer blocks `cs reconcile`.
