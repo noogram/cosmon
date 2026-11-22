@@ -77,6 +77,8 @@ time of writing.
 | An exclusion is refused when its id is also a member; otherwise its head must resolve, and a member is refused when `git merge-base --is-ancestor <excluded head> <member head>` succeeds. Only the exact head the operator passes is tested. | `train.rs:510-550`; the ancestry test at `:529-531`; called at `:491` |
 | The exclusion check runs inside `land`, after the trunk lock is taken, so after the operator has paid for the gate. | `train.rs:408-410`, `:491` |
 | An integration test asserts that a member carrying an earlier commit of the excluded molecule lands when the operator names a later head of that molecule. | `crates/cosmon-cli/tests/land_train.rs:494-502` (`exclusion_allows_landing_when_no_member_contains_the_pinned_head`) |
+
+*Annotation (2026-11-22):* the table above records the code as it stood when this ADR was written. Since then, `--exclude` tests the excluded member's first own commit, the oldest entry of `git rev-list --first-parent <excluded head> ^<train base>`, so a member carrying any own commit of the excluded member is refused, and an excluded head already reachable from the train base refuses no member. This is I4 below. It still misses a rebased culprit. See `docs/guides/train-landing.md`. The ADR's status and decisions are unchanged.
 | The base moves by `git update-ref <base> <tip> <train_base>`, a compare-and-swap. | `train.rs:827-836` |
 | `land` reads no gate evidence: nothing checks that the tip it moves the base to was gated. | `train.rs:342-508` (no gate input in `LandTrainRequest`, `:112-123`) |
 | `land` does not read `blocked_by`. A dependent enters the frontier only when its blocker is Completed and has `merged_at`. | `train.rs:342-508`; `crates/cosmon-state/src/frontier.rs:168`; `crates/cosmon-core/src/molecule.rs:194-196` |
@@ -205,7 +207,7 @@ commits of a member removed from an earlier train?** Partly. `--exclude <id>=<he
 member that contains that exact head, only at landing, and only if the
 operator passes the head the removed member had in the earlier train
 (§1.2). A carrier of an earlier commit lands, and a test asserts it. I4
-closes that gap, `--check` moves the refusal before the gate, and I3 refuses
+closes that gap (implemented since: see the annotation under §1.2), `--check` moves the refusal before the gate, and I3 refuses
 a carrier with no `--exclude` at all.
 
 ### Q4 — Speculative gating already works through one compare-and-swap
