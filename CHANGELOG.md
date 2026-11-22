@@ -19,6 +19,12 @@ this stage.
 
 ## [Unreleased]
 
+- The event journal keeps every acknowledged event replayable after an interrupted append: a torn final line, including one cut inside a UTF-8 character, no longer makes the next event reuse or lose a sequence number, and `cs reconcile` rebuilds molecules nucleated after such an append.
+
+- Concurrent writers of the frontier projection each publish a complete file instead of colliding on one temporary name, and a leftover temporary file from an older version no longer blocks `cs reconcile`.
+
+- A molecule frozen at its final step is replayed as frozen, not as completed.
+
 - FileCas can read blobs with a caller-supplied size limit, repairs corrupt blobs on re-upload, and publishes concurrent writes atomically.
 
 - `cs sessions send` takes the mission's mailbox lock when the recipient's presence names a mission, the lock the remote pilot send already takes, so a local and a remote sender no longer pick the same sequence (#212 W7b). Mailbox format, output and exit codes are unchanged.
