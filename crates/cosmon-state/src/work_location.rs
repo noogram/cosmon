@@ -133,4 +133,35 @@ mod tests {
         assert_eq!(location.harvest_command, "cs done task-20260101-aaaa");
         assert!(!location.render().contains("--no-merge"));
     }
+
+    fn location(landed: bool, held_for_landing: bool) -> WorkLocation {
+        WorkLocation {
+            molecule: "task-20260101-aaaa".to_owned(),
+            branch: "feat/task-20260101-aaaa".to_owned(),
+            worktree: "/repo/.worktrees/task-20260101-aaaa".to_owned(),
+            harvest_command: "cs done task-20260101-aaaa".to_owned(),
+            landed,
+            held_for_landing,
+        }
+    }
+
+    /// A reserved molecule is told it lands by train; `cs done` is for
+    /// landing it oneself, not "to merge it".
+    #[test]
+    fn held_work_says_it_lands_by_train() {
+        let line = location(false, true).render();
+        assert!(line.contains("`cs land-train`"), "{line}");
+        assert!(!line.contains("to merge it"), "{line}");
+    }
+
+    #[test]
+    fn plain_and_landed_work_keep_their_hints() {
+        let plain = location(false, false).render();
+        assert!(
+            plain.contains("run `cs done task-20260101-aaaa` to merge it"),
+            "{plain}"
+        );
+        let landed = location(true, true).render();
+        assert!(landed.contains("already merged"), "{landed}");
+    }
 }

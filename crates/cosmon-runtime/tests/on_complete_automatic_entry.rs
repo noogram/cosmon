@@ -27,9 +27,10 @@ fn reservation_honouring_cs(dir: &Path) -> std::path::PathBuf {
         format!(
             "#!/bin/sh\n\
              [ \"$1\" = done ] || exit 2\n\
+             echo \"$*\" >> '{0}/calls'\n\
              case \"$*\" in\n\
                *--if-completed*) echo reserved ;;\n\
-               *) touch '{}/landed' ;;\n\
+               *) touch '{0}/landed' ;;\n\
              esac\n\
              exit 0\n",
             dir.display()
@@ -50,6 +51,12 @@ fn on_complete_does_not_land_a_reserved_molecule() {
     exec.on_complete(&MoleculeId::new("task-20261124-aaaa").unwrap())
         .expect("the automatic entry answering `reserved` is not a failure");
 
+    let calls = std::fs::read_to_string(tmp.path().join("calls")).unwrap_or_default();
+    assert_eq!(
+        calls.trim(),
+        "done task-20261124-aaaa --if-completed",
+        "on_complete must reach cs done, through the automatic entry"
+    );
     assert!(
         !tmp.path().join("landed").exists(),
         "on_complete used the explicit `cs done <id>`, which lands a tagged molecule"
