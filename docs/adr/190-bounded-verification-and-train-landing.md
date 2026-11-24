@@ -367,6 +367,33 @@ when authority is required.
 - A bound on scoped test runs a worker starts outside the runner. The slot
   bounds only what goes through it.
 
+**Note of 2026-11-24 (non-goal re-examined, kept).** After deliberation
+`delib-20261124-00b9`, the operator re-examined the first non-goal (train
+build, the train gate and bisection inside cosmon) against the data the
+reporter of issue #213 published, and kept it (decision A). No
+`cs land-train --assemble` is planned. The panel's reasons:
+
+- The entry criterion of this section, "operator use shows a stable shape",
+  is not met. Between consecutive reports from the same operator, the
+  train-merge step came back, blame came back after `git log -S` had replaced
+  it, and practices the reporter had already described were missing from the
+  list of steps.
+- The second-script condition of §5 is not met: no second train-building
+  tool exists.
+- The two incidents the reporter described were process-supervision faults
+  (a wait inside the gate command, an orphan acting on the operator's own
+  exclusion list), not gaps in what this section keeps out of cosmon.
+
+One change follows from the same decisions and is not a non-goal: a gate-slot
+holder may hand its slot descriptor to the command, **opt-in only**, for a
+pool declared for a controller (decision B). A controller pool of size 1 then
+keeps its slot while any process of the run lives, so a second controller
+waits instead of racing an orphan. The `full_gate` pool keeps the
+close-on-exec descriptor (`crates/cosmon-cli/src/cmd/gates.rs`, module comment), and the default behaviour of
+`cs gates slot` is unchanged. This is not implemented yet. The decisions on
+`ADR-192` that came with these two are recorded in its amendment of the same
+date.
+
 ## 7 · Where this meets shell trust (#215)
 
 This section locates the intersections; it does not redesign trust.
