@@ -5,13 +5,16 @@
 //! is `cs gates slot`, so a crash, an exit code or an overlap is only
 //! meaningful when it is that process.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use cosmon_filestore::gate_slots::live_gate_slot_holders_in;
+use nix::sys::signal::{kill, killpg, Signal};
+use nix::unistd::{getpgid, Pid};
 
 /// A galaxy under `tmp` whose config declares `gate_slots_toml`; returns the
 /// state directory.
@@ -43,17 +46,6 @@ fn cs(state: &Path) -> Command {
     cmd
 }
 
-/// SIGKILL the holder, then its whole process group, so the orphaned command
-/// does not outlive the test. Returns once the holder is reaped.
-fn kill_group(holder: &mut Child) {
-    let pgid = holder.id();
-    holder.kill().unwrap();
-    holder.wait().unwrap();
-    let _ = Command::new("kill")
-        .args(["-KILL", &format!("-{pgid}")])
-        .status();
-}
-
 fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     let start = Instant::now();
     while !cond() {
@@ -74,6 +66,367 @@ fn spawn_slot(state: &Path, pool: &str, command: &[&str]) -> Child {
         .stderr(Stdio::null())
         .process_group(0);
     cmd.spawn().unwrap()
+}
+
+fn pid(id: u32) -> Pid {
+    Pid::from_raw(i32::try_from(id).unwrap())
+}
+
+/// Keep a handle to both the wrapper and its command group for cleanup, even
+/// when an assertion exposes a surviving command on the unmodified binary.
+struct RunningSlot {
+    wrapper: Child,
+    command: Pid,
+    group: Pid,
+}
+
+impl RunningSlot {
+    fn start(state: &Path, options: &[&str], script: &str) -> Self {
+        let marker = state.join("command.pid");
+        let mut wrapper = cs(state)
+            .args(["gates", "slot"])
+            .args(options)
+            .args(["--", "sh", "-c", script, "sh"])
+            .arg(&marker)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let start = Instant::now();
+        let command = loop {
+            if let Ok(contents) = fs::read_to_string(&marker) {
+                if let Ok(id) = contents.trim().parse() {
+                    break pid(id);
+                }
+            }
+            assert_eq!(wrapper.try_wait().unwrap(), None, "command never started");
+            assert!(start.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let group = getpgid(Some(command)).unwrap();
+        Self {
+            wrapper,
+            command,
+            group,
+        }
+    }
+
+    fn kill_wrapper(&mut self) {
+        self.wrapper.kill().unwrap();
+        self.wrapper.wait().unwrap();
+    }
+}
+
+impl Drop for RunningSlot {
+    fn drop(&mut self) {
+        // The baseline still puts the command in the wrapper's group.
+        let _ = killpg(self.group, Signal::SIGKILL);
+        let _ = self.wrapper.kill();
+        let _ = self.wrapper.wait();
+    }
+}
+
+fn process_is_alive(process: Pid) -> bool {
+    let output = Command::new("ps")
+        .args(["-o", "stat=", "-p", &process.to_string()])
+        .output()
+        .unwrap();
+    // Orphaned zombies may await a reaper, but cannot keep running.
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .trim_start()
+            .starts_with(|state: char| state != 'Z')
+}
+
+#[test]
+fn the_command_can_read_the_terminal_and_returns_it_to_the_caller() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = galaxy(tmp.path(), "");
+    let pty = nix::pty::openpty(None, None).unwrap();
+    let mut terminal = File::from(pty.master);
+    let mut caller = Command::new("sh");
+    caller
+        .current_dir(&state)
+        .env("COSMON_STATE_DIR", &state)
+        .args([
+            "-c",
+            r#""$1" gates slot -- sh -c 'read input; echo "$input" > child-input' &&
+                read input && echo "$input" > caller-input"#,
+            "sh",
+            env!("CARGO_BIN_EXE_cs"),
+        ])
+        .stdin(Stdio::from(pty.slave))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: these syscalls create a session and attach the already-set-up
+    // stdin as its controlling terminal. The pre-exec hook allocates nothing.
+    unsafe {
+        caller.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut caller = caller.spawn().unwrap();
+    terminal.write_all(b"for child\nfor caller\n").unwrap();
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = caller.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > Duration::from_secs(5) {
+            drop(terminal);
+            let _ = killpg(pid(caller.id()), Signal::SIGKILL);
+            caller.wait().unwrap();
+            panic!("the gate caller could not finish reading its terminal");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success(), "{status}");
+    assert_eq!(
+        fs::read_to_string(state.join("child-input")).unwrap(),
+        "for child\n"
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("caller-input")).unwrap(),
+        "for caller\n"
+    );
+}
+
+#[test]
+fn sending_a_signal_to_the_wrapper_stops_the_whole_command_group() {
+    for (signal, number) in [
+        (Signal::SIGTERM, 15),
+        (Signal::SIGINT, 2),
+        (Signal::SIGHUP, 1),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = galaxy(tmp.path(), "[gate_slots]\nfull_gate = 1\n");
+        let script = format!(
+            "trap 'echo caught > signal; exit 7' {number}; \
+             sh -c 'trap \"\" {number}; exec sleep 300' & \
+             echo $! > descendant.pid; echo $$ > \"$1\"; wait"
+        );
+        let mut run = RunningSlot::start(&state, &[], &script);
+        let descendant = pid(fs::read_to_string(state.join("descendant.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap());
+        kill(pid(run.wrapper.id()), signal).unwrap();
+        wait_until("signalled wrapper to exit", || {
+            run.wrapper.try_wait().unwrap().is_some()
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            !process_is_alive(run.command),
+            "{signal} left the command alive"
+        );
+        assert!(
+            !process_is_alive(descendant),
+            "{signal} left its descendant alive"
+        );
+        assert_eq!(
+            fs::read_to_string(state.join("signal")).unwrap(),
+            "caught\n"
+        );
+        assert_eq!(run.group, run.command, "the command leads its group");
+    }
+}
+
+#[test]
+fn timeout_kills_the_group_and_publishes_a_verdict() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = galaxy(tmp.path(), "[gate_slots]\nfull_gate = 1\n");
+    let mut run = RunningSlot::start(
+        &state,
+        &["--timeout", "1", "--verdict-file", "verdict"],
+        "sleep 30 & echo $! > descendant.pid; echo $$ > \"$1\"; wait",
+    );
+    let descendant = pid(fs::read_to_string(state.join("descendant.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap());
+    wait_until("timed-out wrapper to exit", || {
+        run.wrapper.try_wait().unwrap().is_some()
+    });
+    assert_eq!(
+        fs::read_to_string(state.join("verdict")).unwrap(),
+        "timed_out"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!process_is_alive(run.command));
+    assert!(!process_is_alive(descendant));
+}
+
+#[test]
+fn the_timeout_excludes_time_queued_for_a_slot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = galaxy(tmp.path(), "[gate_slots]\nfull_gate = 1\n");
+    let first = RunningSlot::start(&state, &[], "echo $$ > \"$1\"; exec sleep 300");
+    let mut second = cs(&state)
+        .args([
+            "gates",
+            "slot",
+            "--timeout",
+            "1",
+            "--verdict-file",
+            "verdict",
+            "--",
+            "true",
+        ])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut queued = String::new();
+    let mut stderr = std::io::BufReader::new(second.stderr.take().unwrap());
+    std::io::BufRead::read_line(&mut stderr, &mut queued).unwrap();
+    assert!(queued.contains("queued for a slot"), "{queued:?}");
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(second.try_wait().unwrap().is_none());
+    drop(first);
+    assert!(second.wait().unwrap().success());
+    assert_eq!(fs::read_to_string(state.join("verdict")).unwrap(), "ran:0");
+}
+
+#[test]
+fn required_directory_is_probed_before_and_after_the_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = galaxy(tmp.path(), "");
+    fs::write(state.join("file"), "").unwrap();
+    fs::create_dir(state.join("empty")).unwrap();
+    for (path, script, ran) in [
+        ("missing", "touch ran", false),
+        ("file", "touch ran", false),
+        ("empty", "touch ran; rmdir empty; exit 7", true),
+    ] {
+        let status = cs(&state)
+            .args([
+                "gates",
+                "slot",
+                "--require-dir",
+                path,
+                "--verdict-file",
+                "verdict",
+                "--",
+                "sh",
+                "-c",
+                script,
+            ])
+            .status()
+            .unwrap();
+        assert!(!status.success());
+        let verdict = fs::read_to_string(state.join("verdict")).unwrap();
+        let reason = verdict.strip_prefix("could_not_run:").unwrap();
+        assert!(!reason.is_empty() && !reason.contains('\n'), "{verdict:?}");
+        assert_eq!(state.join("ran").exists(), ran, "required path {path}");
+    }
+}
+
+#[test]
+fn a_command_that_cannot_start_has_a_could_not_run_verdict() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = galaxy(tmp.path(), "");
+    let status = cs(&state)
+        .args([
+            "gates",
+            "slot",
+            "--verdict-file",
+            "verdict",
+            "--",
+            "./absent",
+        ])
+        .status()
+        .unwrap();
+    assert!(!status.success());
+    assert!(fs::read_to_string(state.join("verdict"))
+        .unwrap()
+        .starts_with("could_not_run:"));
+}
+
+#[test]
+fn verdict_preserves_the_command_exit_code_with_a_usable_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = galaxy(tmp.path(), "");
+    for code in [0, 7, 124, 125] {
+        let status = cs(&state)
+            .args([
+                "gates",
+                "slot",
+                "--require-dir",
+                ".",
+                "--verdict-file",
+                "verdict",
+                "--",
+                "sh",
+                "-c",
+                &format!("exit {code}"),
+            ])
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(code));
+        assert_eq!(
+            fs::read_to_string(state.join("verdict")).unwrap(),
+            format!("ran:{code}")
+        );
+    }
+}
+
+#[test]
+fn descriptor_handoff_keeps_a_controller_slot_held_after_wrapper_sigkill() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = galaxy(tmp.path(), "[gate_slots.pools]\ncontroller = 1\n");
+    let mut first = RunningSlot::start(
+        &state,
+        &["--pool", "controller", "--hand-descriptor"],
+        "sleep 300 & echo $! > descendant.pid; echo $$ > \"$1\"; wait",
+    );
+    let descendant = pid(fs::read_to_string(state.join("descendant.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap());
+    first.kill_wrapper();
+    kill(first.command, Signal::SIGKILL).unwrap();
+    assert!(process_is_alive(descendant));
+    assert_eq!(live_gate_slot_holders_in(&state, "controller").unwrap(), 1);
+
+    let marker = state.join("second-ran");
+    let mut second = spawn_slot(&state, "controller", &["touch", "second-ran"]);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!marker.exists(), "the second controller raced the orphan");
+    kill(descendant, Signal::SIGKILL).unwrap();
+    wait_until("second controller to run after the orphan died", || {
+        marker.exists()
+    });
+    assert!(second.wait().unwrap().success());
+}
+
+#[test]
+fn descriptor_handoff_requires_a_named_bounded_pool() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = galaxy(tmp.path(), "[gate_slots]\nfull_gate = 1\n");
+    for pool in ["full_gate", "undeclared"] {
+        let output = cs(&state)
+            .args([
+                "gates",
+                "slot",
+                "--pool",
+                pool,
+                "--hand-descriptor",
+                "--",
+                "touch",
+                "ran",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("bounded named pool"));
+        assert!(!state.join("ran").exists());
+    }
 }
 
 /// The command's own exit code is the verb's exit code.
@@ -104,7 +457,7 @@ fn a_killed_holder_frees_its_slot_for_the_waiter() {
     let state = galaxy(tmp.path(), "[gate_slots]\nfull_gate = 1\n");
     let marker = tmp.path().join("waiter-ran");
 
-    let mut holder = spawn_slot(&state, "full_gate", &["sleep", "300"]);
+    let mut holder = RunningSlot::start(&state, &[], "echo $$ > \"$1\"; exec sleep 300");
     wait_until("the holder to take the slot", || {
         live_gate_slot_holders_in(&state, "full_gate").unwrap() == 1
     });
@@ -116,14 +469,10 @@ fn a_killed_holder_frees_its_slot_for_the_waiter() {
     // SIGKILL of the holder alone: no destructor runs, only the kernel releases
     // the lock. Its orphaned `sleep` stays alive for now and must not pin the
     // slot (the descriptor is close-on-exec), so the waiter starts regardless.
-    let pgid = holder.id();
-    holder.kill().unwrap();
-    holder.wait().unwrap();
+    holder.kill_wrapper();
     wait_until("the waiter to run", || marker.exists());
     assert!(waiter.wait().unwrap().success());
-    let _ = Command::new("kill")
-        .args(["-KILL", &format!("-{pgid}")])
-        .status();
+    assert!(process_is_alive(holder.command));
 }
 
 /// N=2 and five concurrent runs: the log of starts and ends never shows more
@@ -186,7 +535,7 @@ fn named_pools_have_their_own_size_and_do_not_block_each_other() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "3");
 
-    let mut full = spawn_slot(&state, "full_gate", &["sleep", "300"]);
+    let full = RunningSlot::start(&state, &[], "echo $$ > \"$1\"; exec sleep 300");
     wait_until("full_gate to be held", || {
         live_gate_slot_holders_in(&state, "full_gate").unwrap() == 1
     });
@@ -195,7 +544,7 @@ fn named_pools_have_their_own_size_and_do_not_block_each_other() {
         .status()
         .unwrap();
     assert!(status.success(), "docker_build waited for full_gate");
-    kill_group(&mut full);
+    drop(full);
 }
 
 fn runner() -> PathBuf {
@@ -226,7 +575,7 @@ fn the_runner_queues_behind_a_held_slot_and_then_runs() {
     fs::create_dir_all(&out).unwrap();
     let ran = tmp.path().join("bundle-ran");
 
-    let mut holder = spawn_slot(&state, "full_gate", &["sleep", "300"]);
+    let mut holder = RunningSlot::start(&state, &[], "echo $$ > \"$1\"; exec sleep 300");
     wait_until("the slot to be held", || {
         live_gate_slot_holders_in(&state, "full_gate").unwrap() == 1
     });
@@ -236,7 +585,7 @@ fn the_runner_queues_behind_a_held_slot_and_then_runs() {
     assert!(!out.join("gates.pid").exists() && !out.join("gates.exit").exists());
     assert!(!ran.exists());
 
-    kill_group(&mut holder);
+    holder.kill_wrapper();
     wait_until("gates.exit", || out.join("gates.exit").exists());
     assert!(ran.exists(), "gates.exit appeared before the bundle ran");
     assert_eq!(fs::read_to_string(out.join("gates.exit")).unwrap(), "0");
