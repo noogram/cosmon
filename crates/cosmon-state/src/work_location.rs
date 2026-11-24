@@ -42,6 +42,10 @@ pub struct WorkLocation {
     /// The work is already on the trunk, so [`Self::harvest_command`] must
     /// not merge it again.
     pub landed: bool,
+    /// The molecule's merge is reserved (`no-auto-harvest`, `harvest_to:*`):
+    /// it lands by an explicit gesture, typically `cs land-train`, and no
+    /// automatic path will merge it.
+    pub held_for_landing: bool,
 }
 
 impl WorkLocation {
@@ -70,6 +74,9 @@ impl WorkLocation {
             worktree: worktree.display().to_string(),
             harvest_command: format!("cs done {}", molecule.id),
             landed: false,
+            held_for_landing: cosmon_core::harvest_hold::harvest_reserved(
+                molecule.tags.iter().map(cosmon_core::tag::Tag::as_str),
+            ),
         }
     }
 
@@ -90,6 +97,9 @@ impl WorkLocation {
     pub fn render(&self) -> String {
         let outcome = if self.landed {
             "already merged; run `{}` to archive and tear it down"
+        } else if self.held_for_landing {
+            "held for external landing (no-auto-harvest): it lands by `cs land-train`; \
+             run `{}` only to land it yourself"
         } else {
             "run `{}` to merge it"
         };
@@ -116,6 +126,7 @@ mod tests {
             worktree: "/repo/.worktrees/task-20260101-aaaa".to_owned(),
             harvest_command: "cs done task-20260101-aaaa".to_owned(),
             landed: false,
+            held_for_landing: false,
         }
         .already_merged();
         assert!(location.landed);

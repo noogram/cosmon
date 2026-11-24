@@ -178,6 +178,33 @@ surface can pass. Run `git status -- .cosmon/config.toml .cosmon/formulas` and
 the scripts they name, and commit, remove or restore what it lists before
 granting.
 
+## Leaving a dependent chain to a train
+
+A node that a train lands, not the runtime, carries the tag `no-auto-harvest`
+from its nucleation. Its dependents wait for the train to stamp `merged_at`, and
+each is dispatched with the model pinned on it:
+
+```sh
+cs nucleate … --blocked-by <id> --tag no-auto-harvest --var cosmon_model=<id>
+cs run --resident _
+```
+
+`cs run` does not need a mode for this. The tag is on disk, so a relaunch of
+`cs run` reads it again and holds the node the same way.
+
+- A `Completed` molecule with the tag is never merged by an automatic path: the
+  resident loop, the legacy `cs run`, the tmux pane-died hook and
+  `cs patrol --harvest` all land through `cs done --if-completed`, which answers
+  `reserved` and changes nothing. The resident loop writes a `hold` line, "held
+  for external landing", once per molecule on `runtime-trace.jsonl`.
+- `cs land-train` closes a tagged member with `cs done --expect-head`, and an
+  explicit `cs done <id>` or `cs harvest --molecule <id>` typed by the operator
+  lands it too. Only the automatic entry honours the tag.
+- A dependent is dispatched only when each blocker is `Completed` with
+  `merged_at` set, so it starts from a tree that holds its predecessors' work.
+- `harvest_to:<branch>` reserves a merge in the same way: an automatic path can
+  only merge to the trunk, so any routing intent is held.
+
 ## Out of scope
 
 Choosing when to build, gate or bisect a train, syncing members from a train,

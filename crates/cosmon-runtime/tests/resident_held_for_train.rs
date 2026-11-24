@@ -148,4 +148,15 @@ fn tagged_blocker_is_held_and_its_dependent_waits_for_merged_at() {
         !lines.iter().any(|l| l == &"tackle b a_merged=False"),
         "`b` was dispatched before `a`'s merged_at: {lines:?}"
     );
+
+    // RR-5: the hold is on the trace, once, naming the molecule and the reason.
+    let trace = std::fs::read_to_string(&trace_path).unwrap();
+    let holds: Vec<serde_json::Value> = trace
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["action"] == "hold")
+        .collect();
+    assert_eq!(holds.len(), 1, "one hold line for `a`, got {holds:?}");
+    assert_eq!(holds[0]["molecule_id"], "a");
+    assert_eq!(holds[0]["decision_basis"], "held for external landing");
 }
