@@ -78,7 +78,7 @@ struct SlotArgs {
     #[arg(long, value_name = "PATH", conflicts_with = "configured")]
     require_dir: Option<PathBuf>,
 
-    /// Write the authoritative result: ran:<code>, timed_out, or could_not_run:<reason>
+    /// Write a typed verdict (`ran:<code>`, `timed_out`, or `could_not_run:<reason>`)
     #[arg(long, value_name = "PATH", conflicts_with = "configured")]
     verdict_file: Option<PathBuf>,
 

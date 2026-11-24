@@ -18,6 +18,6 @@ Options:
       --ready-file <PATH>    Create this file once the slot is held, just before the command starts
       --timeout <SECS>       Kill the command group after this many seconds of runtime, excluding slot wait
       --require-dir <PATH>   Require a writable directory before and after the command runs
-      --verdict-file <PATH>  Write the authoritative result: ran:<code>, timed_out, or could_not_run:<reason>
+      --verdict-file <PATH>  Write a typed verdict (`ran:<code>`, `timed_out`, or `could_not_run:<reason>`)
       --hand-descriptor      Let the command inherit a bounded named slot until its last descriptor closes
   -h, --help                 Print help
