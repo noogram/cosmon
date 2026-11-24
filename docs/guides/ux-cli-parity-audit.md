@@ -9,7 +9,13 @@ runs a command while holding one slot of a pool sized by `[gate_slots]` in
 `.cosmon/config.toml` (`full_gate = N`, named pools under `[gate_slots.pools]`).
 It waits for a free slot, runs the command with the caller's stdio, releases the
 slot on exit and returns the command's exit code. A pool with no configured
-size is unbounded. It is a local, operator-side verb: a slot is a kernel `flock`
+size is unbounded. The verb supervises the command's process group and
+forwards SIGTERM, SIGINT and SIGHUP. `--timeout <secs>` limits command runtime
+and `--require-dir <path>` probes a writable directory before and after the
+run. `--verdict-file <path>` records `ran:<code>`, `timed_out` or
+`could_not_run:<reason>`. A bounded named pool can opt into inheriting the
+slot with `--hand-descriptor`. The `full_gate` descriptor stays close-on-exec.
+It is a local, operator-side verb: a slot is a kernel `flock`
 on a file under the main checkout's state directory, so there is no remote route
 and no UI control (cs-thin allowlist: `operator_only`). Patrol reads the same
 files and leaves a worker whose gate run is queued behind a live holder alone;

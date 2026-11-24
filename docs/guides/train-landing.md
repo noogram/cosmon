@@ -35,6 +35,41 @@ For each member, in order:
 Nothing else may sit on the train's first-parent chain: no operator commit, no
 fix-up, no merge of the train into itself. Gate the tip once, then land it.
 
+## Supervising the gate
+
+Run the gate in a checkout of the train tip. For a Cargo gate, set
+`CARGO_HOME` to a private directory for that train so Cargo processes outside
+the train cannot hold its package-cache lock. Choose a runtime limit and
+keep its verdict file on storage that remains available if the build
+directory disconnects.
+
+```sh
+cs gates slot --timeout 900 --require-dir "$build_dir" \
+  --verdict-file "$verdict_file" -- just gates
+```
+
+The timeout starts when the command starts, after it acquires a slot.
+`cs gates slot` forwards SIGTERM, SIGINT and SIGHUP sent to the wrapper to
+the command's process group. After a short grace period it kills any
+remaining processes in the group. At the timeout it kills the group
+immediately.
+
+Use the verdict file to decide whether to bisect. `ran:0` is green and
+`ran:<nonzero>` reports the command's status. `timed_out` and
+`could_not_run:<reason>` leave the train ungated. A missing verdict leaves
+the result unknown. Never eject a member on one of those outcomes. The
+wrapper exits 124 on timeout and 125 when the gate could not run. A gate
+command can itself return either code. When `--require-dir` is given,
+`cs` probes the directory before execution and again after the run, so a
+directory that became unwritable can invalidate a command result.
+
+To serialize controllers across wrapper crashes, declare a named pool of
+size one under `[gate_slots.pools]` and run the controller through
+`cs gates slot --pool <name> --hand-descriptor -- <controller>`. The slot
+remains held until the last inherited copy of its descriptor closes. A
+daemon that retains a copy can keep the pool occupied after the controller
+ends. The `full_gate` pool always closes its descriptor on exec.
+
 ## The command
 
 ```sh
@@ -145,6 +180,6 @@ granting.
 
 ## Out of scope
 
-Building, gating or bisecting a train inside cosmon, syncing members from a
-train, queues and gate slots (ADR-190 §6). Pushing stays the operator's
-decision.
+Choosing when to build, gate or bisect a train, syncing members from a train,
+and managing train queues stay with the operator's tool (ADR-190 §6).
+Pushing stays the operator's decision.

@@ -4,8 +4,9 @@
 //!
 //! A slot is a kernel `flock` on `<state dir>/gate-slots/<pool>/<k>.lock`, held
 //! by the process that runs the gate for the life of that run. The kernel
-//! releases it when the holder dies, so a crashed gate frees its slot without
-//! any reaper. The state directory is the **main checkout's**, resolved by the
+//! releases it when the last copy of the descriptor closes. By default only
+//! the holder retains it, so no reaper is needed. The state directory is the
+//! **main checkout's**, resolved by the
 //! same walk-up the trunk lock uses: two worktrees of one galaxy share one set
 //! of slot files, which is what makes N a machine-wide bound rather than a
 //! per-worktree one.
@@ -39,13 +40,13 @@ pub const GATE_SLOTS_DIR: &str = "gate-slots";
 /// lasts minutes and keeps an idle waiter off the CPU.
 const SWEEP_INTERVAL: Duration = Duration::from_millis(100);
 
-/// RAII claim on one slot of a pool. The `flock` is released when the guard
-/// drops, or by the kernel when the holding process dies.
+/// RAII claim on one slot of a pool. The `flock` is released when the kernel
+/// closes the last copy of the locked descriptor.
 #[must_use = "the slot is released when the guard drops; bind it to a local to keep it"]
 #[derive(Debug)]
 pub struct GateSlotGuard {
     /// Keeps the open file description, and so the lock, alive.
-    _file: File,
+    file: File,
     index: usize,
     path: PathBuf,
 }
@@ -61,6 +62,14 @@ impl GateSlotGuard {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+// Borrow the locked open file description so an opt-in launcher can make its
+// copy inheritable in the child, without changing the parent's descriptor.
+impl std::os::fd::AsFd for GateSlotGuard {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.file.as_fd()
     }
 }
 
@@ -108,7 +117,7 @@ fn sweep(dir: &Path, count: usize) -> Result<Option<GateSlotGuard>, CosmonError>
         match file.try_lock_exclusive() {
             Ok(()) => {
                 return Ok(Some(GateSlotGuard {
-                    _file: file,
+                    file,
                     index: k,
                     path,
                 }))
