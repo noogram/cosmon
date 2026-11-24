@@ -83,6 +83,12 @@ Options:
           
           The `cs` binary image itself is never sealed (a `cs done` merge reinstalls it on every successful drain by design).
           
+          **Landing by train (#237).** A node tagged `no-auto-harvest` is never merged by this loop, by the legacy mode, by the pane-died hook or by `cs patrol --harvest`: `cs done --if-completed` answers `reserved` and lands nothing. A dependent is dispatched only once its blocker is Completed with `merged_at` set, which `cs land-train` stamps through `cs done --expect-head`. Per-node model pin and admission apply at dispatch:
+          
+          ```text cs nucleate … --blocked-by <id> --tag no-auto-harvest --var cosmon_model=<id> cs run --resident _ ```
+          
+          The held node shows on the trace (`runtime-trace.jsonl`) as a `hold` line, "held for external landing". An explicit `cs done <id>` still lands it.
+          
           Does not require `<molecule>` — the loop walks the whole ensemble. The positional argument is accepted but ignored in resident mode; pass `_` if you have nothing to name.
 
       --affinity

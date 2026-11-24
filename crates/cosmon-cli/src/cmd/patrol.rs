@@ -1398,7 +1398,13 @@ pub(crate) fn harvest_sweep(
     for mol in candidates {
         // Delegate to the same logic `cs harvest` CLI uses so sweep and
         // hook paths cannot drift apart.
-        match crate::cmd::harvest::harvest_one(store, state_dir, &mol.id, false) {
+        match crate::cmd::harvest::harvest_one(
+            store,
+            state_dir,
+            &mol.id,
+            false,
+            crate::cmd::harvest::Gesture::Automatic,
+        ) {
             Ok(crate::cmd::harvest::HarvestOutcome::Harvested) => {
                 report.harvested.push(mol.id.clone());
             }
@@ -1407,7 +1413,8 @@ pub(crate) fn harvest_sweep(
                 | crate::cmd::harvest::HarvestOutcome::NotCompleted
                 | crate::cmd::harvest::HarvestOutcome::ReceiptUnknown
                 | crate::cmd::harvest::HarvestOutcome::DryRun
-                | crate::cmd::harvest::HarvestOutcome::Marked,
+                | crate::cmd::harvest::HarvestOutcome::Marked
+                | crate::cmd::harvest::HarvestOutcome::Reserved,
             ) => {
                 report.skipped.push(mol.id.clone());
             }

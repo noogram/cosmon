@@ -181,6 +181,8 @@ SEE ALSO: cs complete (state transition only), cs tackle (counterpart).
 * `--if-completed` — Silent no-op when the molecule is not `Completed` or already merged.
 
    Hook-friendly gate for callers that do not know whether the molecule is ready for teardown — tmux `pane-died` hooks, patrol sweeps, and the legacy `cs harvest` alias. Exits success without touching state when the precondition is not met; otherwise, behaves exactly like `cs done`. Supersedes the stand-alone `cs harvest` verb (ADR-052).
+
+   This is the automatic entry of `cs done`. A molecule tagged `no-auto-harvest` (or `harvest_to:*`) is answered `reserved`: nothing is merged, closed or changed, and the exit is success. Such a molecule lands only through an explicit `cs done <id>` or `cs land-train` (ADR-192 I9).
 * `--dry-run` — Compute and display the teardown plan without executing any steps.
 
    Reports what `cs done` *would* do: worktree state (clean/dirty), whether a merge is needed, whether the tmux session is alive, whether a fleet worker is registered, and whether the branch exists.
@@ -400,6 +402,12 @@ SEE ALSO: cs tackle (single node, no runtime), docs/handbook.md#one-primitive.
    - **Reloaded** (no halt) — no running molecule's effective adapter settings changed. This includes edits outside `[adapters]`, edits to an adapter no running worker uses, and edits while none is running. The loop adopts the fresh config for its next dispatch and records a `config-reloaded` trace line and summary count. - **Halted fail-closed** — a running molecule's effective adapter settings changed, or its adapter cannot be identified. The loop refuses to form its next dispatch, emits `EventV2::ConfigDriftDetected`, and exits non-zero (`EX_TEMPFAIL`, 75) so a supervisor relaunches a fresh process that re-derives everything from disk — it never merges the new config into a live process.
 
    The `cs` binary image itself is never sealed (a `cs done` merge reinstalls it on every successful drain by design).
+
+   **Landing by train (#237).** A node tagged `no-auto-harvest` is never merged by this loop, by the legacy mode, by the pane-died hook or by `cs patrol --harvest`: `cs done --if-completed` answers `reserved` and lands nothing. A dependent is dispatched only once its blocker is Completed with `merged_at` set, which `cs land-train` stamps through `cs done --expect-head`. Per-node model pin and admission apply at dispatch:
+
+   ```text cs nucleate … --blocked-by <id> --tag no-auto-harvest --var cosmon_model=<id> cs run --resident _ ```
+
+   The held node shows on the trace (`runtime-trace.jsonl`) as a `hold` line, "held for external landing". An explicit `cs done <id>` still lands it.
 
    Does not require `<molecule>` — the loop walks the whole ensemble. The positional argument is accepted but ignored in resident mode; pass `_` if you have nothing to name.
 * `--affinity` — **ADR-145** — model-affinity ordering of the ready frontier.

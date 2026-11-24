@@ -33,6 +33,8 @@ Options:
           Silent no-op when the molecule is not `Completed` or already merged.
           
           Hook-friendly gate for callers that do not know whether the molecule is ready for teardown — tmux `pane-died` hooks, patrol sweeps, and the legacy `cs harvest` alias. Exits success without touching state when the precondition is not met; otherwise, behaves exactly like `cs done`. Supersedes the stand-alone `cs harvest` verb (ADR-052).
+          
+          This is the automatic entry of `cs done`. A molecule tagged `no-auto-harvest` (or `harvest_to:*`) is answered `reserved`: nothing is merged, closed or changed, and the exit is success. Such a molecule lands only through an explicit `cs done <id>` or `cs land-train` (ADR-192 I9).
 
       --json
           Output in JSON format

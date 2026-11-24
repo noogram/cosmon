@@ -593,8 +593,15 @@ impl Executor for SubprocessExecutor {
         // (dispatched next) see it in their worktree. Without this,
         // each worker lives in an isolated branch and never sees
         // the predecessor's work.
+        //
+        // `--if-completed` is the automatic entry: it answers `reserved`,
+        // landing nothing, for a molecule tagged `no-auto-harvest` or
+        // `harvest_to:*` (ADR-192 I9). The runtime then sees the branch not
+        // landed and leaves `merged_at` unset, so the molecule's dependents
+        // keep waiting for the explicit landing.
         let mut cmd = Command::new(&self.cs_program);
-        cmd.args(["done", id.as_str()]).current_dir(&self.cwd);
+        cmd.args(["done", id.as_str(), "--if-completed"])
+            .current_dir(&self.cwd);
         // ADR-080 §3.5: `cs done` is operator-only, and `cs` now refuses it
         // under the RPP request envelope. This teardown is not the request —
         // it is the resident loop's own local gesture, downstream of a
