@@ -190,6 +190,23 @@ pub struct Args {
     /// The `cs` binary image itself is never sealed (a `cs done` merge
     /// reinstalls it on every successful drain by design).
     ///
+    /// **Landing by train (#237).** A node tagged `no-auto-harvest` is never
+    /// merged by this loop, by the legacy mode, by the pane-died hook or by
+    /// `cs patrol --harvest`: `cs done --if-completed` answers `reserved` and
+    /// lands nothing. A dependent is dispatched only once its blocker is
+    /// Completed with `merged_at` set, which `cs land-train` stamps through
+    /// `cs done --expect-head`. Per-node model pin and admission apply at
+    /// dispatch:
+    ///
+    /// ```text
+    /// cs nucleate … --blocked-by <id> --tag no-auto-harvest --var cosmon_model=<id>
+    /// cs run --resident _
+    /// ```
+    ///
+    /// The held node shows on the trace (`runtime-trace.jsonl`) as a `hold`
+    /// line, "held for external landing". An explicit `cs done <id>` still
+    /// lands it.
+    ///
     /// Does not require `<molecule>` — the loop walks the whole
     /// ensemble. The positional argument is accepted but ignored in
     /// resident mode; pass `_` if you have nothing to name.
@@ -599,17 +616,17 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //    exactly the place where that predicate is wrong for one of them.
     //    Closing a collapsed molecule is legitimate; merging its branch is not.
     //
-    //    We restrict the predicate rather than passing `--if-completed`: the
-    //    guard then does not depend on a flag the next caller could forget.
+    //    The predicate is restricted *and* the call goes through the automatic
+    //    entry, `--if-completed`, which leaves a molecule reserved with
+    //    `no-auto-harvest` for its explicit landing (ADR-192 I9). The two guard
+    //    different things: status keeps a collapsed branch off the trunk,
+    //    the entry keeps a held molecule off it.
     let mut teardown_failed = 0usize;
     if !args.no_teardown {
         let mut torn_down = 0;
         for m in &dag_mols {
             if should_tear_down(m.status) {
-                let mut done_cmd = std::process::Command::new("cs");
-                done_cmd
-                    .args(["done", m.id.as_str()])
-                    .current_dir(state_dir.parent().unwrap_or(&state_dir));
+                let mut done_cmd = teardown_done_command(&m.id, &state_dir);
                 // Same hand-off as the runtime executor's `on_complete`
                 // (ADR-080 §3.5): an auto-teardown under a tenant-requested
                 // bounded drain is a local gesture, not the network request,
@@ -1086,6 +1103,19 @@ fn should_tear_down(status: MoleculeStatus) -> bool {
     matches!(status, MoleculeStatus::Completed)
 }
 
+/// The `cs done` invocation of step-9 teardown, run from the repository root.
+///
+/// It goes through the automatic entry (`--if-completed`), so a molecule
+/// tagged `no-auto-harvest` is answered `reserved` and left for its explicit
+/// landing instead of being merged by a run that merely finished
+/// (ADR-192 I9).
+fn teardown_done_command(id: &MoleculeId, state_dir: &std::path::Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("cs");
+    cmd.args(["done", id.as_str(), "--if-completed"])
+        .current_dir(state_dir.parent().unwrap_or(state_dir));
+    cmd
+}
+
 /// Colorize a molecule status for human output.
 fn colorize_status(status: MoleculeStatus) -> String {
     let s = status.to_string();
@@ -1321,6 +1351,19 @@ mod tests {
     // single canonical chain and is resolved by the child `cs tackle` (source
     // `EnvVar`), never hoisted into a rung-1 directive here. Exercise the pure
     // resolver so this boundary is pinned without mutating process-global env.
+    /// Step-9 teardown lands through the automatic entry, so a reserved
+    /// molecule is held rather than merged by the run that finished it.
+    #[test]
+    fn teardown_goes_through_the_automatic_entry() {
+        let id = MoleculeId::new("task-20261124-aaaa").unwrap();
+        let cmd = teardown_done_command(&id, std::path::Path::new("/repo/.cosmon/state"));
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["done", "task-20261124-aaaa", "--if-completed"]);
+    }
+
     /// Step-9 teardown authorizes ONLY `Completed`.
     ///
     /// The regression this pins (task-20260831-74d1, delib-20260819-cda2):

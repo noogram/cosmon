@@ -388,10 +388,23 @@ fn reserved_for_human(molecule: &EnsembleMolecule) -> bool {
 /// Like [`reserved_for_human`], this is a pure snapshot predicate: a restart or
 /// a stale process re-reads the persisted tag and cannot bypass the hold.
 fn harvest_reserved(molecule: &EnsembleMolecule) -> bool {
-    molecule
-        .tags
+    cosmon_core::harvest_hold::harvest_reserved(&molecule.tags)
+}
+
+/// Molecules the resident sweep leaves for an external landing: Completed,
+/// not yet merged, and reserved by [`harvest_reserved`].
+///
+/// The scheduler emits no decision for them (the absence of a `Done` is the
+/// hold), so this is the loop's own read of the snapshot, used to put the hold
+/// on the trace once per molecule (ADR-095 RR-5) instead of leaving it
+/// indistinguishable from a molecule nobody has looked at yet.
+fn held_for_external_landing(snapshot: &EnsembleSnapshot) -> Vec<&str> {
+    snapshot
+        .molecules
         .iter()
-        .any(|tag| tag == "no-auto-harvest" || tag.starts_with("harvest_to:"))
+        .filter(|m| m.status == "completed" && m.merged_at.is_none() && harvest_reserved(m))
+        .map(|m| m.id.as_str())
+        .collect()
 }
 
 /// Whether merging this molecule requires an independent review verdict.
@@ -986,6 +999,9 @@ pub struct RuntimeLoop {
     /// cut-over). Every other verb (`ensemble`, `done`, `patrol`,
     /// `observe`) still shells `cs` regardless.
     tackle_executor: Option<Box<dyn crate::Executor + Send>>,
+    /// Molecules whose hold for an external landing is already on the trace,
+    /// so a held molecule is reported once, not on every tick.
+    held_traced: std::collections::HashSet<String>,
 }
 
 impl RuntimeLoop {
@@ -1007,6 +1023,7 @@ impl RuntimeLoop {
             launch_dispatch_surface: DispatchSurface::default(),
             teardown_retries: std::collections::HashMap::new(),
             tackle_executor: None,
+            held_traced: std::collections::HashSet::new(),
         }
     }
 
@@ -1168,6 +1185,23 @@ impl RuntimeLoop {
                 .collect();
             for id in &ready {
                 self.scheduler.forget_dispatch(id);
+            }
+
+            let held = held_for_external_landing(&snapshot);
+            self.held_traced.retain(|id| held.contains(&id.as_str()));
+            for id in held {
+                if self.held_traced.insert(id.to_owned()) {
+                    let hash = state_hash(&self.config.cwd);
+                    self.trace.write_decision(&DecisionRecord {
+                        verb: "hold",
+                        molecule_id: id,
+                        invocation: &invocation_uuid(),
+                        basis: "held for external landing",
+                        before: &hash,
+                        after: &hash,
+                        error: None,
+                    })?;
+                }
             }
 
             let decisions = self.scheduler.next_decisions(&snapshot);

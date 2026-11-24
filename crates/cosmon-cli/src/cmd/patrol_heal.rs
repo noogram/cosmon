@@ -306,11 +306,20 @@ fn apply_remedy(
         // A4/A8 — orchestrator `cs done` harvest. Never a worker self-done.
         HealthRemedy::HarvestDone => {
             use crate::cmd::harvest::HarvestOutcome as O;
-            match crate::cmd::harvest::harvest_one(store, state_dir, &mol.id, false) {
+            match crate::cmd::harvest::harvest_one(
+                store,
+                state_dir,
+                &mol.id,
+                false,
+                crate::cmd::harvest::Gesture::Automatic,
+            ) {
                 Ok(O::Harvested) => ApplyResult::Success("harvested → cs done".to_owned()),
                 Ok(O::ReceiptUnknown) => ApplyResult::Skipped(
                     "supervised worker exit is unknown; preserve for pilot resolution".to_owned(),
                 ),
+                Ok(O::Reserved) => {
+                    ApplyResult::Skipped("held for external landing (no-auto-harvest)".to_owned())
+                }
                 Ok(O::AlreadyMerged | O::NotCompleted | O::DryRun | O::Marked) => {
                     ApplyResult::Success("already harvested (no-op)".to_owned())
                 }

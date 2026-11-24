@@ -114,6 +114,25 @@ pub enum HarvestOutcome {
     /// The galaxy sets `[harvest] on_pane_died = "mark"`: the exit was
     /// recorded and `cs done` was not run. The pilot harvests.
     Marked,
+    /// The molecule is tagged `no-auto-harvest` (or `harvest_to:*`): `cs done
+    /// --if-completed` answered `reserved` and landed nothing. It lands by an
+    /// explicit gesture, typically `cs land-train` (ADR-192 I9).
+    Reserved,
+}
+
+/// Who asks [`harvest_one`] to land a molecule.
+///
+/// The distinction is the boundary ADR-192 I9 draws. An automatic caller (the
+/// pane-died hook, `cs patrol --harvest`, `cs patrol --heal`) lands through
+/// `cs done --if-completed`, the one entry that honours a reserved merge. An
+/// explicit caller is an operator typing `cs harvest --molecule <id>`: that is
+/// the gesture a reserved molecule waits for, so it runs plain `cs done`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Gesture {
+    /// A hook or sweep acting without an operator at the keyboard.
+    Automatic,
+    /// An operator's own `cs harvest --molecule <id>`.
+    Explicit,
 }
 
 impl HarvestOutcome {
@@ -126,6 +145,7 @@ impl HarvestOutcome {
             Self::HarvestFailed => "harvest_failed",
             Self::ReceiptUnknown => "receipt_unknown",
             Self::Marked => "marked",
+            Self::Reserved => "reserved",
         }
     }
 }
@@ -193,7 +213,12 @@ fn run_with_config(
     {
         HarvestOutcome::Marked
     } else {
-        harvest_one(store.as_ref(), &state_dir, &mol_id, args.dry_run)?
+        let gesture = if args.from_pane_died {
+            Gesture::Automatic
+        } else {
+            Gesture::Explicit
+        };
+        harvest_one(store.as_ref(), &state_dir, &mol_id, args.dry_run, gesture)?
     };
 
     if ctx.json {
@@ -542,6 +567,18 @@ pub(crate) fn emit_worker_exited(
     );
 }
 
+/// The `outcome` a `cs --json done --if-completed` run reported, if any.
+///
+/// Reads the last non-empty stdout line, the payload `cs done` prints in JSON
+/// mode. `None` when stdout carries no such payload (a real merge prints a
+/// different shape, so it carries no `outcome`).
+fn done_outcome(stdout: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(stdout).ok()?;
+    let line = text.lines().rev().find(|l| !l.trim().is_empty())?;
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    value.get("outcome")?.as_str().map(str::to_owned)
+}
+
 /// Core harvest logic, separated for testing.
 ///
 /// Returns the outcome; writes an event to `events.jsonl` when non-trivial.
@@ -550,6 +587,7 @@ pub(crate) fn harvest_one(
     state_dir: &std::path::Path,
     mol_id: &MoleculeId,
     dry_run: bool,
+    gesture: Gesture,
 ) -> anyhow::Result<HarvestOutcome> {
     // Keep a supervised incarnation stable across the subprocess handoff to done.
     // Tackle takes this same per-molecule lock before it can replace a dispatch.
@@ -604,8 +642,30 @@ pub(crate) fn harvest_one(
     // responsible for chdir-ing into the main repo root first.
     let cs_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("cs"));
     let mut cmd = std::process::Command::new(&cs_bin);
-    cmd.arg("done").arg(mol_id.as_str());
-    let status = cmd.status();
+    let (status, reserved) = match gesture {
+        Gesture::Explicit => {
+            cmd.arg("done").arg(mol_id.as_str());
+            (cmd.status(), false)
+        }
+        Gesture::Automatic => {
+            // The automatic entry of `cs done` decides whether the merge is
+            // reserved; this caller only learns the answer from its typed
+            // `--json` outcome, never from parsing prose.
+            cmd.args(["--json", "done", mol_id.as_str(), "--if-completed"])
+                .stdout(std::process::Stdio::piped());
+            match cmd.output() {
+                Ok(out) => (
+                    Ok(out.status),
+                    done_outcome(&out.stdout).as_deref() == Some("reserved"),
+                ),
+                Err(e) => (Err(e), false),
+            }
+        }
+    };
+
+    if reserved {
+        return Ok(HarvestOutcome::Reserved);
+    }
 
     let events_path = state_dir.join("events.jsonl");
     let success = status.as_ref().is_ok_and(std::process::ExitStatus::success);
@@ -767,7 +827,7 @@ mod tests {
                 Some(&receipts.request().identity),
             )?;
             assert!(matches!(
-                harvest_one(&store, root.path(), &id, true)?,
+                harvest_one(&store, root.path(), &id, true, Gesture::Automatic)?,
                 HarvestOutcome::ReceiptUnknown
             ));
             assert_eq!(store.load_molecule(&id)?.status, MoleculeStatus::Completed);
@@ -813,7 +873,7 @@ mod tests {
             );
             assert_eq!(store.load_molecule(&id)?.status, MoleculeStatus::Running);
             assert!(matches!(
-                harvest_one(&store, root.path(), &id, true)?,
+                harvest_one(&store, root.path(), &id, true, Gesture::Automatic)?,
                 HarvestOutcome::NotCompleted
             ));
             Ok(())
@@ -836,14 +896,14 @@ mod tests {
                 Some(&receipts.request().identity),
             )?;
             assert!(matches!(
-                harvest_one(&store, root.path(), &id, true)?,
+                harvest_one(&store, root.path(), &id, true, Gesture::Automatic)?,
                 HarvestOutcome::ReceiptUnknown
             ));
             let mut molecule = store.load_molecule(&id)?;
             molecule.process = None;
             store.save_molecule(&id, &molecule)?;
             assert!(matches!(
-                harvest_one(&store, root.path(), &id, true)?,
+                harvest_one(&store, root.path(), &id, true, Gesture::Automatic)?,
                 HarvestOutcome::ReceiptUnknown
             ));
             Ok(())
@@ -1037,14 +1097,14 @@ mod tests {
     #[test]
     fn harvest_skips_non_completed() {
         let (_tmp, store, mid, state_dir) = setup(MoleculeStatus::Running, false);
-        let r = harvest_one(&store, &state_dir, &mid, false).unwrap();
+        let r = harvest_one(&store, &state_dir, &mid, false, Gesture::Automatic).unwrap();
         assert!(matches!(r, HarvestOutcome::NotCompleted));
     }
 
     #[test]
     fn harvest_skips_already_merged() {
         let (_tmp, store, mid, state_dir) = setup(MoleculeStatus::Completed, true);
-        let r = harvest_one(&store, &state_dir, &mid, false).unwrap();
+        let r = harvest_one(&store, &state_dir, &mid, false, Gesture::Automatic).unwrap();
         assert!(matches!(r, HarvestOutcome::AlreadyMerged));
     }
 
@@ -1059,7 +1119,7 @@ mod tests {
         let mut mol = store.load_molecule(&mid).unwrap();
         mol.archived = true; // harvested via the no_branch path; merged_at stays None
         store.save_molecule(&mid, &mol).unwrap();
-        let r = harvest_one(&store, &state_dir, &mid, false).unwrap();
+        let r = harvest_one(&store, &state_dir, &mid, false, Gesture::Automatic).unwrap();
         assert!(
             matches!(r, HarvestOutcome::AlreadyMerged),
             "an archived no_branch molecule must be a harvest no-op, not a re-exec"
@@ -1115,7 +1175,7 @@ mod tests {
     #[test]
     fn harvest_dry_run_reports_what_would_happen() {
         let (_tmp, store, mid, state_dir) = setup(MoleculeStatus::Completed, false);
-        let r = harvest_one(&store, &state_dir, &mid, true).unwrap();
+        let r = harvest_one(&store, &state_dir, &mid, true, Gesture::Automatic).unwrap();
         assert!(matches!(r, HarvestOutcome::DryRun));
     }
 
@@ -1260,5 +1320,16 @@ mod tests {
             .iter()
             .any(|tag| tag.as_str() == "worker-restart-requested"));
         backend.terminate_session(session).unwrap();
+    }
+
+    /// `done_outcome` reads the typed `outcome` of the last JSON line, and
+    /// nothing else: prose, an empty stream, or a payload without it is `None`.
+    #[test]
+    fn done_outcome_reads_the_last_json_line() {
+        let out = b"noise\n{\"outcome\":\"reserved\"}\n\n";
+        assert_eq!(done_outcome(out).as_deref(), Some("reserved"));
+        assert_eq!(done_outcome(b""), None);
+        assert_eq!(done_outcome(b"{\"ok\":true}\n"), None);
+        assert_eq!(done_outcome(b"{\"outcome\":\"x\"}\nnot json\n"), None);
     }
 }

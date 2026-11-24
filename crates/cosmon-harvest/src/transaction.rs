@@ -124,6 +124,12 @@ pub struct Args {
     /// the legacy `cs harvest` alias. Exits success without touching state
     /// when the precondition is not met; otherwise, behaves exactly like
     /// `cs done`. Supersedes the stand-alone `cs harvest` verb (ADR-052).
+    ///
+    /// This is the automatic entry of `cs done`. A molecule tagged
+    /// `no-auto-harvest` (or `harvest_to:*`) is answered `reserved`: nothing
+    /// is merged, closed or changed, and the exit is success. Such a molecule
+    /// lands only through an explicit `cs done <id>` or `cs land-train`
+    /// (ADR-192 I9).
     #[arg(long)]
     if_completed: bool,
 
@@ -2507,6 +2513,40 @@ fn run_with_remote_before_lock(
             .map_err(|e| recovery_fault(e.to_string()))?;
     let recorded_worktree = crate::worktree::recorded_worktree_for(&store, &mol, &galaxy_root)
         .map(|p| crate::worktree::canonical_or(&p));
+
+    // --if-completed is the automatic entry of `cs done`: the resident sweep,
+    // the legacy runtime, the pane-died hook and `cs patrol --harvest` all land
+    // a molecule through it. A molecule whose merge was reserved
+    // (`no-auto-harvest`, `harvest_to:*`) is not theirs to land (ADR-192 I9):
+    // answer `reserved`, a named outcome and not an error, and change nothing.
+    // A prior harvest attempt does not lift the hold, because only an explicit
+    // gesture can have started it and only an explicit gesture resumes it. An
+    // explicit `cs done <id>` and `cs land-train`'s `--expect-head` closures
+    // do not pass through here.
+    if args.if_completed
+        && mol.status == cosmon_core::molecule::MoleculeStatus::Completed
+        && mol.merged_at.is_none()
+        && !mol.archived
+        && cosmon_core::harvest_hold::harvest_reserved(
+            mol.tags.iter().map(cosmon_core::tag::Tag::as_str),
+        )
+    {
+        if ctx.json {
+            let payload = serde_json::json!({
+                "command": "done",
+                "molecule": mol_id.as_str(),
+                "if_completed": true,
+                "outcome": "reserved",
+            });
+            println!("{}", serde_json::to_string(&payload)?);
+        } else {
+            println!(
+                "done {mol_id}: reserved (held for external landing; \
+                 land it with `cs land-train` or an explicit `cs done {mol_id}`)"
+            );
+        }
+        return Ok(());
+    }
 
     // --if-completed: silent no-op when the molecule is not `Completed`
     // or has already been merged. Subsumes the former `cs harvest` verb

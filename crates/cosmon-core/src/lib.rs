@@ -194,6 +194,8 @@ pub mod harvest_authorization;
 #[doc(hidden)]
 pub mod harvest_door;
 #[doc(hidden)]
+pub mod harvest_hold;
+#[doc(hidden)]
 pub mod hook;
 /// Pure remote harvest policy and admission decisions.
 pub mod remote_harvest;
