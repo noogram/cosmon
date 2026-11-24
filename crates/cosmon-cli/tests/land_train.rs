@@ -1125,6 +1125,144 @@ fn a_train_changing_the_shell_surface_without_trust_is_refused() {
     assert!(t.fx.is_closed(&t.a) && t.fx.is_closed(&t.b));
 }
 
+#[test]
+fn a_train_already_on_the_upstream_base_closes_after_sync_under_stale_trust() {
+    const SCRIPT: &str = "tools/ci/check-build.sh";
+    let fx = Fixture::new(
+        "[gates]\nbuild_command = 'sh tools/ci/check-build.sh'\n",
+        true,
+    );
+    fs::create_dir_all(fx.repo.join("tools/ci")).unwrap();
+    fs::write(fx.repo.join(SCRIPT), "exit 0\n").unwrap();
+    git_ok(&fx.repo, &["add", SCRIPT]);
+    git_ok(&fx.repo, &["commit", "-qm", "add the build gate"]);
+    let a = fx.completed_molecule("member a");
+    let b = fx.completed_molecule("member b");
+    let cards = fx
+        .repo
+        .join(".cosmon/state/fleets/default/molecules")
+        .join(&a);
+    let card_names = ["intent-card.md", "mission-card.md"];
+    for card in card_names {
+        fs::write(cards.join(card), "# Original card\n").unwrap();
+        git_ok(&fx.repo, &["add", "-f", cards.join(card).to_str().unwrap()]);
+    }
+    git_ok(&fx.repo, &["commit", "-qm", "track the molecule cards"]);
+    let base = rev(&fx.repo, "main");
+    let granted = fx.cs().arg("trust").output().unwrap();
+    assert!(granted.status.success(), "{}", combined(&granted));
+
+    git_ok(&fx.repo, &["checkout", "-qb", &format!("feat/{a}")]);
+    for card in card_names {
+        fs::write(cards.join(card), "# Updated card\n").unwrap();
+        git_ok(&fx.repo, &["add", "-f", cards.join(card).to_str().unwrap()]);
+    }
+    git_ok(&fx.repo, &["commit", "-qm", "update molecule cards"]);
+    assert_eq!(trust_status(&fx), "trusted", "card edits alone keep trust");
+    git_ok(&fx.repo, &["checkout", "-q", "main"]);
+    let ha = fx.commit_on_branch(&a, &base, SCRIPT, "touch ../gate-ran\n");
+    let hb = fx.commit_on_branch(&b, &base, "b.txt", "b\n");
+    fx.merge_member_into_train(&a);
+    fx.merge_member_into_train(&b);
+    let tip = rev(&fx.repo, "train");
+    let changed = git_ok(&fx.repo, &["diff", "--name-only", &base, &tip]);
+    for card in card_names {
+        let path = cards.join(card);
+        let relative = path.strip_prefix(&fx.repo).unwrap().to_str().unwrap();
+        assert!(changed.lines().any(|line| line == relative), "{changed}");
+    }
+    let marker = fx._tmp.path().join("gate-ran");
+    fx.checkout_train();
+    assert!(Command::new("sh")
+        .arg(SCRIPT)
+        .current_dir(&fx.repo)
+        .status()
+        .unwrap()
+        .success());
+    fs::remove_file(&marker).unwrap();
+    git_ok(&fx.repo, &["checkout", "-q", "main"]);
+
+    // Model the published base with a local bare upstream. The operator's
+    // local base is still at the original gate input until they pull it.
+    let upstream = fx._tmp.path().join("upstream.git");
+    git_ok(
+        &fx.repo,
+        &["clone", "-q", "--bare", ".", upstream.to_str().unwrap()],
+    );
+    git_ok(
+        &fx.repo,
+        &["remote", "add", "origin", upstream.to_str().unwrap()],
+    );
+    git_ok(&fx.repo, &["fetch", "-q", "origin"]);
+    git_ok(
+        &fx.repo,
+        &["branch", "--set-upstream-to=origin/main", "main"],
+    );
+    git_ok(&upstream, &["update-ref", "refs/heads/main", &tip]);
+    let t = Train {
+        fx,
+        a,
+        b,
+        ha,
+        hb,
+        base,
+        tip,
+    };
+    assert_eq!(rev(&upstream, "main"), t.tip);
+    assert_eq!(rev(&t.fx.repo, "main"), t.base);
+    assert_eq!(rev(&t.fx.repo, "origin/main"), t.base);
+    let refused = t.land();
+    t.assert_refused_naming(&refused, SCRIPT, &t.base);
+    let refusal = combined(&refused);
+    assert!(
+        !refusal.contains("intent-card.md") && !refusal.contains("mission-card.md"),
+        "{refusal}"
+    );
+
+    git_ok(&t.fx.repo, &["pull", "--ff-only"]);
+    assert_eq!(rev(&t.fx.repo, "main"), t.tip);
+    assert_eq!(trust_status(&t.fx), "stale");
+    let grants_before = trust_store_listing(&t.fx.trust);
+
+    let closed = t.land();
+    let text = combined(&closed);
+    assert!(
+        closed.status.success(),
+        "already-landed closure failed: {text}"
+    );
+    let warnings: Vec<_> = text
+        .lines()
+        .filter(|line| line.contains("trusted shell surface changed"))
+        .collect();
+    assert!(warnings.iter().any(|line| line.contains(SCRIPT)), "{text}");
+    assert!(
+        warnings
+            .iter()
+            .all(|line| { !card_names.iter().any(|card| line.contains(card)) }),
+        "{text}"
+    );
+    assert!(t.fx.is_closed(&t.a) && t.fx.is_closed(&t.b));
+    assert_eq!(rev(&t.fx.repo, "main"), t.tip);
+    assert_eq!(trust_store_listing(&t.fx.trust), grants_before);
+    assert!(!marker.exists(), "closure must skip the build gate");
+
+    assert!(
+        refusal.contains("git pull --ff-only"),
+        "the refusal must tell an operator whose train was already published how to resume: {refusal}"
+    );
+}
+
+fn trust_status(fx: &Fixture) -> String {
+    let out = fx
+        .cs()
+        .args(["--json", "trust", "--status"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", combined(&out));
+    let status: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    status["status"].as_str().unwrap().to_owned()
+}
+
 fn trust_store_listing(dir: &Path) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = fs::read_dir(dir)
         .unwrap()

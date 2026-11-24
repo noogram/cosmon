@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- `cs land-train` names the local base in a shell-trust refusal and explains how to resume member closure after the train has already landed upstream.
+
 - Dependencies: `cookie` 0.18.1 → 0.18.3 (RUSTSEC-2026-0594, private cookie nonces can repeat in processes that fork). It is reached only through `axum-test`, a dev-dependency of `apps-transport-http`, so no shipped binary contained it; the cargo-vet exemption moves to 0.18.3 and remains unaudited.
 
 ## [0.10.1] — 2026-11-22
