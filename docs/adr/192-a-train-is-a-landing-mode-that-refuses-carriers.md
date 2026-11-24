@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
 # ADR-192 — A train is a landing mode that refuses carriers: no unlanded import, exclusion by first own commit, ejection only over a green base
 
-**Status:** Proposed (2026-11-20).
+**Status:** Proposed (2026-11-20). Amended 2026-11-24: I5 and I11 accepted, O2 decided (see "Amendment of 2026-11-24" below); everything else stays Proposed.
 **Date:** 2026-11-20.
 **Decider:** Noogram.
 **Authoring molecule:** `task-20261120-83c1`.
@@ -41,6 +41,43 @@ and recorded in §5 with a recommended option and its alternative: a typed
 "could not run" gate verdict (O2), gate evidence at landing (O3), reopening
 a Completed culprit (O4), and a red prefix under a green speculative
 extension (O5). No text in this ADR accepts any of them.
+
+---
+
+## Amendment of 2026-11-24 (operator decisions)
+
+After deliberation `delib-20261124-00b9`, the operator decided the following.
+The rest of this ADR stays Proposed.
+
+- **I5 is accepted.** `cs land-train --check` equals `land` minus the lock
+  and the move. It is not implemented yet: `crates/cosmon-cli/src/cmd/land_train.rs`
+  has no `--check` flag on 2026-11-24.
+- **I11 is accepted, and unconditional.** The condition recorded in §4 is
+  resolved. A manual `cs tackle` admits a dependent whose blocker is
+  Completed without `merged_at` set: the admission loop at
+  `crates/cosmon-cli/src/cmd/tackle.rs:603-620` accepts a blocker when
+  `satisfies_blocked_by()` is true, and
+  `crates/cosmon-core/src/molecule.rs:194-196` makes that true for every
+  Completed molecule, whatever `merged_at` says. Such a dependent forks from
+  the blocker's branch, so a train can hold a member whose blocker is
+  unmerged. The refutation in §4 stands unchanged.
+- **O2 is decided: cosmon produces the "could not run" outcome.** It is
+  produced in `cs gates slot`, by a preflight probe (`--require-dir <path>`),
+  never by parsing gate output, and it is never read as red (I7). §5's
+  recommended placement in `scripts/run-gates-bg.sh` is corrected, because a
+  train's gate calls `cs gates slot` directly and bypasses that script.
+  `scripts/run-gates-bg.sh` is not touched. `cs gates slot` has no
+  `--require-dir` today (`crates/cosmon-cli/src/cmd/gates.rs`).
+- **I6′ is proposed, not accepted.** Witness rule from the same
+  deliberation. No member is ejected without an adjacent pair of prefixes:
+  green before the suspect, red with it, both actually run, in the same
+  environment. A blame or `git log -S` result may propose the suspect and
+  bisection may find it, but neither ejects. *Refuted if* a member is ejected
+  without such a pair, or on a "could not run" outcome. Under monotone
+  failures I6′ implies I6.
+
+I3, I4's remaining text, I6, I7's mechanism beyond O2, I8 to I10, O3, O4 and
+O5 are unchanged and keep the status they had.
 
 ---
 
@@ -283,13 +320,13 @@ invariant that an existing test already exercises.
 | I2 [T] | The base moves only by a compare-and-swap from `--train-base`, under the trunk lock, to a tip whose first-parent chain is exactly the named member merges, each pinned head unchanged. | A landing succeeds after the base moved, or after a member branch moved. Existing tests: `the_base_moving_after_the_gate_is_refused` (`:818`), `a_base_move_at_the_compare_and_swap_preserves_the_ref_and_checkout` (`:833`), `a_member_whose_branch_moved_after_the_pin_is_refused` (`:788`). |
 | I3 | No unlanded import. On every member's first-parent chain above the train base, each merge's second parent is an ancestor of the train base. The rule needs no `--exclude`. **Conditional:** enforced only after the survey of legitimate flows in §3 finds none that fails it. | A member that merged a train holding another member lands with no `--exclude` given. A companion test records the known limit: a member rebased onto the train passes. |
 | I4 | Exclusion by first own commit. No member contains the first own commit of an excluded molecule (§3). It replaces the exact-head test at `train.rs:529-531`. | The fixture of `land_train.rs:494-502` lands. It lands today by design, so under I4 its expectation flips. A second test: an excluded head already reachable from the train base refuses no member. |
-| I5 | `--check` equals `land` minus the lock and the move. | A ref or state file changes under `--check`; or an input passes `--check` and `land` then refuses it for a reason other than the base or a member branch having moved. |
+| I5 (accepted 2026-11-24) | `--check` equals `land` minus the lock and the move. | A ref or state file changes under `--check`; or an input passes `--check` and `land` then refuses it for a reason other than the base or a member branch having moved. |
 | I6 | Base first. No ejection without a green verdict on the exact base oid, obtained in the same environment. A red base refuses the batch. | In the reference operator tool's test, with a red base, any member is ejected. |
-| I7 | "Could not run" is never red. A gate that did not run (build directory unreachable or unwritable, toolchain missing) yields a verdict that bisection and ejection never consume. Where it is produced is open (O2). | With the build directory unmounted, the verdict reads as a code failure, or an ejection follows. |
+| I7 | "Could not run" is never red. A gate that did not run (build directory unreachable or unwritable, toolchain missing) yields a verdict that bisection and ejection never consume. Where it is produced is decided by the 2026-11-24 amendment: `cs gates slot`. | With the build directory unmounted, the verdict reads as a code failure, or an ejection follows. |
 | I8 | Ejection releases nothing. The dependents of a Completed member with `merged_at` unset stay Pending. | Such a dependent enters the frontier. |
 | I9 | One landing path per molecule. A molecule pinned to a train is never landed by the resident `Done` sweep, by the runtime's `on_complete`, or by `cs run`'s teardown while it is in a train. | A pinned member without the `no-auto-harvest` tag is landed by `cs done` from the runtime while it is in a train. §1.2 suggests the non-resident paths do not consult the tag; this test settles it. |
 | I10 | The landed tree equals the gated tree, stated as scope. Today it holds by operator assertion, because `land` takes no gate evidence (§1.3). Whether `land` should require evidence is open (O3). | Documentation-level until O3 is decided. |
-| I11 | A train never holds a member whose blocker is neither merged nor earlier in the same train. **Conditional:** needed only if a manual `cs tackle` can produce a Completed member whose blocker is unmerged, which is unverified. | A train `[B]`, with B blocked by an unmerged A, lands. |
+| I11 (accepted 2026-11-24) | A train never holds a member whose blocker is neither merged nor earlier in the same train. Unconditional: a manual `cs tackle` can produce a Completed member whose blocker is unmerged (amendment of 2026-11-24). | A train `[B]`, with B blocked by an unmerged A, lands. |
 
 ## 5 · Open decisions
 
@@ -302,7 +339,7 @@ expected to take them.
   scan for merges carrying another molecule's `Mol-Id` trailer (needs the
   same survey); a pairwise predicate over the named members only (catches
   carriers among named members only).
-- **O2 — Typed "could not run" verdict (I7).** Recommended (a 3–1 majority of
+- **O2 — Typed "could not run" verdict (I7). Decided 2026-11-24:** produced in `cs gates slot` by `--require-dir`, not in `scripts/run-gates-bg.sh` (amendment above). Original recommendation:  (a 3–1 majority of
   the panel): in cosmon's runner `scripts/run-gates-bg.sh`, decided by
   preflight probes (build directory reachable, writable, with free space)
   and never by parsing compiler output; the runner writes a distinct verdict
