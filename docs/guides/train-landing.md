@@ -51,7 +51,7 @@ failure moves nothing, closes nothing, and names the offending commit or member:
 
 1. `[harvest_authority] required` is false. When it is true, this increment
    refuses the train; close the members one at a time with `cs done`.
-2. The base branch still equals `--train-base`. Otherwise the refusal reads
+2. The local base branch still equals `--train-base`. Otherwise the refusal reads
    "`<base>` moved after the gate": rebuild the train on the current base and
    gate it again. (A base that already has the tip on its first-parent chain is
    a rerun, described below.)
@@ -118,9 +118,14 @@ closed twice.
 
 ## When the shell-surface check refuses
 
-A trust grant pins the surface that is on disk when the grant is made. The
-train's surface is not on disk until the landing, so review it and grant it from
-a checkout of the tip, then rerun:
+If the train already landed upstream, switch to the local base branch and run
+`git pull --ff-only`. Rerun `cs land-train` with the same arguments. Once the
+train tip is on the local base's first-parent chain, `cs land-train` skips the
+landing trust check and closes the open members. `cs done` warns about changed
+trusted shell files, and configured `pre_done` hooks still require trust.
+
+To land the train locally, review the named files and grant trust while the
+gated tip is checked out. Then switch back to the base branch and rerun:
 
 ```sh
 git diff <train-base> <train-tip> -- <named paths>
@@ -129,9 +134,6 @@ cs trust
 git switch <base>
 cs land-train ...            # same arguments
 ```
-
-Until the train lands, that grant reads stale for the base's surface, so a
-`cs done` that needs trust in the meantime is refused.
 
 The check compares the grant with the surface of the tip's tracked files. A
 grant made from a checkout matches it only when that checkout's surface files

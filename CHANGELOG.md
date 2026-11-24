@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- `cs land-train` names the local base in a shell-trust refusal and explains how to resume member closure after the train has already landed upstream.
+
 ## [0.10.1] — 2026-11-22
 
 - Dependencies: `url` 2.5.8 → 2.5.9 (RUSTSEC-2026-0592, stack overflow in `Url::origin()` on nested `blob:` URLs), which brings `form_urlencoded` 1.2.2 → 1.2.3; the cargo-vet exemption for `url` moves to 2.5.9 and `form_urlencoded` 1.2.3 is exempted, both unaudited.
