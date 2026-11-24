@@ -7,6 +7,7 @@
 
 use std::fs::{self, File};
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -103,7 +104,11 @@ impl RunningSlot {
                 }
             }
             assert_eq!(wrapper.try_wait().unwrap(), None, "command never started");
-            assert!(start.elapsed() < Duration::from_secs(10));
+            if start.elapsed() >= Duration::from_secs(10) {
+                let _ = wrapper.kill();
+                let _ = wrapper.wait();
+                panic!("timed out waiting for the command PID");
+            }
             std::thread::sleep(Duration::from_millis(10));
         };
         let group = getpgid(Some(command)).unwrap();
@@ -273,6 +278,7 @@ fn timeout_kills_the_group_and_publishes_a_verdict() {
     wait_until_within("timed-out wrapper to exit", Duration::from_secs(5), || {
         run.wrapper.try_wait().unwrap().is_some()
     });
+    assert_eq!(run.wrapper.wait().unwrap().code(), Some(124));
     assert_eq!(
         fs::read_to_string(state.join("verdict")).unwrap(),
         "timed_out"
@@ -351,7 +357,7 @@ fn required_directory_is_probed_before_and_after_the_command() {
             ])
             .status()
             .unwrap();
-        assert!(!status.success());
+        assert_eq!(status.code(), Some(125));
         let verdict = fs::read_to_string(state.join("verdict")).unwrap();
         let reason = verdict.strip_prefix("could_not_run:").unwrap();
         assert!(!reason.is_empty() && !reason.contains('\n'), "{verdict:?}");
@@ -406,6 +412,33 @@ fn an_existing_directory_cannot_be_used_as_a_verdict_file() {
     assert!(!status.success());
     assert!(!state.join("ran").exists());
     assert!(state.join("verdict").is_dir());
+}
+
+#[test]
+fn a_verdict_can_be_published_outside_a_read_only_working_directory() {
+    if nix::unistd::geteuid().is_root() {
+        return; // Root can write through the fixture's permission bits.
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let state = galaxy(tmp.path(), "");
+    let workdir = tmp.path().join("work");
+    fs::create_dir(&workdir).unwrap();
+    fs::set_permissions(&workdir, fs::Permissions::from_mode(0o555)).unwrap();
+    let verdict = tmp.path().join("verdict");
+
+    let output = cs(&state)
+        .current_dir(&workdir)
+        .args(["gates", "slot", "--verdict-file"])
+        .arg(&verdict)
+        .args(["--", "true"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(verdict).unwrap(), "ran:0");
 }
 
 #[test]
