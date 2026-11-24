@@ -1321,4 +1321,15 @@ mod tests {
             .any(|tag| tag.as_str() == "worker-restart-requested"));
         backend.terminate_session(session).unwrap();
     }
+
+    /// `done_outcome` reads the typed `outcome` of the last JSON line, and
+    /// nothing else: prose, an empty stream, or a payload without it is `None`.
+    #[test]
+    fn done_outcome_reads_the_last_json_line() {
+        let out = b"noise\n{\"outcome\":\"reserved\"}\n\n";
+        assert_eq!(done_outcome(out).as_deref(), Some("reserved"));
+        assert_eq!(done_outcome(b""), None);
+        assert_eq!(done_outcome(b"{\"ok\":true}\n"), None);
+        assert_eq!(done_outcome(b"{\"outcome\":\"x\"}\nnot json\n"), None);
+    }
 }

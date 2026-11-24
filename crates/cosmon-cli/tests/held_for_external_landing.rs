@@ -184,6 +184,12 @@ fn pane_died_harvest_leaves_a_tagged_molecule_open() {
             .output()
             .unwrap();
         assert!(out.status.success(), "{}", text(&out));
+        let outcome = if id == &held { "reserved" } else { "harvested" };
+        assert!(
+            text(&out).contains(&format!("harvest {id}: {outcome}")),
+            "{}",
+            text(&out)
+        );
     }
     assert!(
         is_archived(repo, &free),
@@ -204,11 +210,20 @@ fn patrol_harvest_leaves_a_tagged_molecule_open() {
     let free = completed_molecule(repo, None);
 
     let out = cs_isolated(repo)
-        .args(["patrol", "--harvest"])
+        .args(["--json", "patrol", "--harvest"])
         .current_dir(repo)
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", text(&out));
+    let whole: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("patrol --json is not one document ({e}): {}", text(&out)));
+    let report = whole["harvest"].clone();
+    let listed = |key: &str, id: &str| report[key].to_string().contains(id);
+    assert!(
+        listed("skipped", &held),
+        "held is skipped, not failed: {report}"
+    );
+    assert!(listed("harvested", &free), "{report}");
     assert!(
         is_archived(repo, &free),
         "control: the untagged molecule is harvested"
