@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use cosmon_filestore::gate_slots::live_gate_slot_holders_in;
 use nix::sys::signal::{kill, killpg, Signal};
+use nix::sys::termios::{tcgetattr, tcsetattr, LocalFlags, SetArg};
 use nix::unistd::{getpgid, Pid};
 
 /// A galaxy under `tmp` whose config declares `gate_slots_toml`; returns the
@@ -47,12 +48,13 @@ fn cs(state: &Path) -> Command {
 }
 
 fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+    wait_until_within(what, Duration::from_secs(60), &mut cond);
+}
+
+fn wait_until_within(what: &str, limit: Duration, mut cond: impl FnMut() -> bool) {
     let start = Instant::now();
     while !cond() {
-        assert!(
-            start.elapsed() < Duration::from_secs(60),
-            "timed out waiting for {what}"
-        );
+        assert!(start.elapsed() < limit, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(50));
     }
 }
@@ -144,7 +146,14 @@ fn the_command_can_read_the_terminal_and_returns_it_to_the_caller() {
     let tmp = tempfile::tempdir().unwrap();
     let state = galaxy(tmp.path(), "");
     let pty = nix::pty::openpty(None, None).unwrap();
-    let mut terminal = File::from(pty.master);
+    // No reader drains the master. An echo left queued there can hold up
+    // session teardown on macOS even after both reads have succeeded.
+    let mut mode = tcgetattr(&pty.slave).unwrap();
+    mode.local_flags.remove(LocalFlags::ECHO);
+    tcsetattr(&pty.slave, SetArg::TCSANOW, &mode).unwrap();
+    let mut terminal = File::from(pty.master.try_clone().unwrap());
+    let slave = pty.slave.try_clone().unwrap();
+    drop(pty);
     let mut caller = Command::new("sh");
     caller
         .current_dir(&state)
@@ -156,31 +165,42 @@ fn the_command_can_read_the_terminal_and_returns_it_to_the_caller() {
             "sh",
             env!("CARGO_BIN_EXE_cs"),
         ])
-        .stdin(Stdio::from(pty.slave))
+        .stdin(Stdio::from(slave))
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // SAFETY: these syscalls create a session and attach the already-set-up
     // stdin as its controlling terminal. The pre-exec hook allocates nothing.
     unsafe {
         caller.pre_exec(|| {
-            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+            if libc::setsid() == -1
+                || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1
+                || libc::tcsetpgrp(0, libc::getpgrp()) == -1
+            {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
         });
     }
     let mut caller = caller.spawn().unwrap();
-    terminal.write_all(b"for child\nfor caller\n").unwrap();
+    terminal.write_all(b"for child\n").unwrap();
     let start = Instant::now();
+    let mut sent_to_caller = false;
     let status = loop {
         if let Some(status) = caller.try_wait().unwrap() {
             break status;
+        }
+        if !sent_to_caller && state.join("child-input").exists() {
+            terminal.write_all(b"for caller\n").unwrap();
+            sent_to_caller = true;
         }
         if start.elapsed() > Duration::from_secs(5) {
             drop(terminal);
             let _ = killpg(pid(caller.id()), Signal::SIGKILL);
             caller.wait().unwrap();
-            panic!("the gate caller could not finish reading its terminal");
+            panic!(
+                "the gate caller could not finish reading its terminal (child read: {})",
+                sent_to_caller
+            );
         }
         std::thread::sleep(Duration::from_millis(20));
     };
@@ -216,7 +236,7 @@ fn sending_a_signal_to_the_wrapper_stops_the_whole_command_group() {
             .parse()
             .unwrap());
         kill(pid(run.wrapper.id()), signal).unwrap();
-        wait_until("signalled wrapper to exit", || {
+        wait_until_within("signalled wrapper to exit", Duration::from_secs(5), || {
             run.wrapper.try_wait().unwrap().is_some()
         });
         std::thread::sleep(Duration::from_millis(300));
@@ -250,7 +270,7 @@ fn timeout_kills_the_group_and_publishes_a_verdict() {
         .trim()
         .parse()
         .unwrap());
-    wait_until("timed-out wrapper to exit", || {
+    wait_until_within("timed-out wrapper to exit", Duration::from_secs(5), || {
         run.wrapper.try_wait().unwrap().is_some()
     });
     assert_eq!(
@@ -267,6 +287,7 @@ fn the_timeout_excludes_time_queued_for_a_slot() {
     let tmp = tempfile::tempdir().unwrap();
     let state = galaxy(tmp.path(), "[gate_slots]\nfull_gate = 1\n");
     let first = RunningSlot::start(&state, &[], "echo $$ > \"$1\"; exec sleep 300");
+    fs::write(state.join("verdict"), "ran:7").unwrap();
     let mut second = cs(&state)
         .args([
             "gates",
@@ -281,15 +302,27 @@ fn the_timeout_excludes_time_queued_for_a_slot() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let mut queued = String::new();
     let mut stderr = std::io::BufReader::new(second.stderr.take().unwrap());
-    std::io::BufRead::read_line(&mut stderr, &mut queued).unwrap();
-    assert!(queued.contains("queued for a slot"), "{queued:?}");
+    wait_for_queue(&mut stderr);
+    assert!(
+        !state.join("verdict").exists(),
+        "stale verdict while queued"
+    );
     std::thread::sleep(Duration::from_millis(1200));
     assert!(second.try_wait().unwrap().is_none());
     drop(first);
     assert!(second.wait().unwrap().success());
     assert_eq!(fs::read_to_string(state.join("verdict")).unwrap(), "ran:0");
+}
+
+fn wait_for_queue(stderr: &mut impl std::io::BufRead) {
+    loop {
+        let mut line = String::new();
+        assert_ne!(stderr.read_line(&mut line).unwrap(), 0, "no queue notice");
+        if line.contains("queued for a slot") {
+            return;
+        }
+    }
 }
 
 #[test]
@@ -345,6 +378,34 @@ fn a_command_that_cannot_start_has_a_could_not_run_verdict() {
     assert!(fs::read_to_string(state.join("verdict"))
         .unwrap()
         .starts_with("could_not_run:"));
+    let legacy = cs(&state)
+        .args(["gates", "slot", "--", "./absent"])
+        .output()
+        .unwrap();
+    assert_eq!(legacy.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&legacy.stderr).contains("cannot run `./absent`"));
+}
+
+#[test]
+fn an_existing_directory_cannot_be_used_as_a_verdict_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = galaxy(tmp.path(), "");
+    fs::create_dir(state.join("verdict")).unwrap();
+    let status = cs(&state)
+        .args([
+            "gates",
+            "slot",
+            "--verdict-file",
+            "verdict",
+            "--",
+            "touch",
+            "ran",
+        ])
+        .status()
+        .unwrap();
+    assert!(!status.success());
+    assert!(!state.join("ran").exists());
+    assert!(state.join("verdict").is_dir());
 }
 
 #[test]
@@ -391,12 +452,28 @@ fn descriptor_handoff_keeps_a_controller_slot_held_after_wrapper_sigkill() {
         .unwrap());
     first.kill_wrapper();
     kill(first.command, Signal::SIGKILL).unwrap();
+    wait_until("the first controller to die", || {
+        !process_is_alive(first.command)
+    });
     assert!(process_is_alive(descendant));
     assert_eq!(live_gate_slot_holders_in(&state, "controller").unwrap(), 1);
 
     let marker = state.join("second-ran");
-    let mut second = spawn_slot(&state, "controller", &["touch", "second-ran"]);
-    std::thread::sleep(Duration::from_millis(500));
+    let mut second = cs(&state)
+        .args([
+            "gates",
+            "slot",
+            "--pool",
+            "controller",
+            "--",
+            "touch",
+            "second-ran",
+        ])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = std::io::BufReader::new(second.stderr.take().unwrap());
+    wait_for_queue(&mut stderr);
     assert!(!marker.exists(), "the second controller raced the orphan");
     kill(descendant, Signal::SIGKILL).unwrap();
     wait_until("second controller to run after the orphan died", || {

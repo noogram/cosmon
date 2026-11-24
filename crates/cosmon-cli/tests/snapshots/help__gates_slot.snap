@@ -10,10 +10,14 @@ Arguments:
   [COMMAND]...  The command to run, after `--`
 
 Options:
-      --config <PATH>      Path to the state directory (default: the galaxy's .cosmon/state/)
-      --pool <NAME>        Pool to take a slot from (sized by `[gate_slots]` in `.cosmon/config.toml`) [default: full_gate]
-      --configured         Print the configured slot count of the pool and exit 0, or exit 3 when the pool is unbounded; runs no command
-  -v, --verbose            Enable verbose output
-      --json               Output in JSON format
-      --ready-file <PATH>  Create this file once the slot is held, just before the command starts
-  -h, --help               Print help
+      --config <PATH>        Path to the state directory (default: the galaxy's .cosmon/state/)
+      --pool <NAME>          Pool to take a slot from (sized by `[gate_slots]` in `.cosmon/config.toml`) [default: full_gate]
+      --configured           Print the configured slot count of the pool and exit 0, or exit 3 when the pool is unbounded; runs no command
+  -v, --verbose              Enable verbose output
+      --json                 Output in JSON format
+      --ready-file <PATH>    Create this file once the slot is held, just before the command starts
+      --timeout <SECS>       Kill the command group after this many seconds of runtime, excluding slot wait
+      --require-dir <PATH>   Require a writable directory before and after the command runs
+      --verdict-file <PATH>  Write the authoritative result: ran:<code>, timed_out, or could_not_run:<reason>
+      --hand-descriptor      Let the command inherit a bounded named slot until its last descriptor closes
+  -h, --help                 Print help
