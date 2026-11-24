@@ -76,6 +76,8 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              review after merging. Run 'cs done <id> --review-shell' to see the \
              merged diff, grant trust over those on-disk files, and run the \
              post-merge gate before teardown. Declining rolls the merge back.\n\n\
+             If a train already landed upstream, switch to the local base, run \
+             `git pull --ff-only`, and rerun `cs land-train` to close its members.\n\n\
              DECLARED WORK (ADR-182): a pilot records a finite seat roster \
              with 'cs work declare <owner> --seat a=<molecule> --seat b=<molecule>'. \
              Members use 'cs work send --to <seat> --text <evidence>', \

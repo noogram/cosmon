@@ -261,9 +261,11 @@ change to the trusted shell surface is already covered by a trust grant
 (cs land-train never grants trust). The base then moves by
 `git update-ref <base> <tip> <train-base>`, the lock is released, and each
 member is closed with `cs done <id> --expect-head <head>`, stopping at the
-first failure. Rerun the same command after a failure or a kill: if the tip is
-already on the base's first-parent chain, the landing is skipped and only open
-members are closed.
+first failure. If the train already landed upstream, fast-forward the local base
+with `git pull --ff-only` before rerunning. Once the tip is on the local base's
+first-parent chain, the rerun skips the landing and its trust check, and closes
+only open members. `cs done` warns about changed trusted shell files. Configured
+`pre_done` hooks still require trust.
 
 See docs/guides/train-landing.md.
 

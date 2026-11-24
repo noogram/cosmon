@@ -746,16 +746,17 @@ fn check_shell_surface(
     }
     let root = repo_root.display();
     anyhow::bail!(
-        "cs land-train refused: the train changes the repository's trusted shell surface ({}), \
-         and no trust decision covers the surface it would leave on disk. Nothing was moved or \
-         closed, and cs land-train grants no trust.\n\n\
-         Review the change:\n\n    $ git -C {root} diff {train_base} {tip} -- {}\n\n\
-         A grant pins the surface on disk, so grant it with the train tip checked out, then put \
-         the base back and rerun this command:\n\n    \
+        "cs land-train refused: the local base {base_branch} is still at {train_base}. The train \
+         changes the repository's trusted shell surface ({}), and no trust grant covers the train \
+         tip. Nothing was moved or closed.\n\n\
+         If the train already landed upstream, switch to {base_branch}, run `git pull --ff-only`, \
+         and rerun the same `cs land-train` command to close the members.\n\n\
+         To land the train locally, review the change:\n\n    \
+         $ git -C {root} diff {train_base} {tip} -- {}\n\n\
+         Grant trust from a checkout of the train tip, then switch back and rerun:\n\n    \
          $ git -C {root} switch --detach {tip}\n    \
          $ cs trust\n    \
-         $ git -C {root} switch {base_branch}\n\n\
-         Until the train lands, that grant reads stale for the base's surface.",
+         $ git -C {root} switch {base_branch}",
         paths.join(", "),
         paths.join(" ")
     )
