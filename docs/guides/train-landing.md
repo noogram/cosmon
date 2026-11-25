@@ -33,7 +33,18 @@ For each member, in order:
   `cs done` merges would have written byte for byte.
 
 Nothing else may sit on the train's first-parent chain: no operator commit, no
-fix-up, no merge of the train into itself. Gate the tip once, then land it.
+fix-up, no merge of the train into itself. Run the landing checks, gate the
+tip once, then land it.
+
+```sh
+cs land-train --check --train-base <rev> --train-tip <rev> \
+              --member <id>=<pinned head> --member <id>=<pinned head>
+```
+
+`--check` runs the landing checks without taking the trunk lock or changing
+refs, the index, the checkout, or Cosmon state. Pass the same members and
+`--exclude` pins when landing. Landing rechecks the current state under the
+trunk lock. The gate runs separately on the exact train tip.
 
 ## Supervising the gate
 
@@ -81,8 +92,8 @@ Name the members in the order the train merged them.
 
 ## What cosmon checks
 
-It takes the trunk lock once. Every check runs before the base moves, and a
-failure moves nothing, closes nothing, and names the offending commit or member:
+The landing checks run before the base moves. A refusal leaves the base and
+members in place and names the offending commit or member.
 
 1. `[harvest_authority] required` is false. When it is true, this increment
    refuses the train; close the members one at a time with `cs done`.
@@ -96,7 +107,8 @@ failure moves nothing, closes nothing, and names the offending commit or member:
    member's `--print-merge-message` text, with only trailer lines appended
    after it. There are as many merges as members.
 4. Each member is Completed (not collapsed), integrates into this base, and its
-   branch is still at its pinned head.
+   branch is still at its pinned head. Each local blocker has already merged or
+   appears earlier in the train (ADR-192 I11).
 5. Each `--exclude` head resolves to a commit, the excluded ID is absent from
    the member list, and no pinned member head contains the excluded member's
    first own commit, if it has one above the train base.
@@ -104,8 +116,8 @@ failure moves nothing, closes nothing, and names the offending commit or member:
    (`.cosmon/config.toml`, the formulas, and the scripts they invoke), an
    existing trust grant must already cover the surface the train will leave on
    disk. `cs land-train` never grants trust.
-7. If the base is checked out in the main checkout, no local change may overlap
-   a file the train changes.
+7. No other worktree has the base checked out. If the base is checked out in
+   the main checkout, no local change may overlap a file the train changes.
 
 The base then moves by `git update-ref <base> <tip> <train-base>`, a
 compare-and-swap. A checked-out index and working tree are moved first, with
@@ -118,10 +130,11 @@ blocked on a lock its parent holds would wait forever.
 1. Run the same gate against the current base by itself before dropping any
    members. If the base fails the gate, investigate the base failure first.
 2. Identify the failing member, record its pinned head and rebuild the train
-   without it. Gate the rebuilt train.
-3. When landing the rebuilt train, add `--exclude <id>=<head>` for each removed
-   member. Use the head that member contributed to the earlier train or a
-   later head on the same first-parent history.
+   without it.
+3. When checking and landing the rebuilt train, add `--exclude <id>=<head>`
+   for each removed member. Use the head it contributed to the earlier train
+   or a later head on the same first-parent history. Run the gate after the
+   checks pass and before landing.
 
 A carrier is a member whose pinned head contains the excluded member's first
 own commit. Git finds it as the oldest entry in

@@ -15,9 +15,9 @@
 //!
 //! # The seam
 //!
-//! The locked phase — every landing check and the compare-and-swap
-//! fast-forward — is [`cosmon_harvest::train::land`], which releases the trunk
-//! lock before it returns. This module then closes each pending member by
+//! [`cosmon_harvest::train::check`] runs the landing checks before gating.
+//! [`cosmon_harvest::train::land`] rechecks, fast-forwards by compare-and-swap,
+//! and releases the trunk lock. This module then closes each pending member by
 //! running this same binary as `cs done <id> --expect-head <head>`, one child
 //! at a time, in train order, stopping at the first failure. A child process
 //! and not an in-process call, because each closure must take and release the
@@ -56,6 +56,11 @@ pub struct Args {
     /// --member, and its head must resolve to a commit.
     #[arg(long = "exclude", value_name = "ID=HEAD")]
     pub exclusions: Vec<String>,
+
+    /// Run the landing checks without the trunk lock or changing the
+    /// repository or Cosmon state. Use the same arguments when landing.
+    #[arg(long)]
+    pub check: bool,
 }
 
 /// Execute `cs land-train`.
@@ -88,6 +93,20 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         config: ctx.config.clone(),
         repo_root: None,
     };
+    if args.check {
+        for warning in train::check(&harvest_ctx, &request)? {
+            eprintln!("⚠ {warning}");
+        }
+        if ctx.json {
+            println!(
+                "{}",
+                serde_json::json!({"command": "land-train", "check": "passed"})
+            );
+        } else {
+            println!("land-train: landing checks passed");
+        }
+        return Ok(());
+    }
     let outcome = train::land(&harvest_ctx, &request)?;
     for warning in &outcome.warnings {
         eprintln!("⚠ {warning}");

@@ -41,9 +41,11 @@
 //! The shape and carrier rules are functions of plain data. The surrounding
 //! layer reads the train chain and ancestry from Git.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use anyhow::Context as _;
 use cosmon_core::id::MoleculeId;
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_filestore::FileStore;
@@ -325,7 +327,8 @@ fn indent(text: &str) -> String {
 ///    surface check).
 /// 3. [`check_train_chain`] over `train_base..tip`.
 /// 4. Every member is Completed, has no other base branch, and — unless
-///    already closed — its branch is still at its pinned head.
+///    already closed — its branch is still at its pinned head. Each local
+///    blocker has merged or is an earlier member of the same train.
 /// 5. Each excluded ID is absent from the member list. Its head resolves to
 ///    a commit outside the ancestry of every pinned member head.
 /// 6. The shell-surface predicate over `train_base..tip` (ADR-190 §7): a
@@ -339,6 +342,26 @@ fn indent(text: &str) -> String {
 ///
 /// Every refusal above, and git or store failures.
 pub fn land(ctx: &HarvestContext, req: &LandTrainRequest) -> anyhow::Result<LandingOutcome> {
+    land_or_check(ctx, req, false)
+}
+
+/// Run the landing checks before gating a train. Returns attribution warnings
+/// without taking the trunk lock or changing Git refs, the index, the
+/// checkout, or Cosmon state.
+///
+/// # Errors
+///
+/// The same pre-move refusals as [`land`], using the state observed at check
+/// time. Landing rechecks that state and performs the compare-and-swap.
+pub fn check(ctx: &HarvestContext, req: &LandTrainRequest) -> anyhow::Result<Vec<String>> {
+    Ok(land_or_check(ctx, req, true)?.warnings)
+}
+
+fn land_or_check(
+    ctx: &HarvestContext,
+    req: &LandTrainRequest,
+    check_only: bool,
+) -> anyhow::Result<LandingOutcome> {
     require_project_identity(ctx)?;
     anyhow::ensure!(
         !req.members.is_empty(),
@@ -404,9 +427,15 @@ pub fn land(ctx: &HarvestContext, req: &LandTrainRequest) -> anyhow::Result<Land
         });
     }
 
-    let guard = store
-        .acquire_trunk_lock(&format!("cs land-train {}", short(&train_tip)))
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let _guard = if check_only {
+        None
+    } else {
+        Some(
+            store
+                .acquire_trunk_lock(&format!("cs land-train {}", short(&train_tip)))
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+        )
+    };
 
     let base_ref = format!("refs/heads/{base_branch}");
     let current = resolve_commit(&repo_root, &base_ref, "the base branch")?;
@@ -429,7 +458,7 @@ pub fn land(ctx: &HarvestContext, req: &LandTrainRequest) -> anyhow::Result<Land
 
     let mut to_close = Vec::new();
     let mut already_closed = Vec::new();
-    for member in &expected {
+    for (i, member) in expected.iter().enumerate() {
         let mol = store.load_molecule(&member.molecule)?;
         if mol.status != MoleculeStatus::Completed {
             anyhow::bail!(
@@ -450,6 +479,7 @@ pub fn land(ctx: &HarvestContext, req: &LandTrainRequest) -> anyhow::Result<Land
                 member.molecule
             );
         }
+        check_blockers(&store, &mol, &expected[..i])?;
         if mol.merged_at.is_some() {
             if landing == Landing::Landed {
                 anyhow::bail!(
@@ -491,9 +521,14 @@ pub fn land(ctx: &HarvestContext, req: &LandTrainRequest) -> anyhow::Result<Land
 
     if landing == Landing::Landed {
         check_shell_surface(&repo_root, &base_branch, &train_base, &train_tip)?;
-        fast_forward(&repo_root, &base_branch, &train_base, &train_tip)?;
+        fast_forward(
+            &repo_root,
+            &base_branch,
+            &train_base,
+            &train_tip,
+            check_only,
+        )?;
     }
-    drop(guard);
 
     Ok(LandingOutcome {
         base_branch,
@@ -504,6 +539,32 @@ pub fn land(ctx: &HarvestContext, req: &LandTrainRequest) -> anyhow::Result<Land
         already_closed,
         warnings,
     })
+}
+
+/// I11 permits a local blocker only after it has merged or when its merge
+/// precedes the dependent's merge on this train.
+fn check_blockers(
+    store: &FileStore,
+    member: &cosmon_state::MoleculeData,
+    earlier: &[ExpectedMerge],
+) -> anyhow::Result<()> {
+    for blocker in member.blocked_by() {
+        if earlier.iter().any(|previous| &previous.molecule == blocker) {
+            continue;
+        }
+        let state = store.load_molecule(blocker).with_context(|| {
+            format!(
+                "cs land-train refused: could not read blocker {blocker} of member {}",
+                member.id
+            )
+        })?;
+        anyhow::ensure!(
+            state.merged_at.is_some(),
+            "cs land-train refused: member {} has unmerged blocker {blocker}. Land the blocker +             first or include it earlier in this train. Nothing was moved or closed.",
+            member.id
+        );
+    }
+    Ok(())
 }
 
 fn check_exclusions(
@@ -829,21 +890,22 @@ fn other_checkouts_of(repo_root: &Path, base_branch: &str) -> anyhow::Result<Vec
     Ok(found)
 }
 
-/// Move `base_branch` from `train_base` to `tip` by compare-and-swap, and the
-/// main checkout's index and tree with it when the branch is checked out
-/// there.
+/// Check if the base can fast-forward, then move it by compare-and-swap
+/// when landing. Update the index and tree when the base is checked out.
 ///
 /// The tree moves first, with `git read-tree -m -u <train_base> <tip>` — the
 /// two-tree fast-forward `git merge --ff-only` itself performs, which refuses
 /// when a local change overlaps a file the train changes. Then the ref moves
 /// with `git update-ref <ref> <tip> <train_base>`, which fails unless the ref
 /// still holds the train base. If that compare-and-swap fails, the tree is
-/// moved back, so a failure leaves both where they were.
+/// moved back, so a failure leaves both where they were. In check mode, Git's
+/// dry run checks the checkout against a scratch index without either move.
 fn fast_forward(
     repo_root: &Path,
     base_branch: &str,
     train_base: &str,
     tip: &str,
+    check_only: bool,
 ) -> anyhow::Result<()> {
     let base_ref = format!("refs/heads/{base_branch}");
     let others = other_checkouts_of(repo_root, base_branch)?;
@@ -863,9 +925,18 @@ fn fast_forward(
         head.status.success() && String::from_utf8_lossy(&head.stdout).trim() == base_ref;
 
     if checked_out_here {
-        let moved = git(repo_root)
-            .args(["read-tree", "-m", "-u", train_base, tip])
-            .output()?;
+        let mut cmd = git(repo_root);
+        cmd.args(["read-tree", "-m", "-u", train_base, tip]);
+        let scratch = if check_only {
+            let scratch = copy_index(repo_root)?;
+            cmd.arg("--dry-run")
+                .env("GIT_INDEX_FILE", scratch.path().join("index"));
+            Some(scratch)
+        } else {
+            None
+        };
+        let moved = cmd.output()?;
+        drop(scratch);
         if !moved.status.success() {
             anyhow::bail!(
                 "cs land-train refused: the base checkout {} has local changes that overlap \
@@ -875,6 +946,9 @@ fn fast_forward(
                 String::from_utf8_lossy(&moved.stderr).trim()
             );
         }
+    }
+    if check_only {
+        return Ok(());
     }
     let cas = git(repo_root)
         .args([
@@ -905,6 +979,85 @@ fn fast_forward(
         );
     }
     Ok(())
+}
+
+/// Git's `read-tree --dry-run` still takes an index lock. Give it its own
+/// index and preserve the original mtime for Git's racy-clean checks.
+fn copy_index(repo_root: &Path) -> anyhow::Result<tempfile::TempDir> {
+    let path = git_path(repo_root, &["--git-path", "index"])?;
+    let scratch = tempfile::tempdir()?;
+    if path.try_exists()? {
+        let modified = fs::metadata(&path)?.modified()?;
+        let copy = scratch.path().join("index");
+        fs::copy(path, &copy)?;
+        expand_split_index(repo_root, scratch.path(), &copy)?;
+        fs::File::open(copy)?.set_modified(modified)?;
+    }
+    Ok(scratch)
+}
+
+/// Reading a split index refreshes its shared file in the Git directory.
+/// Expand the scratch index against copied shared files first, then run the
+/// dry run with Git's usual directory and worktree configuration.
+fn expand_split_index(repo_root: &Path, scratch: &Path, index: &Path) -> anyhow::Result<()> {
+    let git_dir = git_path(repo_root, &["--absolute-git-dir"])?;
+    let mut has_shared_index = false;
+    for entry in fs::read_dir(&git_dir)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .as_encoded_bytes()
+            .starts_with(b"sharedindex.")
+        {
+            fs::copy(entry.path(), scratch.join(entry.file_name()))?;
+            has_shared_index = true;
+        }
+    }
+    if has_shared_index {
+        fs::copy(git_dir.join("HEAD"), scratch.join("HEAD"))?;
+        let common = git_path(repo_root, &["--git-common-dir"])?;
+        let out = git(repo_root)
+            .env("GIT_DIR", scratch)
+            .env("GIT_COMMON_DIR", common)
+            .env("GIT_WORK_TREE", repo_root)
+            .env("GIT_INDEX_FILE", index)
+            .args([
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.splitIndex=false",
+                "update-index",
+                "--no-split-index",
+            ])
+            .output()?;
+        anyhow::ensure!(
+            out.status.success(),
+            "could not expand the scratch Git index: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn git_path(repo_root: &Path, option: &[&str]) -> anyhow::Result<PathBuf> {
+    let out = git(repo_root)
+        .args(["rev-parse", "--path-format=absolute"])
+        .args(option)
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git rev-parse {option:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    let path = out.stdout.strip_suffix(b"\n").unwrap_or(&out.stdout);
+    #[cfg(unix)]
+    let path = {
+        use std::os::unix::ffi::OsStrExt as _;
+        std::ffi::OsStr::from_bytes(path)
+    };
+    #[cfg(not(unix))]
+    let path = std::str::from_utf8(path)?;
+    Ok(PathBuf::from(path))
 }
 
 #[cfg(test)]
@@ -1094,7 +1247,7 @@ mod tests {
         git_in(repo, &["commit", "-q", "--allow-empty", "-m", "moved"]);
         let moved = git_in(repo, &["rev-parse", "main"]);
 
-        let err = fast_forward(repo, "main", &train_base, &tip)
+        let err = fast_forward(repo, "main", &train_base, &tip, false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("compare-and-swap"), "{err}");

@@ -238,9 +238,9 @@ SEE ALSO: cs complete (state transition only), cs tackle (counterpart).
 
 ## `cs land-train`
 
-Land-train — land an operator-gated train and close its members, with optional `--exclude` checks
+Land-train — land a gated train and close its members, or run `--check` before gating
 
-The train is built off-trunk by the operator: one `git merge --no-ff` per member, each with the message `cs done --print-merge-message` prints, merging the member's pinned head. Under the trunk lock the base moves by a compare-and-swap fast-forward to the train tip, after every check passed; the lock is released, then each member is closed by `cs done <id> --expect-head <head>`. A rerun after a kill skips the landing and closes only the members still open.
+The train is built off-trunk by the operator: one `git merge --no-ff` per member, each with the message `cs done --print-merge-message` prints, merging the member's pinned head. Use `--check` to validate those pins and the train before gating. Under the trunk lock the base moves by a compare-and-swap fast-forward to the train tip, after every check passed; the lock is released, then each member is closed by `cs done <id> --expect-head <head>`. A rerun after a kill skips the landing and closes only the members still open.
 
 **Usage:** `cs land-train [OPTIONS] --train-base <REV> --train-tip <REV> --member <ID=HEAD>`
 
@@ -248,19 +248,24 @@ EXAMPLES:
   git switch -c train main
   git merge --no-ff -m "$(cs done A --print-merge-message)" feat/A
   git merge --no-ff -m "$(cs done B --print-merge-message)" feat/B
+  cs land-train --check --train-base <main-at-build> --train-tip <train-tip> \
+                --member A=<head-of-A> --member B=<head-of-B>
   # ... gate the train once ...
   cs land-train --train-base <main-at-build> --train-tip <train-tip> \
                 --member A=<head-of-A> --member B=<head-of-B>
 
-Every check runs under the trunk lock before the base moves: the base still
+Both modes check the same conditions before landing. The base still
 equals --train-base; every first-parent commit of base..tip is a --no-ff merge
 of the next named member, with that member's pinned head as second parent and
 the message `cs done --print-merge-message` renders (trailer lines a hook
 appends are tolerated; pass the text with -m "$(...)", not -F, so a sign-off
 hook sees what it sees for `cs done`); each member is Completed and its branch
-is still at its pinned head; `[harvest_authority] required` is false; and a
-change to the trusted shell surface is already covered by a trust grant
-(cs land-train never grants trust). The base then moves by
+is still at its pinned head; each local blocker is merged or earlier in the
+train; `[harvest_authority] required` is false; a shell-surface change is covered
+by a trust grant; and the checkout permits the fast-forward.
+
+`--check` leaves refs, the index, the working tree and Cosmon state in place.
+Landing checks again under the trunk lock. The base then moves by
 `git update-ref <base> <tip> <train-base>`, the lock is released, and each
 member is closed with `cs done <id> --expect-head <head>`, stopping at the
 first failure. If the train already landed upstream, fast-forward the local base
@@ -279,6 +284,7 @@ See docs/guides/train-landing.md.
 * `--train-tip <REV>` — The train's tip: the gated commit the base branch fast-forwards to
 * `--member <ID=HEAD>` — One member, as `<molecule id>=<pinned branch head>`. Repeat once per member merge, in the order the train merged them (oldest first)
 * `--exclude <ID=HEAD>` — Repeat once per removed member with its pinned head. Refuses a train member carrying that head's oldest first-parent commit outside the train base's ancestry, if any. An excluded ID must be absent from --member, and its head must resolve to a commit
+* `--check` — Run the landing checks without the trunk lock or changing the repository or Cosmon state. Use the same arguments when landing
 
 
 

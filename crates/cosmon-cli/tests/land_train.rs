@@ -153,24 +153,28 @@ impl Fixture {
 
     /// Nucleate a `task-work` molecule and complete it.
     fn completed_molecule(&self, topic: &str) -> String {
+        let mol_id = self.nucleate(topic, &[]);
+        self.complete(&mol_id);
+        mol_id
+    }
+
+    fn nucleate(&self, topic: &str, extra: &[&str]) -> String {
         let out = self
             .cs()
             .args(["--json", "nucleate", "task-work", "--var"])
             .arg(format!("topic={topic}"))
+            .args(extra)
             .output()
             .expect("cs nucleate");
         assert!(out.status.success(), "nucleate failed: {}", combined(&out));
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-        let mol_id = v["id"].as_str().expect("nucleate id").to_owned();
+        v["id"].as_str().expect("nucleate id").to_owned()
+    }
+
+    fn complete(&self, mol_id: &str) {
         let done = self
             .cs()
-            .args([
-                "complete",
-                &mol_id,
-                "--reason",
-                "test",
-                "--ignore-mindguard",
-            ])
+            .args(["complete", mol_id, "--reason", "test", "--ignore-mindguard"])
             .output()
             .expect("cs complete");
         assert!(
@@ -178,7 +182,6 @@ impl Fixture {
             "complete failed: {}",
             combined(&done)
         );
-        mol_id
     }
 
     /// Commit `file` with `contents` on `feat/<mol>` (created from `from` if
@@ -314,6 +317,14 @@ impl Train {
         self.fx.land(&self.base, &self.tip, &self.members())
     }
 
+    fn check(&self) -> Output {
+        self.fx
+            .land_command(&self.base, &self.tip, &self.members())
+            .arg("--check")
+            .output()
+            .unwrap()
+    }
+
     fn land_through_git(&self, shim_script: &str) -> Command {
         let shim_dir = self.fx._tmp.path().join("bin");
         fs::create_dir(&shim_dir).unwrap();
@@ -426,6 +437,12 @@ impl CarrierTrain {
     }
 
     fn land(&self, exclusions: &[(&str, &str)]) -> Output {
+        self.land_command(exclusions)
+            .output()
+            .expect("cs land-train")
+    }
+
+    fn land_command(&self, exclusions: &[(&str, &str)]) -> Command {
         let members = self
             .members
             .each_ref()
@@ -434,7 +451,7 @@ impl CarrierTrain {
         for (id, head) in exclusions {
             cmd.arg("--exclude").arg(format!("{id}={head}"));
         }
-        cmd.output().expect("cs land-train")
+        cmd
     }
 
     fn assert_refusal(&self, out: &Output, needles: &[&str]) {
@@ -467,6 +484,12 @@ fn exclusion_refuses_the_middle_carrier_without_landing_or_closing() {
         .fx
         .commit_on_branch(id, &train.base, "later.txt", "later\n");
     let out = train.land(&[(id, head)]);
+    let checked = train
+        .land_command(&[(id, head)])
+        .arg("--check")
+        .output()
+        .unwrap();
+    assert_eq!(checked.stderr, out.stderr);
     train.assert_refusal(
         &out,
         &["carries excluded member", &train.members[1].0, id, head],
@@ -820,6 +843,7 @@ fn a_first_parent_commit_that_is_not_a_member_merge_is_refused() {
     };
     let out = t.land();
     t.assert_refused_naming(&out, &stray, &base);
+    t.assert_refused_naming(&t.check(), &stray, &base);
 }
 
 /// A member merged `--no-ff` without the message `cs done` would write (git's
@@ -898,6 +922,283 @@ fn the_base_moving_after_the_gate_is_refused() {
 }
 
 #[test]
+fn check_leaves_the_repository_and_state_untouched_without_the_trunk_lock() {
+    let t = happy_train(Fixture::new("", false));
+    let repo = &t.fx.repo;
+    fs::write(repo.join("base.txt"), "unrelated local edit\n").unwrap();
+    let store = cosmon_filestore::FileStore::new(&repo.join(".cosmon/state"));
+    let lock = store.acquire_trunk_lock("test preflight").unwrap();
+    let before = file_contents(repo);
+    let grants_before = file_contents(&t.fx.trust);
+    let check = t.check();
+    assert!(check.status.success(), "{}", combined(&check));
+    assert!(
+        !String::from_utf8_lossy(&check.stderr).contains("⚠ "),
+        "{}",
+        combined(&check)
+    );
+    assert!(
+        combined(&check).contains("checks passed"),
+        "{}",
+        combined(&check)
+    );
+    let json =
+        t.fx.land_command(&t.base, &t.tip, &t.members())
+            .args(["--check", "--json"])
+            .output()
+            .unwrap();
+    assert!(json.status.success(), "{}", combined(&json));
+    let payload: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        payload,
+        serde_json::json!({"command": "land-train", "check": "passed"})
+    );
+    assert_eq!(
+        file_contents(repo),
+        before,
+        "check changed checkout, Git or Cosmon state"
+    );
+    assert_eq!(file_contents(&t.fx.trust), grants_before);
+    drop(lock);
+
+    let landed = t.land();
+    assert!(landed.status.success(), "{}", combined(&landed));
+    assert_eq!(rev(repo, "main"), t.tip);
+    assert!(t.fx.is_closed(&t.a) && t.fx.is_closed(&t.b));
+    assert_eq!(
+        fs::read_to_string(repo.join("base.txt")).unwrap(),
+        "unrelated local edit\n"
+    );
+}
+
+fn file_contents(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn visit(dir: &Path, files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                visit(&path, files);
+            } else {
+                files.insert(path.clone(), fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut files = std::collections::BTreeMap::new();
+    visit(root, &mut files);
+    files
+}
+
+#[test]
+fn check_leaves_a_split_index_timestamp_untouched() {
+    let fx = Fixture::new("", false);
+    let repo = &fx.repo;
+    let a = fx.completed_molecule("member changing a tracked file");
+    let ha = fx.commit_on_branch(&a, "main", "base.txt", "changed by the train\n");
+    let base = rev(repo, "main");
+    fx.merge_member_into_train(&a);
+    let tip = rev(repo, "train");
+    let members = [(&*a, &*ha)];
+    git_ok(repo, &["update-index", "--split-index"]);
+    let shared = git_ok(repo, &["rev-parse", "--shared-index-path"]);
+    let shared = fs::File::open(repo.join(shared)).unwrap();
+    let timestamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+    shared.set_modified(timestamp).unwrap();
+
+    let out = fx
+        .land_command(&base, &tip, &members)
+        .arg("--check")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", combined(&out));
+    assert_eq!(shared.metadata().unwrap().modified().unwrap(), timestamp);
+    assert_eq!(fs::read_to_string(repo.join("base.txt")).unwrap(), "base\n");
+
+    // The index differs from the working tree. Preflight must still see
+    // the staged conflict and leave the staged bytes in place.
+    fs::write(repo.join("base.txt"), "staged edit\n").unwrap();
+    git_ok(repo, &["add", "base.txt"]);
+    fs::write(repo.join("base.txt"), "base\n").unwrap();
+    let out = fx
+        .land_command(&base, &tip, &members)
+        .arg("--check")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", combined(&out));
+    assert!(
+        combined(&out).contains("local changes that overlap"),
+        "{}",
+        combined(&out)
+    );
+    assert_eq!(git_ok(repo, &["show", ":base.txt"]), "staged edit");
+    assert_eq!(rev(repo, "main"), base);
+}
+
+#[test]
+fn check_revalidates_moved_base_and_member_pins_when_landing() {
+    let t = happy_train(Fixture::new("", false));
+    let repo = &t.fx.repo;
+    let checked = t.check();
+    assert!(checked.status.success(), "{}", combined(&checked));
+    git_ok(repo, &["commit", "-q", "--allow-empty", "-m", "move base"]);
+    t.assert_refused_naming(&t.land(), "main moved after the gate", &rev(repo, "main"));
+
+    git_ok(repo, &["reset", "-q", "--hard", &t.base]);
+    let checked = t.check();
+    assert!(checked.status.success(), "{}", combined(&checked));
+    t.fx.commit_on_branch(&t.b, "main", "b.txt", "moved after check\n");
+    t.assert_refused_naming(&t.land(), "not its pinned head", &t.base);
+}
+
+#[test]
+fn checks_refuse_a_manually_tackled_members_unmerged_blocker_until_it_is_earlier() {
+    let fx = Fixture::new("", false);
+    let repo = &fx.repo;
+    let suffix = fx._tmp.path().file_name().unwrap().to_str().unwrap();
+    let socket = format!("test-land-train-{}", suffix.trim_start_matches('.'));
+    let config = repo.join(".cosmon/config.toml");
+    fs::write(&config, format!("[project]\nproject_id = \"{socket}\"\n")).unwrap();
+    let a = fx.completed_molecule("blocker a");
+    let ha = fx.commit_on_branch(&a, "main", "a.txt", "a\n");
+    let b = fx.nucleate("dependent b", &["--blocked-by", &a]);
+    let granted = fx.cs().arg("trust").output().unwrap();
+    assert!(granted.status.success(), "{}", combined(&granted));
+
+    let bin = fx._tmp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let claude = bin.join("claude");
+    fs::write(
+        &claude,
+        "#!/bin/sh\ncase \"$1\" in --version|-v) echo 'stub-claude 0.0.0'; exit 0;; esac\n\
+         printf '\\342\\235\\257 Type your message\\n'\nexec sleep 600\n",
+    )
+    .unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::var_os("PATH").unwrap();
+    let worktree = repo.join(".worktrees").join(&b);
+    let tackled = fx
+        .cs()
+        .env(
+            "PATH",
+            std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path))).unwrap(),
+        )
+        .env("COSMON_CONFIG_HOME", fx._tmp.path().join("config"))
+        .env(
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "test-placeholder-not-a-credential",
+        )
+        .args(["tackle", &b, "--adapter", "claude"])
+        .output()
+        .unwrap();
+    // The stub does no work. The fixture commits in the worktree created
+    // by manual tackle and completes the molecule through the CLI.
+    let _ = Command::new("tmux")
+        .args(["-L", &socket, "kill-server"])
+        .output();
+    assert!(tackled.status.success(), "{}", combined(&tackled));
+    assert_eq!(rev(&worktree, "HEAD"), ha);
+    fs::write(worktree.join("b.txt"), "b\n").unwrap();
+    git_ok(&worktree, &["add", "b.txt"]);
+    git_ok(&worktree, &["commit", "-qm", "feat: b"]);
+    let hb = rev(&worktree, "HEAD");
+    fx.complete(&b);
+    assert!(!fx.is_closed(&a));
+
+    let base = rev(repo, "main");
+    fx.merge_member_into_train(&b);
+    let only_b = rev(repo, "train");
+    let members = [(&*b, &*hb)];
+    for flags in [&[][..], &["--check"][..]] {
+        let out = fx
+            .land_command(&base, &only_b, &members)
+            .args(flags)
+            .output()
+            .unwrap();
+        let result = combined(&out);
+        assert!(
+            !out.status.success()
+                && result.contains("blocker")
+                && result.contains(&a)
+                && result.contains(&b),
+            "{result}"
+        );
+        assert_eq!(rev(repo, "main"), base);
+        assert!(!fx.is_closed(&a) && !fx.is_closed(&b));
+    }
+
+    // B already contains A, so git merge would elide A's trailing merge.
+    // Write its two-parent commit explicitly so shape validation can pass.
+    let later_a = git_ok(
+        repo,
+        &[
+            "commit-tree",
+            &rev(repo, "train^{tree}"),
+            "-p",
+            &only_b,
+            "-p",
+            &ha,
+            "-m",
+            fx.merge_message(&a).trim_end_matches('\n'),
+        ],
+    );
+    let out = fx
+        .land_command(&base, &later_a, &[(&b, &hb), (&a, &ha)])
+        .arg("--check")
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success() && combined(&out).contains(&format!("blocker {a}")),
+        "{}",
+        combined(&out)
+    );
+
+    git_ok(repo, &["branch", "-f", "train", "main"]);
+    fx.merge_member_into_train(&a);
+    fx.merge_member_into_train(&b);
+    let t = Train {
+        tip: rev(repo, "train"),
+        fx,
+        a,
+        b,
+        ha,
+        hb,
+        base,
+    };
+    let check = t.check();
+    assert!(check.status.success(), "{}", combined(&check));
+    let land = t.land();
+    assert!(land.status.success(), "{}", combined(&land));
+    assert!(t.fx.is_closed(&t.a) && t.fx.is_closed(&t.b));
+}
+
+#[test]
+fn check_accepts_a_blocker_landed_before_the_train() {
+    let fx = Fixture::new("", false);
+    let a = fx.completed_molecule("blocker a");
+    fx.commit_on_branch(&a, "main", "a.txt", "a\n");
+    let done = fx.cs().args(["done", &a]).output().unwrap();
+    assert!(done.status.success(), "{}", combined(&done));
+    assert!(fx.is_closed(&a));
+
+    let b = fx.nucleate("dependent b", &["--blocked-by", &a]);
+    fx.complete(&b);
+    let hb = fx.commit_on_branch(&b, "main", "b.txt", "b\n");
+    let base = rev(&fx.repo, "main");
+    fx.merge_member_into_train(&b);
+    let tip = rev(&fx.repo, "train");
+    let members = [(&*b, &*hb)];
+    let checked = fx
+        .land_command(&base, &tip, &members)
+        .arg("--check")
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{}", combined(&checked));
+    assert_eq!(rev(&fx.repo, "main"), base);
+    let landed = fx.land(&base, &tip, &members);
+    assert!(landed.status.success(), "{}", combined(&landed));
+    assert!(fx.is_closed(&b));
+}
+
+#[test]
 fn a_base_move_at_the_compare_and_swap_preserves_the_ref_and_checkout() {
     let t = happy_train(Fixture::new("", false));
     let repo = &t.fx.repo;
@@ -959,6 +1260,7 @@ fn an_overlapping_checkout_change_prevents_landing() {
     let repo = &t.fx.repo;
     fs::write(repo.join("a.txt"), "local work\n").unwrap();
 
+    t.assert_refused_naming(&t.check(), "local changes that overlap", &t.base);
     t.assert_refused_naming(&t.land(), "local changes that overlap", &t.base);
     assert_eq!(
         fs::read_to_string(repo.join("a.txt")).unwrap(),
@@ -979,6 +1281,7 @@ fn a_base_checked_out_in_another_worktree_prevents_landing() {
         &["worktree", "add", "-q", checkout.to_str().unwrap(), "main"],
     );
 
+    t.assert_refused_naming(&t.check(), "checkout with a space", &t.base);
     let out = t.land();
     t.assert_refused_naming(&out, "checkout with a space", &t.base);
     assert!(!checkout.join("a.txt").exists());
@@ -1063,6 +1366,7 @@ fn a_train_is_refused_when_harvest_authority_is_required() {
         "[harvest_authority]\nrequired = true\n",
         false,
     ));
+    t.assert_refused_naming(&t.check(), "harvest_authority", &t.base);
     let out = t.land();
     t.assert_refused_naming(&out, "harvest_authority", &t.base);
 }
@@ -1098,6 +1402,7 @@ fn a_train_changing_the_shell_surface_without_trust_is_refused() {
     };
     let grants_before = trust_store_listing(&t.fx.trust);
 
+    t.assert_refused_naming(&t.check(), ".cosmon/config.toml", &base);
     let out = t.land();
     t.assert_refused_naming(&out, ".cosmon/config.toml", &base);
     assert_eq!(
@@ -1115,6 +1420,8 @@ fn a_train_changing_the_shell_surface_without_trust_is_refused() {
     assert!(trusted.status.success(), "{}", combined(&trusted));
     git_ok(&t.fx.repo, &["checkout", "-q", "main"]);
 
+    let checked = t.check();
+    assert!(checked.status.success(), "{}", combined(&checked));
     let landed = t.land();
     assert!(
         landed.status.success(),
