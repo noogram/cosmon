@@ -30,8 +30,8 @@
 //!
 //! ## Output
 //!
-//! Human: one line — `<glyph> <headline>` followed by a voyant strip.
-//! `--json`: one NDJSON line matching the `cosmon.pulse/v1` schema.
+//! Human: `<glyph> <headline>`, the voyant strip and any gate pools.
+//! `--json`: one NDJSON line with the vitality reading and `gate_slots`.
 //!
 //! ## ADR-068 UX↔CLI parity
 //!
@@ -63,14 +63,18 @@
 //! tick is older than its TTL, its voyant is set to `Red` — missing data IS
 //! the alarm, never silence.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
 use chrono::{DateTime, Duration, Utc};
 use colored::Colorize;
+use cosmon_core::config::FULL_GATE_POOL;
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_core::vitality::{vitality, Pulse, PulseState, VitalityInputs, VoyantState};
+use cosmon_filestore::gate_slots::{observe_gate_pools, GateRunRecord};
 use cosmon_state::MoleculeFilter;
+use serde::Serialize;
 use serde_json::Value;
 
 use super::Context;
@@ -139,6 +143,7 @@ pub struct Args {
     pub sched_state: Option<std::path::PathBuf>,
 
     /// Emit the aggregate as a single `cosmon.pulse/v1` NDJSON line.
+    /// `gate_slots` includes holders, stale records and queued runs by pool.
     /// The global `--json` flag also enables this.
     #[arg(long)]
     pub json: bool,
@@ -277,17 +282,152 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     };
 
     let pulse = vitality(&inputs);
+    let gate_slots = gate_slots(ctx, &state_dir)?;
     let want_json = ctx.json || args.json;
     let mut out = std::io::stdout().lock();
 
     if args.swiftbar {
-        print_swiftbar(&mut out, &pulse)?;
+        print_swiftbar(&mut out, &pulse, &gate_slots)?;
     } else if want_json {
-        print_json(&mut out, &pulse)?;
+        print_json(&mut out, &pulse, &gate_slots)?;
     } else {
         print_human(&mut out, &pulse, window_secs)?;
+        print_gate_slots(&mut out, &gate_slots)?;
     }
 
+    Ok(())
+}
+
+#[derive(Default, Serialize)]
+struct GatePoolReading {
+    holders: Vec<GateSlotReading>,
+    queued: Vec<GateRunReading>,
+}
+
+#[derive(Serialize)]
+struct GateSlotReading {
+    index: usize,
+    status: &'static str,
+    #[serde(flatten)]
+    run: Option<GateRunReading>,
+}
+
+#[derive(Serialize)]
+struct GateRunReading {
+    #[serde(flatten)]
+    record: GateRunRecord,
+    age_secs: f64,
+    silence_secs: Option<f64>,
+}
+
+impl GateRunReading {
+    fn new(record: GateRunRecord, now: DateTime<Utc>, held: bool) -> Self {
+        let elapsed = |since| {
+            now.signed_duration_since(since)
+                .to_std()
+                .unwrap_or_default()
+                .as_secs_f64()
+        };
+        let age_secs = elapsed(record.started_at);
+        let silence_secs = (held && record.output_observed)
+            .then(|| elapsed(record.last_output_at.unwrap_or(record.started_at)));
+        Self {
+            record,
+            age_secs,
+            silence_secs,
+        }
+    }
+}
+
+type GateSlots = BTreeMap<String, GatePoolReading>;
+
+fn gate_slots(ctx: &Context, state_dir: &Path) -> anyhow::Result<GateSlots> {
+    let observations = observe_gate_pools(state_dir)?;
+    let now = Utc::now();
+    let mut pools: GateSlots = observations
+        .into_iter()
+        .map(|(pool, observation)| {
+            let holders = observation
+                .slots
+                .into_iter()
+                .map(|slot| GateSlotReading {
+                    index: slot.index,
+                    status: if slot.held { "held" } else { "stale" },
+                    run: slot
+                        .record
+                        .map(|record| GateRunReading::new(record, now, slot.held)),
+                })
+                .collect();
+            let queued = observation
+                .queued
+                .into_iter()
+                .map(|record| GateRunReading::new(record, now, false))
+                .collect();
+            (pool, GatePoolReading { holders, queued })
+        })
+        .collect();
+    let config = cosmon_filestore::load_project_config(&ctx.config_path()).unwrap_or_default();
+    for pool in config
+        .gate_slots
+        .pools
+        .keys()
+        .map(String::as_str)
+        .chain([FULL_GATE_POOL])
+    {
+        if config.gate_slots.count_for(pool).is_some() {
+            pools.entry(pool.to_owned()).or_default();
+        }
+    }
+    Ok(pools)
+}
+
+fn print_gate_slots(out: &mut impl Write, gate_slots: &GateSlots) -> anyhow::Result<()> {
+    for (pool, reading) in gate_slots {
+        let name = format!("{pool:?}").replace('|', "\\u{7c}");
+        writeln!(
+            out,
+            "  Gate pool {name}  ({} held, {} queued)",
+            reading
+                .holders
+                .iter()
+                .filter(|slot| slot.status == "held")
+                .count(),
+            reading.queued.len()
+        )?;
+        for slot in &reading.holders {
+            write!(out, "    slot {} {}", slot.index, slot.status)?;
+            if let Some(run) = &slot.run {
+                print_gate_run(out, run, slot.status == "held")?;
+            }
+            writeln!(out)?;
+        }
+        for run in &reading.queued {
+            write!(out, "    queued")?;
+            print_gate_run(out, run, false)?;
+            writeln!(out)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_gate_run(
+    out: &mut impl Write,
+    run: &GateRunReading,
+    show_silence: bool,
+) -> anyhow::Result<()> {
+    let record = &run.record;
+    write!(out, "  pid {}", record.pid)?;
+    if let Some(pgid) = record.pgid {
+        write!(out, "  pgid {pgid}")?;
+    }
+    write!(out, "  age {:.1}s", run.age_secs)?;
+    if let Some(silence) = run.silence_secs {
+        write!(out, "  output silence {silence:.1}s")?;
+    } else if show_silence {
+        write!(out, "  output silence unknown")?;
+    }
+    let command = format!("{:?}", record.command).replace('|', "\\u{7c}");
+    write!(out, "  {command}")?;
     Ok(())
 }
 
@@ -672,9 +812,15 @@ fn measured_token_count(value: &Value) -> Option<u64> {
 // Rendering
 // ---------------------------------------------------------------------------
 
-fn print_json(out: &mut impl Write, pulse: &Pulse) -> anyhow::Result<()> {
-    let line = serde_json::to_string(pulse)?;
-    writeln!(out, "{line}")?;
+fn print_json(out: &mut impl Write, pulse: &Pulse, gate_slots: &GateSlots) -> anyhow::Result<()> {
+    #[derive(Serialize)]
+    struct Reading<'a> {
+        #[serde(flatten)]
+        pulse: &'a Pulse,
+        gate_slots: &'a GateSlots,
+    }
+    serde_json::to_writer(&mut *out, &Reading { pulse, gate_slots })?;
+    writeln!(out)?;
     Ok(())
 }
 
@@ -756,7 +902,11 @@ fn write_voyant_with_count(
 ///
 /// The dot-emoji mapping (🟢/🟡/🔴/⚫) is the UI projection of
 /// `PulseState`/`VoyantState`; formatting stays in the CLI shell per ADR-068.
-fn print_swiftbar(out: &mut impl Write, pulse: &Pulse) -> anyhow::Result<()> {
+fn print_swiftbar(
+    out: &mut impl Write,
+    pulse: &Pulse,
+    gate_slots: &GateSlots,
+) -> anyhow::Result<()> {
     let dot = pulse_state_dot(pulse.state);
     let color = pulse_state_color(pulse.state);
     let headline = pulse.headline();
@@ -790,6 +940,11 @@ fn print_swiftbar(out: &mut impl Write, pulse: &Pulse) -> anyhow::Result<()> {
         pulse.fuel_pct * 100.0,
         pulse.scanned
     )?;
+
+    if !gate_slots.is_empty() {
+        writeln!(out, "---")?;
+        print_gate_slots(out, gate_slots)?;
+    }
 
     // Actions — operator-triggered only (lecture > intervention).
     writeln!(out, "---")?;
@@ -1185,7 +1340,7 @@ mod tests {
     fn test_swiftbar_green_first_line() {
         let pulse = make_green_pulse();
         let mut buf = Vec::new();
-        print_swiftbar(&mut buf, &pulse).unwrap();
+        print_swiftbar(&mut buf, &pulse, &GateSlots::new()).unwrap();
         let out = String::from_utf8(buf).unwrap();
         let first_line = out.lines().next().unwrap();
         // Green state → 🟢 dot + RPM headline + green color
@@ -1211,7 +1366,7 @@ mod tests {
     fn test_swiftbar_red_drainage_off_first_line() {
         let pulse = make_red_drainage_off_pulse();
         let mut buf = Vec::new();
-        print_swiftbar(&mut buf, &pulse).unwrap();
+        print_swiftbar(&mut buf, &pulse, &GateSlots::new()).unwrap();
         let out = String::from_utf8(buf).unwrap();
         let first_line = out.lines().next().unwrap();
         // Red state → 🔴 dot + DRAINAGE OFF word + red color
@@ -1233,7 +1388,7 @@ mod tests {
     fn test_swiftbar_dropdown_voyant_lines() {
         let pulse = make_green_pulse();
         let mut buf = Vec::new();
-        print_swiftbar(&mut buf, &pulse).unwrap();
+        print_swiftbar(&mut buf, &pulse, &GateSlots::new()).unwrap();
         let out = String::from_utf8(buf).unwrap();
         // All six voyant names must appear in the dropdown
         assert!(out.contains("scheduler"), "scheduler voyant missing");
@@ -1536,7 +1691,7 @@ mod tests {
     fn test_workers_count_in_swiftbar_output() {
         let pulse = make_green_pulse(); // live_workers=2 → workers_count=2
         let mut buf = Vec::new();
-        print_swiftbar(&mut buf, &pulse).unwrap();
+        print_swiftbar(&mut buf, &pulse, &GateSlots::new()).unwrap();
         let out = String::from_utf8(buf).unwrap();
         // workers line in dropdown must show the numeric count
         let workers_line = out.lines().find(|l| l.contains("workers")).unwrap_or("");
@@ -1550,7 +1705,7 @@ mod tests {
     fn test_swiftbar_peek_action_contains_cd() {
         let pulse = make_green_pulse();
         let mut buf = Vec::new();
-        print_swiftbar(&mut buf, &pulse).unwrap();
+        print_swiftbar(&mut buf, &pulse, &GateSlots::new()).unwrap();
         let out = String::from_utf8(buf).unwrap();
         let peek_line = out
             .lines()
@@ -1579,7 +1734,7 @@ mod tests {
     fn test_swiftbar_structure_separator_and_sections() {
         let pulse = make_green_pulse();
         let mut buf = Vec::new();
-        print_swiftbar(&mut buf, &pulse).unwrap();
+        print_swiftbar(&mut buf, &pulse, &GateSlots::new()).unwrap();
         let out = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = out.lines().collect();
         // Second line must be a separator

@@ -23,7 +23,7 @@
 
 use std::fs::{self, File};
 use std::future::pending;
-use std::io::{self, Write};
+use std::io::{self, Seek as _, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -31,8 +31,12 @@ use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
 use anyhow::{bail, Context as _, Result};
+use chrono::Utc;
 use cosmon_core::config::FULL_GATE_POOL;
-use cosmon_filestore::gate_slots::{acquire_gate_slot_in, try_acquire_gate_slot_in, GateSlotGuard};
+use cosmon_filestore::gate_slots::{
+    acquire_gate_slot_in, register_gate_waiter, try_acquire_gate_slot_in, GateRunRecord,
+    GateSlotGuard,
+};
 use nix::errno::Errno;
 use nix::sys::signal::{killpg, pthread_sigmask, SigSet, SigmaskHow, Signal};
 use nix::unistd::{getpgrp, tcgetpgrp, tcsetpgrp, Pid};
@@ -41,6 +45,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use super::Context;
 
 const SIGNAL_GRACE: Duration = Duration::from_millis(250);
+const OUTPUT_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Arguments for `cs gates`.
 #[derive(clap::Args)]
@@ -128,10 +133,18 @@ fn slot(ctx: &Context, a: &SlotArgs) -> Result<()> {
         }
     }
 
-    let guard = match count {
-        None => None,
-        Some(n) => Some(wait_for_slot(&ctx.state_dir(), &a.pool, n)?),
+    let record = GateRunRecord {
+        pid: std::process::id(),
+        pgid: None,
+        pool: a.pool.clone(),
+        command: a.command.clone(),
+        started_at: Utc::now(),
+        last_output_at: None,
+        output_observed: false,
     };
+    let guard = count
+        .map(|n| wait_for_slot(&ctx.state_dir(), &record, n))
+        .transpose()?;
     let mut command = Command::new(program);
     command.args(rest).process_group(0);
     if let Some(guard) = guard.as_ref().filter(|_| a.hand_descriptor) {
@@ -147,7 +160,12 @@ fn slot(ctx: &Context, a: &SlotArgs) -> Result<()> {
             });
         }
     }
-    let verdict = run_slot(a, program, command)?;
+    let verdict = run_slot(
+        a,
+        program,
+        command,
+        guard.as_ref().map(|guard| (guard, record)),
+    )?;
     if let Some(path) = &a.verdict_file {
         verdict.write(path)?;
     }
@@ -156,7 +174,12 @@ fn slot(ctx: &Context, a: &SlotArgs) -> Result<()> {
     std::process::exit(code);
 }
 
-fn run_slot(a: &SlotArgs, program: &str, command: Command) -> Result<Verdict> {
+fn run_slot(
+    a: &SlotArgs,
+    program: &str,
+    command: Command,
+    observation: Option<(&GateSlotGuard, GateRunRecord)>,
+) -> Result<Verdict> {
     let required_dir_error = || a.require_dir.as_deref().and_then(probe_directory);
     if let Some(reason) = required_dir_error() {
         return Ok(Verdict::CouldNotRun(reason));
@@ -170,7 +193,7 @@ fn run_slot(a: &SlotArgs, program: &str, command: Command) -> Result<Verdict> {
         .build()
         .context("cannot start gate supervisor")?;
     let timeout = a.timeout.map(Duration::from_secs);
-    let result = runtime.block_on(supervise(command, program, timeout));
+    let result = runtime.block_on(supervise(command, program, timeout, observation));
     if let Some(reason) = required_dir_error() {
         return Ok(Verdict::CouldNotRun(reason));
     }
@@ -236,6 +259,7 @@ async fn supervise(
     mut command: Command,
     program: &str,
     timeout: Option<Duration>,
+    mut observation: Option<(&GateSlotGuard, GateRunRecord)>,
 ) -> Result<Verdict> {
     // Subscribe before spawn so a signal received as the child starts is queued.
     let mut terminate = signal(SignalKind::terminate())?;
@@ -249,11 +273,27 @@ async fn supervise(
         }
     };
     let _terminal = ForegroundTerminal::lend_to(&mut command);
+    let mut output = observation
+        .as_ref()
+        .and_then(|_| OutputOffsets::open().ok());
+    let started_at = Utc::now();
     let mut child = tokio::process::Command::from(command)
         .spawn()
         .with_context(|| format!("cannot run `{program}`"))?;
     let id = child.id().context("gate command has no pid")?;
     let group = Pid::from_raw(i32::try_from(id)?);
+    if let Some((guard, record)) = &mut observation {
+        record.pgid = Some(id);
+        record.started_at = started_at;
+        record.output_observed = output.is_some();
+        if let Err(err) = guard.write_record(record) {
+            eprintln!(
+                "cs gates slot: cannot record holder of {}: {err}",
+                guard.path().display()
+            );
+            output = None;
+        }
+    }
     let deadline = async {
         match timeout {
             Some(duration) => tokio::time::sleep(duration).await,
@@ -268,7 +308,11 @@ async fn supervise(
             signal_group(group, received)?;
             false
         }
-        status = child.wait() => return Ok(Verdict::Ran(exit_code(status?))),
+        status = child.wait() => {
+            sample_output(&mut output, &mut observation);
+            return Ok(Verdict::Ran(exit_code(status?)));
+        }
+        never = observe_output(&mut output, &mut observation) => match never {},
     };
     if !timed_out {
         let grace = tokio::time::sleep(SIGNAL_GRACE);
@@ -286,10 +330,87 @@ async fn supervise(
     // PID until wait, and other members may still ignore the forwarded signal.
     signal_group(group, Signal::SIGKILL)?;
     let status = child.wait().await?;
+    sample_output(&mut output, &mut observation);
     if timed_out {
         Ok(Verdict::TimedOut)
     } else {
         Ok(Verdict::Ran(exit_code(status)))
+    }
+}
+
+/// Observe writes to the inherited open file descriptions. Borrowing their
+/// offsets preserves the command's stdio, including a shared `2>&1` offset.
+/// Pipes, terminals and devices do not expose a written-byte offset.
+struct OutputOffsets {
+    files: [File; 2],
+    positions: [u64; 2],
+}
+
+impl OutputOffsets {
+    fn open() -> io::Result<Self> {
+        let mut files = [
+            File::from(io::stdout().as_fd().try_clone_to_owned()?),
+            File::from(io::stderr().as_fd().try_clone_to_owned()?),
+        ];
+        for file in &files {
+            if !file.metadata()?.is_file() {
+                return Err(io::ErrorKind::Unsupported.into());
+            }
+        }
+        let positions = [files[0].stream_position()?, files[1].stream_position()?];
+        Ok(Self { files, positions })
+    }
+
+    fn advanced(&mut self) -> io::Result<bool> {
+        let positions = [
+            self.files[0].stream_position()?,
+            self.files[1].stream_position()?,
+        ];
+        let advanced = positions
+            .iter()
+            .zip(self.positions)
+            .any(|(now, before)| *now > before);
+        self.positions = positions;
+        Ok(advanced)
+    }
+}
+
+async fn observe_output(
+    output: &mut Option<OutputOffsets>,
+    observation: &mut Option<(&GateSlotGuard, GateRunRecord)>,
+) -> std::convert::Infallible {
+    if output.is_some() {
+        let mut interval = tokio::time::interval(OUTPUT_SAMPLE_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        while output.is_some() {
+            interval.tick().await;
+            sample_output(output, observation);
+        }
+    }
+    pending().await
+}
+
+fn sample_output(
+    output: &mut Option<OutputOffsets>,
+    observation: &mut Option<(&GateSlotGuard, GateRunRecord)>,
+) {
+    let (Some(offsets), Some((guard, record))) = (output.as_mut(), observation) else {
+        return;
+    };
+    match offsets.advanced() {
+        Ok(false) => return,
+        Ok(true) => record.last_output_at = Some(Utc::now()),
+        Err(_) => {
+            record.output_observed = false;
+            *output = None;
+        }
+    }
+    if let Err(err) = guard.write_record(record) {
+        eprintln!(
+            "cs gates slot: cannot update holder of {}: {err}",
+            guard.path().display()
+        );
+        *output = None;
     }
 }
 
@@ -347,12 +468,17 @@ fn set_foreground(terminal: BorrowedFd<'_>, group: Pid) -> nix::Result<()> {
 }
 
 /// Take a slot, saying once on stderr that this run is queued.
-fn wait_for_slot(state_dir: &Path, pool: &str, count: usize) -> Result<GateSlotGuard> {
+fn wait_for_slot(state_dir: &Path, record: &GateRunRecord, count: usize) -> Result<GateSlotGuard> {
+    let pool = &record.pool;
     if let Some(guard) = try_acquire_gate_slot_in(state_dir, pool, count)? {
         return Ok(guard);
     }
+    let queued = register_gate_waiter(state_dir, record).map_err(|err| {
+        eprintln!("cs gates slot: cannot record queued run: {err}");
+    });
     eprintln!("cs gates slot: queued for a slot of pool `{pool}` ({count} slots, all held)");
     let guard = acquire_gate_slot_in(state_dir, pool, count)?;
+    drop(queued);
     eprintln!(
         "cs gates slot: slot {} of pool `{pool}` acquired",
         guard.index()

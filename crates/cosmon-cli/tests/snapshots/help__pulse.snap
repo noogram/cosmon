@@ -42,7 +42,7 @@ Options:
           [env: COSMON_SCHED_STATE=]
 
       --json
-          Emit the aggregate as a single `cosmon.pulse/v1` NDJSON line. The global `--json` flag also enables this
+          Emit the aggregate as a single `cosmon.pulse/v1` NDJSON line. `gate_slots` includes holders, stale records and queued runs by pool. The global `--json` flag also enables this
 
       --swiftbar
           Emit `SwiftBar`/`BitBar` formatted output for the macOS menubar plugin.
