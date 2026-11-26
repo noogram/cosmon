@@ -268,6 +268,7 @@ pub(crate) struct RowView {
     /// may share a molecule; cumulative histories are deduplicated before any
     /// total is rendered.
     pub(crate) usage: Vec<cosmon_core::usage::UsageRecord>,
+    pub(crate) agy_receipt: Option<cosmon_observability::agy::AgyReceipt>,
     pub(crate) context_window: Option<u64>,
     pub(crate) latest_turn_input_tokens: Option<u64>,
     pub(crate) session: Option<String>,
@@ -3361,14 +3362,35 @@ impl App {
                 let health_style = molecule_health_style(health);
                 let (temp_glyph_s, temp_style) = temp_token(&r.tags);
                 let (whisper_glyph_s, whisper_style) = whisper_token(r.whisper_fresh);
-                let energy = format_energy(
-                    r.energy_in,
-                    r.energy_cached,
-                    r.energy_out,
-                    r.energy_reasoning,
-                    (r.context_window, r.latest_turn_input_tokens),
-                    &r.energy_cost,
-                    &r.usage,
+                let energy = r.agy_receipt.as_ref().map_or_else(
+                    || {
+                        format_energy(
+                            r.energy_in,
+                            r.energy_cached,
+                            r.energy_out,
+                            r.energy_reasoning,
+                            (r.context_window, r.latest_turn_input_tokens),
+                            &r.energy_cost,
+                            &r.usage,
+                        )
+                    },
+                    |receipt| {
+                        let counters = receipt.usage.unwrap_or_default().columns(|n| {
+                            if n == 0 {
+                                "0".to_owned()
+                            } else {
+                                humanize_tokens(n)
+                            }
+                        });
+                        let api =
+                            cosmon_observability::usage_projection::format_api_equivalent(&r.usage);
+                        let mut text = format!("     · {counters}\n{api}");
+                        if let Some(stop) = &receipt.quota_stop {
+                            use std::fmt::Write as _;
+                            let _ = write!(text, "\n{stop}");
+                        }
+                        text
+                    },
                 );
                 let is_expanded = self.expanded.contains(&r.mol_id);
                 // Tree-view indicator: ▾ when expanded, ▸ when collapsed.
@@ -4432,9 +4454,21 @@ pub(crate) fn snapshot_to_rows(snap: &FleetSnapshot) -> Vec<RowView> {
         }
     }
 
+    let agy_workers: HashMap<_, _> = snap
+        .workers()
+        .filter(|w| w.energy.agy_receipt.is_some())
+        .filter_map(|w| w.molecule_id.as_deref().map(|id| (id, &w.energy)))
+        .collect();
     for m in snap.molecules() {
         let id = m.id.to_string();
-        if by_mol.contains_key(&id) {
+        let agy_energy = agy_workers.get(id.as_str());
+        if let Some(row) = by_mol.get_mut(&id) {
+            if row.agy_receipt.is_none() {
+                if let Some(energy) = agy_energy {
+                    row.agy_receipt.clone_from(&energy.agy_receipt);
+                    row.usage.extend(energy.usage.clone());
+                }
+            }
             continue;
         }
         let heartbeat = if super::peek::PhaseFilter::is_harvestable(m.status, m.archived) {
@@ -4461,7 +4495,11 @@ pub(crate) fn snapshot_to_rows(snap: &FleetSnapshot) -> Vec<RowView> {
                 energy_out: 0,
                 energy_reasoning: 0,
                 energy_cost: cosmon_observability::EnergyCost::Unknown,
-                usage: Vec::new(),
+                usage: agy_energy
+                    .and_then(|energy| energy.usage.clone())
+                    .into_iter()
+                    .collect(),
+                agy_receipt: agy_energy.and_then(|energy| energy.agy_receipt.clone()),
                 context_window: None,
                 latest_turn_input_tokens: None,
                 session: None,
@@ -4522,6 +4560,9 @@ fn merge_row(
         .saturating_add(fresh.energy_reasoning);
     merge_energy_cost(&mut existing.energy_cost, fresh.energy_cost);
     existing.usage.extend(fresh.usage);
+    if existing.agy_receipt.is_none() {
+        existing.agy_receipt = fresh.agy_receipt;
+    }
     let deduplicated =
         cosmon_observability::usage_projection::deduplicate_histories(existing.usage.iter())
             .into_iter()
@@ -4667,6 +4708,7 @@ fn row_view_from(
         energy_reasoning: energy.reasoning_output_tokens,
         energy_cost: energy.cost,
         usage: energy.usage.into_iter().collect(),
+        agy_receipt: energy.agy_receipt,
         context_window: energy.context_window,
         latest_turn_input_tokens: energy.latest_turn_input_tokens,
         session: Some(s.name.clone()),
@@ -5149,6 +5191,7 @@ fn populate_snapshot(
                     api_equivalent: e.api_equivalent.clone(),
                     subscription: e.subscription.clone(),
                     usage: e.usage.clone(),
+                    agy_receipt: e.agy_receipt.clone(),
                     context_window: e.context_window,
                     latest_turn_input_tokens: e.latest_turn_input_tokens,
                 }
@@ -6090,6 +6133,7 @@ mod tests {
             energy_reasoning: 0,
             energy_cost: cosmon_observability::EnergyCost::Unknown,
             usage: Vec::new(),
+            agy_receipt: None,
             context_window: None,
             latest_turn_input_tokens: None,
             session: None,
@@ -6696,6 +6740,7 @@ mod tests {
                 api_equivalent: None,
                 subscription: None,
                 usage: None,
+                agy_receipt: None,
                 context_window: None,
                 latest_turn_input_tokens: None,
             },
@@ -6835,6 +6880,7 @@ mod tests {
                     api_equivalent: None,
                     subscription: None,
                     usage: None,
+                    agy_receipt: None,
                     context_window: Some(1_000_000),
                     latest_turn_input_tokens: None,
                 },
@@ -6854,6 +6900,7 @@ mod tests {
                     api_equivalent: None,
                     subscription: None,
                     usage: None,
+                    agy_receipt: None,
                     context_window: Some(1_000_000),
                     latest_turn_input_tokens: None,
                 },

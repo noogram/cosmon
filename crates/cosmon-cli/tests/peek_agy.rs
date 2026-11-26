@@ -91,6 +91,12 @@ fn agy_receipt_usage_is_projected_as_four_counts() -> anyhow::Result<()> {
     assert_eq!(doc["molecules"][0]["agy_usage"]["input_tokens"], 159_034);
     let text = peek(tmp.path(), &["peek", "--no-tui", "--once", "--no-tmux"])?;
     assert!(text.contains("159034/369075/8486/4698"), "{text}");
+    let snapshot = peek(tmp.path(), &["peek", "--snapshot"])?;
+    assert!(snapshot.contains("159.0K/369.0K/8.4K/4.6K"), "{snapshot}");
+    assert!(
+        snapshot.contains("quota-exhausted (resets in 19m45s)"),
+        "{snapshot}"
+    );
     Ok(())
 }
 
@@ -152,18 +158,20 @@ fn agy_usage_uses_the_existing_pulse_fuel_channel() -> anyhow::Result<()> {
 
     let journal = tmp.path().join(".cosmon/state/events.jsonl");
     let deadline = Instant::now() + Duration::from_secs(15);
-    let recorded = loop {
-        if fs::read_to_string(&journal)?.contains("\"type\":\"usage_observed\"") {
-            break true;
+    let recorded = (|| -> anyhow::Result<bool> {
+        loop {
+            if fs::read_to_string(&journal)?.contains("\"type\":\"usage_observed\"") {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline || observer.try_wait()?.is_some() {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        if Instant::now() >= deadline || observer.try_wait()?.is_some() {
-            break false;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    })();
     let _ = observer.kill();
     observer.wait()?;
-    assert!(recorded, "peek did not journal the agy observation");
+    assert!(recorded?, "peek did not journal the agy observation");
 
     let output = peek(tmp.path(), &["pulse", "--json"])?;
     let doc: Value = serde_json::from_str(&output)?;

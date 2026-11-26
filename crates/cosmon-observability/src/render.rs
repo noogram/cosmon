@@ -473,13 +473,17 @@ fn worker_row(w: &Worker) -> String {
     use crate::worker::EnergyCost;
 
     let mol = w.molecule_id.as_deref().unwrap_or("-");
-    let tokens = format!(
-        "{}/{}/{}/{}",
-        humanize_tokens(w.energy.input_tokens),
-        humanize_tokens(w.energy.cached_input_tokens),
-        humanize_tokens(w.energy.output_tokens),
-        humanize_tokens(w.energy.reasoning_output_tokens),
-    );
+    let tokens = if let Some(receipt) = &w.energy.agy_receipt {
+        receipt.usage.unwrap_or_default().columns(humanize_tokens)
+    } else {
+        format!(
+            "{}/{}/{}/{}",
+            humanize_tokens(w.energy.input_tokens),
+            humanize_tokens(w.energy.cached_input_tokens),
+            humanize_tokens(w.energy.output_tokens),
+            humanize_tokens(w.energy.reasoning_output_tokens),
+        )
+    };
     let cost = if let Some(usage) = &w.energy.usage {
         crate::usage_projection::format_api_equivalent(std::slice::from_ref(usage))
     } else if let Some(api) = &w.energy.api_equivalent {
@@ -519,6 +523,14 @@ fn worker_row(w: &Worker) -> String {
 
 fn worker_usage_lines(w: &Worker) -> Vec<String> {
     let mut lines = Vec::new();
+    if let Some(stop) = w
+        .energy
+        .agy_receipt
+        .as_ref()
+        .and_then(|receipt| receipt.quota_stop.as_ref())
+    {
+        lines.push(format!("    {stop}"));
+    }
     if let Some(percent) = w.energy.context_percent() {
         lines.push(format!("    context {percent:.0}%"));
     }

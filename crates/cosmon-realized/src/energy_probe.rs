@@ -23,6 +23,7 @@
 //! every active worker, whichever subprocess adapter hosts it.
 
 use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use cosmon_core::codex_energy::{codex_energy_from_session, CodexSubscriptionUsage};
@@ -41,6 +42,7 @@ use cosmon_core::usage::{
     PlanApplicability, PlanUsage, TokenCount as UsageTokenCount, TokenUsage, UnavailableReason,
     UsageHistory, UsageObservationId, UsageRecord, UsageSubject, CURRENT_USAGE_SCHEMA_VERSION,
 };
+use cosmon_observability::agy::{parse_agy_receipt, AgyReceipt, AgyTokenCounts};
 use cosmon_state::events::worker_spawn::ModelAssessmentSnapshot;
 use cosmon_state::plan_observation::FilePlanObservationStore;
 use sha2::{Digest as _, Sha256};
@@ -65,6 +67,8 @@ pub struct WorkerEnergy {
     /// Authoritative record consumed by every new projection and durable
     /// producer. The legacy fields remain populated for compatibility.
     pub usage: Option<UsageRecord>,
+    /// Raw Antigravity counters and quota information for the display.
+    pub agy_receipt: Option<AgyReceipt>,
     /// Model context-window capacity, when the adapter reports it.
     pub context_window: Option<u64>,
     /// Input tokens in the last reported turn, including cached input.
@@ -335,7 +339,7 @@ pub fn discover_fleet_backends(
 /// Load energy for every worker in `fleet`, probing every tmux socket in
 /// `backends`. `state_dir` locates `events.jsonl`, whose last
 /// `AdapterSelected` per molecule routes each worker to the right
-/// session-log parser (claude vs codex).
+/// receipt or session-log parser.
 #[must_use]
 pub fn load_worker_energy(
     state_dir: &Path,
@@ -421,6 +425,11 @@ pub fn load_worker_energy_with_adapters<S: std::hash::BuildHasher>(
                 .get(worker_id)
                 .and_then(|(cwd, _)| codex_sessions.get(cwd.to_string_lossy().as_ref()))
                 .and_then(|session| read_codex_worker_energy(session, worker_id))
+        } else if adapter == Some("agy") {
+            data.current_molecule
+                .as_ref()
+                .filter(|_| data.worker_role == cosmon_core::worker::WorkerRole::Cognition)
+                .map(|molecule| read_agy_worker_energy(state_dir, molecule, worker_id))
         } else {
             let plan_root = data
                 .current_molecule
@@ -665,6 +674,7 @@ fn read_claude_worker_energy(
         api_equivalent: Some(api_equivalent),
         subscription: None,
         usage: canonical_usage,
+        agy_receipt: None,
         context_window: None,
         latest_turn_input_tokens: session_log.turns.last().and_then(|turn| {
             turn.input_tokens
@@ -754,9 +764,120 @@ fn read_codex_worker_energy(session_path: &Path, worker_id: &WorkerId) -> Option
         api_equivalent: Some(api_equivalent),
         subscription: snapshot.subscription,
         usage: canonical_usage,
+        agy_receipt: None,
         context_window: snapshot.model_context_window,
         latest_turn_input_tokens: snapshot.latest_turn_input_tokens,
     })
+}
+
+fn agy_receipt_path(state_dir: &Path, molecule: &MoleculeId) -> Option<PathBuf> {
+    cosmon_state::archive::resolve_molecule_dir(state_dir, molecule)
+        .map(|dir| dir.join("agy-stream.jsonl"))
+}
+
+fn read_agy_file(path: &Path) -> Option<AgyReceipt> {
+    let file = std::fs::File::open(path).ok()?;
+    Some(parse_agy_receipt(
+        BufReader::new(file).split(b'\n').map_while(Result::ok),
+    ))
+}
+
+/// Read the molecule's Antigravity receipt independently of its tmux pane.
+/// A missing or unreadable receipt leaves its counters and stop unknown.
+#[must_use]
+pub fn read_agy_receipt(state_dir: &Path, molecule: &MoleculeId) -> AgyReceipt {
+    agy_receipt_path(state_dir, molecule)
+        .and_then(|path| read_agy_file(&path))
+        .unwrap_or_default()
+}
+
+fn read_agy_worker_energy(
+    state_dir: &Path,
+    molecule: &MoleculeId,
+    worker_id: &WorkerId,
+) -> WorkerEnergy {
+    let path = agy_receipt_path(state_dir, molecule);
+    let receipt = path.as_deref().and_then(read_agy_file).unwrap_or_default();
+    let usage = path
+        .as_deref()
+        .zip(receipt.usage)
+        .and_then(|(path, counts)| agy_usage_record(path, worker_id, counts, receipt.init_count));
+    let mut energy = WorkerEnergy {
+        agy_receipt: Some(receipt),
+        ..WorkerEnergy::default()
+    };
+    if let Some(record) = usage {
+        let tokens = &record.tokens;
+        energy.input = TokenCount::new(tokens.input_tokens.measured().unwrap_or_default());
+        energy.cached_input =
+            TokenCount::new(tokens.cached_input_tokens.measured().unwrap_or_default());
+        energy.output = TokenCount::new(tokens.output_tokens.measured().unwrap_or_default());
+        energy.reasoning_output = TokenCount::new(
+            tokens
+                .reasoning_output_tokens
+                .measured()
+                .unwrap_or_default(),
+        );
+        energy.usage = Some(record);
+    }
+    energy
+}
+
+fn agy_usage_record(
+    path: &Path,
+    worker_id: &WorkerId,
+    counts: AgyTokenCounts,
+    init_count: u64,
+) -> Option<UsageRecord> {
+    let unavailable = UsageTokenCount::Unavailable {
+        reason: UnavailableReason::NotObserved,
+    };
+    let observed = |count: Option<u64>| {
+        count.map_or(unavailable, |tokens| UsageTokenCount::Measured { tokens })
+    };
+    // The provider reports uncached input separately. Canonical usage requires
+    // the inclusive total, which can only be observed with both counters.
+    let input = counts
+        .input
+        .zip(counts.cache_read)
+        .and_then(|(input, cache)| input.checked_add(cache));
+    let reasoning = match (counts.thinking, counts.output) {
+        (Some(thinking), Some(output)) if thinking > output => UsageTokenCount::Unavailable {
+            reason: UnavailableReason::MalformedSource,
+        },
+        _ => observed(counts.thinking),
+    };
+    let tokens = TokenUsage {
+        input_tokens: observed(input),
+        cached_input_tokens: observed(counts.cache_read),
+        cache_write_tokens: unavailable,
+        output_tokens: observed(counts.output),
+        reasoning_output_tokens: reasoning,
+        model_segments: Availability::Unavailable {
+            reason: UnavailableReason::NotObserved,
+        },
+        provenance: ObservationProvenance {
+            source: "agy_stream_jsonl".to_owned(),
+            provider: Some("google".to_owned()),
+            observed_at: None,
+            captured_at: file_capture_time(path),
+            scope: ObservationScope::UsageHistory,
+        },
+    };
+    let api_equivalent = ApiEquivalent::Unavailable {
+        reason: UnavailableReason::NotObserved,
+    };
+    let mut history_digest = Sha256::new();
+    history_digest.update(path.as_os_str().as_encoded_bytes());
+    history_digest.update(init_count.to_le_bytes());
+    finalize_usage_record(
+        worker_id,
+        history_digest.finalize(),
+        tokens,
+        api_equivalent,
+        unavailable_plan(),
+        |history_id, api, plan| serde_json::to_vec(&(history_id, counts, api, plan)),
+    )
 }
 
 fn unavailable_plan() -> PlanUsage {
@@ -789,24 +910,84 @@ fn build_usage_record(
     plan: PlanUsage,
     captured_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Option<UsageRecord> {
+    let tokens = TokenUsage {
+        input_tokens: UsageTokenCount::Measured { tokens: input },
+        cached_input_tokens: UsageTokenCount::Measured {
+            tokens: cached_input,
+        },
+        cache_write_tokens: if provider == "openai" {
+            UsageTokenCount::Unavailable {
+                reason: UnavailableReason::Unsupported,
+            }
+        } else {
+            UsageTokenCount::Measured {
+                tokens: cache_write,
+            }
+        },
+        output_tokens: UsageTokenCount::Measured { tokens: output },
+        reasoning_output_tokens: if provider == "anthropic" {
+            UsageTokenCount::Unavailable {
+                reason: UnavailableReason::Unsupported,
+            }
+        } else {
+            UsageTokenCount::Measured {
+                tokens: reasoning_output,
+            }
+        },
+        model_segments: if segments.is_empty() {
+            Availability::Unavailable {
+                reason: UnavailableReason::NotObserved,
+            }
+        } else {
+            Availability::Available {
+                value: segments.to_vec(),
+            }
+        },
+        provenance: ObservationProvenance {
+            source: source.to_owned(),
+            provider: Some(provider.to_owned()),
+            observed_at: None,
+            captured_at,
+            scope: ObservationScope::UsageHistory,
+        },
+    };
+    finalize_usage_record(
+        worker_id,
+        Sha256::digest(history_path.as_os_str().as_encoded_bytes()),
+        tokens,
+        api_equivalent,
+        plan,
+        |history_id, api_equivalent, identity_plan| {
+            serde_json::to_vec(&(
+                history_id,
+                input,
+                cached_input,
+                cache_write,
+                output,
+                reasoning_output,
+                api_equivalent,
+                identity_plan,
+            ))
+        },
+    )
+}
+
+fn finalize_usage_record(
+    worker_id: &WorkerId,
+    history_digest: sha2::digest::Output<Sha256>,
+    tokens: TokenUsage,
+    api_equivalent: ApiEquivalent,
+    plan: PlanUsage,
+    identity: impl FnOnce(&str, &ApiEquivalent, &PlanUsage) -> serde_json::Result<Vec<u8>>,
+) -> Option<UsageRecord> {
     let core_worker = cosmon_core::id::WorkerId::new(worker_id.as_str()).ok()?;
-    let history_digest = Sha256::digest(history_path.as_os_str().as_encoded_bytes());
+    let provider = tokens.provenance.provider.as_deref()?;
     let history_id = format!("{provider}-{history_digest:x}");
     let mut identity_plan = plan.clone();
     for window in &mut identity_plan.windows {
         window.provenance.captured_at = None;
     }
-    let observation_material = serde_json::to_vec(&(
-        &history_id,
-        input,
-        cached_input,
-        cache_write,
-        output,
-        reasoning_output,
-        &api_equivalent,
-        &identity_plan,
-    ))
-    .ok()?;
+    let observation_material = identity(&history_id, &api_equivalent, &identity_plan).ok()?;
     let observation_digest = Sha256::digest(observation_material);
     let record = UsageRecord {
         schema_version: CURRENT_USAGE_SCHEMA_VERSION,
@@ -818,47 +999,7 @@ fn build_usage_record(
             attempt: None,
             history: UsageHistory::Known { id: history_id },
         },
-        tokens: TokenUsage {
-            input_tokens: UsageTokenCount::Measured { tokens: input },
-            cached_input_tokens: UsageTokenCount::Measured {
-                tokens: cached_input,
-            },
-            cache_write_tokens: if provider == "openai" {
-                UsageTokenCount::Unavailable {
-                    reason: UnavailableReason::Unsupported,
-                }
-            } else {
-                UsageTokenCount::Measured {
-                    tokens: cache_write,
-                }
-            },
-            output_tokens: UsageTokenCount::Measured { tokens: output },
-            reasoning_output_tokens: if provider == "anthropic" {
-                UsageTokenCount::Unavailable {
-                    reason: UnavailableReason::Unsupported,
-                }
-            } else {
-                UsageTokenCount::Measured {
-                    tokens: reasoning_output,
-                }
-            },
-            model_segments: if segments.is_empty() {
-                Availability::Unavailable {
-                    reason: UnavailableReason::NotObserved,
-                }
-            } else {
-                Availability::Available {
-                    value: segments.to_vec(),
-                }
-            },
-            provenance: ObservationProvenance {
-                source: source.to_owned(),
-                provider: Some(provider.to_owned()),
-                observed_at: None,
-                captured_at,
-                scope: ObservationScope::UsageHistory,
-            },
-        },
+        tokens,
         api_equivalent,
         plan,
     };
@@ -2644,6 +2785,7 @@ mod tests {
             api_equivalent: None,
             subscription: None,
             usage: None,
+            agy_receipt: None,
             context_window: Some(1_000),
             latest_turn_input_tokens: Some(80),
         };

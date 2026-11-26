@@ -30,6 +30,12 @@ model window. An unknown turn or window shows no percentage; IN/CACHED/OUT/RSN
 remain cumulative session counters. Snapshot follows the same rule. JSON keeps
 its existing cumulative usage schema and exposes no context percentage.
 
+Antigravity (agy) shows reported input, cache reads, output, and thinking
+tokens from the molecule receipt. A dash marks missing counts. JSON includes
+the raw counters in agy_usage alongside the canonical usage record, whose
+input total includes cache reads. Quota refusals show quota-exhausted with
+the reset delay the provider announced, when available.
+
 The selected dependent's blocked-by detail names a collapsed or frozen
 blocker and the operator gesture that can release or replace the edge.
 

@@ -1,2 +1,3 @@
+{"event":"init","init":{"permission_mode":"always-proceed"}}
 {"event":"error","error":{"status":"RESOURCE_EXHAUSTED","code":429,"retryable":true,"message":"Individual quota reached. Resets in 19m45s."}}
 {"event":"result","result":{"status":"ERROR","error":"Individual quota reached. Resets in 19m45s.","duration_seconds":95.8,"num_turns":1,"usage":{"input_tokens":159034,"output_tokens":8486,"thinking_tokens":4698,"cache_read_tokens":369075,"total_tokens":167520},"finished_reason":"error"}}
