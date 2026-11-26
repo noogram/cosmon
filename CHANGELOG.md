@@ -19,6 +19,14 @@ this stage.
 
 ## [Unreleased]
 
+- `cs gates slot` supervises the command it runs: the command gets its own process group and TERM, INT and HUP are forwarded to the whole group; `--timeout <secs>` kills the group and records `timed_out`; `--require-dir <path>` refuses to start, or reclassifies a finished run, when the directory is missing or not writable, recording `could_not_run:<reason>`; `--verdict-file <path>` writes `ran:<code>`, `timed_out` or `could_not_run:<reason>`; `--hand-descriptor` lets the command keep a named slot until its last descriptor closes. Without the new flags the exit status is unchanged (ADR-192 I7, decision D).
+
+- `cs pulse` lists each gate-slot pool's holders and queued runs with run age and output-silence age, for runs inside and outside molecules; a record whose lock is no longer held is shown as stale.
+
+- `cs land-train --check` runs every landing check without the trunk lock, the compare-and-swap or any write; landing and `--check` also refuse a member whose blocker is neither landed nor earlier in the same train (ADR-192 I5 and I11).
+
+- A molecule tagged `no-auto-harvest` (or `harvest_to:<branch>`) is never merged by an automatic path: the resident loop, the legacy `cs run` teardown and `on_complete`, the tmux pane-died harvest and `cs patrol --harvest` all land through `cs done --if-completed`, which answers `reserved` and changes nothing. An explicit `cs done <id>` and `cs land-train` still close it (#237).
+
 - A failed Codex Exec launch with a confirmed absent worker now collapses the molecule and preserves its branch and worktree for inspection.
 - The resident runtime waits for cross-galaxy blockers to complete and land. Unknown or unreadable blocker records keep the dependent pending.
 - `cs run --resident` rejects `--policy noop` before starting the runtime.
