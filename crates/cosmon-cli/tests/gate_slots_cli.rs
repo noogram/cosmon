@@ -331,6 +331,141 @@ fn wait_for_queue(stderr: &mut impl std::io::BufRead) {
     }
 }
 
+fn pulse_gate_slots(state: &Path) -> serde_json::Value {
+    let output = cs(state).args(["pulse", "--json"]).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["gate_slots"].clone()
+}
+
+#[test]
+fn pulse_distinguishes_live_queued_and_stale_runs_without_a_molecule() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = galaxy(
+        tmp.path(),
+        "[gate_slots]\nfull_gate = 1\n[gate_slots.pools]\ncontroller = 2",
+    );
+    let mut holder = RunningSlot::start(&state, &[], "echo $$ > \"$1\"; exec sleep 300");
+    let mut waiter = cs(&state)
+        .args(["gates", "slot", "--", "touch", "waiter-ran"])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_queue(&mut std::io::BufReader::new(waiter.stderr.take().unwrap()));
+    let pools = pulse_gate_slots(&state);
+    waiter.kill().unwrap();
+    waiter.wait().unwrap();
+    assert!(!state.join("waiter-ran").exists());
+
+    let full = &pools["full_gate"];
+    assert_eq!(full["holders"][0]["pid"], holder.wrapper.id());
+    assert_eq!(full["holders"][0]["pgid"], holder.group.as_raw());
+    assert_eq!(full["holders"][0]["status"], "held");
+    assert!(full["holders"][0]["silence_secs"].is_null());
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(state.join("gate-slots/full_gate/0.lock")).unwrap())
+            .unwrap();
+    assert_eq!(record["pool"], "full_gate");
+    assert_eq!(record["pid"], holder.wrapper.id());
+    assert_eq!(record["started_at"], full["holders"][0]["started_at"]);
+    assert_eq!(full["queued"][0]["pid"], waiter.id());
+    assert_eq!(
+        full["queued"][0]["command"],
+        serde_json::json!(["touch", "waiter-ran"])
+    );
+    assert!(full["queued"][0]["age_secs"].is_number());
+    assert_eq!(pools["controller"]["holders"], serde_json::json!([]));
+
+    holder.kill_wrapper();
+    let pools = pulse_gate_slots(&state);
+    assert_eq!(pools["full_gate"]["holders"][0]["status"], "stale");
+    assert_eq!(pools["full_gate"]["queued"], serde_json::json!([]));
+    assert!(process_is_alive(holder.command));
+
+    for options in [&["pulse"][..], &["pulse", "--swiftbar"][..]] {
+        let output = cs(&state).args(options).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("Gate pool \"full_gate\"  (0 held, 0 queued)"));
+        assert!(stdout.contains("slot 0 stale"));
+    }
+
+    let replacement =
+        cosmon_filestore::gate_slots::try_acquire_gate_slot_in(&state, "full_gate", 1)
+            .unwrap()
+            .unwrap();
+    let replacement_view = pulse_gate_slots(&state);
+    assert_eq!(
+        replacement_view["full_gate"]["holders"][0]["status"],
+        "held"
+    );
+    assert!(replacement_view["full_gate"]["holders"][0]["pid"].is_null());
+    drop(replacement);
+}
+
+#[test]
+fn pulse_measures_silence_and_resets_on_either_redirected_stream() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = galaxy(tmp.path(), "[gate_slots]\nfull_gate = 1\n")
+        .canonicalize()
+        .unwrap();
+    let molecule = state.join("fixture-molecule");
+    fs::create_dir(&molecule).unwrap();
+    let log_path = molecule.join("gates.log");
+    let log = File::create(&log_path).unwrap();
+    let mut command = cs(&state);
+    command
+        .env_remove("COSMON_STATE_DIR")
+        .env("COSMON_MOL_DIR", &molecule)
+        .args([
+            "gates",
+            "slot",
+            "--timeout",
+            "25",
+            "--",
+            "sh",
+            "-c",
+            "echo $$ > command.pid; printf start; while [ ! -e emit ]; do sleep .05; done; printf stderr >&2; exec sleep 300",
+        ])
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .process_group(0);
+    let wrapper = command.spawn().unwrap();
+    wait_until_within("the first output", Duration::from_secs(8), || {
+        fs::read(&log_path).unwrap() == b"start"
+    });
+    let command = pid(fs::read_to_string(state.join("command.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap());
+    let holder = RunningSlot {
+        wrapper,
+        command,
+        group: getpgid(Some(command)).unwrap(),
+    };
+    let snapshot = || pulse_gate_slots(&state)["full_gate"]["holders"][0].clone();
+    assert_eq!(
+        snapshot()["pid"],
+        holder.wrapper.id(),
+        "no live holder record"
+    );
+    wait_until_within("measured silence", Duration::from_secs(10), || {
+        let held = snapshot();
+        held["last_output_at"].is_string()
+            && held["silence_secs"].as_f64().is_some_and(|age| age >= 1.0)
+    });
+    let silent = snapshot();
+    assert_eq!(silent["pid"], holder.wrapper.id());
+    assert!(silent["age_secs"].as_f64().unwrap() >= silent["silence_secs"].as_f64().unwrap());
+    fs::write(state.join("emit"), "").unwrap();
+    wait_until_within(
+        "the stderr output timestamp to advance",
+        Duration::from_secs(10),
+        || snapshot()["last_output_at"] != silent["last_output_at"],
+    );
+    assert_eq!(fs::read(log_path).unwrap(), b"startstderr");
+}
+
 #[test]
 fn required_directory_is_probed_before_and_after_the_command() {
     let tmp = tempfile::tempdir().unwrap();
@@ -749,9 +884,8 @@ fn no_cs_done_path_acquires_a_gate_slot() {
                     .to_string_lossy()
                     .into_owned();
                 let src = fs::read_to_string(&path).unwrap_or_default();
-                let takes_slot = ["acquire_gate_slot", "gate_slots::", "gates slot"]
-                    .iter()
-                    .any(|needle| src.contains(needle));
+                let read_only_pulse = rel.ends_with("cosmon-cli/src/cmd/pulse.rs")
+                    && !src.contains("acquire_gate_slot");
                 // Comments and docs may name the primitive; code may not call it.
                 let in_code = src.lines().any(|l| {
                     let t = l.trim_start();
@@ -760,7 +894,7 @@ fn no_cs_done_path_acquires_a_gate_slot() {
                             .iter()
                             .any(|n| t.contains(n))
                 });
-                if takes_slot && in_code && !allowed.iter().any(|a| rel.ends_with(a)) {
+                if in_code && !read_only_pulse && !allowed.iter().any(|a| rel.ends_with(a)) {
                     offenders.push(rel);
                 }
             }

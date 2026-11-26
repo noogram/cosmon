@@ -207,7 +207,7 @@ Exit code: always 0 (read-only, non-blocking — callers use --json state).
    The drainage, propel, and heal voyants read `patrols.<name>.last_fired_at` from this file — the authoritative per-patrol fire time written by the scheduler on every dispatch, regardless of what the patrol command does.
 
    Defaults to `~/.cosmon/scheduler.state.json`. Override with `COSMON_SCHED_STATE` env var or this flag for testability.
-* `--json` — Emit the aggregate as a single `cosmon.pulse/v1` NDJSON line. The global `--json` flag also enables this
+* `--json` — Emit the aggregate as a single `cosmon.pulse/v1` NDJSON line. `gate_slots` includes holders, stale records and queued runs by pool. The global `--json` flag also enables this
 * `--swiftbar` — Emit `SwiftBar`/`BitBar` formatted output for the macOS menubar plugin.
 
    First line = menubar face (colored dot + headline + `SwiftBar` params). Below `---`: the six voyant lines, fuel%, scanned, separator, action items. Consumed by `menubar/cosmon-pulse.10s.sh` which execs `cs pulse --swiftbar`. See ADR-068: `cs pulse --swiftbar` is the UI surface for `cs pulse`.

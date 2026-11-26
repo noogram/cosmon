@@ -21,6 +21,14 @@ and no UI control (cs-thin allowlist: `operator_only`). Patrol reads the same
 files and leaves a worker whose gate run is queued behind a live holder alone;
 no patrol flag changes.
 
+`cs pulse` lists gate pools, slots and queued commands in its terminal, JSON
+and SwiftBar output. It includes runs launched outside a molecule. An unlocked
+slot record appears as stale, and an abandoned queue record is omitted. Output
+silence is sampled when the command inherits regular files for both stdout and
+stderr. Other output destinations show an unknown silence age. The observation
+preserves the command's stdio and leaves the vitality indicators unchanged.
+There is no gate pool view on the remote route.
+
 ## Briefing edits on step changes
 
 The shared evolve operation preserves a briefing that differs from its last
