@@ -129,12 +129,64 @@ blocked on a lock its parent holds would wait forever.
 
 1. Run the same gate against the current base by itself before dropping any
    members. If the base fails the gate, investigate the base failure first.
-2. Identify the failing member, record its pinned head and rebuild the train
-   without it.
+2. Find a suspect and confirm it with a witness pair (below), then record the
+   suspect's pinned head and rebuild the train without it.
 3. When checking and landing the rebuilt train, add `--exclude <id>=<head>`
    for each removed member. Use the head it contributed to the earlier train
    or a later head on the same first-parent history. Run the gate after the
    checks pass and before landing.
+
+### The witness rule (ADR-192 I6′)
+
+A probe proposes a suspect and proves nothing. `git blame` on the failing
+line, or `git log -S` on the failing symbol, names a member that may be the
+author of the fault. Eject that member only with a witness pair: a gate run on
+the train prefix just before the suspect that is green, and a gate run on the
+prefix that includes the suspect that is red. Both runs must actually have
+happened, in the same environment (same checkout method, `CARGO_HOME`, build
+directory, toolchain and gate command), and each verdict must be `ran:0` and
+`ran:<nonzero>` respectively.
+
+- When the probe names no member, or the pair does not hold (the prefix before
+  the suspect is red, or the prefix with it is green), the probe missed.
+  Bisect the member list by prefix over a base that passed the gate, and eject
+  the first member whose prefix turns red.
+- A `timed_out` or `could_not_run` verdict is not red. A prefix with that
+  outcome is unknown: rerun it, or repair the environment, and do not eject on
+  it. A missing verdict is unknown as well.
+- Blame alone is not enough. The assertion line of a catalogue-wide test
+  points at the file that registers the entry, not at the member that broke
+  the invariant, and a carrier (below) defeats both blame and bisection,
+  because the prefix that turns red is the carrier while the faulty commit
+  belongs to another member. Refuse carriers before gating rather than
+  expecting the probe to find them.
+
+A late red costs more per probe (a failure that appears only after the
+platform build or the longest suite finishes can take tens of minutes), but it
+does not change what the pair has to show.
+
+### Conflicting members and re-admission
+
+A member that conflicts when the train merges it is ejected from this train.
+It syncs from the landed base, by merging or rebasing the base into its branch
+and re-running its own gates, and returns as a candidate for the next train.
+Order the next train with the ejected members first, oldest ejection first.
+Each member then reaches the front of the queue after a bounded number of
+trains, so a member that keeps conflicting with newer arrivals is eventually
+admitted.
+
+### Build environment and gate order
+
+Give the train's gate a private `CARGO_HOME`. This is project policy, not
+something cosmon sets: a Cargo process outside the train that holds
+`$CARGO_HOME/.package-cache` blocks the gate inside the command, where neither
+the slot queue nor `cs pulse` shows it, and a timeout is the only bound.
+
+Run the platform build first in the project's `[gates]` order, before the
+suites that are quick to fail on other grounds. A reporter's trains showed
+their reds roughly 50 minutes in, after the platform build; putting that build
+first moves a red caused by it to the start of the run, where a probe is
+cheapest.
 
 A carrier is a member whose pinned head contains the excluded member's first
 own commit. Git finds it as the oldest entry in
