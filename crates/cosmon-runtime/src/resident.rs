@@ -61,6 +61,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use cosmon_core::event_v2::EventV2;
+use cosmon_core::interaction::{CrossGalaxyRef, MoleculeLink};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -166,6 +167,9 @@ pub struct EnsembleMolecule {
     /// IDs the molecule is blocked by. Empty for ready molecules.
     #[serde(default)]
     pub blocked_by: Vec<String>,
+    /// Typed edges from the ensemble, including foreign prerequisites.
+    #[serde(default)]
+    pub typed_links: Vec<MoleculeLink>,
     /// Merge stamp when `status == "completed"` — the merge-before-dispatch
     /// discriminant, carried as an RFC-3339 string (only its *presence* is
     /// read). A completed blocker clears its dependents **iff** this is set,
@@ -276,6 +280,14 @@ impl EnsembleSnapshot {
                         .collect()
                 })
                 .unwrap_or_default();
+            let typed_links = entry
+                .get("typed_links")
+                .map(Vec::deserialize)
+                .transpose()
+                .map_err(|e| {
+                    ResidentError::EnsembleParse(format!("{id}: invalid typed_links: {e}"))
+                })?
+                .unwrap_or_default();
             let kind = entry
                 .get("kind")
                 .and_then(serde_json::Value::as_str)
@@ -327,6 +339,7 @@ impl EnsembleSnapshot {
                 kind,
                 tags,
                 blocked_by,
+                typed_links,
                 merged_at,
                 stuck_at,
                 freeze_on_last_step,
@@ -601,6 +614,7 @@ pub struct ReadyFrontierScheduler {
     /// this run makes. An empty map (the default) renders no `--harness`
     /// flag at all.
     run_harness: cosmon_core::harness_settings::HarnessMap,
+    cross_blocker_landed: Option<fn(&CrossGalaxyRef) -> bool>,
 }
 
 impl ReadyFrontierScheduler {
@@ -650,6 +664,14 @@ impl ReadyFrontierScheduler {
         run_harness: cosmon_core::harness_settings::HarnessMap,
     ) -> Self {
         self.run_harness = run_harness;
+        self
+    }
+
+    /// Supply the application's read-only completion and landing check for
+    /// foreign prerequisites. Without a resolver, a foreign edge stays closed.
+    #[must_use]
+    pub fn with_cross_blocker_check(mut self, landed: fn(&CrossGalaxyRef) -> bool) -> Self {
+        self.cross_blocker_landed = Some(landed);
         self
     }
 }
@@ -718,7 +740,14 @@ impl ResidentScheduler for ReadyFrontierScheduler {
                 continue;
             }
             // A missing record does not provide a completion verdict.
-            let unblocked = m.blocked_by.iter().all(|b| cleared.contains(b.as_str()));
+            let unblocked = m.blocked_by.iter().all(|b| cleared.contains(b.as_str()))
+                && m.typed_links
+                    .iter()
+                    .filter_map(MoleculeLink::cross_galaxy_blocked_by_source)
+                    .all(|source| {
+                        self.cross_blocker_landed
+                            .is_some_and(|landed| landed(source))
+                    });
             if unblocked {
                 out.push(Decision::Tackle {
                     molecule_id: m.id.clone(),
@@ -2580,6 +2609,7 @@ mod tests {
             kind: None,
             tags: Vec::new(),
             blocked_by: blocked_by.iter().map(|s| (*s).into()).collect(),
+            typed_links: Vec::new(),
             merged_at: None,
             stuck_at: None,
             freeze_on_last_step: false,

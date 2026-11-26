@@ -367,7 +367,7 @@ SEE ALSO: cs tackle (single node, no runtime), docs/handbook.md#one-primitive.
 
 ###### **Options:**
 
-* `--policy <POLICY>` — Scheduling policy to use
+* `--policy <POLICY>` — Scheduling policy to use. `noop` is unavailable with `--resident`
 
   Default value: `dag`
 

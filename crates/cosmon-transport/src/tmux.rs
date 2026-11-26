@@ -1525,10 +1525,13 @@ impl TransportBackend for TmuxBackend {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // Various tmux messages that mean "no sessions exist" — not an error
-            if stderr.contains("no server running")
-                || stderr.contains("no sessions")
-                || stderr.contains("error connecting")
+            // An absent socket or server establishes absence. A connection
+            // error such as permission denied leaves liveness unknown.
+            let message = stderr.trim();
+            if message.starts_with("no server running")
+                || message == "no sessions"
+                || (message.starts_with("error connecting to ")
+                    && message.ends_with("(No such file or directory)"))
             {
                 return Ok(Vec::new());
             }

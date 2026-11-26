@@ -19,6 +19,10 @@ this stage.
 
 ## [Unreleased]
 
+- A failed Codex Exec launch with a confirmed absent worker now collapses the molecule and preserves its branch and worktree for inspection.
+- The resident runtime waits for cross-galaxy blockers to complete and land. Unknown or unreadable blocker records keep the dependent pending.
+- `cs run --resident` rejects `--policy noop` before starting the runtime.
+
 - `cs land-train` names the local base in a shell-trust refusal and explains how to resume member closure after the train has already landed upstream.
 
 - Dependencies: `cookie` 0.18.1 → 0.18.3 (RUSTSEC-2026-0594, private cookie nonces can repeat in processes that fork). It is reached only through `axum-test`, a dev-dependency of `apps-transport-http`, so no shipped binary contained it; the cargo-vet exemption moves to 0.18.3 and remains unaudited.

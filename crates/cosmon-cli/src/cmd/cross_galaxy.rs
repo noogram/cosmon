@@ -25,8 +25,8 @@
 //! The resolver is deliberately *advisory*: a missing galaxy or a
 //! missing molecule yields a degraded resolution, never a hard error.
 //! That mirrors ADR-035 §6 ("network partition / galaxy offline →
-//! `StaleEdge` event") — the local DAG must keep moving even when the
-//! remote galaxy is unreachable.
+//! `StaleEdge` event"). Scheduling keeps that dependency closed until
+//! the remote completion and landing can both be read.
 
 // Read-side surface (`resolve_cross_galaxy_ref`, `is_resolved`,
 // `is_terminal`, override-file helpers) is consumed incrementally by
@@ -55,6 +55,9 @@ pub enum CrossGalaxyResolution {
         galaxy_path: PathBuf,
         /// The molecule's current status (terminal or live).
         status: MoleculeStatus,
+        /// Presence of the remote landing stamp, used by dispatch.
+        #[serde(skip)]
+        landed: bool,
     },
     /// The galaxy was located on disk but the molecule could not be
     /// loaded (missing, mistyped, or removed).
@@ -142,9 +145,19 @@ pub fn resolve_cross_galaxy_ref(reference: &CrossGalaxyRef) -> CrossGalaxyResolu
         Ok(mol) => CrossGalaxyResolution::Resolved {
             galaxy_path,
             status: mol.status,
+            landed: mol.merged_at.is_some(),
         },
         Err(_) => CrossGalaxyResolution::MoleculeMissing { galaxy_path },
     }
+}
+
+/// Admit a cross-galaxy edge only with both a successful completion and a landing.
+pub(super) fn blocker_has_landed(reference: &CrossGalaxyRef) -> bool {
+    matches!(
+        resolve_cross_galaxy_ref(reference),
+        CrossGalaxyResolution::Resolved { status, landed: true, .. }
+            if status.satisfies_blocked_by()
+    )
 }
 
 // ---------------------------------------------------------------------------
