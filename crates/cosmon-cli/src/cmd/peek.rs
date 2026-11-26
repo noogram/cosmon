@@ -1313,7 +1313,6 @@ mod tests {
     use cosmon_core::molecule::MoleculeStatus;
     use cosmon_core::worker::{DesiredState, WorkerStatus};
     use cosmon_filestore::FileStore;
-    use cosmon_observability::agy::{AgyReceipt, AgyTokenCounts};
     use cosmon_observability::FleetSnapshot;
     use cosmon_state::{Fleet, MoleculeData, StateStore, WorkerData};
     use tempfile::TempDir;
