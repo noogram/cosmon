@@ -617,6 +617,8 @@ callback. An absent sample remains unavailable on every surface.
 | Continue after an edit to an unused adapter | `cs run --resident` reloads the config and records `config-reloaded` in its trace and summary | No equivalent control audited | No equivalent action audited |
 | Halt when a running molecule's adapter settings change or its adapter is unknown | `cs run --resident` records `config-drift-halt` and exits with code 75 | No equivalent control audited | No equivalent action audited |
 | Inspect the adapter recorded on a running process | `cs ensemble --json` includes `dispatched_adapter` separately from the durable `adapter` pin | No equivalent field audited | No equivalent field audited |
+| Request the noop policy with resident mode | `cs run --resident --policy noop` refuses before starting or dispatching | No equivalent control audited | No equivalent action audited |
+| Inspect a failed Codex Exec launch with a confirmed absent worker | `cs observe <id>` shows the collapse reason. The branch and worktree remain available for inspection. | No equivalent view audited | The resident trace records the failed tackle |
 
 ## Concurrent tackle claim (issue #119)
 
@@ -674,6 +676,7 @@ successfully answered request, not that the model used them.
 | Capability | CLI | Native UI | Other CLI views |
 |---|---|---|---|
 | Hold a dependent until its blocker completes | `cs tackle` refuses dispatch; `cs run --resident` and the frontier retain the pending dependent | No equivalent admission control audited | No equivalent admission control audited |
+| Hold a dependent on a foreign blocker | `cs run --resident` and `cs tackle` require readable completion and landing evidence for `--blocked-by <alias>:<id>` | No equivalent admission control audited | `cs deps` shows the reference and its resolution |
 | Name dependents held by a collapsed or frozen blocker | Human `cs status` and `cs status <blocker>` name them; `cs peek` names the blocker on the dependent row and gives the recovery gesture | No equivalent detail audited | No equivalent detail audited |
 | Diagnose a blocker absent from the resident project snapshot | `cs status` names each pending dependent and blocker in text and `missing_blockers` JSON, distinguishes a missing record from an out-of-project record, and names the re-nucleation gesture; `cs ensemble --json` includes referenced legacy blockers without `project_id` | No equivalent detail audited | No equivalent detail audited |
 

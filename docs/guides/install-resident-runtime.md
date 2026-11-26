@@ -98,6 +98,23 @@ if your layout differs from `/Users/you/…`. The `--config` value
 must end in `.cosmon/state` — that is the directory containing
 `fleets/`, `presence/`, and `events.jsonl`.
 
+## Dispatch prerequisites
+
+`cs run --resident` uses the ready frontier and rejects `--policy noop`.
+Each resident tackle checks the galaxy's `[admission].max_active` against
+the live worker count before creating a branch, worktree, or worker session.
+
+A dependency declared with `--blocked-by <alias>:<id>` stays pending until
+the referenced molecule is completed and its landing stamp is readable.
+An unknown galaxy, missing record, or unreadable state keeps the dependent
+pending. Inspect the edge with `cs deps <dependent>` and run `cs done` in the
+blocker's galaxy once the blocker is ready to land.
+
+When a Codex Exec launch fails and the transport confirms the worker is
+absent, `cs observe <id>` reports a collapse with the launch error. The
+branch and worktree remain available for inspection. A failed liveness read
+leaves the launch unresolved for audit.
+
 ## The five gestures
 
 ### 1. Add the block (one-time)

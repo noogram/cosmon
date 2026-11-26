@@ -394,3 +394,26 @@ fn resident_holds_cross_galaxy_dependencies_until_landed_and_fails_closed() {
     assert!(attempts[0]["error"].is_null(), "{attempts:?}");
     assert!(downstream.tackles(&unknown).is_empty());
 }
+
+#[test]
+fn resident_rejects_noop_before_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let galaxy = Galaxy::new(tmp.path(), "resident-noop", "");
+    let id = galaxy.nucleate(&["--adapter", "opencode"]);
+    let run = galaxy
+        .resident()
+        .args(["--policy", "noop"])
+        .output()
+        .unwrap();
+    assert!(
+        !run.status.success()
+            && stderr(&run).contains("--policy noop")
+            && stderr(&run).contains("--resident"),
+        "expected an explicit refusal, got {} and {}",
+        run.status,
+        stderr(&run)
+    );
+    assert!(!galaxy.trace_path().exists());
+    assert_eq!(galaxy.observe(&id)["status"], "pending");
+    assert!(!galaxy.has_worktree(&id));
+}

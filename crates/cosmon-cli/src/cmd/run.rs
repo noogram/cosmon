@@ -84,7 +84,7 @@ pub struct Args {
     #[arg(default_value = "")]
     pub molecule: String,
 
-    /// Scheduling policy to use.
+    /// Scheduling policy to use. `noop` is unavailable with `--resident`.
     #[arg(long, default_value = "dag", value_parser = ["dag", "noop"])]
     pub policy: String,
 
@@ -308,6 +308,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // crate at its module boundary, satisfies RR-1 through RR-5, and
     // writes an NDJSON trace to `.cosmon/state/runtime-trace.jsonl`.
     if args.resident {
+        anyhow::ensure!(
+            args.policy != "noop",
+            "--resident cannot be combined with --policy noop"
+        );
         return run_resident(ctx, args);
     }
 
