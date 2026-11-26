@@ -742,20 +742,7 @@ pub(crate) fn collapse_one_with_kind(
             store.save_molecule(mol_id, &updated)?;
         }
         if let Some(expected) = failed_launch {
-            let cleanup = store.load_fleet().and_then(|mut fleet| {
-                if fleet
-                    .workers
-                    .get(&expected.worker_id)
-                    .is_some_and(|worker| worker.current_molecule.as_ref() == Some(mol_id))
-                {
-                    fleet.workers.remove(&expected.worker_id);
-                    store.save_fleet(&fleet)?;
-                }
-                Ok(())
-            });
-            if let Err(error) = cleanup {
-                eprintln!("Could not clear the failed worker registration for {mol_id}: {error}");
-            }
+            unregister_failed_worker(store, mol_id, &expected.worker_id);
         }
         prev_status
     };
@@ -811,6 +798,30 @@ pub(crate) fn collapse_one_with_kind(
     );
 
     Ok(prev_status)
+}
+
+/// Clear the roster entry for a collapsed dispatch while holding the fleet lock.
+fn unregister_failed_worker(
+    store: &FileStore,
+    mol_id: &MoleculeId,
+    worker_id: &cosmon_core::id::WorkerId,
+) {
+    use cosmon_state::StateStore;
+
+    let cleanup = store.load_fleet().and_then(|mut fleet| {
+        if fleet
+            .workers
+            .get(worker_id)
+            .is_some_and(|worker| worker.current_molecule.as_ref() == Some(mol_id))
+        {
+            fleet.workers.remove(worker_id);
+            store.save_fleet(&fleet)?;
+        }
+        Ok(())
+    });
+    if let Err(error) = cleanup {
+        eprintln!("Could not clear the failed worker registration for {mol_id}: {error}");
+    }
 }
 
 #[cfg(test)]
