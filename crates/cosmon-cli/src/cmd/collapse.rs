@@ -681,10 +681,11 @@ pub(crate) fn collapse_one(
     mol_id: &MoleculeId,
     reason: &str,
 ) -> anyhow::Result<MoleculeStatus> {
-    collapse_one_with_kind(store, ops_dir, mol_id, reason, None)
+    collapse_one_with_kind(store, ops_dir, mol_id, reason, None, None)
 }
 
-/// Collapse a synchronous worker with a recorded machine-readable cause.
+/// Collapse a failed worker with a recorded machine-readable cause.
+/// A qualified launch must still own the running dispatch when it collapses.
 ///
 /// # Errors
 /// Returns persistence and transition errors from the canonical collapse path.
@@ -694,12 +695,18 @@ pub(crate) fn collapse_one_with_kind(
     mol_id: &MoleculeId,
     reason: &str,
     kind: Option<CollapseReason>,
+    failed_launch: Option<&cosmon_core::process::MoleculeProcess>,
 ) -> anyhow::Result<MoleculeStatus> {
     use cosmon_state::StateStore;
 
     let prev_status = {
         let _g = store.lock_fleet()?;
-        let mol_data = store.load_molecule(mol_id)?;
+        let (mol_data, revision) = if failed_launch.is_some() {
+            let (molecule, revision) = store.load_molecule_revisioned(mol_id)?;
+            (molecule, Some(revision))
+        } else {
+            (store.load_molecule(mol_id)?, None)
+        };
         let prev_status = mol_data.status;
 
         if prev_status == MoleculeStatus::Collapsed {
@@ -707,6 +714,17 @@ pub(crate) fn collapse_one_with_kind(
         }
         if prev_status == MoleculeStatus::Completed {
             anyhow::bail!("molecule {mol_id} is completed — cannot collapse a completed molecule");
+        }
+        if let Some(expected) = failed_launch {
+            anyhow::ensure!(
+                prev_status == MoleculeStatus::Running
+                    && mol_data.process.as_ref().is_some_and(|p| {
+                        p.worker_id == expected.worker_id
+                            && p.started_at == expected.started_at
+                            && p.transport == expected.transport
+                    }),
+                "dispatch changed before the failed launch could be recorded for {mol_id}"
+            );
         }
 
         let mut updated = mol_data;
@@ -718,7 +736,27 @@ pub(crate) fn collapse_one_with_kind(
             updated.release_process();
         }
         updated.updated_at = Utc::now();
-        store.save_molecule(&updated.id.clone(), &updated)?;
+        if let Some(revision) = revision {
+            store.save_molecule_if_revision(mol_id, &updated, &revision)?;
+        } else {
+            store.save_molecule(mol_id, &updated)?;
+        }
+        if let Some(expected) = failed_launch {
+            let cleanup = store.load_fleet().and_then(|mut fleet| {
+                if fleet
+                    .workers
+                    .get(&expected.worker_id)
+                    .is_some_and(|worker| worker.current_molecule.as_ref() == Some(mol_id))
+                {
+                    fleet.workers.remove(&expected.worker_id);
+                    store.save_fleet(&fleet)?;
+                }
+                Ok(())
+            });
+            if let Err(error) = cleanup {
+                eprintln!("Could not clear the failed worker registration for {mol_id}: {error}");
+            }
+        }
         prev_status
     };
 

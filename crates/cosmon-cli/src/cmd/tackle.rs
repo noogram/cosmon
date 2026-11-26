@@ -2062,12 +2062,9 @@ fn run_with_transport(
 
     // Failure of spawn_and_prompt used to propagate via `?` straight to the
     // caller, leaving the branch and worktree we just created orphaned on
-    // disk. A re-invocation would then see "branch already exists" and
-    // either reuse a stale worktree or confuse the operator. `cs tackle`'s
-    // symmetry contract is: either everything commits (Running molecule +
-    // worker + branch + worktree) or nothing persists. On spawn failure
-    // we now undo `create_worktree`'s side effects — and the ledger entry
-    // written just above — before surfacing the error.
+    // disk. Legacy failed spawns roll back the ledger and provisioning.
+    // An attempted Codex Exec launch can have reached the worker before the
+    // error was reported, so its branch and worktree are retained for audit.
     let spawn_outcome = match spawn_and_prompt(
         &backend,
         selected_backend,
@@ -2090,7 +2087,7 @@ fn run_with_transport(
     ) {
         Ok(outcome) => outcome,
         Err(e) => {
-            if let Some(created) = e.downcast_ref::<ExecLaunchUnresolved>() {
+            if let Some(created) = e.downcast_ref::<ExecLaunchAttemptFailure>() {
                 if let Some(identity) = &created.terminal {
                     let _ = dispatch_ledger::stamp_terminal_witness(
                         &store,
@@ -2099,7 +2096,13 @@ fn run_with_transport(
                         identity,
                     );
                 }
-                return Err(e);
+                return Err(fail_exec_launch(
+                    &store,
+                    &state_dir,
+                    &mol,
+                    selected_backend,
+                    &created.message,
+                ));
             }
 
             if let Some(failure) = e.downcast_ref::<InprocessLoopFailure>() {
@@ -2115,6 +2118,7 @@ fn run_with_transport(
                         &mol_id,
                         &reason,
                         Some(cosmon_core::event_v2::CollapseReason::AgentLoopFailed),
+                        None,
                     )?;
                     return Err(e);
                 }
@@ -2213,8 +2217,15 @@ fn run_with_transport(
             .or(mol.process.as_ref());
         dispatch_ledger::stamp_terminal_witness(&store, &mol.id, expected, identity)
     });
-    anyhow::ensure!(!pin_transport || identity_recorded,
-        "Codex Exec launched but creation identity could not be persisted; dispatch remains unresolved for audit, no name-based adoption or automatic retry");
+    if pin_transport && !identity_recorded {
+        return Err(fail_exec_launch(
+            &store,
+            &state_dir,
+            &mol,
+            selected_backend,
+            "creation identity could not be persisted",
+        ));
+    }
     if spawn_outcome.terminal.is_some() && !identity_recorded {
         eprintln!(
             "cs tackle: terminal identity not recorded; read-only attachment will be unavailable"
@@ -2308,7 +2319,15 @@ fn run_with_transport(
             cosmon_transport::readiness::SessionStatus::Dead
         };
         if !still_alive || status == cosmon_transport::readiness::SessionStatus::Dead {
-            anyhow::ensure!(!pin_transport, "Codex Exec exited during setup; launch binding and owned worktree preserved for audit, no name-addressed cleanup");
+            if pin_transport {
+                return Err(fail_exec_launch(
+                    &store,
+                    &state_dir,
+                    &mol,
+                    selected_backend,
+                    &format!("worker did not survive setup (status={status})"),
+                ));
+            }
 
             dispatch_ledger::rollback_dispatch(&store, &pre_dispatch_snapshot, &wid);
             emit_worker_spawn_rolled_back(
@@ -4828,11 +4847,45 @@ pub(super) struct SpawnOutcome {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("Codex Exec transport launch was attempted; outcome unresolved and resources remain for audit: {message}")]
-struct ExecLaunchUnresolved {
+#[error("{message}")]
+struct ExecLaunchAttemptFailure {
     message: String,
     terminal: Option<cosmon_core::terminal::TerminalIdentity>,
     expected_process: Option<cosmon_core::process::MoleculeProcess>,
+}
+
+/// A launch error alone is ambiguous. A successful absence probe permits
+/// terminalizing the same dispatch while preserving its Git resources.
+fn fail_exec_launch(
+    store: &FileStore,
+    state_dir: &Path,
+    dispatched: &MoleculeData,
+    backend: &dyn TransportBackend,
+    message: &str,
+) -> anyhow::Error {
+    if let Some(process) = dispatched
+        .process
+        .as_ref()
+        .filter(|p| matches!(backend.is_alive(&p.worker_id), Ok(false)))
+    {
+        let reason = format!(
+            "Codex Exec launch failed and the worker is absent: {message}. Branch and worktree retained for audit."
+        );
+        return match super::collapse::collapse_one_with_kind(
+            store,
+            state_dir,
+            &dispatched.id,
+            &reason,
+            Some(cosmon_core::event_v2::CollapseReason::WorkerCrashed),
+            Some(process),
+        ) {
+            Ok(_) => anyhow::anyhow!("{reason}"),
+            Err(error) => error.context(reason),
+        };
+    }
+    anyhow::anyhow!(
+        "Codex Exec transport launch was attempted; outcome unresolved and resources remain for audit: {message}"
+    )
 }
 
 /// The observable output of a synchronous in-process Direct-API agent loop.
@@ -5103,7 +5156,7 @@ pub(super) fn spawn_and_prompt(
                     .and_then(|entry| entry.mode.as_deref())
                     .is_some_and(|mode| mode.eq_ignore_ascii_case("exec"))
             {
-                anyhow::Error::new(ExecLaunchUnresolved {
+                anyhow::Error::new(ExecLaunchAttemptFailure {
                     message: error.to_string(),
                     terminal: terminal.clone(),
                     expected_process: terminal_expected_process
