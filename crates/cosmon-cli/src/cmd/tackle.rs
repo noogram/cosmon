@@ -2099,23 +2099,26 @@ fn run_with_transport(
     ) {
         Ok(outcome) => outcome,
         Err(e) => {
-            if let Some(created) = e.downcast_ref::<ExecLaunchAttemptFailure>() {
-                if let Some(identity) = &created.terminal {
-                    let _ = dispatch_ledger::stamp_terminal_witness(
+            let e = match e.downcast::<ExecLaunchUnresolved>() {
+                Ok(failure) => {
+                    if let Some(identity) = &failure.terminal {
+                        let _ = dispatch_ledger::stamp_terminal_witness(
+                            &store,
+                            &mol.id,
+                            failure.expected_process.as_ref(),
+                            identity,
+                        );
+                    }
+                    return Err(fail_exec_launch(
                         &store,
-                        &mol.id,
-                        created.expected_process.as_ref(),
-                        identity,
-                    );
+                        &state_dir,
+                        &mol,
+                        selected_backend,
+                        failure,
+                    ));
                 }
-                return Err(fail_exec_launch(
-                    &store,
-                    &state_dir,
-                    &mol,
-                    selected_backend,
-                    &created.message,
-                ));
-            }
+                Err(other) => other,
+            };
 
             if let Some(failure) = e.downcast_ref::<InprocessLoopFailure>() {
                 if failure.progress.tools_executed > 0 {
@@ -2235,7 +2238,7 @@ fn run_with_transport(
             &state_dir,
             &mol,
             selected_backend,
-            "creation identity could not be persisted",
+            ExecLaunchUnresolved::without_witness("creation identity could not be persisted"),
         ));
     }
     if spawn_outcome.terminal.is_some() && !identity_recorded {
@@ -2337,7 +2340,9 @@ fn run_with_transport(
                     &state_dir,
                     &mol,
                     selected_backend,
-                    &format!("worker did not survive setup (status={status})"),
+                    ExecLaunchUnresolved::without_witness(format!(
+                        "worker did not survive setup (status={status})"
+                    )),
                 ));
             }
 
@@ -4859,11 +4864,21 @@ pub(super) struct SpawnOutcome {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("{message}")]
-struct ExecLaunchAttemptFailure {
+#[error("Codex Exec transport launch was attempted; outcome unresolved and resources remain for audit: {message}")]
+struct ExecLaunchUnresolved {
     message: String,
     terminal: Option<cosmon_core::terminal::TerminalIdentity>,
     expected_process: Option<cosmon_core::process::MoleculeProcess>,
+}
+
+impl ExecLaunchUnresolved {
+    fn without_witness(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            terminal: None,
+            expected_process: None,
+        }
+    }
 }
 
 /// A launch error alone is ambiguous. A successful absence probe permits
@@ -4873,7 +4888,7 @@ fn fail_exec_launch(
     state_dir: &Path,
     dispatched: &MoleculeData,
     backend: &dyn TransportBackend,
-    message: &str,
+    failure: ExecLaunchUnresolved,
 ) -> anyhow::Error {
     if let Some(process) = dispatched
         .process
@@ -4881,7 +4896,8 @@ fn fail_exec_launch(
         .filter(|p| matches!(backend.is_alive(&p.worker_id), Ok(false)))
     {
         let reason = format!(
-            "Codex Exec launch failed and the worker is absent: {message}. Branch and worktree retained for audit."
+            "Codex Exec launch failed and the worker is absent: {}. Branch and worktree retained for audit.",
+            failure.message
         );
         return match super::collapse::collapse_one_with_kind(
             store,
@@ -4892,12 +4908,11 @@ fn fail_exec_launch(
             Some(process),
         ) {
             Ok(_) => anyhow::anyhow!("{reason}"),
-            Err(error) => error.context(reason),
+            Err(error) => anyhow::Error::new(failure)
+                .context(format!("Could not record the failed dispatch: {error}")),
         };
     }
-    anyhow::anyhow!(
-        "Codex Exec transport launch was attempted; outcome unresolved and resources remain for audit: {message}"
-    )
+    anyhow::Error::new(failure)
 }
 
 /// The observable output of a synchronous in-process Direct-API agent loop.
@@ -5168,7 +5183,7 @@ pub(super) fn spawn_and_prompt(
                     .and_then(|entry| entry.mode.as_deref())
                     .is_some_and(|mode| mode.eq_ignore_ascii_case("exec"))
             {
-                anyhow::Error::new(ExecLaunchAttemptFailure {
+                anyhow::Error::new(ExecLaunchUnresolved {
                     message: error.to_string(),
                     terminal: terminal.clone(),
                     expected_process: terminal_expected_process
