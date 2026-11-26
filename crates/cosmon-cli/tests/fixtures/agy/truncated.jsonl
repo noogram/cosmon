@@ -1,0 +1,2 @@
+{"event":"message","message":{"role":"assistant","content":"Checking the worktree"}}
+{"event":"result","result":{"status":"SUCCESS","usage":{"input_tokens":150
