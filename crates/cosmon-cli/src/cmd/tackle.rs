@@ -836,6 +836,18 @@ fn run_with_transport(
             enforce_admission()?;
         }
     }
+    // Read the foreign record at the dispatch boundary as well as in the
+    // resident frontier. A mount or state record can disappear between them.
+    if let Some(blocker) = mol
+        .typed_links
+        .iter()
+        .filter_map(cosmon_core::interaction::MoleculeLink::cross_galaxy_blocked_by_source)
+        .find(|source| !super::cross_galaxy::blocker_has_landed(source))
+    {
+        anyhow::bail!(
+            "molecule {mol_id} is blocked by {blocker} — no completed and landed blocker was verified; inspect the edge with cs deps {mol_id}"
+        );
+    }
 
     // 2. Load formula for context.
     //

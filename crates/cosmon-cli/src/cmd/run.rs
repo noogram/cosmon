@@ -1041,7 +1041,8 @@ fn run_resident(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         ReadyFrontierScheduler::new()
             .with_run_adapter(run_adapter)
             .with_run_base(run_base)
-            .with_run_harness(run_harness),
+            .with_run_harness(run_harness)
+            .with_cross_blocker_check(super::cross_galaxy::blocker_has_landed),
     );
     let mut runtime = RuntimeLoop::new(config, scheduler);
     let trace_path = runtime.trace_path().to_path_buf();

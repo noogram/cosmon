@@ -300,3 +300,97 @@ fn resident_checks_the_active_cap_between_dispatches_from_the_same_snapshot() {
     assert!(!galaxy.has_branch(third));
     assert!(!galaxy.has_worktree(third));
 }
+
+#[test]
+fn resident_holds_cross_galaxy_dependencies_until_landed_and_fails_closed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let upstream = Galaxy::new(tmp.path(), "resident-upstream", "");
+    let downstream = Galaxy::new(tmp.path(), "resident-downstream", "");
+    let blocker = upstream.nucleate(&["--tag", "no-auto-harvest"]);
+    success(
+        upstream
+            .cs(&["tackle", &blocker, "--adapter", "opencode"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(upstream.observe(&blocker)["status"], "running");
+    let edge = format!("resident-upstream:{blocker}");
+    let child = downstream.nucleate(&["--blocked-by", &edge, "--adapter", "opencode"]);
+    let unknown_edge = format!("resident-unknown:{blocker}");
+    let unknown = downstream.nucleate(&[
+        "--blocked-by",
+        &edge,
+        "--blocked-by",
+        &unknown_edge,
+        "--adapter",
+        "opencode",
+    ]);
+    let deps = success(downstream.cs(&["deps", &child]).output().unwrap());
+    assert!(String::from_utf8_lossy(&deps.stdout).contains("[cross-galaxy/running]"));
+
+    let assert_held = |stage| {
+        let run = downstream.resident().output().unwrap();
+        assert_eq!(run.status.code(), Some(124), "{}", stderr(&run));
+        for id in [&child, &unknown] {
+            let attempts = downstream.tackles(id);
+            assert!(
+                attempts.is_empty(),
+                "{stage}: {id} was dispatched: {attempts:#?}"
+            );
+            assert_eq!(downstream.observe(id)["status"], "pending");
+            assert!(!downstream.has_worktree(id));
+        }
+    };
+    assert_held("running");
+    let direct = downstream
+        .cs(&["tackle", &child, "--adapter", "opencode"])
+        .output()
+        .unwrap();
+    assert!(
+        !direct.status.success() && stderr(&direct).contains(&edge),
+        "{}",
+        stderr(&direct)
+    );
+    assert!(!downstream.has_worktree(&child));
+    let worktree = upstream.root.join(".worktrees").join(&blocker);
+    fs::write(worktree.join("result.txt"), "fixture result\n").unwrap();
+    upstream.git(&["-C", worktree.to_str().unwrap(), "add", "result.txt"]);
+    upstream.git(&[
+        "-C",
+        worktree.to_str().unwrap(),
+        "commit",
+        "-qm",
+        "Add fixture result",
+    ]);
+    success(
+        upstream
+            .cs(&["complete", &blocker, "--reason", "fixture completed"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(upstream.observe(&blocker)["status"], "completed");
+    assert_held("completed before landing");
+    success(upstream.cs(&["done", &blocker]).output().unwrap());
+    assert_eq!(
+        fs::read_to_string(upstream.root.join("result.txt")).unwrap(),
+        "fixture result\n"
+    );
+
+    let state = upstream.state(&blocker);
+    let landed = fs::read(&state).unwrap();
+    fs::write(&state, "{unreadable").unwrap();
+    assert_held("unreadable");
+    fs::write(&state, landed).unwrap();
+
+    let run = downstream.resident().output().unwrap();
+    assert_eq!(
+        downstream.observe(&child)["status"],
+        "running",
+        "{}",
+        stderr(&run)
+    );
+    let attempts = downstream.tackles(&child);
+    assert_eq!(attempts.len(), 1, "{attempts:?}");
+    assert!(attempts[0]["error"].is_null(), "{attempts:?}");
+    assert!(downstream.tackles(&unknown).is_empty());
+}
