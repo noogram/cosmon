@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-11-26
+
 - `cs gates slot` supervises the command it runs: the command gets its own process group and TERM, INT and HUP are forwarded to the whole group; `--timeout <secs>` kills the group and records `timed_out`; `--require-dir <path>` refuses to start, or reclassifies a finished run, when the directory is missing or not writable, recording `could_not_run:<reason>`; `--verdict-file <path>` writes `ran:<code>`, `timed_out` or `could_not_run:<reason>`; `--hand-descriptor` lets the command keep a named slot until its last descriptor closes. Without the new flags the exit status is unchanged (ADR-192 I7, decision D).
 
 - `cs pulse` lists each gate-slot pool's holders and queued runs with run age and output-silence age, for runs inside and outside molecules; a record whose lock is no longer held is shown as stale.
@@ -4906,7 +4908,8 @@ release **is**, not how it was built.
   `#![deny(missing_docs)]` on the core, and CI gates on build, test, clippy,
   and fmt.
 
-[Unreleased]: https://github.com/noogram/cosmon/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/noogram/cosmon/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/noogram/cosmon/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/noogram/cosmon/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/noogram/cosmon/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/noogram/cosmon/compare/v0.8.0...v0.9.0
