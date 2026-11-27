@@ -675,3 +675,20 @@ fn worker_shares_are_listed_with_their_basis() {
     alone.workers.clear();
     assert_eq!(format_worker_shares(&alone), "");
 }
+
+/// At exactly an even pace the remainder lasts exactly until the reset:
+/// that is lasting, not running out at the reset instant.
+#[test]
+fn an_exactly_even_pace_lasts_until_reset() {
+    let observed = "2026-11-27T18:00:00Z";
+    let records = [codex_record(
+        "w-codex",
+        &codex_line(observed, 25.0, Some(RESETS_AT), "10080"),
+        time(observed),
+    )];
+    let accounts = project_accounts(&records, time(observed));
+    let Pace::Known { runs_out_at, .. } = &only(&accounts).pace else {
+        panic!("pace should be known");
+    };
+    assert_eq!(*runs_out_at, None);
+}

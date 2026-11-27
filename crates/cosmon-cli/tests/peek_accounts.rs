@@ -10,8 +10,11 @@
 //! running out 42 hours after the reading.
 
 use std::fs;
+use std::io::{BufRead as _, BufReader};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Instant;
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use cosmon_core::event_v2::{AdapterSelectionSource, EventV2};
@@ -293,5 +296,76 @@ fn a_rollout_without_rate_limits_reports_no_account_rather_than_zero() -> anyhow
     assert_eq!(doc["accounts"], json!([]), "{output}");
     let text = cs(tmp.path(), &["peek", "--no-tui", "--once", "--no-tmux"])?;
     assert!(!text.contains("account "), "{text}");
+    Ok(())
+}
+
+/// The follow stream repeats an account only when its reading changes: no
+/// line per tick for an unchanged window, a new line once the rollout
+/// reports more use.
+#[test]
+fn peek_follow_prints_an_account_again_only_when_its_reading_changes() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    seed(tmp.path(), &Reading::FRESH)?;
+    let mut observer = Command::new(env!("CARGO_BIN_EXE_cs"))
+        .current_dir(tmp.path())
+        .env("NO_COLOR", "1")
+        .args([
+            "peek",
+            "--no-tui",
+            "--follow",
+            "--no-tmux",
+            "--energy-tick-interval",
+            "1",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdout = observer.stdout.take().expect("piped stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if line.starts_with("account ") && tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let collect_for = |window: std::time::Duration| {
+        let deadline = Instant::now() + window;
+        let mut lines = Vec::new();
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(left) {
+                Ok(line) => lines.push(line),
+                Err(_) => break,
+            }
+        }
+        lines
+    };
+
+    // Baseline plus several energy ticks over an unchanged rollout.
+    let unchanged = collect_for(std::time::Duration::from_secs(4));
+    // The rollout reports more use: 55 % of the same window.
+    let rollout = fs::read_dir(
+        tmp.path()
+            .join(".cosmon/state/fleets/default/molecules")
+            .join(MOLECULE)
+            .join("codex-work-home/sessions/2026/11/27"),
+    )?
+    .next()
+    .expect("rollout file")?
+    .path();
+    let text = fs::read_to_string(&rollout)?;
+    let last = text.lines().last().expect("a token_count line");
+    let newer = last
+        .replace("\"used_percent\":50.0", "\"used_percent\":55.0")
+        .replacen(&last[14..38], &stamp(Utc::now()), 1);
+    fs::write(&rollout, format!("{text}\n{newer}\n"))?;
+    let changed = collect_for(std::time::Duration::from_secs(4));
+    let _ = observer.kill();
+    observer.wait()?;
+
+    assert_eq!(unchanged.len(), 1, "{unchanged:#?}");
+    assert!(unchanged[0].contains("50% left"), "{unchanged:#?}");
+    assert_eq!(changed.len(), 1, "{changed:#?}");
+    assert!(changed[0].contains("45% left"), "{changed:#?}");
     Ok(())
 }

@@ -8020,6 +8020,44 @@ mod tests {
         );
     }
 
+    /// The strip's colour of its first cell for one account.
+    fn account_strip_colour(account: AccountWindow) -> Option<Color> {
+        let mut app = App::for_test(Vec::new(), std::collections::HashMap::new());
+        app.accounts = vec![account];
+        let backend = ratatui::backend::TestBackend::new(140, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| app.draw_account_strip(f, f.area()))
+            .unwrap();
+        terminal.backend().buffer().cell((2, 0)).map(|c| c.fg)
+    }
+
+    /// The line is quiet while the reading is fresh and the window lasts;
+    /// it turns yellow when it is stale, contradictory, or on course to run
+    /// out before the reset.
+    #[test]
+    fn draw_account_strip_highlights_only_readings_that_need_a_look() {
+        let mut lasting = account_window("openai");
+        lasting.pace = cosmon_observability::account_usage::Pace::Known {
+            even_use_percent: 25.0,
+            deficit_percent: -15.0,
+            runs_out_at: None,
+            runs_out_in_secs: None,
+        };
+        assert_eq!(account_strip_colour(lasting.clone()), Some(Color::DarkGray));
+        assert_eq!(
+            account_strip_colour(account_window("openai")),
+            Some(Color::Yellow),
+            "runs out before the reset"
+        );
+        let mut stale = lasting.clone();
+        stale.freshness = cosmon_core::usage::Freshness::Stale;
+        assert_eq!(account_strip_colour(stale), Some(Color::Yellow));
+        let mut conflicting = lasting;
+        conflicting.conflicting_readings = true;
+        assert_eq!(account_strip_colour(conflicting), Some(Color::Yellow));
+    }
+
     /// No rate-limit reading, no account line: the table moves up rather
     /// than showing an account at zero.
     #[test]
