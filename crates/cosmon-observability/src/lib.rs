@@ -33,6 +33,7 @@
 #![warn(missing_docs)]
 
 pub mod aggregate;
+pub mod agy;
 pub mod event;
 pub mod fixture;
 pub mod molecule;

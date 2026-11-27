@@ -1,0 +1,3 @@
+{"event":"init","init":{"permission_mode":"always-proceed"}}
+{"event":"step_update","step_update":{"state":"ACTIVE","step_type":"agent_response","text_delta":"Checking the worktree"}}
+{"event":"result","result":{"status":"SUCCESS","usage":{"input_tokens":150

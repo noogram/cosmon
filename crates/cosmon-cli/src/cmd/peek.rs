@@ -24,13 +24,18 @@
 //! this with label `watch` for backward compatibility during the deprecation
 //! grace window.
 
+use std::collections::{BTreeMap, HashMap};
 use std::io::{IsTerminal, Write as _};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
 use colored::Colorize;
+use cosmon_core::id::MoleculeId;
 use cosmon_core::molecule::{MoleculeStatus, Phase};
+use cosmon_core::run_state::GhostKind;
 use cosmon_filestore::FileStore;
+use cosmon_observability::agy::{AgyReceipt, AgyTokenCounts};
 use cosmon_state::{MoleculeFilter, StateStore};
 use cosmon_transport::TmuxBackend;
 
@@ -755,6 +760,15 @@ struct PeekMoleculeJson {
     /// Histories are deduplicated before publication; an empty array means
     /// no source observation, never measured zero.
     usage: Vec<cosmon_core::usage::UsageRecord>,
+    /// Antigravity's counters before canonical usage normalization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agy_usage: Option<AgyTokenCounts>,
+    /// Provider quota evidence for a stopped worker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ghost: Option<GhostKind>,
+    /// The delay announced by the provider at refusal time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quota_reset_delay: Option<String>,
 }
 
 /// The `cs peek --json` document.
@@ -890,6 +904,10 @@ fn snapshot_to_json(
             // nothing behind it. It is not a molecule and has no status to
             // report, so it is not one of `molecules[]`.
             let mol = by_id.get(&row.mol_id)?;
+            let quota = row
+                .agy_receipt
+                .as_ref()
+                .and_then(|receipt| receipt.quota_stop.as_ref());
             Some(PeekMoleculeJson {
                 id: row.mol_id.clone(),
                 project: row.project.clone(),
@@ -898,7 +916,10 @@ fn snapshot_to_json(
                 heartbeat: row.heartbeat,
                 last_activity: row.last_activity,
                 updated_at: mol.updated_at,
-                usage: row.usage.clone(),
+                usage: row.usage,
+                agy_usage: row.agy_receipt.as_ref().and_then(|receipt| receipt.usage),
+                ghost: quota.map(|_| GhostKind::QuotaExhausted),
+                quota_reset_delay: quota.and_then(|stop| stop.reset_delay.clone()),
             })
         })
         .collect();
@@ -965,6 +986,61 @@ fn run_canonical_snapshot(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Track only changed receipts in the plaintext follow stream.
+struct AgyReceiptWatch {
+    fold: crate::energy_probe::JournalFold,
+    previous: HashMap<MoleculeId, AgyReceipt>,
+}
+
+impl AgyReceiptWatch {
+    fn new(state_dir: &Path) -> Self {
+        Self {
+            fold: crate::energy_probe::JournalFold::new(state_dir),
+            previous: HashMap::new(),
+        }
+    }
+
+    fn print_changes(
+        &mut self,
+        state_dir: &Path,
+        snapshot: &Snapshot,
+        phase: PhaseFilter,
+        stdout: &mut std::io::Stdout,
+        tty: bool,
+    ) -> std::io::Result<()> {
+        self.fold.catch_up();
+        let mut current = HashMap::new();
+        let adapters: BTreeMap<_, _> = self.fold.last_adapters().into_iter().collect();
+        for (id, adapter) in adapters {
+            if adapter != "agy"
+                || !snapshot
+                    .molecules
+                    .get(&id)
+                    .is_some_and(|row| phase.matches_molecule(row.status, row.archived))
+            {
+                continue;
+            }
+            let receipt = crate::energy_probe::read_agy_receipt(state_dir, &id);
+            if self.previous.get(&id) != Some(&receipt) {
+                clear_line(stdout, tty)?;
+                let counters = receipt
+                    .usage
+                    .unwrap_or_default()
+                    .columns(|count| count.to_string());
+                write!(stdout, "~ {id} agy IN/CACHED/OUT/RSN {counters}")?;
+                if let Some(stop) = &receipt.quota_stop {
+                    write!(stdout, "  {stop}")?;
+                }
+                writeln!(stdout)?;
+                stdout.flush()?;
+            }
+            current.insert(id, receipt);
+        }
+        self.previous = current;
+        Ok(())
+    }
+}
+
 /// Shared `--no-tui` loop, also invoked by the deprecated `cs watch` alias.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_no_tui(ctx: &Context, opts: &NoTuiOptions) -> anyhow::Result<()> {
@@ -995,6 +1071,16 @@ pub(crate) fn run_no_tui(ctx: &Context, opts: &NoTuiOptions) -> anyhow::Result<(
         }
     };
     print_baseline(&mut stdout, tty, Utc::now(), &baseline)?;
+    let mut agy_receipts = (opts.label == "peek").then(|| AgyReceiptWatch::new(&state_dir));
+    if let Some(receipts) = &mut agy_receipts {
+        receipts.print_changes(
+            &state_dir,
+            &baseline.snapshot,
+            opts.phase_filter,
+            &mut stdout,
+            tty,
+        )?;
+    }
     prev = Some(baseline.snapshot);
 
     let propel_events = propel_pass(&store, backend.as_ref(), opts.stale_after)?;
@@ -1069,6 +1155,15 @@ pub(crate) fn run_no_tui(ctx: &Context, opts: &NoTuiOptions) -> anyhow::Result<(
             Tier::Poll => {
                 let outcome = poll_and_diff(&store, prev.as_ref())?;
                 print_events(&mut stdout, tty, Utc::now(), &outcome.events)?;
+                if let Some(receipts) = &mut agy_receipts {
+                    receipts.print_changes(
+                        &state_dir,
+                        &outcome.snapshot,
+                        opts.phase_filter,
+                        &mut stdout,
+                        tty,
+                    )?;
+                }
                 prev = Some(outcome.snapshot);
                 deadlines.poll = Instant::now() + poll_interval;
             }
@@ -1155,6 +1250,9 @@ fn emit_energy_ticks(
         last_energy.insert(wid_s.clone(), usage.clone());
 
         let _ = cosmon_state::event_log::emit_one(events_path, event, None);
+        if e.agy_receipt.is_some() {
+            continue;
+        }
 
         let cost_delta = delta_cost.map_or_else(
             || "API equiv. unavailable".to_owned(),

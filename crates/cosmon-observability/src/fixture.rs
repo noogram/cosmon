@@ -82,6 +82,7 @@ pub fn canonical_snapshot() -> FleetSnapshot {
             api_equivalent: None,
             subscription: None,
             usage: None,
+            agy_receipt: None,
             context_window: Some(1_000_000),
             latest_turn_input_tokens: None,
         },

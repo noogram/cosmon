@@ -130,6 +130,7 @@ mod tests {
             energy_reasoning: 0,
             energy_cost: cosmon_observability::EnergyCost::Unknown,
             usage: Vec::new(),
+            agy_receipt: None,
             context_window: None,
             latest_turn_input_tokens: None,
             session: None,
