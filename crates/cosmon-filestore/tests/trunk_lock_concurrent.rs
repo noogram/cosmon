@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-#[path = "../../../tests/support/prebuilt.rs"]
+#[path = "../../cosmon-api/tests/support/prebuilt_artifact.rs"]
 mod prebuilt;
 
 const TRUNK_LOCK_HOLDER: prebuilt::Prebuilt = prebuilt::Prebuilt {

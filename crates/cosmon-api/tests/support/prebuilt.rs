@@ -24,7 +24,7 @@
 //! for the final artifact under Cargo's target directory, with the test
 //! executable's profile directory as a fallback.
 
-#[path = "../../../../tests/support/prebuilt.rs"]
+#[path = "prebuilt_artifact.rs"]
 mod shared;
 
 use std::path::{Path, PathBuf};
