@@ -284,17 +284,16 @@ fn pace(window: &PlanWindowObservation, at: Option<DateTime<Utc>>, now: DateTime
     // Time to use the remainder at the average rate so far.
     let runs_out_at = if used >= 1.0 {
         Some(at)
-    } else if used > 0.0 {
-        let remaining_secs = (1.0 - used) / used * elapsed_secs;
-        // Compare in seconds first: a tiny use projects past any calendar
-        // instant, and only a time before the reset is ever turned into one.
-        let until_reset_secs = resets_at.signed_duration_since(at).num_seconds() as f64;
-        #[allow(clippy::cast_possible_truncation)] // below `until_reset_secs`, an i64
-        let exhausted = (remaining_secs < until_reset_secs)
-            .then(|| at + Duration::seconds(remaining_secs.round() as i64));
-        exhausted.filter(|t| *t < resets_at)
     } else {
-        None
+        // Zero use gives an infinite remainder, which never comes before the
+        // reset. Compare in seconds first: a tiny use projects past any
+        // calendar instant, and only a time before the reset becomes one.
+        let remaining_secs = (1.0 - used) / used * elapsed_secs;
+        let until_reset_secs = resets_at.signed_duration_since(at).num_seconds() as f64;
+        // Floored, the instant stays strictly before the reset.
+        #[allow(clippy::cast_possible_truncation)] // below `until_reset_secs`, an i64
+        (remaining_secs < until_reset_secs)
+            .then(|| at + Duration::seconds(remaining_secs.floor() as i64))
     };
     Pace::Known {
         even_use_percent,
