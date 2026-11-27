@@ -19,6 +19,8 @@ this stage.
 
 ## [Unreleased]
 
+- Integration tests locate prebuilt `cs` and `trunk_lock_holder` artifacts when Cargo uses a separate build directory.
+
 ## [0.11.0] — 2026-11-26
 
 - `cs gates slot` supervises the command it runs: the command gets its own process group and TERM, INT and HUP are forwarded to the whole group; `--timeout <secs>` kills the group and records `timed_out`; `--require-dir <path>` refuses to start, or reclassifies a finished run, when the directory is missing or not writable, recording `could_not_run:<reason>`; `--verdict-file <path>` writes `ran:<code>`, `timed_out` or `could_not_run:<reason>`; `--hand-descriptor` lets the command keep a named slot until its last descriptor closes. Without the new flags the exit status is unchanged (ADR-192 I7, decision D).

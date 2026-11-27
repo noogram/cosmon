@@ -20,188 +20,197 @@
 //! it, and the timing of that race is set by the runner's scheduling rather
 //! than by anything in the test.
 //!
-//! So resolution here is explicit and never builds:
-//!
-//! 1. an env override — `COSMON_TEST_CS_BIN` — which is what CI and any
-//!    prebuild step set, and the only way to point at an artifact outside
-//!    the profile directory;
-//! 2. otherwise the sibling artifact under our own profile directory,
-//!    derived from `current_exe()` (the one anchor that stays correct under
-//!    an isolated `CARGO_TARGET_DIR`, and that picks up `release` without a
-//!    second hard-coded `debug`);
-//! 3. otherwise a **clear error** naming the build command and the env var.
-//!
-//! Case 3 is the whole point. A missing prerequisite must read as a missing
-//! prerequisite, not as a test that quietly grows a build step.
+//! The resolver honours `COSMON_TEST_CS_BIN` first. Otherwise it looks
+//! for the final artifact under Cargo's target directory, with the test
+//! executable's profile directory as a fallback.
 
-#![allow(dead_code)] // Each test target uses a different subset.
+#[path = "prebuilt_artifact.rs"]
+mod shared;
 
 use std::path::{Path, PathBuf};
 
-/// Env var that names a prebuilt `cs` binary explicitly.
-///
-/// Set by CI's prebuild step and honoured ahead of the profile directory,
-/// so an operator can test against an artifact built anywhere.
-pub const CS_BIN_ENV: &str = "COSMON_TEST_CS_BIN";
+const CS: shared::Prebuilt = shared::Prebuilt {
+    override_env: "COSMON_TEST_CS_BIN",
+    name: "cs",
+    path: "cs",
+    build_command: "cargo build -p cosmon-cli --bin cs",
+};
 
-/// The directory cargo wrote *this* test binary into.
-fn profile_dir() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    profile_dir_of(&exe).expect("test binary lives under <target>/<profile>/{deps,build}")
-}
-
-/// The profile directory (`<target>/<profile>`) a test executable belongs to.
-///
-/// Sibling bin targets land there. Old cargo puts the test executable at
-/// `<target>/<profile>/deps/<name>-<hash>`; newer cargo puts it at
-/// `<target>/<profile>/build/<pkg>/<hash>/out/<name>-<hash>`. Both are covered
-/// by taking the parent of the nearest ancestor named `deps` or `build`.
-fn profile_dir_of(exe: &Path) -> Option<PathBuf> {
-    exe.parent()?
-        .ancestors()
-        .find(|dir| dir.file_name().is_some_and(|n| n == "deps" || n == "build"))
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-}
-
-/// Resolve the prebuilt `cs` binary, or explain precisely what is missing.
-///
-/// Never spawns a build. Returns `Err` with an operator-facing message
-/// naming both the expected path and the two ways to satisfy it.
-pub fn try_cs_bin() -> Result<PathBuf, String> {
-    resolve(
-        CS_BIN_ENV,
-        std::env::var_os(CS_BIN_ENV).map(PathBuf::from),
-        &profile_dir().join("cs"),
-        "cs",
-    )
-}
-
-/// [`try_cs_bin`], panicking with the same message.
-///
-/// Integration tests want the message, not an error type; a panic here is
-/// the honest report that a prerequisite was not built.
+/// Locate the prebuilt `cs` binary. A missing prerequisite fails the test
+/// with the paths searched and the command to build the binary.
 pub fn cs_bin() -> PathBuf {
-    match try_cs_bin() {
+    match CS.resolve(Path::new(env!("CARGO_MANIFEST_DIR"))) {
         Ok(path) => path,
         Err(msg) => panic!("{msg}"),
     }
 }
 
-/// The shared resolution rule, factored out so it can be exercised directly
-/// with a synthetic override and candidate path.
-///
-/// The override wins when present; an override that points at a nonexistent
-/// path is an error rather than a silent fallback, because a typo in a CI
-/// variable must not degrade into "test something else". It arrives as a
-/// parameter rather than being read here so the rule stays exercisable
-/// without mutating the process environment — which in a multi-threaded test
-/// binary that also spawns subprocesses is not a safe thing to do.
-pub fn resolve(
-    env_var: &str,
-    override_path: Option<PathBuf>,
-    candidate: &Path,
-    artifact: &str,
-) -> Result<PathBuf, String> {
-    if let Some(from_env) = override_path {
-        if from_env.is_file() {
-            return Ok(from_env);
-        }
-        return Err(format!(
-            "{env_var} is set to `{}`, but no file exists there. \
-             Point it at a prebuilt `{artifact}` binary, or unset it to use \
-             the profile directory.",
-            from_env.display(),
-        ));
-    }
-    if candidate.is_file() {
-        return Ok(candidate.to_path_buf());
-    }
-    Err(format!(
-        "prebuilt `{artifact}` binary not found at `{}`. \
-         Integration tests never build it implicitly — a nested `cargo build` \
-         races the parallel test runner. Build it first with \
-         `cargo build -p cosmon-cli --bin cs`, run the whole gate \
-         (`cargo test --workspace`, which builds sibling bin targets), or set \
-         {env_var} to an existing binary.",
-        candidate.display(),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
-    /// The profile directory is found for the old `deps/` layout and for the
-    /// newer `build/<pkg>/<hash>/out/` layout, and a `build` or `deps` higher
-    /// up the path does not capture the answer.
+    fn file(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"fixture").unwrap();
+    }
+
     #[test]
-    fn profile_dir_is_found_under_both_cargo_layouts() {
-        let old = Path::new("/w/target/debug/deps/smoke-1a2b3c");
-        assert_eq!(profile_dir_of(old), Some(PathBuf::from("/w/target/debug")));
-        let new = Path::new("/w/target/debug/build/cosmon-api/a83d7f91/out/smoke-a83d7f91");
-        assert_eq!(profile_dir_of(new), Some(PathBuf::from("/w/target/debug")));
-        let nested = Path::new("/home/me/build/proj/target/release/build/p/h/out/t-h");
+    fn prebuilt_is_found_with_a_separate_build_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let manifest = workspace.join("crates/cosmon-api");
+        let exe = temp
+            .path()
+            .join("cache/debug/build/cosmon-api/hash/out/smoke-hash");
+        let binary = workspace.join("target/debug/cs");
+        file(&exe);
+        file(&binary);
+
         assert_eq!(
-            profile_dir_of(nested),
-            Some(PathBuf::from("/home/me/build/proj/target/release"))
+            CS.resolve_from(&manifest, Some(&exe), None, None, None),
+            Ok(binary)
         );
     }
 
-    /// A missing `cs` is a named prerequisite, never an implicit build.
-    ///
-    /// This is exactly the property the old nested `cargo build` violated.
-    /// The message must carry both remedies so a CI log is actionable
-    /// without opening this file.
     #[test]
-    fn missing_cs_is_a_named_prerequisite_not_a_build() {
-        let err = resolve(
-            CS_BIN_ENV,
-            None,
-            Path::new("/nonexistent/cosmon/target/debug/cs"),
-            "cs",
-        )
-        .expect_err("a nonexistent candidate must not resolve");
-        assert!(
-            err.contains("cargo build -p cosmon-cli --bin cs"),
-            "error must name the build command; got: {err}"
-        );
-        assert!(
-            err.contains(CS_BIN_ENV),
-            "error must name the override env var; got: {err}"
+    fn configured_target_dir_wins_over_default_target_and_legacy_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let manifest = workspace.join("crates/cosmon-api");
+        let cache_profile = temp.path().join("build/project/cache/release");
+        let exe = cache_profile.join("build/cosmon-api/hash/out/smoke-hash");
+        let custom_target = workspace.join("custom-target");
+        let binary = custom_target.join("release/cs");
+        for path in [
+            workspace.join("target/release/cs"),
+            cache_profile.join("cs"),
+            binary.clone(),
+        ] {
+            file(&path);
+        }
+
+        for custom in [&custom_target, Path::new("custom-target")] {
+            assert_eq!(
+                CS.resolve_from(&manifest, Some(&exe), Some(custom), None, None),
+                Ok(binary.clone()),
+            );
+        }
+        assert_eq!(
+            CS.resolve_from(&manifest, Some(&exe), None, None, None),
+            Ok(workspace.join("target/release/cs")),
         );
     }
 
-    /// A dangling override fails loudly instead of falling through to
-    /// whatever else happens to sit in the profile directory.
     #[test]
-    fn override_pointing_at_nothing_does_not_fall_back() {
-        let err = resolve(
-            CS_BIN_ENV,
-            Some(PathBuf::from("/nonexistent/cosmon/override")),
-            Path::new("/nonexistent/cosmon/candidate"),
-            "cs",
-        )
-        .expect_err("a dangling override must not resolve");
-        assert!(
-            err.contains("/nonexistent/cosmon/override"),
-            "error must quote the override path it rejected; got: {err}"
+    fn relative_target_dir_uses_the_absolute_profile_cargo_passed_to_the_test() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let manifest = workspace.join("crates/cosmon-api");
+        let exe = temp.path().join("cache/debug/deps/smoke-hash");
+        let relative = Path::new("../temporary/../member-target");
+        let intended_profile = workspace.join("crates/member-target/debug");
+        let binary = intended_profile.join("cs");
+        let decoy = workspace.join("other-target/debug");
+        file(&binary);
+        file(&decoy.join("cs"));
+        let cargo_library_path = std::env::join_paths([
+            Path::new("member-target/debug"),
+            decoy.as_path(),
+            intended_profile.as_path(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            CS.resolve_from(
+                &manifest,
+                Some(&exe),
+                Some(relative),
+                None,
+                Some(&cargo_library_path),
+            ),
+            Ok(binary),
         );
     }
 
-    /// An existing override is honoured ahead of the profile directory.
     #[test]
-    fn override_wins_over_the_profile_directory() {
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let explicit = tmp.path().join("cs");
-        std::fs::write(&explicit, b"#!/bin/sh\n").expect("write stub");
-        let resolved = resolve(
-            CS_BIN_ENV,
-            Some(explicit.clone()),
-            Path::new("/nonexistent/cosmon/candidate"),
-            "cs",
-        )
-        .expect("an existing override resolves");
-        assert_eq!(resolved, explicit);
+    fn legacy_directory_is_checked_when_the_final_artifact_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = temp.path().join("workspace/crates/cosmon-api");
+        let profile = temp.path().join("custom/debug");
+        let exe = profile.join("deps/smoke-hash");
+        let binary = profile.join("cs");
+        file(&binary);
+
+        assert_eq!(
+            CS.resolve_from(&manifest, Some(&exe), None, None, None),
+            Ok(binary)
+        );
+    }
+
+    #[test]
+    fn missing_cs_names_both_paths_and_the_build_prerequisite() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let manifest = workspace.join("crates/cosmon-api");
+        let profile = temp.path().join("cache/debug");
+        let exe = profile.join("deps/smoke-hash");
+
+        let err = CS
+            .resolve_from(&manifest, Some(&exe), None, None, None)
+            .unwrap_err();
+        for path in [workspace.join("target/debug/cs"), profile.join("cs")] {
+            assert!(err.contains(&format!("`{}`", path.display())), "{err}");
+        }
+        assert!(err.contains("cargo build -p cosmon-cli --bin cs"), "{err}");
+        assert!(err.contains("COSMON_TEST_CS_BIN"), "{err}");
+    }
+
+    #[test]
+    fn explicit_override_wins_and_an_invalid_override_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let manifest = workspace.join("crates/cosmon-api");
+        let exe = workspace.join("target/debug/deps/smoke-hash");
+        let fallback = workspace.join("target/debug/cs");
+        let explicit = temp.path().join("explicit-cs");
+        file(&fallback);
+        file(&explicit);
+
+        assert_eq!(
+            CS.resolve_from(&manifest, Some(&exe), None, Some(explicit.clone()), None),
+            Ok(explicit.clone()),
+        );
+        assert_eq!(
+            CS.resolve_from(&manifest, None, None, Some(explicit.clone()), None),
+            Ok(explicit),
+        );
+        let bad_override = temp.path().join("missing-cs");
+        for invalid in [bad_override.as_path(), temp.path()] {
+            let err = CS
+                .resolve_from(
+                    &manifest,
+                    Some(&exe),
+                    None,
+                    Some(invalid.to_path_buf()),
+                    None,
+                )
+                .unwrap_err();
+            assert!(err.contains("COSMON_TEST_CS_BIN"), "{err}");
+            assert!(err.contains(&format!("`{}`", invalid.display())), "{err}");
+        }
+    }
+
+    #[test]
+    fn missing_test_executable_path_still_gives_a_prerequisite_error() {
+        let manifest = Path::new("/workspace/crates/cosmon-api");
+        let err = CS
+            .resolve_from(manifest, None, None, None, None)
+            .unwrap_err();
+        assert!(
+            err.contains("no Cargo profile directory could be inferred"),
+            "{err}"
+        );
+        assert!(err.contains("COSMON_TEST_CS_BIN"), "{err}");
     }
 }
