@@ -53,6 +53,7 @@ use chrono::{DateTime, Utc};
 use cosmon_core::molecule::Phase;
 use cosmon_core::reconcile::{molecule_health, MoleculeHealth};
 use cosmon_filestore::FileStore;
+use cosmon_observability::account_usage::AccountWindow;
 use cosmon_observability::{
     EnergyBudget, FleetSnapshot, HeartbeatTier, Molecule, MoleculeStatus, Session, SessionFilter,
     Worker,
@@ -450,12 +451,16 @@ fn worker_census(snap: &FleetSnapshot) -> WorkerCensus {
     census
 }
 
+/// Most lines the account strip may take under the fleet header.
+const MAX_ACCOUNT_LINES: usize = 3;
+
 /// Payload produced by a background reload thread — the I/O-heavy portion
 /// of a reload cycle (Phase 3).
 struct BgReloadResult {
     rows: Vec<RowView>,
     state_dirs: std::collections::HashMap<String, std::path::PathBuf>,
     census: WorkerCensus,
+    accounts: Vec<AccountWindow>,
 }
 
 impl RowView {
@@ -1210,6 +1215,9 @@ struct App {
     /// Refreshed on every reload alongside `rows` — the strip and the
     /// table always describe the same snapshot.
     census: WorkerCensus,
+    /// Provider account windows rendered by [`Self::draw_account_strip`]
+    /// (issue #242), projected from the same snapshot as `rows`.
+    accounts: Vec<AccountWindow>,
     /// Per-molecule state dir, so detail artifacts can be resolved for the
     /// selected row whether we're in single-project or `--all` mode.
     row_state_dirs: std::collections::HashMap<String, std::path::PathBuf>,
@@ -1368,6 +1376,7 @@ impl App {
             refresh: Duration::from_millis(args.refresh_ms.max(250)),
             rows: Vec::new(),
             census: WorkerCensus::default(),
+            accounts: Vec::new(),
             row_state_dirs: std::collections::HashMap::new(),
             lease_missions: std::collections::BTreeSet::new(),
             expanded: std::collections::HashSet::new(),
@@ -1422,7 +1431,8 @@ impl App {
         )?;
         let rows = snapshot_to_rows(&snapshot);
         let census = worker_census(&snapshot);
-        self.apply_reload(rows, state_dirs, census);
+        let accounts = super::peek::snapshot_accounts(&snapshot, Utc::now());
+        self.apply_reload(rows, state_dirs, census, accounts);
         Ok(())
     }
 
@@ -1445,10 +1455,12 @@ impl App {
         mut rows: Vec<RowView>,
         state_dirs: std::collections::HashMap<String, std::path::PathBuf>,
         census: WorkerCensus,
+        accounts: Vec<AccountWindow>,
     ) {
         self.row_state_dirs = state_dirs;
         self.lease_missions = lease_missions_for(&self.state_dir, &self.row_state_dirs);
         self.census = census;
+        self.accounts = accounts;
         let selected_id = self
             .table_state
             .selected()
@@ -1818,10 +1830,12 @@ impl App {
             ) {
                 let rows = snapshot_to_rows(&snapshot);
                 let census = worker_census(&snapshot);
+                let accounts = super::peek::snapshot_accounts(&snapshot, Utc::now());
                 let _ = tx.send(BgReloadResult {
                     rows,
                     state_dirs,
                     census,
+                    accounts,
                 });
             }
             // I/O error — silently skip this tick. The TUI retains
@@ -1838,7 +1852,12 @@ impl App {
         match self.bg_rx.try_recv() {
             Ok(result) => {
                 self.bg_pending = false;
-                self.apply_reload(result.rows, result.state_dirs, result.census);
+                self.apply_reload(
+                    result.rows,
+                    result.state_dirs,
+                    result.census,
+                    result.accounts,
+                );
                 true
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
@@ -2635,6 +2654,10 @@ impl App {
         // Header, then the worker strip. The strip has no `show_*` gate:
         // it is a reading, not a query, so it is always on.
         let mut constraints = vec![Constraint::Length(1), Constraint::Length(1)];
+        let account_lines = self.account_strip_height();
+        if account_lines > 0 {
+            constraints.push(Constraint::Length(account_lines));
+        }
         if show_presence {
             constraints.push(Constraint::Length(1));
         }
@@ -2651,6 +2674,10 @@ impl App {
         idx += 1;
         self.draw_worker_strip(f, chunks[idx]);
         idx += 1;
+        if account_lines > 0 {
+            self.draw_account_strip(f, chunks[idx]);
+            idx += 1;
+        }
         if show_presence {
             self.draw_presence_strip(f, chunks[idx]);
             idx += 1;
@@ -3033,6 +3060,66 @@ impl App {
             ));
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    /// Lines the account strip takes: one per account window, at most
+    /// [`MAX_ACCOUNT_LINES`] (the last one then counts the rest), none when
+    /// no worker reported a rate limit.
+    fn account_strip_height(&self) -> u16 {
+        u16::try_from(self.accounts.len().min(MAX_ACCOUNT_LINES)).unwrap_or(0)
+    }
+
+    /// Provider accounts under the fleet header (issue #242), one line per
+    /// account window, so the allowance never crowds a molecule row:
+    ///
+    /// ```text
+    ///  account openai 7d: 50% left · resets in 5d 5h · 25% in deficit, runs out in 1d 17h · …
+    /// ```
+    ///
+    /// Highlighted when the reading needs a look: stale, contradictory, or on
+    /// a pace that exhausts the window before it resets. Worker shares are in
+    /// `cs peek --no-tui` and `--json`, where there is room for them.
+    fn draw_account_strip(&self, f: &mut Frame, area: Rect) {
+        let mut lines: Vec<Line> = Vec::new();
+        let overflow = self.accounts.len() > MAX_ACCOUNT_LINES;
+        let shown = if overflow {
+            MAX_ACCOUNT_LINES - 1
+        } else {
+            self.accounts.len()
+        };
+        for account in self.accounts.iter().take(shown) {
+            let attention = account.conflicting_readings
+                || account.freshness == cosmon_core::usage::Freshness::Stale
+                || matches!(
+                    account.pace,
+                    cosmon_observability::account_usage::Pace::Known {
+                        runs_out_at: Some(_),
+                        ..
+                    }
+                );
+            let style = if attention {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    " account {}",
+                    cosmon_observability::account_usage::format_account_window(account)
+                ),
+                style,
+            )));
+        }
+        if overflow {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    " +{} more accounts · cs peek --no-tui",
+                    self.accounts.len() - shown
+                ),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        f.render_widget(Paragraph::new(lines), area);
     }
 
     /// One-line strip listing every live Claude session. Compact, wheat-paste
@@ -5410,6 +5497,7 @@ impl App {
             lease_missions: std::collections::BTreeSet::new(),
             rows,
             census: WorkerCensus::default(),
+            accounts: Vec::new(),
             row_state_dirs,
             expanded: std::collections::HashSet::new(),
             table_state: TableState::default(),
@@ -7870,6 +7958,90 @@ mod tests {
             rendered, " workers: 4 registered · 4 attached · 0 phantom",
             "a clean roster still reports, without advising a no-op purge"
         );
+    }
+
+    /// A seven-day Codex account window, 50 % used, 25 points ahead of an
+    /// even pace and running out in 1 d 17 h, read 3 minutes ago.
+    fn account_window(provider: &str) -> AccountWindow {
+        AccountWindow {
+            provider: Some(provider.to_owned()),
+            meter: "primary".to_owned(),
+            window_minutes: Some(10_080),
+            resets_at: None,
+            resets_in_secs: Some(126 * 3600 - 180),
+            used_percent: 50.0,
+            left_percent: Some(50.0),
+            observed_at: None,
+            age_secs: Some(180),
+            freshness: cosmon_core::usage::Freshness::Fresh,
+            pace: cosmon_observability::account_usage::Pace::Known {
+                even_use_percent: 25.0,
+                deficit_percent: 25.0,
+                runs_out_at: Some(Utc::now()),
+                runs_out_in_secs: Some(42 * 3600 - 180),
+            },
+            credits: None,
+            conflicting_readings: false,
+            share_basis: cosmon_observability::account_usage::SHARE_BASIS,
+            workers: Vec::new(),
+        }
+    }
+
+    /// Render the whole frame and return its text, one line per row.
+    fn rendered_frame(app: &mut App, height: u16) -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(140, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf.cell((x, y)).map_or(" ", ratatui::buffer::Cell::symbol))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The account line sits under the fleet header and the worker strip,
+    /// on its own line, so the allowance never crowds a molecule row.
+    #[test]
+    fn draw_puts_each_account_window_on_its_own_line_under_the_header() {
+        let mut app = App::for_test(Vec::new(), std::collections::HashMap::new());
+        app.accounts = vec![account_window("openai")];
+        let lines = rendered_frame(&mut app, 12);
+        assert!(lines[0].contains("cs peek — fleet watchdog"), "{lines:#?}");
+        assert!(lines[1].starts_with(" workers:"), "{lines:#?}");
+        assert_eq!(
+            lines[2],
+            " account openai 7d: 50% left · resets in 5d 5h · 25% in deficit, \
+             runs out in 1d 17h · seen 3m ago",
+        );
+    }
+
+    /// No rate-limit reading, no account line: the table moves up rather
+    /// than showing an account at zero.
+    #[test]
+    fn draw_has_no_account_line_without_a_reading() {
+        let mut app = App::for_test(Vec::new(), std::collections::HashMap::new());
+        let lines = rendered_frame(&mut app, 12);
+        assert!(
+            lines.iter().all(|line| !line.contains("account ")),
+            "{lines:#?}"
+        );
+    }
+
+    /// Past three windows the strip stops growing and counts the rest.
+    #[test]
+    fn draw_caps_the_account_strip_and_counts_the_rest() {
+        let mut app = App::for_test(Vec::new(), std::collections::HashMap::new());
+        app.accounts = (0..5).map(|_| account_window("anthropic")).collect();
+        let lines = rendered_frame(&mut app, 14);
+        assert!(lines[2].starts_with(" account anthropic 7d"), "{lines:#?}");
+        assert!(lines[3].starts_with(" account anthropic 7d"), "{lines:#?}");
+        assert_eq!(lines[4], " +3 more accounts · cs peek --no-tui");
+        assert!(!lines[5].contains("account"), "{lines:#?}");
     }
 
     /// End-to-end honest fold: write a real `events.jsonl` for a molecule
