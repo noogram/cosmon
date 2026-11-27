@@ -229,11 +229,12 @@ pub fn codex_plan(content: &str, captured_at: DateTime<Utc>) -> PlanObservation 
 /// missing, `null` or non-object value yields no credits observation.
 fn codex_credits(value: Option<&Value>) -> Option<PlanCredits> {
     let object = value.filter(|v| v.is_object())?;
-    let balance = object.get("balance").and_then(|b| match b {
-        Value::String(text) => text.trim().parse::<f64>().ok(),
-        Value::Number(number) => number.as_f64(),
-        _ => None,
-    });
+    // Codex writes the balance as a decimal string; any other shape is
+    // unknown rather than guessed at.
+    let balance = object
+        .get("balance")
+        .and_then(Value::as_str)
+        .and_then(|text| text.trim().parse::<f64>().ok());
     Some(PlanCredits {
         has_credits: object.get("has_credits").and_then(Value::as_bool),
         unlimited: object.get("unlimited").and_then(Value::as_bool),
