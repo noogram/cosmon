@@ -405,3 +405,117 @@ fn an_absurd_window_length_leaves_the_pace_unknown() {
         );
     }
 }
+
+/// A reading timed before its window opened, or after it closed, cannot
+/// place itself in the window: its pace is unknown, not extrapolated.
+#[test]
+fn a_reading_outside_its_window_has_no_pace() {
+    // RESETS_AT minus seven days is 2026-11-26T00:00:00Z.
+    for observed in ["2026-11-25T23:00:00Z", "2026-11-26T00:00:00Z"] {
+        let records = [codex_record(
+            "w-codex",
+            &codex_line(observed, 50.0, Some(RESETS_AT), "10080"),
+            time(observed),
+        )];
+        let accounts = project_accounts(&records, time(observed));
+        assert_eq!(
+            only(&accounts).pace,
+            Pace::Unknown {
+                reason: PaceUnknown::ObservationOutsideWindow
+            },
+            "{observed}"
+        );
+    }
+    // The last second of the window is still inside it.
+    let observed = "2026-12-02T23:59:59Z";
+    let records = [codex_record(
+        "w-codex",
+        &codex_line(observed, 50.0, Some(RESETS_AT), "10080"),
+        time(observed),
+    )];
+    let accounts = project_accounts(&records, time(observed));
+    assert!(
+        matches!(only(&accounts).pace, Pace::Known { .. }),
+        "{:?}",
+        only(&accounts).pace
+    );
+}
+
+/// The window's last instant is the reset itself: a reading made there is
+/// inside (even use 100 %), one made after it is outside. Both are read from
+/// a clock that has not yet reached the reset, as a skewed clock would.
+#[test]
+fn the_reset_instant_closes_the_window() {
+    let at_reset = "2026-12-03T00:00:00Z";
+    let records = [codex_record(
+        "w-codex",
+        &codex_line(at_reset, 50.0, Some(RESETS_AT), "10080"),
+        time(at_reset),
+    )];
+    let accounts = project_accounts(&records, time(at_reset) - Duration::minutes(1));
+    let Pace::Known {
+        even_use_percent, ..
+    } = only(&accounts).pace
+    else {
+        panic!("pace should be known: {:?}", only(&accounts).pace);
+    };
+    close(even_use_percent, 100.0);
+
+    let after = "2026-12-03T01:00:00Z";
+    let records = [codex_record(
+        "w-codex",
+        &codex_line(after, 50.0, Some(RESETS_AT), "10080"),
+        time(after),
+    )];
+    let accounts = project_accounts(&records, time(at_reset) - Duration::minutes(1));
+    assert_eq!(
+        only(&accounts).pace,
+        Pace::Unknown {
+            reason: PaceUnknown::ObservationOutsideWindow
+        }
+    );
+}
+
+/// A reading timestamped after the reader's clock (a skewed clock) has no
+/// defensible age class: it is unknown, neither fresh nor stale.
+#[test]
+fn a_reading_from_the_future_has_unknown_freshness() {
+    let observed = "2026-11-27T18:00:00Z";
+    let records = [codex_record(
+        "w-codex",
+        &codex_line(observed, 50.0, Some(RESETS_AT), "10080"),
+        time(observed),
+    )];
+    let accounts = project_accounts(&records, time(observed) - Duration::minutes(5));
+    assert_eq!(only(&accounts).freshness, Freshness::Unknown);
+    // Exactly the stale threshold is still fresh; one second more is stale.
+    let at = |secs| {
+        let accounts = project_accounts(&records, time(observed) + Duration::seconds(secs));
+        only(&accounts).freshness
+    };
+    assert_eq!(at(600), Freshness::Fresh);
+    assert_eq!(at(601), Freshness::Stale);
+    assert_eq!(at(0), Freshness::Fresh);
+}
+
+/// Zero use runs out never: it lasts until the reset, fully in reserve.
+#[test]
+fn zero_use_lasts_until_reset() {
+    let observed = "2026-11-27T18:00:00Z";
+    let records = [codex_record(
+        "w-codex",
+        &codex_line(observed, 0.0, Some(RESETS_AT), "10080"),
+        time(observed),
+    )];
+    let accounts = project_accounts(&records, time(observed));
+    let Pace::Known {
+        deficit_percent,
+        runs_out_at,
+        ..
+    } = &only(&accounts).pace
+    else {
+        panic!("pace should be known");
+    };
+    close(*deficit_percent, -25.0);
+    assert_eq!(*runs_out_at, None);
+}
