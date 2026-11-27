@@ -423,7 +423,11 @@ pub fn format_account_window(account: &AccountWindow) -> String {
             runs_out_in_secs,
             ..
         } => {
-            let side = if *deficit_percent > 0.0 {
+            // Within half a point of even use, a rounded "0% in deficit"
+            // or "0% in reserve" would only be noise.
+            let side = if deficit_percent.abs() < 0.5 {
+                "on pace".to_owned()
+            } else if *deficit_percent > 0.0 {
                 format!("{deficit_percent:.0}% in deficit")
             } else {
                 format!("{:.0}% in reserve", -deficit_percent)

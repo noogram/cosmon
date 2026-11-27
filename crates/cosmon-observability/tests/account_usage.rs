@@ -519,3 +519,159 @@ fn zero_use_lasts_until_reset() {
     close(*deficit_percent, -25.0);
     assert_eq!(*runs_out_at, None);
 }
+
+/// Providers round their percentages, so a newer reading up to one point
+/// lower is rounding, not a second account; beyond one point it is flagged.
+#[test]
+fn a_drop_within_one_point_is_rounding_not_a_second_account() {
+    let earlier = "2026-11-27T17:00:00Z";
+    let later = "2026-11-27T18:00:00Z";
+    let flagged = |first: f64, second: f64| {
+        let records = [
+            codex_record(
+                "w-one",
+                &codex_line(earlier, first, Some(RESETS_AT), "10080"),
+                time(earlier),
+            ),
+            codex_record(
+                "w-two",
+                &codex_line(later, second, Some(RESETS_AT), "10080"),
+                time(later),
+            ),
+        ];
+        only(&project_accounts(&records, time(later))).conflicting_readings
+    };
+    assert!(!flagged(60.0, 60.0));
+    assert!(!flagged(60.0, 59.5));
+    assert!(!flagged(60.0, 59.0));
+    assert!(flagged(60.0, 58.5));
+}
+
+/// Workers that used no tokens have no share to divide: unknown, not 0 %
+/// and not a division by zero.
+#[test]
+fn shares_of_a_zero_token_total_are_unknown() {
+    let observed = "2026-11-27T18:00:00Z";
+    let mut record = codex_record(
+        "w-one",
+        &codex_line(observed, 50.0, Some(RESETS_AT), "10080"),
+        time(observed),
+    );
+    record.tokens.input_tokens = TokenCount::Measured { tokens: 0 };
+    record.tokens.cached_input_tokens = TokenCount::Measured { tokens: 0 };
+    record.tokens.output_tokens = TokenCount::Measured { tokens: 0 };
+    let accounts = project_accounts(&[record], time(observed));
+    let worker = &only(&accounts).workers[0];
+    assert_eq!(worker.tokens, Some(0));
+    assert_eq!(worker.share_percent, None);
+}
+
+/// Durations read at the scale that matters: days and hours, hours and
+/// minutes, minutes, and under a minute.
+#[test]
+fn durations_are_shown_at_two_units_at_most() {
+    use cosmon_observability::account_usage::format_duration_secs;
+    assert_eq!(format_duration_secs(5 * 86_400 + 5 * 3_600 + 59), "5d 5h");
+    assert_eq!(format_duration_secs(2 * 3_600), "2h 0m");
+    assert_eq!(format_duration_secs(3 * 60 + 59), "3m");
+    assert_eq!(format_duration_secs(30), "<1m");
+    assert_eq!(format_duration_secs(-5), "<1m");
+}
+
+/// The five-hour window is labelled in hours, beside the weekly one.
+#[test]
+fn a_short_window_is_labelled_in_hours() {
+    let captured = time("2026-11-27T08:50:52Z");
+    let sample = claude_plan(
+        r#"{"rate_limits":{"five_hour":{"used_percentage":40,"resets_at":1795775400},"seven_day":{"used_percentage":99,"resets_at":1795982400}}}"#,
+        PlanSource::ClaudeStatusLine,
+        captured,
+    );
+    let records = [record("w-claude", "h-claude", sample.plan)];
+    let lines: Vec<String> = project_accounts(&records, captured)
+        .iter()
+        .map(format_account_window)
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("anthropic 5h: 60% left")),
+        "{lines:#?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("anthropic 7d: 1% left")),
+        "{lines:#?}"
+    );
+}
+
+/// Use that rounds to an even pace reads as on pace, not "0% in reserve".
+#[test]
+fn an_even_pace_reads_as_on_pace() {
+    let observed = "2026-11-27T18:00:00Z";
+    let records = [codex_record(
+        "w-codex",
+        &codex_line(observed, 25.2, Some(RESETS_AT), "10080"),
+        time(observed),
+    )];
+    let line = format_account_window(only(&project_accounts(&records, time(observed))));
+    assert!(line.contains(" · on pace, "), "{line}");
+}
+
+/// Windows that are not whole hours keep minutes; a window without a length
+/// is named by its meter, without the hashed bucket prefix.
+#[test]
+fn odd_and_unknown_window_lengths_are_labelled_plainly() {
+    let observed = "2026-11-27T18:00:00Z";
+    let label = |line: &str| {
+        let records = [codex_record("w-codex", line, time(observed))];
+        format_account_window(only(&project_accounts(&records, time(observed))))
+    };
+    assert!(
+        label(&codex_line(observed, 10.0, Some(RESETS_AT), "90")).starts_with("openai 90m: "),
+        "{}",
+        label(&codex_line(observed, 10.0, Some(RESETS_AT), "90"))
+    );
+    let without = codex_line(observed, 10.0, Some(RESETS_AT), "null");
+    assert!(
+        label(&without).starts_with("openai primary: 90% left · resets in"),
+        "{}",
+        label(&without)
+    );
+}
+
+/// The worker line names each worker with its share, or says the share is
+/// unknown, and states the basis; no worker, no line.
+#[test]
+fn worker_shares_are_listed_with_their_basis() {
+    use cosmon_observability::account_usage::format_worker_shares;
+    let observed = "2026-11-27T18:00:00Z";
+    let line = codex_line(observed, 50.0, Some(RESETS_AT), "10080");
+    let mut first = codex_record("w-one", &line, time(observed));
+    first.tokens.input_tokens = TokenCount::Measured { tokens: 1_000 };
+    first.tokens.cached_input_tokens = TokenCount::Measured { tokens: 800 };
+    first.tokens.output_tokens = TokenCount::Measured { tokens: 100 };
+    let mut second = codex_record("w-two", &line, time(observed));
+    second.tokens.input_tokens = TokenCount::Measured { tokens: 500 };
+    second.tokens.cached_input_tokens = TokenCount::Measured { tokens: 450 };
+    second.tokens.output_tokens = TokenCount::Measured { tokens: 50 };
+    let accounts = project_accounts(&[first.clone(), second], time(observed));
+    assert_eq!(
+        format_worker_shares(only(&accounts)),
+        "workers: w-one 75% · w-two 25% (uncached input + output tokens)"
+    );
+
+    let mut unknown = codex_record("w-two", &line, time(observed));
+    unknown.tokens.output_tokens = TokenCount::Unavailable {
+        reason: cosmon_core::usage::UnavailableReason::NotObserved,
+    };
+    let accounts = project_accounts(&[first, unknown], time(observed));
+    assert_eq!(
+        format_worker_shares(only(&accounts)),
+        "workers: w-one share unknown · w-two share unknown (uncached input + output tokens)"
+    );
+
+    let mut alone = only(&accounts).clone();
+    alone.workers.clear();
+    assert_eq!(format_worker_shares(&alone), "");
+}
