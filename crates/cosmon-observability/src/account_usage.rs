@@ -281,9 +281,13 @@ fn pace(window: &PlanWindowObservation, at: Option<DateTime<Utc>>, now: DateTime
         Some(at)
     } else if used > 0.0 {
         let remaining_secs = (1.0 - used) / used * elapsed_secs;
-        #[allow(clippy::cast_possible_truncation)] // bounded by the window length
-        let exhausted = at + Duration::seconds(remaining_secs.round() as i64);
-        (exhausted < resets_at).then_some(exhausted)
+        // Compare in seconds first: a tiny use projects past any calendar
+        // instant, and only a time before the reset is ever turned into one.
+        let until_reset_secs = resets_at.signed_duration_since(at).num_seconds() as f64;
+        #[allow(clippy::cast_possible_truncation)] // below `until_reset_secs`, an i64
+        let exhausted = (remaining_secs < until_reset_secs)
+            .then(|| at + Duration::seconds(remaining_secs.round() as i64));
+        exhausted.filter(|t| *t < resets_at)
     } else {
         None
     };

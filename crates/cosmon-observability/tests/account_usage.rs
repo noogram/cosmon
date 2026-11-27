@@ -366,3 +366,20 @@ fn no_rate_limit_reading_is_no_account_not_a_zero_one() {
     let records = [codex_record("w-one", token_only, time(observed))];
     assert_eq!(project_accounts(&records, time(observed)).len(), 0);
 }
+
+/// A vanishingly small use projects an exhaustion far past any calendar; it
+/// must read as lasting until the reset, not overflow the clock arithmetic.
+#[test]
+fn a_negligible_use_lasts_until_reset_without_overflowing() {
+    let observed = "2026-11-27T18:00:00Z";
+    let records = [codex_record(
+        "w-codex",
+        &codex_line(observed, 1e-12, Some(RESETS_AT), "10080"),
+        time(observed),
+    )];
+    let accounts = project_accounts(&records, time(observed));
+    let Pace::Known { runs_out_at, .. } = &only(&accounts).pace else {
+        panic!("pace should be known");
+    };
+    assert_eq!(*runs_out_at, None);
+}
