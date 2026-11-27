@@ -255,10 +255,13 @@ fn freshness(
 #[allow(clippy::cast_precision_loss)] // durations of days in seconds are exact in f64
 fn pace(window: &PlanWindowObservation, at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Pace {
     let unknown = |reason| Pace::Unknown { reason };
-    let Some(minutes) = window
+    // The length is provider data; one the clock cannot represent is as
+    // good as no length at all.
+    let Some(length) = window
         .window
         .duration_minutes
         .and_then(|m| i64::try_from(m).ok())
+        .and_then(Duration::try_minutes)
     else {
         return unknown(PaceUnknown::WindowLengthUnknown);
     };
@@ -268,8 +271,10 @@ fn pace(window: &PlanWindowObservation, at: Option<DateTime<Utc>>, now: DateTime
     let Some(at) = at else {
         return unknown(PaceUnknown::ObservationTimeUnknown);
     };
-    let length = Duration::minutes(minutes);
-    let elapsed = at.signed_duration_since(resets_at - length);
+    let Some(start) = resets_at.checked_sub_signed(length) else {
+        return unknown(PaceUnknown::WindowLengthUnknown);
+    };
+    let elapsed = at.signed_duration_since(start);
     if elapsed <= Duration::zero() || elapsed > length {
         return unknown(PaceUnknown::ObservationOutsideWindow);
     }

@@ -383,3 +383,25 @@ fn a_negligible_use_lasts_until_reset_without_overflowing() {
     };
     assert_eq!(*runs_out_at, None);
 }
+
+/// The window length is provider data: an absurd one leaves the pace
+/// unknown instead of overflowing the clock arithmetic.
+#[test]
+fn an_absurd_window_length_leaves_the_pace_unknown() {
+    let observed = "2026-11-27T18:00:00Z";
+    for window in ["9000000000000000", "18446744073709551615"] {
+        let records = [codex_record(
+            "w-codex",
+            &codex_line(observed, 50.0, Some(RESETS_AT), window),
+            time(observed),
+        )];
+        let accounts = project_accounts(&records, time(observed));
+        assert_eq!(
+            only(&accounts).pace,
+            Pace::Unknown {
+                reason: PaceUnknown::WindowLengthUnknown
+            },
+            "window {window}"
+        );
+    }
+}
