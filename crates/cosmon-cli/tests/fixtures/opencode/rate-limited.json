@@ -1,0 +1,5 @@
+{
+  "model": {"id": "fixture", "providerID": "limited", "variant": "default"},
+  "finish": "error",
+  "error": {"type": "provider.rate-limit", "status": 429, "retryAfterMs": 1000}
+}
