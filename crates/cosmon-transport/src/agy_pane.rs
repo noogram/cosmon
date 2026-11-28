@@ -760,6 +760,174 @@ mod tests {
         assert_eq!(out, "partial\nerror: Individual quota reached.\n");
     }
 
+    /// A writer the test can read back after the driver is done with it.
+    #[derive(Clone, Default)]
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Shared {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    /// A fake agy speaking the multi-turn print mode: init, one turn per
+    /// stdin line (recorded), a stderr line when stdin closes, then `exit`.
+    fn fake_agy(dir: &std::path::Path, exit: &str) -> AgyPaneConfig {
+        let script = dir.join("agy");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n\
+                 printf '%s\\n' '{{\"event\":\"init\",\"conversation_id\":\"c\",\"init\":{{}}}}'\n\
+                 n=0\n\
+                 while IFS= read -r line; do n=$((n+1)); printf '%s\\n' \"$line\" >> '{d}/stdin'\n\
+                 printf '{{\"event\":\"result\",\"result\":{{\"status\":\"SUCCESS\",\"num_turns\":%d,\"usage\":{{\"input_tokens\":%d}}}}}}\\n' $n $n\n\
+                 done\n\
+                 echo 'closed' >&2\n\
+                 {exit}\n",
+                d = dir.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        AgyPaneConfig {
+            molecule_dir: dir.to_path_buf(),
+            prompt: "the brief".into(),
+            program: script.to_string_lossy().into_owned(),
+            arguments: vec![],
+        }
+    }
+
+    fn sent(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("stdin"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                v["message"]["content"].as_str().unwrap().to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn run_sends_brief_then_lines_and_records_receipt_display_and_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(EXIT_CODE_FILE), "stale\n").unwrap();
+        std::fs::write(dir.path().join(RECEIPT_FILE), "earlier\n").unwrap();
+        let config = fake_agy(dir.path(), "exit 6");
+        let (out, echo) = (Shared::default(), Shared::default());
+        let input = std::io::Cursor::new(b"nexz\x7ft\r\n\r\x1b[200~a\rb\x1b[201~\r".to_vec());
+        let code = run(&config, input, out.clone(), Some(Box::new(echo.clone()))).unwrap();
+
+        assert_eq!(code, 6);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(EXIT_CODE_FILE)).unwrap(),
+            "6\n"
+        );
+        assert_eq!(sent(dir.path()), ["the brief", "next", "a\nb"]);
+        let receipt = std::fs::read_to_string(dir.path().join(RECEIPT_FILE)).unwrap();
+        assert!(
+            receipt.starts_with("earlier\n{\"event\":\"init\""),
+            "{receipt}"
+        );
+        assert_eq!(receipt.matches("\"event\":\"result\"").count(), 3);
+        assert!(receipt.contains("closed\n"), "stderr is kept: {receipt}");
+        let shown = out.text();
+        assert!(shown.contains("agy session c · model default\n"), "{shown}");
+        assert!(shown.contains("── turn 3 SUCCESS · tokens in 3 cache - out - thinking -\n"));
+        assert!(!shown.contains("{\"event\""), "{shown}");
+        assert!(echo.text().contains("nexz\x08 \x08t"), "{:?}", echo.text());
+    }
+
+    #[test]
+    fn run_ends_when_agy_ends_though_the_terminal_stays_open() {
+        let dir = tempfile::tempdir().unwrap();
+        // agy reads one message and fails, as on a quota refusal.
+        let mut config = fake_agy(dir.path(), "exit 0");
+        std::fs::write(
+            &config.program,
+            "#!/bin/sh\nread -r line\necho 'error: quota' >&2\nexit 3\n",
+        )
+        .unwrap();
+        config.prompt = "brief".into();
+        let (terminal, _kept_open) = std::os::unix::net::UnixStream::pair().unwrap();
+        let out = Shared::default();
+        let code = run(&config, terminal, out.clone(), None).unwrap();
+        assert_eq!(code, 3);
+        assert!(out.text().contains("error: quota\n"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(EXIT_CODE_FILE)).unwrap(),
+            "3\n"
+        );
+    }
+
+    #[test]
+    fn run_without_a_brief_waits_for_the_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = fake_agy(dir.path(), "exit 0");
+        config.prompt = "  ".into();
+        let code = run(
+            &config,
+            std::io::Cursor::new(b"only line\n".to_vec()),
+            Shared::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(sent(dir.path()), ["only line"]);
+    }
+
+    #[test]
+    fn run_stops_feeding_after_ctrl_d() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = fake_agy(dir.path(), "exit 0");
+        let code = run(
+            &config,
+            std::io::Cursor::new(b"one\n\x04two\n".to_vec()),
+            Shared::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(sent(dir.path()), ["the brief", "one"]);
+    }
+
+    #[test]
+    fn run_reports_an_agy_that_cannot_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = fake_agy(dir.path(), "exit 0");
+        config.program = dir.path().join("missing").to_string_lossy().into_owned();
+        let err = run(&config, std::io::empty(), Shared::default(), None).unwrap_err();
+        assert!(
+            matches!(err, AgyPaneError::Spawn(ref m) if m.contains("missing")),
+            "{err}"
+        );
+        assert!(!dir.path().join(EXIT_CODE_FILE).exists());
+    }
+
+    #[test]
+    fn run_refuses_a_molecule_dir_it_cannot_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = fake_agy(dir.path(), "exit 0");
+        config.molecule_dir = dir.path().join("absent");
+        let err = run(&config, std::io::empty(), Shared::default(), None).unwrap_err();
+        assert!(matches!(err, AgyPaneError::MoleculeDir(_)), "{err}");
+    }
+
     #[test]
     fn exit_status_is_the_code_or_128_plus_the_signal() {
         let ok = Command::new("sh").args(["-c", "exit 3"]).status().unwrap();
