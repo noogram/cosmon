@@ -52,7 +52,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
     // Out of canonical mode the driver echoes and edits lines itself, with no
     // line-length cap (a long whisper was otherwise dropped by the terminal).
     let saved = if terminal {
-        cosmon_transport::agy_pane::take_terminal()
+        cosmon_transport::agy_pane::take_terminal(std::io::stdin())
     } else {
         None
     };
@@ -61,7 +61,7 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         .map(|_| Box::new(std::io::stdout()) as Box<dyn std::io::Write + Send>);
     let outcome = cosmon_transport::agy_pane::run(&config, stdin, std::io::stdout(), echo);
     if let Some(saved) = &saved {
-        cosmon_transport::agy_pane::restore_terminal(saved);
+        cosmon_transport::agy_pane::restore_terminal(std::io::stdin(), saved);
     }
     let code = outcome.map_err(|e| anyhow::anyhow!("agy-pane: {e}"))?;
     std::process::exit(code)

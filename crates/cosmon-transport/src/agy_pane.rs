@@ -355,31 +355,31 @@ fn block(state: &mut RenderState, text: &str) -> String {
     format!("{lead}{text}\n")
 }
 
-/// Take the terminal on stdin out of canonical mode and its own echo, so the
-/// driver edits lines itself with no length limit ([`LineEditor`]). Signals
-/// (Ctrl-C) stay with the terminal. Returns the settings to restore, or `None`
-/// when stdin is not a terminal or refuses the change.
+/// Take the terminal `fd` (the pane: stdin) out of canonical mode and its
+/// own echo, so the driver edits lines itself with no length limit
+/// ([`LineEditor`]). Signals (Ctrl-C) stay with the terminal. Returns the
+/// settings to restore, or `None` when `fd` is not a terminal or refuses the
+/// change.
 #[cfg(unix)]
 #[must_use]
-pub fn take_terminal() -> Option<nix::sys::termios::Termios> {
+pub fn take_terminal(fd: impl std::os::fd::AsFd) -> Option<nix::sys::termios::Termios> {
     use nix::sys::termios::{tcgetattr, tcsetattr, LocalFlags, SetArg, SpecialCharacterIndices};
-    let stdin = std::io::stdin();
-    let saved = tcgetattr(&stdin).ok()?;
+    let saved = tcgetattr(&fd).ok()?;
     let mut edited = saved.clone();
     edited
         .local_flags
         .remove(LocalFlags::ICANON | LocalFlags::ECHO);
     edited.control_chars[SpecialCharacterIndices::VMIN as usize] = 1;
     edited.control_chars[SpecialCharacterIndices::VTIME as usize] = 0;
-    tcsetattr(&stdin, SetArg::TCSANOW, &edited).ok()?;
+    tcsetattr(&fd, SetArg::TCSANOW, &edited).ok()?;
     Some(saved)
 }
 
-/// Put back the terminal settings [`take_terminal`] saved.
+/// Put back on `fd` the terminal settings [`take_terminal`] saved, so a
+/// terminal the driver ran in is left as it was found.
 #[cfg(unix)]
-pub fn restore_terminal(saved: &nix::sys::termios::Termios) {
-    let _ =
-        nix::sys::termios::tcsetattr(std::io::stdin(), nix::sys::termios::SetArg::TCSANOW, saved);
+pub fn restore_terminal(fd: impl std::os::fd::AsFd, saved: &nix::sys::termios::Termios) {
+    let _ = nix::sys::termios::tcsetattr(fd, nix::sys::termios::SetArg::TCSANOW, saved);
 }
 
 /// Exit status of a finished child, as a shell would report it: the code, or
@@ -550,7 +550,8 @@ fn feed(
             let Some(encoded) = user_message_line(&message) else {
                 continue;
             };
-            if stdin.write_all(encoded.as_bytes()).is_err() || stdin.flush().is_err() {
+            // `ChildStdin` is unbuffered: a written message is already agy's.
+            if stdin.write_all(encoded.as_bytes()).is_err() {
                 return;
             }
         }
@@ -918,6 +919,67 @@ mod tests {
         .unwrap();
         assert_eq!(code, 0);
         assert_eq!(sent(dir.path()), ["the brief", "one"]);
+    }
+
+    #[test]
+    fn a_taken_terminal_is_unbuffered_and_silent_and_is_restored() {
+        use nix::sys::termios::{tcgetattr, LocalFlags, SpecialCharacterIndices};
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let before = tcgetattr(&pty.slave).unwrap();
+        assert!(before
+            .local_flags
+            .contains(LocalFlags::ICANON | LocalFlags::ECHO));
+
+        let saved = take_terminal(&pty.slave).expect("a pty is a terminal");
+        let taken = tcgetattr(&pty.slave).unwrap();
+        assert!(!taken.local_flags.contains(LocalFlags::ICANON));
+        assert!(!taken.local_flags.contains(LocalFlags::ECHO));
+        assert!(
+            taken.local_flags.contains(LocalFlags::ISIG),
+            "Ctrl-C still signals"
+        );
+        assert_eq!(
+            taken.control_chars[SpecialCharacterIndices::VMIN as usize],
+            1
+        );
+        assert_eq!(
+            taken.control_chars[SpecialCharacterIndices::VTIME as usize],
+            0
+        );
+
+        restore_terminal(&pty.slave, &saved);
+        let after = tcgetattr(&pty.slave).unwrap();
+        // The kernel may add PENDIN when canonical mode changes; the flags the
+        // driver took are what must come back.
+        assert!(after
+            .local_flags
+            .contains(LocalFlags::ICANON | LocalFlags::ECHO));
+    }
+
+    #[test]
+    fn a_file_is_not_a_terminal_to_take() {
+        let file = tempfile::tempfile().unwrap();
+        assert!(take_terminal(&file).is_none());
+    }
+
+    #[test]
+    fn a_stale_exit_code_that_cannot_be_removed_stops_before_agy_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the exit-code file goes cannot be removed as a file.
+        std::fs::create_dir(dir.path().join(EXIT_CODE_FILE)).unwrap();
+        let config = fake_agy(dir.path(), "exit 0");
+        let err = run(
+            &config,
+            std::io::Cursor::new(b"line\n".to_vec()),
+            Shared::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, AgyPaneError::MoleculeDir(_)), "{err}");
+        assert!(
+            !dir.path().join("stdin").exists(),
+            "agy must not run when its previous exit code cannot be cleared"
+        );
     }
 
     #[test]
