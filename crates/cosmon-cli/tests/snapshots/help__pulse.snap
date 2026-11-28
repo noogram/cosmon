@@ -78,4 +78,9 @@ Provider accounts: the account lines and accounts[] that `cs peek` shows,
 from the same reader (allowance left, reset, pace, credits, age, worker
 shares). Not on the --swiftbar face.
 
+JSON worker_usage[] contains live canonical usage records with unknown counters
+marked unavailable. For OpenCode 2 workers it also includes the observed
+provider/model and any terminal rate-limit or quota refusal. The fuel
+percentage still comes from usage events in the journal.
+
 Exit code: always 0 (read-only, non-blocking — callers use --json state).

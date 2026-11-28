@@ -475,6 +475,14 @@ fn worker_row(w: &Worker) -> String {
     let mol = w.molecule_id.as_deref().unwrap_or("-");
     let tokens = if let Some(receipt) = &w.energy.agy_receipt {
         receipt.usage.unwrap_or_default().columns(humanize_tokens)
+    } else if w.energy.opencode.is_some() {
+        crate::usage_projection::format_usage_token_columns(w.energy.usage.as_ref(), |n| {
+            if n == 0 {
+                "0".to_owned()
+            } else {
+                humanize_tokens(n)
+            }
+        })
     } else {
         format!(
             "{}/{}/{}/{}",
@@ -533,6 +541,14 @@ fn worker_usage_lines(w: &Worker) -> Vec<String> {
     }
     if let Some(percent) = w.energy.context_percent() {
         lines.push(format!("    context {percent:.0}%"));
+    }
+    if let Some(status) = &w.energy.opencode {
+        if let Some(model) = &status.model {
+            lines.push(format!("    {model}"));
+        }
+        if let Some(refusal) = status.refusal {
+            lines.push(format!("    {refusal}"));
+        }
     }
     if let Some(usage) = &w.energy.usage {
         let records = std::slice::from_ref(usage);

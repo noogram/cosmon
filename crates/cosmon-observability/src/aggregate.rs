@@ -206,6 +206,7 @@ mod tests {
                 subscription: None,
                 usage: None,
                 agy_receipt: None,
+                opencode: None,
                 context_window: Some(1_000_000),
                 latest_turn_input_tokens: None,
             },

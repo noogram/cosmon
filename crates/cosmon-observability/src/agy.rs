@@ -28,9 +28,10 @@ impl AgyTokenCounts {
     /// Render the provider's four counters in the fleet's column order.
     #[must_use]
     pub fn columns(&self, format: impl Fn(u64) -> String) -> String {
-        [self.input, self.cache_read, self.output, self.thinking]
-            .map(|count| count.map_or_else(|| "-".to_owned(), &format))
-            .join("/")
+        crate::usage_projection::format_token_columns(
+            [self.input, self.cache_read, self.output, self.thinking],
+            format,
+        )
     }
 }
 

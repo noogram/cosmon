@@ -36,6 +36,12 @@ the raw counters in agy_usage alongside the canonical usage record, whose
 input total includes cache reads. Quota refusals show quota-exhausted with
 the reset delay the provider announced, when available.
 
+OpenCode 2 workers show cumulative IN/CACHED/OUT/RSN, reported API cost,
+provider/model, and any terminal rate-limit or quota refusal. Input includes
+cache reads and writes, and output includes reasoning. A dash marks missing
+counts. JSON carries the canonical usage plus opencode model and refusal
+metadata. This requires a session started by cs tackle with a usage binding.
+
 Provider accounts (codex, claude) appear as account lines under the worker
 strip, in --no-tui output and as accounts[] in --json: allowance left per
 window, time to reset, pace against an even spread (in deficit or in
@@ -204,6 +210,11 @@ A dead subsystem serializes 'off' (red-class) — never silently absent.
 Provider accounts: the account lines and accounts[] that `cs peek` shows,
 from the same reader (allowance left, reset, pace, credits, age, worker
 shares). Not on the --swiftbar face.
+
+JSON worker_usage[] contains live canonical usage records with unknown counters
+marked unavailable. For OpenCode 2 workers it also includes the observed
+provider/model and any terminal rate-limit or quota refusal. The fuel
+percentage still comes from usage events in the journal.
 
 Exit code: always 0 (read-only, non-blocking — callers use --json state).
 

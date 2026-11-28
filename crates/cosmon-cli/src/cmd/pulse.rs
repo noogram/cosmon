@@ -63,16 +63,19 @@
 //! tick is older than its TTL, its voyant is set to `Red` — missing data IS
 //! the alarm, never silence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::Path;
 
 use chrono::{DateTime, Duration, Utc};
 use colored::Colorize;
 use cosmon_core::config::FULL_GATE_POOL;
+use cosmon_core::id::WorkerId;
 use cosmon_core::molecule::MoleculeStatus;
+use cosmon_core::usage::UsageRecord;
 use cosmon_core::vitality::{vitality, Pulse, PulseState, VitalityInputs, VoyantState};
 use cosmon_filestore::gate_slots::{observe_gate_pools, GateRunRecord};
+use cosmon_observability::opencode::OpencodeStatus;
 use cosmon_state::MoleculeFilter;
 use serde::Serialize;
 use serde_json::Value;
@@ -293,9 +296,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // as `cs peek`. Not on the menubar face, which refreshes every few
         // seconds and has no room for them.
         let backends = crate::energy_probe::discover_fleet_backends(&state_dir, &project_socket);
-        let accounts = super::peek::live_accounts(&state_dir, &backends, now);
+        let energy = super::peek::live_worker_energy(&state_dir, &backends);
+        let accounts = super::peek::energy_accounts(energy.values(), now);
         if want_json {
-            print_json(&mut out, &pulse, &gate_slots, &accounts)?;
+            print_json(&mut out, &pulse, &gate_slots, &accounts, &energy)?;
         } else {
             print_human(&mut out, &pulse, window_secs)?;
             print_gate_slots(&mut out, &gate_slots)?;
@@ -822,11 +826,20 @@ fn measured_token_count(value: &Value) -> Option<u64> {
 // Rendering
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize)]
+struct WorkerUsage<'a> {
+    worker_id: &'a WorkerId,
+    usage: Option<&'a UsageRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    opencode: Option<&'a OpencodeStatus>,
+}
+
 fn print_json(
     out: &mut impl Write,
     pulse: &Pulse,
     gate_slots: &GateSlots,
     accounts: &[cosmon_observability::account_usage::AccountWindow],
+    energy: &HashMap<WorkerId, crate::energy_probe::WorkerEnergy>,
 ) -> anyhow::Result<()> {
     #[derive(Serialize)]
     struct Reading<'a> {
@@ -835,13 +848,25 @@ fn print_json(
         gate_slots: &'a GateSlots,
         /// The account windows `cs peek --json` publishes, same objects.
         accounts: &'a [cosmon_observability::account_usage::AccountWindow],
+        worker_usage: &'a [WorkerUsage<'a>],
     }
+    let mut worker_usage: Vec<_> = energy
+        .iter()
+        .filter(|(_, reading)| reading.usage.is_some() || reading.opencode.is_some())
+        .map(|(worker_id, reading)| WorkerUsage {
+            worker_id,
+            usage: reading.usage.as_ref(),
+            opencode: reading.opencode.as_ref(),
+        })
+        .collect();
+    worker_usage.sort_unstable_by_key(|worker| worker.worker_id.as_str());
     serde_json::to_writer(
         &mut *out,
         &Reading {
             pulse,
             gate_slots,
             accounts,
+            worker_usage: &worker_usage,
         },
     )?;
     writeln!(out)?;

@@ -270,6 +270,7 @@ pub(crate) struct RowView {
     /// total is rendered.
     pub(crate) usage: Vec<cosmon_core::usage::UsageRecord>,
     pub(crate) agy_receipt: Option<cosmon_observability::agy::AgyReceipt>,
+    pub(crate) opencode: Option<cosmon_observability::opencode::OpencodeStatus>,
     pub(crate) context_window: Option<u64>,
     pub(crate) latest_turn_input_tokens: Option<u64>,
     pub(crate) session: Option<String>,
@@ -3451,6 +3452,22 @@ impl App {
                 let (whisper_glyph_s, whisper_style) = whisper_token(r.whisper_fresh);
                 let energy = r.agy_receipt.as_ref().map_or_else(
                     || {
+                        if let Some(status) = &r.opencode {
+                            return format!(
+                                "     · {}",
+                                status.format_usage(
+                                    r.usage.first(),
+                                    |n| {
+                                        if n == 0 {
+                                            "0".to_owned()
+                                        } else {
+                                            humanize_tokens(n)
+                                        }
+                                    },
+                                    "\n",
+                                )
+                            );
+                        }
                         format_energy(
                             r.energy_in,
                             r.energy_cached,
@@ -4541,18 +4558,19 @@ pub(crate) fn snapshot_to_rows(snap: &FleetSnapshot) -> Vec<RowView> {
         }
     }
 
-    let agy_workers: HashMap<_, _> = snap
+    let receipt_workers: HashMap<_, _> = snap
         .workers()
-        .filter(|w| w.energy.agy_receipt.is_some())
+        .filter(|w| w.energy.agy_receipt.is_some() || w.energy.opencode.is_some())
         .filter_map(|w| w.molecule_id.as_deref().map(|id| (id, &w.energy)))
         .collect();
     for m in snap.molecules() {
         let id = m.id.to_string();
-        let agy_energy = agy_workers.get(id.as_str());
+        let receipt_energy = receipt_workers.get(id.as_str());
         if let Some(row) = by_mol.get_mut(&id) {
-            if row.agy_receipt.is_none() {
-                if let Some(energy) = agy_energy {
+            if row.agy_receipt.is_none() && row.opencode.is_none() {
+                if let Some(energy) = receipt_energy {
                     row.agy_receipt.clone_from(&energy.agy_receipt);
+                    row.opencode.clone_from(&energy.opencode);
                     row.usage.extend(energy.usage.clone());
                 }
             }
@@ -4582,11 +4600,12 @@ pub(crate) fn snapshot_to_rows(snap: &FleetSnapshot) -> Vec<RowView> {
                 energy_out: 0,
                 energy_reasoning: 0,
                 energy_cost: cosmon_observability::EnergyCost::Unknown,
-                usage: agy_energy
+                usage: receipt_energy
                     .and_then(|energy| energy.usage.clone())
                     .into_iter()
                     .collect(),
-                agy_receipt: agy_energy.and_then(|energy| energy.agy_receipt.clone()),
+                agy_receipt: receipt_energy.and_then(|energy| energy.agy_receipt.clone()),
+                opencode: receipt_energy.and_then(|energy| energy.opencode.clone()),
                 context_window: None,
                 latest_turn_input_tokens: None,
                 session: None,
@@ -4647,6 +4666,9 @@ fn merge_row(
         .saturating_add(fresh.energy_reasoning);
     merge_energy_cost(&mut existing.energy_cost, fresh.energy_cost);
     existing.usage.extend(fresh.usage);
+    if existing.opencode.is_none() {
+        existing.opencode = fresh.opencode;
+    }
     if existing.agy_receipt.is_none() {
         existing.agy_receipt = fresh.agy_receipt;
     }
@@ -4796,6 +4818,7 @@ fn row_view_from(
         energy_cost: energy.cost,
         usage: energy.usage.into_iter().collect(),
         agy_receipt: energy.agy_receipt,
+        opencode: energy.opencode,
         context_window: energy.context_window,
         latest_turn_input_tokens: energy.latest_turn_input_tokens,
         session: Some(s.name.clone()),
@@ -5279,6 +5302,7 @@ fn populate_snapshot(
                     subscription: e.subscription.clone(),
                     usage: e.usage.clone(),
                     agy_receipt: e.agy_receipt.clone(),
+                    opencode: e.opencode.clone(),
                     context_window: e.context_window,
                     latest_turn_input_tokens: e.latest_turn_input_tokens,
                 }
@@ -6222,6 +6246,7 @@ mod tests {
             energy_cost: cosmon_observability::EnergyCost::Unknown,
             usage: Vec::new(),
             agy_receipt: None,
+            opencode: None,
             context_window: None,
             latest_turn_input_tokens: None,
             session: None,
@@ -6829,6 +6854,7 @@ mod tests {
                 subscription: None,
                 usage: None,
                 agy_receipt: None,
+                opencode: None,
                 context_window: None,
                 latest_turn_input_tokens: None,
             },
@@ -6969,6 +6995,7 @@ mod tests {
                     subscription: None,
                     usage: None,
                     agy_receipt: None,
+                    opencode: None,
                     context_window: Some(1_000_000),
                     latest_turn_input_tokens: None,
                 },
@@ -6989,6 +7016,7 @@ mod tests {
                     subscription: None,
                     usage: None,
                     agy_receipt: None,
+                    opencode: None,
                     context_window: Some(1_000_000),
                     latest_turn_input_tokens: None,
                 },

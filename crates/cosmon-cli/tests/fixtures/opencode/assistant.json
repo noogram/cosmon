@@ -1,0 +1,6 @@
+{
+  "model": {"id": "fixture", "providerID": "normal", "variant": "default"},
+  "finish": "stop",
+  "tokens": {"input": 12, "output": 4, "reasoning": 7, "cache": {"read": 5, "write": 0}},
+  "cost": 0.0000365
+}

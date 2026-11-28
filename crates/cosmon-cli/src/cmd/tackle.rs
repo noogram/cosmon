@@ -5212,6 +5212,7 @@ pub(super) fn spawn_and_prompt(
             wid,
             session_name,
             worktree_path,
+            mol_state_dir,
             prompt,
             adapter_entry,
             preferred_model,
@@ -7989,6 +7990,7 @@ fn opencode_session_config(
         binary: std::path::PathBuf::from("opencode"),
         prompt: Some(prompt.to_owned()),
         model: preferred_model.map(str::to_owned),
+        session_title: None,
         telemetry: None,
         pre_existing_worker: None,
         environment,
@@ -8051,6 +8053,7 @@ fn spawn_opencode_and_prompt(
     wid: &cosmon_core::id::WorkerId,
     session_name: &str,
     worktree_path: &std::path::Path,
+    mol_state_dir: &std::path::Path,
     prompt: &str,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
@@ -8068,7 +8071,7 @@ fn spawn_opencode_and_prompt(
         |value| Some(value.model.clone()),
     );
     let environment = gateway.map_or_else(Vec::new, |value| value.environment);
-    let config = opencode_session_config(
+    let mut config = opencode_session_config(
         backend.socket(),
         session_name,
         worktree_path,
@@ -8076,6 +8079,16 @@ fn spawn_opencode_and_prompt(
         environment,
         effective_model.as_deref(),
     );
+
+    let binding = opencode::OpencodeSessionBinding {
+        worker_id: wid.clone(),
+        title: format!("Cosmon {session_name} {:032x}", rand::random::<u128>()),
+    };
+    cosmon_filestore::atomic_write_durable(
+        &mol_state_dir.join(opencode::SESSION_BINDING_FILE),
+        &serde_json::to_vec(&binding)?,
+    )?;
+    config.session_title = Some(binding.title);
 
     *terminal = opencode::spawn_opencode_session_witnessed(&config)
         .map_err(|e| anyhow::anyhow!("cs tackle: opencode spawn failed: {e}"))?;

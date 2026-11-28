@@ -248,6 +248,33 @@ pub fn format_worker_plan(records: &[UsageRecord]) -> String {
     )
 }
 
+/// Render measured token values in input, cached-input, output, reasoning order.
+#[must_use]
+pub fn format_usage_token_columns(
+    usage: Option<&UsageRecord>,
+    format: impl Fn(u64) -> String,
+) -> String {
+    let tokens = usage.map(|record| &record.tokens);
+    format_token_columns(
+        [
+            tokens.and_then(|tokens| tokens.input_tokens.measured()),
+            tokens.and_then(|tokens| tokens.cached_input_tokens.measured()),
+            tokens.and_then(|tokens| tokens.output_tokens.measured()),
+            tokens.and_then(|tokens| tokens.reasoning_output_tokens.measured()),
+        ],
+        format,
+    )
+}
+
+pub(crate) fn format_token_columns(
+    counts: [Option<u64>; 4],
+    format: impl Fn(u64) -> String,
+) -> String {
+    counts
+        .map(|count| count.map_or_else(|| "-".to_owned(), &format))
+        .join("/")
+}
+
 /// Sum one measured token category over distinct cumulative histories.
 #[must_use]
 pub fn sum_token_category(
