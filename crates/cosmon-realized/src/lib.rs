@@ -4,4 +4,3 @@
 
 /// Observes the current worker session and publishes durable evidence.
 pub mod energy_probe;
-mod opencode;

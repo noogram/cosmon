@@ -49,6 +49,10 @@ use cosmon_state::events::worker_spawn::ModelAssessmentSnapshot;
 use cosmon_state::plan_observation::FilePlanObservationStore;
 use sha2::{Digest as _, Sha256};
 
+// The CLI's binary unit tests include this module by path.
+#[path = "opencode.rs"]
+mod opencode;
+
 /// Per-worker aggregated energy values.
 #[derive(Clone, Debug, Default)]
 pub struct WorkerEnergy {
@@ -903,7 +907,7 @@ pub fn read_opencode_worker_energy(
         opencode: Some(OpencodeStatus::default()),
         ..WorkerEnergy::default()
     };
-    let Some(session) = crate::opencode::read_session(state_dir, molecule, worker) else {
+    let Some(session) = opencode::read_session(state_dir, molecule, worker) else {
         return energy;
     };
     let OpencodeReading {
