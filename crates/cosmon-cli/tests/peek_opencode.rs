@@ -4,7 +4,8 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use cosmon_core::event_v2::{AdapterSelectionSource, EventV2};
@@ -84,13 +85,16 @@ fn seed(root: &Path, message: &Value, bind_session: bool) -> anyhow::Result<()> 
     Ok(())
 }
 
-fn cs(root: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let out = Command::new(env!("CARGO_BIN_EXE_cs"))
-        .current_dir(root)
+fn command(root: &Path) -> Command {
+    let mut cs = Command::new(env!("CARGO_BIN_EXE_cs"));
+    cs.current_dir(root)
         .env("NO_COLOR", "1")
-        .env("OPENCODE_DB", root.join("opencode.db"))
-        .args(args)
-        .output()?;
+        .env("OPENCODE_DB", root.join("opencode.db"));
+    cs
+}
+
+fn cs(root: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let out = command(root).args(args).output()?;
     anyhow::ensure!(
         out.status.success(),
         "{}",
@@ -120,6 +124,9 @@ fn recorded_usage_reaches_peek_and_pulse_without_a_live_pane_or_observer() -> an
     let text = cs(tmp.path(), &["peek", "--no-tui", "--once", "--no-tmux"])?;
     assert!(text.contains("IN/CACHED/OUT/RSN 17/5/11/7"), "{text}");
     assert!(text.contains("normal/fixture"), "{text}");
+    let snapshot = cs(tmp.path(), &["peek", "--snapshot"])?;
+    assert!(snapshot.contains("17/5/11/7"), "{snapshot}");
+    assert!(snapshot.contains("normal/fixture"), "{snapshot}");
     let pulse: Value = serde_json::from_str(&cs(tmp.path(), &["pulse", "--json"])?)?;
     let worker = &pulse["worker_usage"][0];
     assert_eq!(worker["worker_id"], "worker-opencode-test", "{pulse}");
@@ -161,26 +168,38 @@ fn an_unbound_worker_does_not_borrow_a_session() -> anyhow::Result<()> {
 }
 
 #[test]
-fn a_terminal_rate_refusal_is_visible_without_inventing_usage() -> anyhow::Result<()> {
-    let tmp = tempfile::tempdir()?;
-    let message: Value = serde_json::from_str(include_str!("fixtures/opencode/rate-limited.json"))?;
-    seed(tmp.path(), &message, true)?;
-    let db = Connection::open(tmp.path().join("opencode.db"))?;
-    db.execute(
-        "INSERT INTO session_message VALUES (?1, 2, 'idle', ?2)",
-        params![SESSION, json!({"error": message["error"]}).to_string()],
-    )?;
-    let text = cs(tmp.path(), &["peek", "--no-tui", "--once", "--no-tmux"])?;
-    assert!(text.contains("IN/CACHED/OUT/RSN -/-/-/-"), "{text}");
-    assert!(text.contains("rate-limited"), "{text}");
-    let doc: Value = serde_json::from_str(&cs(tmp.path(), &["peek", "--json"])?)?;
-    let row = &doc["molecules"][0];
-    assert_eq!(row["usage"], json!([]), "{doc}");
-    assert_eq!(row["opencode"]["refusal"]["kind"], "rate_limited");
-    assert_eq!(row["opencode"]["refusal"]["retry_after_ms"], 1000);
-    let pulse: Value = serde_json::from_str(&cs(tmp.path(), &["pulse", "--json"])?)?;
-    assert_eq!(pulse["worker_usage"][0]["opencode"], row["opencode"]);
-    assert!(pulse["worker_usage"][0]["usage"].is_null());
+fn a_terminal_refusal_is_visible_without_inventing_usage() -> anyhow::Result<()> {
+    for (kind, label, ghost) in [
+        ("provider.rate-limit", "rate_limited", Value::Null),
+        (
+            "provider.quota",
+            "quota_exhausted",
+            json!("quota_exhausted"),
+        ),
+    ] {
+        let tmp = tempfile::tempdir()?;
+        let mut message: Value =
+            serde_json::from_str(include_str!("fixtures/opencode/rate-limited.json"))?;
+        message["error"]["type"] = json!(kind);
+        seed(tmp.path(), &message, true)?;
+        let db = Connection::open(tmp.path().join("opencode.db"))?;
+        db.execute(
+            "INSERT INTO session_message VALUES (?1, 2, 'idle', ?2)",
+            params![SESSION, json!({"error": message["error"]}).to_string()],
+        )?;
+        let text = cs(tmp.path(), &["peek", "--no-tui", "--once", "--no-tmux"])?;
+        assert!(text.contains("IN/CACHED/OUT/RSN -/-/-/-"), "{text}");
+        assert!(text.contains(&label.replace('_', "-")), "{text}");
+        let doc: Value = serde_json::from_str(&cs(tmp.path(), &["peek", "--json"])?)?;
+        let row = &doc["molecules"][0];
+        assert_eq!(row["usage"], json!([]), "{doc}");
+        assert_eq!(row["ghost"], ghost, "{doc}");
+        assert_eq!(row["opencode"]["refusal"]["kind"], label);
+        assert_eq!(row["opencode"]["refusal"]["retry_after_ms"], 1000);
+        let pulse: Value = serde_json::from_str(&cs(tmp.path(), &["pulse", "--json"])?)?;
+        assert_eq!(pulse["worker_usage"][0]["opencode"], row["opencode"]);
+        assert!(pulse["worker_usage"][0]["usage"].is_null());
+    }
     Ok(())
 }
 
@@ -196,5 +215,96 @@ fn ambiguous_titles_fail_closed_even_with_a_valid_binding() -> anyhow::Result<()
     let doc: Value = serde_json::from_str(&cs(tmp.path(), &["peek", "--json"])?)?;
     assert_eq!(doc["molecules"][0]["usage"], json!([]), "{doc}");
     assert_eq!(doc["molecules"][0]["opencode"], json!({}), "{doc}");
+    Ok(())
+}
+
+#[test]
+fn a_binding_owned_by_another_worker_is_unavailable() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    seed(tmp.path(), &serde_json::from_str(ASSISTANT)?, true)?;
+    let id = MoleculeId::new("task-20261128-a901")?;
+    let store = FileStore::new(tmp.path().join(".cosmon/state"));
+    fs::write(
+        store.molecule_dir(&id).join("opencode-session.json"),
+        serde_json::to_vec(&json!({"worker_id": "worker-other", "title": TITLE}))?,
+    )?;
+    let doc: Value = serde_json::from_str(&cs(tmp.path(), &["peek", "--json"])?)?;
+    assert_eq!(doc["molecules"][0]["usage"], json!([]), "{doc}");
+    Ok(())
+}
+
+#[test]
+fn follow_journals_usage_once_without_a_second_text_line() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    seed(tmp.path(), &serde_json::from_str(ASSISTANT)?, true)?;
+    let mut observer = command(tmp.path())
+        .args([
+            "peek",
+            "--no-tui",
+            "--follow",
+            "--no-tmux",
+            "--energy-tick-interval",
+            "1",
+        ])
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let journal = tmp.path().join(".cosmon/state/events.jsonl");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let usage_event = r#""type":"usage_observed""#;
+    let observed = (|| -> anyhow::Result<bool> {
+        let mut first_seen = None;
+        loop {
+            if fs::read_to_string(&journal)?.contains(usage_event) {
+                let at = first_seen.get_or_insert_with(Instant::now);
+                if at.elapsed() >= Duration::from_millis(1_250) {
+                    return Ok(true);
+                }
+            }
+            if Instant::now() >= deadline || observer.try_wait()?.is_some() {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    })();
+    let _ = observer.kill();
+    let output = observer.wait_with_output()?;
+    assert!(observed?, "peek did not journal the OpenCode observation");
+    assert_eq!(
+        fs::read_to_string(&journal)?.matches(usage_event).count(),
+        1
+    );
+    let stdout = String::from_utf8(output.stdout)?;
+    assert_eq!(
+        stdout.matches("IN/CACHED/OUT/RSN 17/5/11/7").count(),
+        1,
+        "{stdout}"
+    );
+    assert!(!stdout.contains("worker-opencode-test usage:"), "{stdout}");
+    let pulse: Value = serde_json::from_str(&cs(tmp.path(), &["pulse", "--json"])?)?;
+    let fuel = pulse["fuel_pct"].as_f64().expect("pulse fuel percentage");
+    assert!((fuel - 28.0 / 10_000_000.0).abs() < 1e-10, "{pulse}");
+    Ok(())
+}
+
+#[test]
+fn default_database_is_read_from_the_opencode_data_directory() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    seed(tmp.path(), &serde_json::from_str(ASSISTANT)?, true)?;
+    let data = tmp.path().join("share");
+    let opencode = data.join("opencode");
+    fs::create_dir_all(&opencode)?;
+    fs::rename(tmp.path().join("opencode.db"), opencode.join("opencode.db"))?;
+    let output = command(tmp.path())
+        .env_remove("OPENCODE_DB")
+        .env("XDG_DATA_HOME", &data)
+        .args(["pulse", "--json"])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pulse: Value = serde_json::from_slice(&output.stdout)?;
+    assert_record(&pulse["worker_usage"][0]["usage"]);
     Ok(())
 }

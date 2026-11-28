@@ -306,6 +306,42 @@ mod tests {
     }
 
     #[test]
+    fn formats_an_unavailable_reading_with_its_provider_and_refusal() {
+        let error: Value = serde_json::from_str(RATE_LIMIT).unwrap();
+        let model = error["model"].to_string();
+        let reading = parse_opencode_session(
+            Some(&model),
+            [row("idle", &json!({"error": error["error"]}))],
+        );
+        assert_eq!(
+            reading.status.format_usage(None, |n| n.to_string(), "  "),
+            "-/-/-/-  API equiv. unavailable  limited/fixture  rate-limited (retry after 1000ms)"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_labels_and_terminal_control_characters() {
+        for id in ["", "with space", "escape\u{1b}"] {
+            let step = json!({"model": {"providerID": "normal", "id": id}, "finish": "stop"});
+            let reading = parse_opencode_session(None, [row("assistant", &step)]);
+            assert_eq!(reading.status.model, None, "{id:?}");
+            assert_eq!(reading.provider, None, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn a_completed_step_without_tokens_invalidates_an_earlier_total() {
+        let first: Value = serde_json::from_str(ASSISTANT).unwrap();
+        let incomplete = json!({"model": first["model"], "finish": "stop"});
+        let reading = parse_opencode_session(
+            None,
+            [row("assistant", &first), row("assistant", &incomplete)],
+        );
+        assert_eq!(reading.totals, Some(OpencodeTotals::default()));
+        assert_eq!(reading.provider.as_deref(), Some("normal"));
+    }
+
+    #[test]
     fn quota_is_distinct_from_transport_and_a_bad_model_is_ignored() {
         let invalid_model = r#"{"providerID":"normal","id":"\nmodel"}"#;
         let transport = json!({"error": {"type": "provider.transport", "status": 429}});
