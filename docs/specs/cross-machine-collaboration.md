@@ -16,9 +16,10 @@ The semantic contract remains frozen. W4 mounts the five work routes
 W-LIST through W-ACK together with their remote client, canon, OpenAPI and
 help changes. W7a mounts the four presence routes S-ATTACH, S-BEAT, S-DETACH
 and S-PEERS the same way, and W7b the three mailbox routes S-SEND, S-PULL and
-S-ACK. The checkpoint routes in §4 remain **proposed** and absent from
+S-ACK. The checkpoint routes and the evidence routes S-EVPUT and S-EVGET in
+§4 remain **proposed** and absent from
 `crates/cosmon-rpp-adapter/data/surface_events.txt` until their own W7
-increment. The contract checker requires the shipped W4, W7a and W7b routes
+increment (W7c, whose contract the 2026-11-21 W7c amendment settles). The contract checker requires the shipped W4, W7a and W7b routes
 and continues to refuse other mounted collaboration routes.
 
 ## 1. Decisions
@@ -70,7 +71,10 @@ rechecked inside the commit of every write, so revocation and effect have an
 auditable order.
 
 **Single writer per record class.** The RPP, client caches and pending views
-are advisory and rebuildable from the canonical files.
+are advisory and rebuildable from the canonical files. Evidence bytes are not a
+record class of their own: they stay in the existing host content-addressed
+store (CAS), which no admission record duplicates, and a blob is readable for a
+mission only through that mission's admission record (§4).
 
 | Writer | Record class | Location |
 |---|---|---|
@@ -78,7 +82,7 @@ are advisory and rebuildable from the canonical files.
 | `binding-store` | Collaboration bindings, attachment verifiers and revisions | Host state, written only by the local binding command (W2) |
 | `pilot-mailbox` | Pilot messages and their client acknowledgments | Existing pilot mailbox of the mission (W5) |
 | `presence-store` | Tagged remote-presence records with server-observed heartbeat | Existing presence store (W5) |
-| `checkpoint-store` | Immutable checkpoint revisions | Existing checkpoint store (W5) |
+| `checkpoint-store` | Immutable checkpoint revisions, and evidence admission records (one immutable file per admitted digest: mission, digest, size, admitting attachment or session, server time; no bytes) | Existing checkpoint store (W5); admission records under the mission's checkpoint directory |
 | `lease-ledger` | Signed pilot-lease grants and epochs | Existing lease ledger; no route in this contract writes it |
 
 ## 3. Scopes
@@ -94,8 +98,16 @@ table confers lifecycle, harvest, spawn or lease rights.
 | `cosmon:sessions:read` | List authorized peers, pull pilot messages, read checkpoints | - |
 | `cosmon:sessions:write` | Attach, heartbeat, detach, send and acknowledge pilot messages, publish checkpoints | `cosmon:sessions:read` |
 
-Missing evidence bytes move through the existing artifact read and write
-routes under their own scopes; this contract adds none for them.
+Evidence bytes move only through S-EVPUT and S-EVGET (§4), under
+`cosmon:sessions:write` and `cosmon:sessions:read`; this contract adds no
+scope for them. The existing artifact routes are not evidence custody. They
+admit by the `cosmon:artifact:read` and `cosmon:artifact:write` scopes and the
+caller's noyau, not by the collaboration binding, so the host could report a
+checkpoint `complete` to a recipient who cannot read the bytes, which
+contradicts "readable by the recipient". Their files are also addressed by
+name and can be overwritten after publication, and their default root is
+`/tmp/cosmon`. This reverses the sentence of the frozen contract that named
+those routes (operator decision of 2026-11-21).
 
 ## 4. Routes
 
@@ -130,6 +142,8 @@ model received or considered the content.
 | S-CKPUT | checkpoint publish | `POST /v1/pilot/{mission}/checkpoints` | `cosmon:sessions:write` | `cs sessions checkpoint publish` | `checkpoint-store` | 262144 bytes per checkpoint, 100 evidence references | idempotent-key | advisory-write | W7 |
 | S-CKGET | checkpoint read | `GET /v1/pilot/{mission}/checkpoints/{revision}` | `cosmon:sessions:read` | `cs sessions checkpoint show` | `checkpoint-store` | 262144 bytes | safe-repeat | read-only | W7 |
 | S-CKCMP | checkpoint compare | `GET /v1/pilot/{mission}/checkpoints/{revision}/comparison` | `cosmon:sessions:read` | `cs sessions drift` | `checkpoint-store` | 262144 bytes | safe-repeat | read-only | W7 |
+| S-EVPUT | evidence upload | `PUT /v1/pilot/{mission}/evidence/{sha256}` | `cosmon:sessions:write` | `cs sessions evidence put` (confirmed by the operator on 2026-11-28, see §11 2026-11-21 W7c) | `checkpoint-store` | 1048576 bytes per blob | safe-repeat | advisory-write | W7 |
+| S-EVGET | evidence read | `GET /v1/pilot/{mission}/evidence/{sha256}` | `cosmon:sessions:read` | `cs sessions evidence get` (confirmed by the operator on 2026-11-28, see §11 2026-11-21 W7c) | `checkpoint-store` | 1048576 bytes | safe-repeat | read-only | W7 |
 
 Of the local counterparts above, both W5 verbs now exist.
 `cs presence detach [--session <SID>] [--json]` removes the session's presence
@@ -141,7 +155,7 @@ to detach", which is the safe-repeat behavior S-DETACH needs.
 separately from reading it. A duplicate succeeds without writing; an unknown
 key is refused. The local mailbox read still acknowledges as it reads, while
 `inbox --peek` reads without acknowledging. W7a mounts the presence routes
-and W7b the mailbox routes; the checkpoint routes remain W7 work.
+and W7b the mailbox routes; the checkpoint and evidence routes remain W7 work.
 `cs sessions checkpoint publish` is now idempotent on its id and bounded.
 The same id with the same content, publication time aside, succeeds and writes
 nothing; the same id with other content is refused and the first record stays.
@@ -150,7 +164,9 @@ references (claims included), or one whose evidence locator is a path or
 `file:` URL of the publisher's machine is refused before anything is written.
 `cs sessions checkpoint show` refuses a stored record over 262144 bytes before
 reading it. `cs sessions checkpoint list` and `cs sessions drift` read only,
-and a drift verdict never states that a checkpoint is portable.
+and a drift verdict never states that a checkpoint is portable. The local
+publication still accepts the schema `cosmon.checkpoint/v1` and its free
+`locator`; the remote rule below does not change it.
 The singular `GET /v1/molecules/{id}/session`
 transcript route is unchanged and stays read-only. Three things stay
 distinct: reading a transcript, advisory exchange (everything above) and
@@ -215,11 +231,73 @@ authority transfer (the host-local lease ledger, reached by no route here).
   refused. DTOs are additive and versioned; old records default on read.
 - **Pilot routes** take `mission` and `attachment` from the path and check them
   against the binding. The server fixes author and mission from the attachment.
-  Checkpoints are bounded structured records; evidence is a digest-bound
-  artifact reference readable by the recipient, never a client path. A
-  checkpoint whose references cannot be read is incomplete, and a drift
-  comparison alone cannot certify portability. Pilot pull returns messages
+  Checkpoints are bounded structured records. Pilot pull returns messages
   without consuming them; the client acknowledges after its own safe point.
+  The checkpoint and evidence rule follows.
+- **Evidence reference.** An evidence reference is the object
+  `{"sha256": "<64 lowercase hex>", "size": <1..1048576>}` and nothing else.
+  `sha256` is the SHA-256 of the exact bytes, the algorithm of the host CAS
+  (`ContentHash`), written as 64 lowercase hexadecimal characters; it is
+  mandatory, and the algorithm is named by the field because BLAKE3 values,
+  used by work payloads and the artifact routes, have the same textual shape.
+  `size` is the byte length. Any other spelling, an unknown field or a
+  `locator` field is refused with `invalid_json_body` and is never trimmed,
+  case-folded or rewritten; the refusal does not echo the value. The grammar is
+  closed, so the only request bytes that reach path construction are a value
+  parsed as a digest, and no client path, URL or encoding of one can be cited.
+  A record that holds such references declares `cosmon.checkpoint/v2`. A record
+  of the schema `cosmon.checkpoint/v1` stays readable without rewrite and its
+  references are reported `unresolvable`; S-CKPUT refuses it. Whether a
+  display label accompanies a reference is not specified; the choice is none,
+  because a second free string would carry client paths into published
+  records (§9). The pilot mailbox's `payload_ref` strings
+  (`cas/<prefix>/<hash>`) are unchanged and are not evidence references.
+- **Admission.** A digest is readable for a mission only if bytes with that
+  digest and size were uploaded under a binding of that mission; knowing a
+  digest, or holding it as a mailbox body, grants nothing. S-EVPUT takes the raw
+  bytes as the body and hashes them; a body that does not hash to the path
+  digest is `digest_mismatch`. It verifies any blob the store already holds,
+  replaces it if it fails its digest, and writes the bytes before it creates
+  the immutable admission record. Its response does not depend on whether the
+  store already held the blob, and S-EVGET answers a digest that no mission
+  admitted exactly as one not admitted for this mission.
+- **Publication.** S-CKPUT answers an identical retry before resolving
+  anything; it then accepts a checkpoint only when every cited reference is
+  `readable` for the path mission, and otherwise refuses with
+  `evidence_unreadable`, listing the status of each reference, and writes
+  nothing. Evidence is therefore uploaded before the checkpoint that cites it.
+- **Status and completeness.** Completeness is never stored. S-CKGET, S-CKCMP
+  and S-EVGET resolve at each read, hashing at most `size` + 1 bytes per
+  reference, and give each reference exactly one status: `readable`
+  (admitted for the mission, bytes present and matching), `unknown` (not
+  admitted for the mission), `missing` (admitted, bytes absent), `mismatched`
+  (bytes present, digest or size differs) or `unresolvable` (schema v1). A store
+  I/O failure other than absence answers the whole request with
+  `custody_unavailable` and never yields a status. A checkpoint is `complete`
+  when it cites at least one reference and every status is `readable`,
+  `none_cited` when it cites none, and `incomplete` otherwise. S-CKGET returns
+  the record, each reference's status, the completeness and the server time of
+  resolution; the status list does not count toward the 262144-byte record
+  bound and has at most 100 entries. S-EVGET returns the bytes of a `readable`
+  reference, refuses `unknown` and `missing` with `evidence_unreadable`, and
+  refuses `mismatched` with `corrupt_evidence` without sending bytes. A
+  checkpoint becomes complete again only when identical bytes are uploaded
+  again for the mission. Complete means the cited bytes exist and match; it
+  does not mean they support the claim, and a drift comparison alone cannot
+  certify portability.
+- **Comparison.** S-CKCMP's second operand is not specified; the choice is a
+  required `against` query parameter naming a revision of the same mission. Its
+  response carries the drift report and each side's completeness, and no
+  portability field. Each reference that is not `readable` adds an INCONCLUSIVE
+  record of class `unresolved_evidence`, so the comparison never reports AGREE
+  over an incomplete side. The local `cs sessions drift` supplies no statuses
+  and its output is unchanged.
+- **Allowance.** The per-mission allowance is not specified; the choice is 1000
+  admitted digests and 104857600 admitted bytes, refused with `evidence_limit`.
+  The limit of 100 references per checkpoint is unchanged. How admissions and
+  bytes are removed is not specified; the choice is that no route removes them
+  and they leave only with the mission's archive under §9 (pending operator
+  confirmation, see §11 2026-11-21 W7c).
 
 ## 5. Operations that are refused
 
@@ -259,13 +337,15 @@ added by amendment, never reused for another meaning.
 | payload_too_large | 413 | Payload or note exceeds its limit. |
 | budget_exhausted | 429 | The seat used its message or byte allowance. |
 | envelope_expired | 410 | The envelope's lifetime ended before the operation. |
-| digest_mismatch | 422 | The supplied digest does not match the stored payload. |
-| evidence_unreadable | 422 | Referenced evidence is missing, unreadable or fails its digest. |
+| digest_mismatch | 422 | The supplied digest does not match the payload sent or stored. |
+| evidence_unreadable | 422 | Referenced evidence is missing, unreadable or fails its digest; for S-CKPUT the body lists the status of each reference. |
+| evidence_limit | 429 | The mission's admitted evidence reached 1000 digests or 104857600 bytes (S-EVPUT); confirmed by the operator on 2026-11-28, see §11 2026-11-21 W7c. |
+| invalid_json_body | 400 | The request body is not valid JSON for its route, or carries an unknown field or a malformed evidence reference; already emitted by the work and pilot routes and recorded here. |
 | attachment_limit | 409 | The mission already holds two attachments with valid bindings (S-ATTACH); confirmed by the operator on 2026-11-20, see §11. |
-| not_attached | 404 | The attachment has no presence record on the mission (S-BEAT); pending operator confirmation, see §11 2026-11-20. |
-| heartbeat_too_soon | 429 | The attachment's last heartbeat is less than 10 seconds old; carries Retry-After; pending operator confirmation, see §11 2026-11-20. |
-| pending_limit | 429 | The sending attachment already has 1000 unacknowledged pilot messages (S-SEND); pending operator confirmation, see §11 2026-11-21. |
-| corrupt_evidence | 500 | Stored records fail validation; nothing is returned or repaired silently. |
+| not_attached | 404 | The attachment has no presence record on the mission (S-BEAT); confirmed by the operator on 2026-11-28, see §11 2026-11-20. |
+| heartbeat_too_soon | 429 | The attachment's last heartbeat is less than 10 seconds old; carries Retry-After; confirmed by the operator on 2026-11-28, see §11 2026-11-20. |
+| pending_limit | 429 | The sending attachment already has 1000 unacknowledged pilot messages (S-SEND); confirmed by the operator on 2026-11-28, see §11 2026-11-21. |
+| corrupt_evidence | 500 | Stored records or evidence bytes fail validation; nothing is returned or repaired silently. |
 | unsupported_feature | 501 | The deployment predates the requested operation; there is no local fallback. |
 | custody_unavailable | 503 | The owning store cannot be reached or locked; the outcome is unknown, not failed. |
 
@@ -325,8 +405,8 @@ harvest grants remain mandatory.
 | 3 | W4 | Work routes W-LIST … W-ACK, remote client commands, canon, OpenAPI, help and parity updates | Session routes |
 | 4 | W5 | Portable presence, pilot mailbox acknowledgment and checkpoint custody on the local side: `cs presence detach`, `cs sessions ack`, `cs sessions checkpoint publish\|show\|list`, `cs sessions drift` (done 2026-11-17, see §11) | Lease fencing; evidence-reference resolution |
 | 5 | W6 | Nothing: not shipped, by decision of 2026-11-17 (see §8 and §11) | Fencing of every covered effect; control handover |
-| 6 | W7 | Session routes S-ATTACH … S-CKCMP and client commands, in four serialized increments. W7a, the presence routes S-ATTACH, S-BEAT, S-DETACH, S-PEERS and `cosmon-remote pilot`, is delivered (2026-11-20, see §11). W7b, the mailbox routes S-SEND, S-PULL, S-ACK and `cosmon-remote pilot send\|inbox\|ack`, is delivered (2026-11-21, see §11). W7c (checkpoint routes) and W7d are not delivered | Remote signing; takeover routes |
-| 7 | W8 | Two-machine acceptance evidence and the off-host restore check | New features |
+| 6 | W7 | Session routes S-ATTACH … S-CKCMP, the evidence routes S-EVPUT and S-EVGET, and client commands, in four serialized increments. W7a, the presence routes S-ATTACH, S-BEAT, S-DETACH, S-PEERS and `cosmon-remote pilot`, is delivered (2026-11-20, see §11). W7b, the mailbox routes S-SEND, S-PULL, S-ACK and `cosmon-remote pilot send\|inbox\|ack`, is delivered (2026-11-21, see §11). W7c (checkpoint and evidence routes; contract settled by the 2026-11-21 W7c amendment) and W7d are not delivered | Remote signing; takeover routes |
+| 7 | W8 | Two-machine acceptance evidence and the off-host restore check, which resolves every evidence reference of every stored checkpoint on the restored host | New features |
 
 W4 is the work-only release boundary. Units that share exports, route
 registration, the surface canon, specs or parity documents are serialized in
@@ -374,7 +454,7 @@ therefore dropped from §4 and refused as X-TAKEOVER, and the local
 `cs sessions takeover` verbs are unchanged. O1 and O8 stand as written: no
 route confers or exercises lifecycle authority.
 
-**2026-11-20 amendment (W7a; the attachment cap rule is confirmed by the operator on 2026-11-20, the rest is pending operator confirmation).** W7a mounts
+**2026-11-20 amendment (W7a; the attachment cap rule is confirmed by the operator on 2026-11-20, the rest on 2026-11-28).** W7a mounts
 S-ATTACH, S-BEAT, S-DETACH and S-PEERS; W7b to W7d are not delivered. Remote
 presence is its own record class in the presence store,
 `presence/remote/<mission>/<attachment>.json`, tagged by attachment and
@@ -407,7 +487,7 @@ because no existing code has their meaning and `budget_exhausted` is reserved
 for seat allowances. The local verbs keep their current behaviour: the caps
 apply to the remote routes only.
 
-**2026-11-21 amendment (W7b; pending operator confirmation).** W7b mounts
+**2026-11-21 amendment (W7b; confirmed by the operator on 2026-11-28).** W7b mounts
 S-SEND, S-PULL and S-ACK; W7c and W7d are not delivered. The store is the
 existing pilot mailbox (`presence/<sid>.inbox.jsonl`, the body in the CAS,
 acknowledgments in `presence/<sid>.inbox.ack.jsonl`); no second store and no
@@ -455,6 +535,51 @@ message is not specified; the choice is to accept it, as the local
 and the remote S-PULL see a message only when they ask. The local verbs keep
 their current behaviour: the limits apply to the remote routes only.
 
+**2026-11-21 amendment (W7c; the reversal of §3 and the routes S-EVPUT and S-EVGET are decided by the operator on 2026-11-21, the rest is confirmed on 2026-11-28).**
+W7c settles the evidence-reference rule left open on 2026-11-17 and fixes the
+contract of S-CKPUT, S-CKGET, S-CKCMP, S-EVPUT and S-EVGET. It mounts nothing:
+the five routes stay proposed and absent from the surface until the W7c
+implementation, and W7d is not delivered. The operator decided to reverse the
+sentence of §3 that named the artifact routes and to add S-EVPUT and S-EVGET;
+the reason is in §3. The evidence reference, the admission rule, the status
+list and the completeness rule are in §4 and are not repeated here. Choices the
+contract did not make, each recorded as a choice: the digest is mandatory,
+SHA-256 and named by the field; a reference carries no label; a size of 0 is
+refused, because it is the one reference anyone can admit without holding any
+content; S-EVPUT is `safe-repeat` because the digest is its identity; the
+admission record is written under the checkpoint store's directory because its
+writer is `checkpoint-store` and §2 gives each writer one tree; a mismatch is a
+per-reference status in S-CKGET and `corrupt_evidence` in S-EVGET, which sends
+no bytes; the allowance is 1000 admitted digests and 104857600 admitted bytes,
+refused with the new code `evidence_limit`, because `budget_exhausted` is
+reserved for seat allowances. `invalid_json_body` is added to §6, where it was
+missing although the work and pilot routes already emit it. Two further
+choices were **confirmed by the operator on 2026-11-28**. First, removal: not specified;
+the choice is that no route removes evidence and it leaves only with the
+mission's archive (§9), so reaching the allowance is an operator event.
+Second, host-local admission: not specified; the choice is a host-local
+`cs sessions evidence put <file>`, the parity counterpart of S-EVPUT, which
+reads a file of the host, on the host, and admits it for the mission, and a
+matching `cs sessions evidence get`. It is a client-side path on the host
+itself, not a path supplied over the wire, so X-PATH does not apply. Without it
+a checkpoint published locally cites v1 locators and reads as permanently
+`incomplete` to a remote reader. This amendment does not change the local
+`cs sessions checkpoint publish`, which keeps accepting v1 records.
+
+Where the code differs from this text, the code is the earlier state and the
+W7c implementation closes the gap: `EvidenceRef` is today `{locator, digest}`
+with a free optional `digest`; no `cosmon.checkpoint/v2` schema, status or
+completeness exists; `is_client_path` is a prefix test, which is why the
+grammar above is closed instead of extending it; the compare in
+`cosmon-pilot-checkpoint` reports `missing_evidence` on emptiness only and has
+no `unresolved_evidence` class; `FileCas::get` is unbounded and does not
+re-hash, `FileCas::put` returns success when the target exists without
+checking it, and its temporary file name is fixed per hash, so S-EVPUT needs
+a verifying write and a bounded read that the mailbox, which shares `FileCas`,
+must not see change; and the CAS is host-wide, with no record of which mission
+a blob belongs to, which is why admission is per mission. The 1048576-byte blob
+bound equals the adapter's default request body limit.
+
 **Amendments**, recorded in the ADRs themselves:
 
 - ADR-080 §6.7 names this contract as the exposure list for collaboration
@@ -465,6 +590,6 @@ their current behaviour: the limits apply to the remote routes only.
   remote admission does not change the advisory, non-authoritative status of
   work messages.
 
-**Parity.** Mounting a route (W4, W7) updates `cs help`, the man page source,
+**Parity.** Mounting a route (W4, W7, including S-EVPUT and S-EVGET) updates `cs help`, the man page source,
 `docs/guides/ux-cli-parity-audit.md` and the API/CLI coverage guide in the
 same change. This file changes none of them because it mounts nothing.
