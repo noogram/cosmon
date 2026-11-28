@@ -45,10 +45,24 @@ pub fn run(args: &Args) -> anyhow::Result<()> {
         arguments: arguments.to_vec(),
     };
     let stdin = std::io::stdin();
-    if stdin.is_terminal() {
+    let terminal = stdin.is_terminal();
+    if terminal {
         print!("{BRACKETED_PASTE_ON}");
     }
-    let code = cosmon_transport::agy_pane::run(&config, stdin, std::io::stdout())
-        .map_err(|e| anyhow::anyhow!("agy-pane: {e}"))?;
+    // Out of canonical mode the driver echoes and edits lines itself, with no
+    // line-length cap (a long whisper was otherwise dropped by the terminal).
+    let saved = if terminal {
+        cosmon_transport::agy_pane::take_terminal()
+    } else {
+        None
+    };
+    let echo: Option<Box<dyn std::io::Write + Send>> = saved
+        .as_ref()
+        .map(|_| Box::new(std::io::stdout()) as Box<dyn std::io::Write + Send>);
+    let outcome = cosmon_transport::agy_pane::run(&config, stdin, std::io::stdout(), echo);
+    if let Some(saved) = &saved {
+        cosmon_transport::agy_pane::restore_terminal(saved);
+    }
+    let code = outcome.map_err(|e| anyhow::anyhow!("agy-pane: {e}"))?;
     std::process::exit(code)
 }

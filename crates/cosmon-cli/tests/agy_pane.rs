@@ -425,8 +425,9 @@ impl Drop for TmuxRig {
 
 /// #240 and #245 end to end: the harness setting reaches agy's argv, the pane
 /// is readable, the session stays open after the brief, `cs whisper` delivers
-/// a multi-line continuation as one turn, `cs peek` reads the cumulative
-/// usage, and ending the input ends agy with its own exit status.
+/// a multi-line continuation as one turn and a line longer than the terminal's
+/// canonical limit whole, typed input is edited, `cs peek` reads the
+/// cumulative usage, and ending the input ends agy with its own exit status.
 #[test]
 fn tackle_whisper_and_peek_an_agy_worker_in_tmux() {
     let Some(rig) = TmuxRig::new() else { return };
@@ -557,6 +558,34 @@ fn tackle_whisper_and_peek_an_agy_worker_in_tmux() {
         .cloned()
         .unwrap_or_else(|| panic!("molecule in peek: {doc}"));
     assert_eq!(row["agy_usage"]["input_tokens"], 200, "{row}");
+
+    // Longer than the terminal's canonical line limit (1024 bytes on macOS),
+    // which dropped such a line entirely before the driver edited lines itself.
+    std::thread::sleep(Duration::from_millis(2100)); // whisper rate limit
+    let long = "x".repeat(3000);
+    rig.cs(&["whisper", &id, "--message", &long]);
+    assert!(
+        wait_for(Duration::from_secs(15), || stdin_messages(&record).len()
+            >= 3),
+        "a long whisper reaches the session: {}",
+        pane()
+    );
+    assert_eq!(
+        stdin_messages(&record)[2]["message"]["content"],
+        long.as_str()
+    );
+
+    // An operator typing, with a correction.
+    rig.tmux(&["send-keys", "-t", "agy-worker", "-l", "abx"]);
+    rig.tmux(&["send-keys", "-t", "agy-worker", "BSpace"]);
+    rig.tmux(&["send-keys", "-t", "agy-worker", "-l", "c"]);
+    rig.tmux(&["send-keys", "-t", "agy-worker", "Enter"]);
+    assert!(wait_for(Duration::from_secs(10), || stdin_messages(
+        &record
+    )
+    .len()
+        >= 4));
+    assert_eq!(stdin_messages(&record)[3]["message"]["content"], "abc");
 
     rig.tmux(&["send-keys", "-t", "agy-worker", "C-d"]);
     assert!(

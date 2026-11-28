@@ -137,6 +137,87 @@ impl MessageAssembler {
     }
 }
 
+/// What the terminal produced: a finished line, or the end of input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalInput {
+    /// A line, without its terminator. Bracketed-paste markers are kept for
+    /// [`MessageAssembler`].
+    Line(String),
+    /// Ctrl-D on an empty line: the operator ends the session.
+    End,
+}
+
+/// Assembles terminal bytes into lines, with the little editing a prompt
+/// needs, when the driver has taken the terminal out of canonical mode.
+///
+/// Canonical mode would do this itself, but it caps one input line at the
+/// system's `MAX_CANON` (1024 bytes on macOS); a longer typed or whispered line
+/// never reached agy at all (measured). So the driver reads bytes and edits
+/// here, with no length limit: printable bytes are kept and echoed, Backspace
+/// removes the last character, Ctrl-U clears the line (`cs whisper` sends it
+/// before pasting), Ctrl-D on an empty line ends input, Enter ends the line.
+/// The bracketed-paste markers are kept, other escape sequences (arrow keys)
+/// and other control bytes are dropped.
+#[derive(Debug, Default)]
+pub struct LineEditor {
+    line: Vec<u8>,
+    escape: Option<Vec<u8>>,
+}
+
+impl LineEditor {
+    /// Feed one byte. Echo for the terminal is appended to `echo`.
+    pub fn push(&mut self, byte: u8, echo: &mut Vec<u8>) -> Option<TerminalInput> {
+        if let Some(mut sequence) = self.escape.take() {
+            sequence.push(byte);
+            let complete = match sequence.as_slice() {
+                [_, b'['] => false,
+                [_, _] => true,
+                [_, b'[', .., last] => (0x40..=0x7e).contains(last),
+                _ => false,
+            };
+            if !complete {
+                self.escape = Some(sequence);
+            } else if sequence == PASTE_START.as_bytes() || sequence == PASTE_END.as_bytes() {
+                self.line.extend_from_slice(&sequence);
+            }
+            return None;
+        }
+        match byte {
+            0x1b => self.escape = Some(vec![byte]),
+            b'\r' | b'\n' => {
+                echo.extend_from_slice(b"\r\n");
+                let line = String::from_utf8_lossy(&std::mem::take(&mut self.line)).into_owned();
+                return Some(TerminalInput::Line(line));
+            }
+            0x7f | 0x08 => {
+                while let Some(last) = self.line.pop() {
+                    if last & 0xc0 != 0x80 {
+                        echo.extend_from_slice(b"\x08 \x08");
+                        break;
+                    }
+                }
+            }
+            0x15 => {
+                if !self.line.is_empty() {
+                    self.line.clear();
+                    echo.extend_from_slice(b"\r\x1b[K");
+                }
+            }
+            0x04 if self.line.is_empty() => return Some(TerminalInput::End),
+            b'\t' => {
+                self.line.push(byte);
+                echo.push(byte);
+            }
+            byte if byte < 0x20 => {}
+            byte => {
+                self.line.push(byte);
+                echo.push(byte);
+            }
+        }
+        None
+    }
+}
+
 /// Display state carried between frames: whether the cursor sits after
 /// streamed agent text that has not yet ended its line.
 #[derive(Debug, Default)]
@@ -274,6 +355,33 @@ fn block(state: &mut RenderState, text: &str) -> String {
     format!("{lead}{text}\n")
 }
 
+/// Take the terminal on stdin out of canonical mode and its own echo, so the
+/// driver edits lines itself with no length limit ([`LineEditor`]). Signals
+/// (Ctrl-C) stay with the terminal. Returns the settings to restore, or `None`
+/// when stdin is not a terminal or refuses the change.
+#[cfg(unix)]
+#[must_use]
+pub fn take_terminal() -> Option<nix::sys::termios::Termios> {
+    use nix::sys::termios::{tcgetattr, tcsetattr, LocalFlags, SetArg, SpecialCharacterIndices};
+    let stdin = std::io::stdin();
+    let saved = tcgetattr(&stdin).ok()?;
+    let mut edited = saved.clone();
+    edited
+        .local_flags
+        .remove(LocalFlags::ICANON | LocalFlags::ECHO);
+    edited.control_chars[SpecialCharacterIndices::VMIN as usize] = 1;
+    edited.control_chars[SpecialCharacterIndices::VTIME as usize] = 0;
+    tcsetattr(&stdin, SetArg::TCSANOW, &edited).ok()?;
+    Some(saved)
+}
+
+/// Put back the terminal settings [`take_terminal`] saved.
+#[cfg(unix)]
+pub fn restore_terminal(saved: &nix::sys::termios::Termios) {
+    let _ =
+        nix::sys::termios::tcsetattr(std::io::stdin(), nix::sys::termios::SetArg::TCSANOW, saved);
+}
+
 /// Exit status of a finished child, as a shell would report it: the code, or
 /// 128 plus the signal number when a signal ended it.
 fn exit_status_code(status: std::process::ExitStatus) -> i32 {
@@ -289,8 +397,10 @@ fn exit_status_code(status: std::process::ExitStatus) -> i32 {
 
 /// Run one agy session in the current terminal and return agy's exit status.
 ///
-/// `input` is the terminal (the pane), `output` the pane's display. The
-/// session stays open after the brief's turn: it ends when `input` reaches
+/// `input` is the terminal (the pane), `output` the pane's display, and
+/// `echo` receives the typed characters when the caller has turned the
+/// terminal's own echo off (see [`LineEditor`]). The session stays open after
+/// the brief's turn: it ends when `input` reaches
 /// end of file, which closes agy's stdin, or when agy exits on its own (a
 /// failed turn). `input` is read on a thread that is abandoned when agy
 /// exits, so a caller should exit the process with the returned status rather
@@ -304,6 +414,7 @@ pub fn run(
     config: &AgyPaneConfig,
     input: impl Read + Send + 'static,
     output: impl Write + Send + 'static,
+    echo: Option<Box<dyn Write + Send>>,
 ) -> Result<i32, AgyPaneError> {
     let exit_file = config.molecule_dir.join(EXIT_CODE_FILE);
     match std::fs::remove_file(&exit_file) {
@@ -352,7 +463,7 @@ pub fn run(
         let first = user_message_line(&config.prompt);
         let sent = first.is_none_or(|line| stdin.write_all(line.as_bytes()).is_ok());
         if sent {
-            std::thread::spawn(move || feed(input, stdin));
+            std::thread::spawn(move || feed(input, stdin, echo));
         }
     }
 
@@ -401,27 +512,47 @@ fn forward(stream: Box<dyn Read + Send>, sink: &Mutex<Sink>) {
     }
 }
 
-/// Forward terminal lines to agy as messages until the terminal closes, then
-/// close agy's stdin so the session ends after its current turn.
-fn feed(input: impl Read, mut stdin: std::process::ChildStdin) {
+/// Forward terminal lines to agy as messages until the terminal closes or the
+/// operator presses Ctrl-D, then close agy's stdin so the session ends after
+/// its current turn.
+fn feed(
+    input: impl Read,
+    mut stdin: std::process::ChildStdin,
+    mut echo: Option<Box<dyn Write + Send>>,
+) {
+    let mut editor = LineEditor::default();
     let mut assembler = MessageAssembler::default();
-    let mut reader = BufReader::new(input);
-    let mut raw = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let mut input = input;
+    let mut shown = Vec::new();
     loop {
-        raw.clear();
-        match reader.read_until(b'\n', &mut raw) {
+        let read = match input.read(&mut buffer) {
             Ok(0) | Err(_) => return,
-            Ok(_) => {}
-        }
-        let line = String::from_utf8_lossy(&raw);
-        let Some(message) = assembler.push(line.trim_end_matches('\n')) else {
-            continue;
+            Ok(n) => n,
         };
-        let Some(encoded) = user_message_line(&message) else {
-            continue;
-        };
-        if stdin.write_all(encoded.as_bytes()).is_err() || stdin.flush().is_err() {
-            return;
+        for &byte in &buffer[..read] {
+            let event = editor.push(byte, &mut shown);
+            if let Some(echo) = echo.as_mut() {
+                if !shown.is_empty() {
+                    let _ = echo.write_all(&shown);
+                    let _ = echo.flush();
+                }
+            }
+            shown.clear();
+            let line = match event {
+                None => continue,
+                Some(TerminalInput::End) => return,
+                Some(TerminalInput::Line(line)) => line,
+            };
+            let Some(message) = assembler.push(&line) else {
+                continue;
+            };
+            let Some(encoded) = user_message_line(&message) else {
+                continue;
+            };
+            if stdin.write_all(encoded.as_bytes()).is_err() || stdin.flush().is_err() {
+                return;
+            }
         }
     }
 }
@@ -471,6 +602,66 @@ mod tests {
             a.push("typed \u{1b}[200~pasted\u{1b}[201~ more").as_deref(),
             Some("typed pasted more")
         );
+    }
+
+    fn type_bytes(bytes: &[u8]) -> (Vec<TerminalInput>, Vec<u8>) {
+        let mut editor = LineEditor::default();
+        let mut echo = Vec::new();
+        let inputs = bytes
+            .iter()
+            .filter_map(|b| editor.push(*b, &mut echo))
+            .collect();
+        (inputs, echo)
+    }
+
+    fn line(text: &str) -> TerminalInput {
+        TerminalInput::Line(text.to_owned())
+    }
+
+    #[test]
+    fn a_line_longer_than_the_canonical_limit_is_kept_whole() {
+        let mut long = vec![b'a'; 5000];
+        long.push(b'\r');
+        let (inputs, echo) = type_bytes(&long);
+        assert_eq!(inputs, vec![line(&"a".repeat(5000))]);
+        assert!(echo.ends_with(b"a\r\n"));
+    }
+
+    #[test]
+    fn backspace_removes_one_character_even_a_multibyte_one() {
+        let (inputs, echo) = type_bytes("abé\x7f\x7fc\x08d\n".as_bytes());
+        assert_eq!(inputs, vec![line("ad")]);
+        assert_eq!(echo.windows(3).filter(|w| w == b"\x08 \x08").count(), 3);
+        let (empty, quiet) = type_bytes(b"\x7f\n");
+        assert_eq!(empty, vec![line("")]);
+        assert_eq!(quiet, b"\r\n");
+    }
+
+    #[test]
+    fn ctrl_u_clears_the_line_and_ctrl_d_ends_only_an_empty_line() {
+        let (inputs, echo) = type_bytes(b"junk\x15ok\r\x15x\x04\x7f\x04");
+        assert_eq!(inputs, vec![line("ok"), TerminalInput::End]);
+        // Only the first Ctrl-U had something to clear.
+        assert_eq!(echo.windows(4).filter(|w| w == b"\r\x1b[K").count(), 1);
+    }
+
+    #[test]
+    fn paste_markers_are_kept_and_other_escapes_and_controls_dropped() {
+        let (inputs, echo) = type_bytes(b"\x1b[200~one\rtwo\x1b[201~\r\x1b[Aup\x1bx\x07\tz\r");
+        assert_eq!(
+            inputs,
+            vec![line("\x1b[200~one"), line("two\x1b[201~"), line("up\tz")]
+        );
+        assert!(!echo.contains(&0x1b), "escape sequences are not echoed");
+        let mut assembler = MessageAssembler::default();
+        let messages: Vec<String> = inputs
+            .iter()
+            .filter_map(|i| match i {
+                TerminalInput::Line(l) => assembler.push(l),
+                TerminalInput::End => None,
+            })
+            .collect();
+        assert_eq!(messages, ["one\ntwo", "up\tz"]);
     }
 
     fn render_all(lines: &[&str]) -> String {
