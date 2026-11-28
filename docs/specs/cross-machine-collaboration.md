@@ -142,8 +142,8 @@ model received or considered the content.
 | S-CKPUT | checkpoint publish | `POST /v1/pilot/{mission}/checkpoints` | `cosmon:sessions:write` | `cs sessions checkpoint publish` | `checkpoint-store` | 262144 bytes per checkpoint, 100 evidence references | idempotent-key | advisory-write | W7 |
 | S-CKGET | checkpoint read | `GET /v1/pilot/{mission}/checkpoints/{revision}` | `cosmon:sessions:read` | `cs sessions checkpoint show` | `checkpoint-store` | 262144 bytes | safe-repeat | read-only | W7 |
 | S-CKCMP | checkpoint compare | `GET /v1/pilot/{mission}/checkpoints/{revision}/comparison` | `cosmon:sessions:read` | `cs sessions drift` | `checkpoint-store` | 262144 bytes | safe-repeat | read-only | W7 |
-| S-EVPUT | evidence upload | `PUT /v1/pilot/{mission}/evidence/{sha256}` | `cosmon:sessions:write` | `cs sessions evidence put` (pending operator confirmation, see §11 2026-11-21 W7c) | `checkpoint-store` | 1048576 bytes per blob | safe-repeat | advisory-write | W7 |
-| S-EVGET | evidence read | `GET /v1/pilot/{mission}/evidence/{sha256}` | `cosmon:sessions:read` | `cs sessions evidence get` (pending operator confirmation, see §11 2026-11-21 W7c) | `checkpoint-store` | 1048576 bytes | safe-repeat | read-only | W7 |
+| S-EVPUT | evidence upload | `PUT /v1/pilot/{mission}/evidence/{sha256}` | `cosmon:sessions:write` | `cs sessions evidence put` (confirmed by the operator on 2026-11-28, see §11 2026-11-21 W7c) | `checkpoint-store` | 1048576 bytes per blob | safe-repeat | advisory-write | W7 |
+| S-EVGET | evidence read | `GET /v1/pilot/{mission}/evidence/{sha256}` | `cosmon:sessions:read` | `cs sessions evidence get` (confirmed by the operator on 2026-11-28, see §11 2026-11-21 W7c) | `checkpoint-store` | 1048576 bytes | safe-repeat | read-only | W7 |
 
 Of the local counterparts above, both W5 verbs now exist.
 `cs presence detach [--session <SID>] [--json]` removes the session's presence
@@ -339,12 +339,12 @@ added by amendment, never reused for another meaning.
 | envelope_expired | 410 | The envelope's lifetime ended before the operation. |
 | digest_mismatch | 422 | The supplied digest does not match the payload sent or stored. |
 | evidence_unreadable | 422 | Referenced evidence is missing, unreadable or fails its digest; for S-CKPUT the body lists the status of each reference. |
-| evidence_limit | 429 | The mission's admitted evidence reached 1000 digests or 104857600 bytes (S-EVPUT); pending operator confirmation, see §11 2026-11-21 W7c. |
+| evidence_limit | 429 | The mission's admitted evidence reached 1000 digests or 104857600 bytes (S-EVPUT); confirmed by the operator on 2026-11-28, see §11 2026-11-21 W7c. |
 | invalid_json_body | 400 | The request body is not valid JSON for its route, or carries an unknown field or a malformed evidence reference; already emitted by the work and pilot routes and recorded here. |
 | attachment_limit | 409 | The mission already holds two attachments with valid bindings (S-ATTACH); confirmed by the operator on 2026-11-20, see §11. |
-| not_attached | 404 | The attachment has no presence record on the mission (S-BEAT); pending operator confirmation, see §11 2026-11-20. |
-| heartbeat_too_soon | 429 | The attachment's last heartbeat is less than 10 seconds old; carries Retry-After; pending operator confirmation, see §11 2026-11-20. |
-| pending_limit | 429 | The sending attachment already has 1000 unacknowledged pilot messages (S-SEND); pending operator confirmation, see §11 2026-11-21. |
+| not_attached | 404 | The attachment has no presence record on the mission (S-BEAT); confirmed by the operator on 2026-11-28, see §11 2026-11-20. |
+| heartbeat_too_soon | 429 | The attachment's last heartbeat is less than 10 seconds old; carries Retry-After; confirmed by the operator on 2026-11-28, see §11 2026-11-20. |
+| pending_limit | 429 | The sending attachment already has 1000 unacknowledged pilot messages (S-SEND); confirmed by the operator on 2026-11-28, see §11 2026-11-21. |
 | corrupt_evidence | 500 | Stored records or evidence bytes fail validation; nothing is returned or repaired silently. |
 | unsupported_feature | 501 | The deployment predates the requested operation; there is no local fallback. |
 | custody_unavailable | 503 | The owning store cannot be reached or locked; the outcome is unknown, not failed. |
@@ -454,7 +454,7 @@ therefore dropped from §4 and refused as X-TAKEOVER, and the local
 `cs sessions takeover` verbs are unchanged. O1 and O8 stand as written: no
 route confers or exercises lifecycle authority.
 
-**2026-11-20 amendment (W7a; the attachment cap rule is confirmed by the operator on 2026-11-20, the rest is pending operator confirmation).** W7a mounts
+**2026-11-20 amendment (W7a; the attachment cap rule is confirmed by the operator on 2026-11-20, the rest on 2026-11-28).** W7a mounts
 S-ATTACH, S-BEAT, S-DETACH and S-PEERS; W7b to W7d are not delivered. Remote
 presence is its own record class in the presence store,
 `presence/remote/<mission>/<attachment>.json`, tagged by attachment and
@@ -487,7 +487,7 @@ because no existing code has their meaning and `budget_exhausted` is reserved
 for seat allowances. The local verbs keep their current behaviour: the caps
 apply to the remote routes only.
 
-**2026-11-21 amendment (W7b; pending operator confirmation).** W7b mounts
+**2026-11-21 amendment (W7b; confirmed by the operator on 2026-11-28).** W7b mounts
 S-SEND, S-PULL and S-ACK; W7c and W7d are not delivered. The store is the
 existing pilot mailbox (`presence/<sid>.inbox.jsonl`, the body in the CAS,
 acknowledgments in `presence/<sid>.inbox.ack.jsonl`); no second store and no
@@ -535,7 +535,7 @@ message is not specified; the choice is to accept it, as the local
 and the remote S-PULL see a message only when they ask. The local verbs keep
 their current behaviour: the limits apply to the remote routes only.
 
-**2026-11-21 amendment (W7c; the reversal of §3 and the routes S-EVPUT and S-EVGET are decided by the operator on 2026-11-21, the rest is pending operator confirmation).**
+**2026-11-21 amendment (W7c; the reversal of §3 and the routes S-EVPUT and S-EVGET are decided by the operator on 2026-11-21, the rest is confirmed on 2026-11-28).**
 W7c settles the evidence-reference rule left open on 2026-11-17 and fixes the
 contract of S-CKPUT, S-CKGET, S-CKCMP, S-EVPUT and S-EVGET. It mounts nothing:
 the five routes stay proposed and absent from the surface until the W7c
@@ -554,7 +554,7 @@ no bytes; the allowance is 1000 admitted digests and 104857600 admitted bytes,
 refused with the new code `evidence_limit`, because `budget_exhausted` is
 reserved for seat allowances. `invalid_json_body` is added to §6, where it was
 missing although the work and pilot routes already emit it. Two further
-choices are **pending operator confirmation**. First, removal: not specified;
+choices were **confirmed by the operator on 2026-11-28**. First, removal: not specified;
 the choice is that no route removes evidence and it leaves only with the
 mission's archive (§9), so reaching the allowance is an operator event.
 Second, host-local admission: not specified; the choice is a host-local
