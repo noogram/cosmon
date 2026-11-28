@@ -243,6 +243,11 @@ pub enum HarnessChannel {
     /// unknown key is rejected by Claude Code's parser at launch, naming
     /// itself; cosmon names the adapter alongside it.
     ClaudeFlag,
+    /// The Antigravity CLI's own flags: `--<key> <value>`, with no allowlist,
+    /// the same shape as Claude Code's (issue #245). agy 1.5.19 refuses an
+    /// unknown flag at launch, and refuses an `--effort` that contradicts the
+    /// effort suffix of the pinned `--model` id.
+    AgyFlag,
 }
 
 impl HarnessChannel {
@@ -253,6 +258,7 @@ impl HarnessChannel {
         match self {
             Self::CodexConfigOverride => "codex:-c",
             Self::ClaudeFlag => "claude:flag",
+            Self::AgyFlag => "agy:flag",
         }
     }
 }
@@ -301,7 +307,7 @@ impl HarnessArg {
      key(s) were resolved for this dispatch ({keys}). cosmon never silently \
      drops a setting: re-dispatch without `--harness` / without the step's \
      `[steps.harness]` table, or pick an adapter that carries them (codex, \
-     claude)."
+     claude, agy)."
 )]
 pub struct UnsupportedHarnessCarrier {
     /// The adapter that cannot carry the map.
@@ -321,6 +327,9 @@ pub struct UnsupportedHarnessCarrier {
 /// - `claude` → `--<key> <value>` per entry, no allowlist
 ///   ([`HarnessChannel::ClaudeFlag`]); Claude Code's own parser rejects an
 ///   unknown flag at launch, loudly.
+/// - `agy` → `--<key> <value>` per entry, no allowlist
+///   ([`HarnessChannel::AgyFlag`], #245); agy's own parser rejects an unknown
+///   flag at launch.
 /// - anything else → [`UnsupportedHarnessCarrier`], **only** when the map is
 ///   non-empty. An empty map renders to an empty vec on every adapter, so a
 ///   dispatch that pins nothing is byte-identical to the pre-#65 shape on every
@@ -340,6 +349,7 @@ pub fn render_harness_args(
     let channel = match adapter {
         "codex" => HarnessChannel::CodexConfigOverride,
         "claude" => HarnessChannel::ClaudeFlag,
+        "agy" => HarnessChannel::AgyFlag,
         other => {
             return Err(UnsupportedHarnessCarrier {
                 adapter: other.to_owned(),
@@ -355,7 +365,7 @@ pub fn render_harness_args(
                 HarnessChannel::CodexConfigOverride => {
                     vec!["-c".to_owned(), format!("{key}={}", setting.value)]
                 }
-                HarnessChannel::ClaudeFlag => {
+                HarnessChannel::ClaudeFlag | HarnessChannel::AgyFlag => {
                     vec![format!("--{key}"), setting.value.clone()]
                 }
             };
@@ -455,6 +465,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["--effort xhigh", "--not-a-real-flag x"]
         );
+    }
+
+    #[test]
+    fn agy_renders_a_flag_per_key_with_no_allowlist() {
+        // #245: agy's channel is Claude Code's shape, carried verbatim; agy's
+        // own parser is what rejects an unknown key.
+        let flag = map(&[("effort", "high"), ("not-a-real-flag", "x y")]);
+        let resolved = resolve_harness_settings(&flag, None);
+        let args = render_harness_args("agy", &resolved).expect("agy carries the map");
+        assert_eq!(
+            args.iter().map(|a| a.argv.clone()).collect::<Vec<_>>(),
+            vec![
+                vec!["--effort".to_owned(), "high".to_owned()],
+                vec!["--not-a-real-flag".to_owned(), "x y".to_owned()],
+            ]
+        );
+        assert!(args.iter().all(|a| a.channel == HarnessChannel::AgyFlag));
+        assert_eq!(HarnessChannel::AgyFlag.as_str(), "agy:flag");
     }
 
     #[test]

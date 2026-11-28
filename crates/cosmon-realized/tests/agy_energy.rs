@@ -163,3 +163,44 @@ fn a_new_init_starts_a_new_cumulative_history_in_an_appended_receipt() -> TestRe
     assert_ne!(first.subject.history, restarted.subject.history);
     Ok(())
 }
+
+/// An interactive agy worker (#240) writes one `init` and then one `result`
+/// per turn, each with the session's cumulative usage. The worker's totals are
+/// the last result, not a sum of results, and stay one cumulative history.
+#[test]
+fn a_multi_turn_session_reports_its_last_cumulative_result() -> TestResult<()> {
+    let fixture = Receipt::new()?;
+    let init = br#"{"event":"init","conversation_id":"c","init":{"model":"m"}}"#;
+    let turn = |n: u64| {
+        format!(
+            r#"{{"event":"result","result":{{"status":"SUCCESS","num_turns":{n},"usage":{{"input_tokens":{},"cache_read_tokens":{},"output_tokens":{},"thinking_tokens":{}}}}}}}"#,
+            100 * n,
+            1000 * n,
+            10 * n,
+            n
+        )
+    };
+    let mut receipt = init.to_vec();
+    receipt.push(b'\n');
+    receipt.extend_from_slice(turn(1).as_bytes());
+    receipt.push(b'\n');
+    fixture.write(&receipt)?;
+    let first = fixture.observe("agy", WorkerRole::Cognition)?.unwrap();
+    assert_eq!(first.token_tuple(), (1100, 1000, 10, 1));
+
+    receipt.extend_from_slice(turn(2).as_bytes());
+    receipt.push(b'\n');
+    fixture.write(&receipt)?;
+    let second = fixture.observe("agy", WorkerRole::Cognition)?.unwrap();
+    assert_eq!(
+        second.token_tuple(),
+        (2200, 2000, 20, 2),
+        "last, not summed"
+    );
+    assert_eq!(
+        first.usage.unwrap().subject.history,
+        second.usage.unwrap().subject.history,
+        "one session is one cumulative history"
+    );
+    Ok(())
+}

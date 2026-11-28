@@ -391,10 +391,14 @@ pub fn default_registry() -> PaneSignatureRegistry {
         ],
     );
     // `agy` (Google Antigravity CLI) installs as `agy`. External-CLI sibling of
-    // opencode. The binary name is the signature.
+    // opencode. Since #240 a worker's pane runs cosmon's agy pane driver
+    // (`exec … cs agy-pane -- agy …`, see `crate::agy_pane`), which reads the
+    // terminal and forwards each line to agy; `pane_current_command` therefore
+    // names `cs`, the process typed text actually reaches. The binary name
+    // stays registered for an agy started directly in a pane.
     r.register(
         crate::agy::ADAPTER_NAME,
-        vec![crate::agy::ADAPTER_NAME.to_owned()],
+        vec![crate::agy::ADAPTER_NAME.to_owned(), "cs".to_owned()],
     );
     // In-process Direct-API adapters (ADR-100). Single sentinel each;
     // dispatch site reads the sentinel to skip tmux readiness.
@@ -705,7 +709,10 @@ mod tests {
     fn default_registry_knows_agy_signatures() {
         let r = default_registry();
         assert!(r.matches(crate::agy::ADAPTER_NAME, "agy"));
+        // The pane driver (`cs agy-pane`) is the pane's process since #240.
+        assert!(r.matches(crate::agy::ADAPTER_NAME, "cs"));
         assert!(!r.matches(crate::agy::ADAPTER_NAME, "opencode"));
+        assert!(!r.matches(crate::agy::ADAPTER_NAME, "zsh"));
     }
 
     /// C4 (PR-3): the default registry must match every variant of

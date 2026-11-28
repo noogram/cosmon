@@ -1522,27 +1522,18 @@ impl LiveProbe for CodexProbe {
 /// preamble, widen it here rather than loosening the probe to accept a bare
 /// live session.
 /// `true` when raw terminal `output` carries positive evidence that a live
-/// `agy` process printed it.
+/// `agy` session started.
 ///
-/// Positive evidence is a line that parses as JSON and represents the `init`
-/// event of the agy stream-json output.
+/// Positive evidence is the line the pane driver prints when agy's own `init`
+/// frame arrives ([`crate::agy_pane::READY_PREFIX`] followed by the
+/// conversation id). The driver prints it only after agy has started a
+/// session, so neither the pane's existence nor the driver alone reads as live.
 #[must_use]
 pub fn agy_output_is_live(output: &str) -> bool {
     output.lines().any(|line| {
-        let trimmed = line.trim();
-        if !trimmed.starts_with('{') {
-            return false;
-        }
-        // `capture-pane -p` (no `-J`) hard-wraps agy's very wide init line,
-        // so a captured row is a fragment that does not parse. The prefix of
-        // agy's own init event is still positive evidence.
-        if trimmed.starts_with("{\"event\":\"init\"") {
-            return true;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            return false;
-        };
-        v.get("event").and_then(|e| e.as_str()) == Some("init") && v.get("init").is_some()
+        line.trim_start()
+            .strip_prefix(crate::agy_pane::READY_PREFIX)
+            .is_some_and(|rest| !rest.trim().is_empty())
     })
 }
 
@@ -3323,32 +3314,17 @@ mod tests {
     }
 
     #[test]
-    fn agy_output_is_live_on_init_event() {
-        let output = "some unrelated text\n{\"event\":\"init\",\"conversation_id\":\"123\",\"init\":{\"model\":\"gemini\"}}\n";
+    fn agy_output_is_live_on_the_drivers_session_line() {
+        let output = "some unrelated text\n  agy session 123 · model gemini\n";
         assert!(agy_output_is_live(output));
     }
 
     #[test]
-    fn agy_output_is_live_on_hard_wrapped_init_event() {
-        let init = format!(
-            "{{\"event\":\"init\",\"conversation_id\":\"c1\",\"init\":{{\"model\":\"m\",\"cwd\":\"/w\",\"tools\":[{}]}}}}",
-            (0..40).map(|i| format!("\"tool_{i}\"")).collect::<Vec<_>>().join(",")
-        );
-        let wrapped: Vec<String> = init
-            .as_bytes()
-            .chunks(80)
-            .map(|c| String::from_utf8_lossy(c).into_owned())
-            .collect();
-        assert!(wrapped.len() > 2);
-        assert!(serde_json::from_str::<serde_json::Value>(&wrapped[0]).is_err());
-        assert!(agy_output_is_live(&wrapped.join("\n")));
-        assert!(!agy_output_is_live("{\"event\":\"step_update\",\"x\":1"));
-    }
-
-    #[test]
-    fn agy_output_not_live_on_unrelated_json() {
-        assert!(!agy_output_is_live("{\"event\":\"step_update\"}"));
-        assert!(!agy_output_is_live("{\"name\":\"test\"}"));
+    fn agy_output_not_live_without_a_session_line() {
+        assert!(!agy_output_is_live("agy session \n"));
+        assert!(!agy_output_is_live("agy session"));
+        assert!(!agy_output_is_live("{\"event\":\"init\",\"init\":{}}"));
+        assert!(!agy_output_is_live("the agy session 1 started"));
         assert!(!agy_output_is_live("plain text"));
         assert!(!agy_output_is_live(""));
     }
@@ -3368,13 +3344,13 @@ mod tests {
         let worker = backend
             .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
             .unwrap();
-        backend.set_canned_output("{\"event\":\"init\",\"conversation_id\":\"123\",\"init\":{}}\n");
+        backend.set_canned_output("agy session 123 · model default\n");
 
         let probe = AgyProbe;
         assert_eq!(
             probe.observe(&backend, &worker.id).unwrap(),
             Liveness::Live,
-            "an agy init event is positive evidence of liveness"
+            "the driver's session line is positive evidence of liveness"
         );
     }
 

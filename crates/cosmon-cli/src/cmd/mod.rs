@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod agy_pane;
 pub mod apps;
 pub mod archive;
 pub mod artifacts;

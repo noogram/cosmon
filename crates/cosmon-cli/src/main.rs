@@ -277,6 +277,9 @@ enum Command {
     /// Wait for a direct child and publish launch-bound OS evidence (internal transport).
     #[command(hide = true)]
     WorkerSupervise(cmd::worker_supervise::Args),
+    /// Drive an agy worker's pane: forward typed lines, keep the receipt (internal transport).
+    #[command(hide = true)]
+    AgyPane(cmd::agy_pane::Args),
 
     /// Claim a molecule for the pilot; the runtime defers until it is released
     #[command(after_help = cmd::examples::CLAIM)]
@@ -846,6 +849,7 @@ fn main() {
         Command::Tackle(args) => cmd::tackle::run(&ctx, &args),
         Command::LocalWorker(args) => cmd::tackle::run_local_worker(&args),
         Command::WorkerSupervise(args) => cmd::worker_supervise::run(&args),
+        Command::AgyPane(args) => cmd::agy_pane::run(&args),
         Command::Claim(args) => cmd::claim::claim(&ctx, &args),
         Command::Release(args) => cmd::claim::release(&ctx, &args),
         Command::Tag(args) => cmd::tag::run(&ctx, &args),

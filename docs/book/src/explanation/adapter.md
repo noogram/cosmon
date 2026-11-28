@@ -48,10 +48,11 @@ adapter, and the events each dispatch emits are documented in the
 
 ## The `opencode` and `agy` workers
 
-Both run as a one-shot command in a tmux pane under `cs tackle`. When the
-command exits, the pane ends, tmux fires the `pane-died` hook, and the hook
-records the worker's exit. What happens next is set by `[harvest]
-on_pane_died` (see [Harvest after the pane ends](#harvest-after-the-pane-ends)).
+Both run in a tmux pane under `cs tackle`. opencode runs a one-shot command;
+agy keeps an interactive session open (see [agy](#agy)). When the process
+exits, the pane ends, tmux fires the `pane-died` hook, and the hook records
+the worker's exit. What happens next is set by `[harvest] on_pane_died` (see
+[Harvest after the pane ends](#harvest-after-the-pane-ends)).
 
 ### opencode
 
@@ -85,44 +86,91 @@ credentials yourself, unless you bind a per-galaxy gateway row
 ### agy
 
 ```sh
-cs tackle <molecule-id> --adapter agy [--model <model>]
+cs tackle <molecule-id> --adapter agy [--model <model>] [--harness <key>=<value>]…
 ```
 
-Cosmon runs this pipeline in the pane:
+Cosmon runs this command in the pane:
 
 ```text
-rm -f '<mol dir>/agy-exit.code'; { env -u ANTIGRAVITY_CONVERSATION_ID agy \
-  --print-timeout 0 --output-format stream-json [--model <model>] \
-  --dangerously-skip-permissions -p '<prompt>' 2>&1; \
-  echo $? > '<mol dir>/agy-exit.code'; } | tee -a '<mol dir>/agy-stream.jsonl'; \
-  exit "$(cat '<mol dir>/agy-exit.code')"
+exec env -u ANTIGRAVITY_CONVERSATION_ID cs agy-pane --molecule-dir '<mol dir>' \
+  --prompt '<prompt>' -- agy --print-timeout 0 --input-format stream-json \
+  --output-format stream-json [--model <model>] [--<key> <value>]… \
+  --dangerously-skip-permissions -p ''
 ```
 
-Each part has a reason:
+`cs agy-pane` is cosmon's pane driver, a hidden internal command. It sits
+between the terminal and agy:
 
-- `echo $? > …/agy-exit.code` and the final `exit "$(cat …)"` make the pane's
-  exit status agy's, not `tee`'s. The command avoids `set -o pipefail`, which
-  dash rejects, so it runs under any POSIX `sh`.
+- It sends the prompt as the session's first message, then each line typed
+  into the pane, or pasted by `cs whisper`, as the next one. A multi-line
+  whisper stays one message. Blank lines are not sent.
+- It appends every line agy writes, stdout and stderr, to
+  `<mol dir>/agy-stream.jsonl`, the receipt `cs peek` reads for usage and a
+  quota stop. The receipt lives in the **molecule directory**, so it survives
+  `cs done` removing the worktree.
+- It shows the same lines readably in the pane: agent text as it streams, one
+  line per tool call, and after each turn its status and the session's token
+  counts so far.
+- When agy exits, it writes agy's exit status to `<mol dir>/agy-exit.code`
+  and exits with it, so the pane's exit status is agy's.
+
+Each part of the agy command has a reason:
+
+- `--input-format stream-json` with `-p ''` is agy's multi-turn print mode:
+  one JSON message per input line, one turn each, and the same `stream-json`
+  events on output as a one-shot run. Measured on agy 1.5.19: one `init`
+  event, then one `result` per turn whose usage covers the whole session so
+  far. agy exits when its input closes or a turn fails; a quota refusal exits
+  with status 3, which ends the pane as before.
+- `exec` makes the driver the pane's process, so tmux reports `cs` as the
+  pane's command (the whisper gate accepts it for agy) and no shell is left in
+  the pane to receive typed text after agy ends.
 - `env -u ANTIGRAVITY_CONVERSATION_ID` keeps a conversation id inherited from
   the tmux server environment from reaching the worker, so the worker does not
   take over a caller identity that belongs to another agy session. An explicit
   entry with that name in the session environment is dropped as well.
-- `--print-timeout 0 --output-format stream-json` runs agy non-interactively
-  with no print timeout and emits one JSON event per line.
 - `--model <model>` is present only when a model is pinned.
+- `--<key> <value>` comes from `--harness <key>=<value>` or from the step's
+  `[steps.harness]` table, carried verbatim (ADR-177): cosmon keeps no list of
+  agy's keys, and an unknown key fails in agy's own parser at launch. Each
+  resolved key is recorded on `events.jsonl` as `harness_setting_selected`
+  with the channel `agy:flag` and the output of `agy --version`.
 - `--dangerously-skip-permissions` approves tool permissions automatically.
   An unattended agy worker therefore runs tools without asking. Run it only
   on work and in a worktree where that is acceptable.
-- `| tee -a …/agy-stream.jsonl` shows progress in the pane and appends the
-  stream to a receipt in the **molecule directory**, not in the worktree, so
-  the receipt survives `cs done` removing the worktree.
+
+Why not agy's interactive TUI (`agy -i`)? It is readable and accepts typed
+input, but during the session it records token usage only in its own
+conversation store, as unnamed fields in a binary format, and its `/usage`
+view shows the account's quota windows, not the session's tokens. Running it
+would lose the usage and quota stop `cs peek` reads from the receipt, and a
+quota error would leave the TUI waiting for input instead of ending the pane.
 
 Further points:
 
-- **Readiness.** `cs tackle` waits up to 30 seconds for agy's `init` event
-  from the stream. `capture-pane` hard-wraps agy's long init line, so a
-  fragment that starts with `{"event":"init"` counts. If it never appears,
-  the spawn fails and the session is terminated.
+- **Interaction.** The session stays open after the brief's turn, like a
+  claude or codex worker. Type into the pane (`cs peek`, then attach) or use
+  `cs whisper <id> --message …`. A line sent while agy is in a turn is run
+  after that turn ends, not injected into it (measured on agy 1.5.19). The
+  worker ends its molecule with
+  `cs complete`; the pane stays open until `cs done` ends the session. Ctrl-D
+  in the pane closes agy's input, and agy exits after its current turn.
+- **Effort.** `--harness effort=<low|medium|high|xhigh|max>` renders
+  `--effort <value>`. agy also lists model ids that carry an effort suffix
+  (`gemini-3.8-flash-high`). Measured on agy 1.5.19, a pinned model id whose
+  suffix contradicts `--effort` is refused at launch with exit status 1 and no
+  turn spent (`--model gemini-3.8-flash-high --effort low`: "conflicts with
+  --effort=low"); agy applies neither. Pin a model without a suffix, or a
+  suffix that agrees with the effort.
+- **Typing.** The driver takes the pane's terminal out of its line mode and
+  edits lines itself, because that mode drops any input line longer than 1024
+  bytes on macOS (measured), which would lose a long whisper. Backspace,
+  Ctrl-U (clear the line), Ctrl-D (end the session) and Enter work; arrow keys
+  are ignored. Ctrl-C still stops agy and the driver.
+- **Readiness.** `cs tackle` waits up to 30 seconds for the driver's
+  `agy session <conversation id> · model <model>` line, which it prints only
+  when agy's own `init` event arrives. If it never appears, the spawn fails
+  and the session is terminated.
 - **Recorded model.** Cosmon records the pin, if any. It does not yet read the
   model agy actually used from the stream, so for an unpinned run the
   realized model is unrecorded.
@@ -135,7 +183,9 @@ Further points:
 
 ### Harvest after the pane ends
 
-The `opencode` and `agy` panes end when the run ends. With the default `on_pane_died = "merge"`, the
+The `opencode` pane ends when the run ends; the `agy` pane ends when agy
+exits (its input closed, or a failed turn such as a quota stop). With the
+default `on_pane_died = "merge"`, the
 `pane-died` hook records the exit and then runs `cs done`: the molecule is
 merged with no pilot review. With `"mark"` the hook records the exit and
 stops. The molecule stays completed and unmerged, listed by `cs status` and

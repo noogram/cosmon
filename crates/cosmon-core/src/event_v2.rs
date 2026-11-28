@@ -1958,7 +1958,7 @@ pub enum EventV2 {
         /// field that can be diffed against the harness's own echo**, which is
         /// why it is recorded as sent rather than reconstructed.
         argv_fragment: String,
-        /// *Which* override surface carried it (`codex:-c`, `claude:flag`).
+        /// *Which* override surface carried it (`codex:-c`, `claude:flag`, `agy:flag`).
         channel: String,
         /// The harness's self-reported version at spawn, or `None` when the
         /// probe could not run. An echo is only interpretable against the
