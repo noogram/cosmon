@@ -864,9 +864,20 @@ mod tests {
         )
         .unwrap();
         config.prompt = "brief".into();
-        let (terminal, _kept_open) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (terminal, kept_open) = std::os::unix::net::UnixStream::pair().unwrap();
         let out = Shared::default();
-        let code = run(&config, terminal, out.clone(), None).unwrap();
+        // A deadline of its own: if the brief never reached agy, agy would
+        // wait for it forever while the terminal stays open.
+        let (done, outcome) = std::sync::mpsc::channel();
+        let (cfg, shown) = (config.clone(), out.clone());
+        std::thread::spawn(move || {
+            let _ = done.send(run(&cfg, terminal, shown, None));
+        });
+        let code = outcome
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("run must end when agy ends")
+            .unwrap();
+        drop(kept_open);
         assert_eq!(code, 3);
         assert!(out.text().contains("error: quota\n"));
         // A last line without its newline is still a whole receipt line.
