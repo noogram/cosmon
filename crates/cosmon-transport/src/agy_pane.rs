@@ -841,10 +841,12 @@ mod tests {
         );
         assert_eq!(sent(dir.path()), ["the brief", "next", "a\nb"]);
         let receipt = std::fs::read_to_string(dir.path().join(RECEIPT_FILE)).unwrap();
-        assert!(
-            receipt.starts_with("earlier\n{\"event\":\"init\""),
-            "{receipt}"
-        );
+        // stdout and stderr reach the receipt through two pipes, so their
+        // relative order is not defined; only stdout's own order is.
+        assert!(receipt.starts_with("earlier\n"), "{receipt}");
+        let init = receipt.find("{\"event\":\"init\"").expect("init line");
+        let first_result = receipt.find("\"event\":\"result\"").expect("result line");
+        assert!(init < first_result, "init precedes the results: {receipt}");
         assert_eq!(receipt.matches("\"event\":\"result\"").count(), 3);
         assert!(receipt.contains("closed\n"), "stderr is kept: {receipt}");
         let shown = out.text();
