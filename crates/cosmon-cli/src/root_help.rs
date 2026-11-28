@@ -501,6 +501,12 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              (sst/opencode) CLI in a tmux pane — vendor cloud. base_url + \
              api_key_env + default_model configure one worker for an \
              OpenAI-compatible gateway without changing global config.\n  \
+             agy           (TmuxPane,  External, Vendor)    Antigravity CLI \
+             in a tmux pane, in its multi-turn print mode under cosmon's \
+             pane driver: the pane is readable and stays open after the \
+             brief, a typed line or 'cs whisper' is the next turn, and the \
+             raw stream is appended to <mol>/agy-stream.jsonl, where 'cs \
+             peek' reads usage and a quota stop.\n  \
              openai        (InProcess, Cosmon,   Vendor)    OpenAI chat-\
              completions HTTP, in-process loop (cosmon-agent-harness).\n  \
              anthropic     (InProcess, Cosmon,   Vendor)    Anthropic messages \
@@ -601,7 +607,9 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              'service_tier=default' for Standard / Fast off, and \
              'service_tier=priority' or 'service_tier=fast' for Fast; Fast \
              availability depends on the selected model and account); claude \
-             takes '--<key> <value>'; any other adapter REFUSES a non-empty \
+             and agy take '--<key> <value>' (agy refuses at launch an \
+             'effort' that contradicts its model id's effort suffix); any \
+             other adapter REFUSES a non-empty \
              map at launch, \
              naming itself — a setting is never silently dropped. The \
              '[adapters.<name>.harness]' config level is deferred (it would \

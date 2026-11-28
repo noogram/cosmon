@@ -26,6 +26,7 @@ use cosmon_core::transport::TransportBackend;
 use cosmon_filestore::FileStore;
 use cosmon_state::events::worker_spawn::emit_adapter_pane_signature_checked;
 use cosmon_state::StateStore;
+use cosmon_transport::agy::ADAPTER_NAME as AGY_ADAPTER;
 use cosmon_transport::claude::ADAPTER_NAME as CLAUDE_ADAPTER;
 use cosmon_transport::codex::ADAPTER_NAME as CODEX_ADAPTER;
 use cosmon_transport::registry::{default_registry, effective_pane_command, pane_current_command};
@@ -33,13 +34,14 @@ use sha2::{Digest, Sha256};
 
 use super::Context;
 
-/// Adapters whose live worker keeps a driveable interactive TUI pane open,
-/// so `cs whisper` can steer them. `claude` has always been whisperable;
-/// `codex` joins it once its interactive mode is the default
-/// (task-20260711-246d). The pane-signature gate accepts the union of these
-/// adapters' registered signatures. `aider` / `opencode` are batch
-/// (fire-and-forget) and deliberately absent.
-const WHISPERABLE_ADAPTERS: &[&str] = &[CLAUDE_ADAPTER, CODEX_ADAPTER];
+/// Adapters whose live worker keeps a driveable interactive pane open, so
+/// `cs whisper` can steer them. `claude` has always been whisperable; `codex`
+/// joins it once its interactive mode is the default (task-20260711-246d);
+/// `agy` since its pane driver keeps the session open and forwards each
+/// submitted line as the next turn (#240). The pane-signature gate accepts the
+/// union of these adapters' registered signatures. `aider` / `opencode` are
+/// batch (fire-and-forget) and deliberately absent.
+const WHISPERABLE_ADAPTERS: &[&str] = &[CLAUDE_ADAPTER, CODEX_ADAPTER, AGY_ADAPTER];
 
 /// Maximum payload size in bytes (8 KiB). A whisper is a nudge, not a
 /// document — larger payloads almost certainly indicate misuse.
@@ -1320,6 +1322,16 @@ mod tests {
         }
         // A crashed-into-shell pane is still refused for every adapter.
         assert!(!WHISPERABLE_ADAPTERS.iter().any(|a| r.matches(a, "zsh")));
+    }
+
+    /// #240 — an agy worker's pane runs the `cs agy-pane` driver, which
+    /// forwards each submitted line to agy as the next turn, so the gate
+    /// accepts the driver's process name.
+    #[test]
+    fn whisperable_adapters_include_the_agy_pane_driver() {
+        let r = default_registry();
+        assert!(WHISPERABLE_ADAPTERS.contains(&AGY_ADAPTER));
+        assert!(WHISPERABLE_ADAPTERS.iter().any(|a| r.matches(a, "cs")));
     }
 
     /// ADR-097 PR-2 / galileo §2.3 — a non-claude pane signature

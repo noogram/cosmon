@@ -196,6 +196,12 @@ class = "out_of_scope"
 reason = "internal transport plumbing — execs a detached Ollama-backed worker process on this machine. Not an operator verb at all (hidden from `cs --help`); it is the local-inference callee, never a wire-callable gesture."
 
 [[verb_absent_from_thin]]
+verb = "agy-pane"
+class = "out_of_scope"
+adr_ref = "ADR-080 §4"
+reason = "hidden pane driver of an agy worker, run inside its tmux pane by cs tackle --adapter agy (#240): forwards terminal lines to agy, appends the receipt, renders the pane. No RPP route or tenant invocation; remote callers dispatch through tackle and steer through whisper."
+
+[[verb_absent_from_thin]]
 verb = "worker-supervise"
 class = "out_of_scope"
 adr_ref = "ADR-080 §4"
