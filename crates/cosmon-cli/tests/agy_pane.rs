@@ -423,7 +423,8 @@ impl Drop for TmuxRig {
     }
 }
 
-/// #240 end to end: the pane is readable, the session stays open after the brief, `cs whisper` delivers
+/// #240 and #245 end to end: the harness setting reaches agy's argv, the pane
+/// is readable, the session stays open after the brief, `cs whisper` delivers
 /// a multi-line continuation as one turn, `cs peek` reads the cumulative
 /// usage, and ending the input ends agy with its own exit status.
 #[test]
@@ -442,6 +443,10 @@ fn tackle_whisper_and_peek_an_agy_worker_in_tmux() {
         "agy",
         "--model",
         "fake-model",
+        "--harness",
+        "effort=high",
+        "--harness",
+        "mode=plan it",
         "--name",
         "agy-worker",
     ]);
@@ -466,10 +471,14 @@ fn tackle_whisper_and_peek_an_agy_worker_in_tmux() {
             "stream-json",
             "--model",
             "fake-model",
+            "--effort",
+            "high",
+            "--mode",
+            "plan it",
             "--dangerously-skip-permissions",
             "-p",
         ],
-        "agy runs in its multi-turn print mode"
+        "harness settings reach agy verbatim, after the model"
     );
     let brief = stdin_messages(&record)[0]["message"]["content"]
         .as_str()
@@ -478,6 +487,23 @@ fn tackle_whisper_and_peek_an_agy_worker_in_tmux() {
     assert!(
         brief.contains(&id),
         "the brief is the first message: {brief}"
+    );
+
+    let events = fs::read_to_string(rig.root.path().join(".cosmon/state/events.jsonl")).unwrap();
+    let receipts: Vec<Value> = events
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e.to_string().contains("harness_setting_selected"))
+        .collect();
+    let effort = receipts
+        .iter()
+        .find(|e| e.to_string().contains("--effort high"))
+        .unwrap_or_else(|| panic!("an ex-ante receipt for effort: {events}"));
+    let effort = effort.to_string();
+    assert!(effort.contains("agy:flag"), "{effort}");
+    assert!(
+        effort.contains("1.5.19-fake"),
+        "agy's version is probed: {effort}"
     );
 
     let pane = || rig.tmux(&["capture-pane", "-p", "-J", "-S", "-200", "-t", "agy-worker"]);
@@ -539,4 +565,32 @@ fn tackle_whisper_and_peek_an_agy_worker_in_tmux() {
         }),
         "ending the input ends agy with its own status"
     );
+}
+
+/// #245: a formula step's `[steps.harness]` table reaches agy's argv the same
+/// way as `--harness`, with no flag on the command line.
+#[test]
+fn a_formula_step_harness_pin_reaches_agy() {
+    let Some(rig) = TmuxRig::new() else { return };
+    let record = rig.root.path().join("record");
+    fake_agy(&rig.bins, &record, 0, None);
+    fs::write(
+        rig.root.path().join(".cosmon/formulas/pinned.formula.toml"),
+        "formula='pinned'\nversion=1\nid_prefix='pinned'\ndescription='Step pins an effort'\n\
+         [[steps]]\nid='observe'\ntitle='Observe'\ndescription='Synthetic task input only'\n\
+         acceptance='Pane driven'\nadapter='agy'\n[steps.harness]\neffort='xhigh'\n",
+    )
+    .unwrap();
+    let value: Value =
+        serde_json::from_slice(&rig.cs(&["--json", "nucleate", "pinned"]).stdout).unwrap();
+    let id = value["id"].as_str().expect("molecule id").to_owned();
+    rig.cs(&["tackle", &id, "--name", "agy-pinned"]);
+    assert!(wait_for(Duration::from_secs(10), || !argv(&record).is_empty()));
+    let words = argv(&record);
+    let at = words
+        .iter()
+        .position(|w| w == "--effort")
+        .unwrap_or_else(|| panic!("the step's effort reaches agy: {words:?}"));
+    assert_eq!(words[at + 1], "xhigh");
+    assert_eq!(words[at + 2], "--dangerously-skip-permissions");
 }

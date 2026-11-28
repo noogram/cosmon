@@ -341,6 +341,10 @@ pub struct Args {
     ///   Fast processing. `fast` is also accepted as the Fast spelling;
     ///   Fast availability depends on the selected model and account;
     /// - `claude` → `--<key> <value>` per entry, e.g. `--harness effort=xhigh`;
+    /// - `agy` → `--<key> <value>` per entry, e.g. `--harness effort=high`.
+    ///   agy refuses at launch an `--effort` that contradicts the effort
+    ///   suffix of the pinned model id (`--model gemini-4-neon-high` with
+    ///   `effort=low`); it applies neither;
     /// - any other adapter → the dispatch **fails at launch, naming the
     ///   adapter**. A setting is never silently dropped.
     ///
@@ -4969,6 +4973,7 @@ fn harness_version(adapter: &str) -> Option<String> {
     let binary = match adapter {
         "codex" => "codex",
         "claude" => "claude",
+        "agy" => "agy",
         // Every other adapter reaches here only with an empty harness map (the
         // render refuses a non-empty one), so there is nothing to interpret and
         // nothing to probe.
@@ -5037,9 +5042,9 @@ pub(super) fn spawn_and_prompt(
     // adapter's own override channel by
     // `cosmon_core::harness_settings::render_harness_args` (ADR-177 / #65).
     // Empty on almost every dispatch, and an empty slice leaves every arm's
-    // command byte-identical to the pre-#65 shape. Only the two arms with a
-    // channel — codex (`-c k=v`) and claude (`--k v`) — can receive a non-empty
-    // slice: the render refuses any other adapter *before* the worktree lands,
+    // command byte-identical to the pre-#65 shape. Only the three arms with a
+    // channel — codex (`-c k=v`), claude and agy (`--k v`, #245) — can receive a
+    // non-empty slice: the render refuses any other adapter *before* the worktree lands,
     // so a setting is never silently dropped on an arm that would ignore it.
     harness_args: &[cosmon_core::harness_settings::HarnessArg],
     // Proof that this dispatch is already on the ledger. Unused by the body —
