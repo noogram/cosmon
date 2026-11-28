@@ -53,6 +53,7 @@ use chrono::{DateTime, Utc};
 use cosmon_core::molecule::Phase;
 use cosmon_core::reconcile::{molecule_health, MoleculeHealth};
 use cosmon_filestore::FileStore;
+use cosmon_observability::account_usage::AccountWindow;
 use cosmon_observability::{
     EnergyBudget, FleetSnapshot, HeartbeatTier, Molecule, MoleculeStatus, Session, SessionFilter,
     Worker,
@@ -268,6 +269,7 @@ pub(crate) struct RowView {
     /// may share a molecule; cumulative histories are deduplicated before any
     /// total is rendered.
     pub(crate) usage: Vec<cosmon_core::usage::UsageRecord>,
+    pub(crate) agy_receipt: Option<cosmon_observability::agy::AgyReceipt>,
     pub(crate) context_window: Option<u64>,
     pub(crate) latest_turn_input_tokens: Option<u64>,
     pub(crate) session: Option<String>,
@@ -449,12 +451,16 @@ fn worker_census(snap: &FleetSnapshot) -> WorkerCensus {
     census
 }
 
+/// Most lines the account strip may take under the fleet header.
+const MAX_ACCOUNT_LINES: usize = 3;
+
 /// Payload produced by a background reload thread — the I/O-heavy portion
 /// of a reload cycle (Phase 3).
 struct BgReloadResult {
     rows: Vec<RowView>,
     state_dirs: std::collections::HashMap<String, std::path::PathBuf>,
     census: WorkerCensus,
+    accounts: Vec<AccountWindow>,
 }
 
 impl RowView {
@@ -1209,6 +1215,9 @@ struct App {
     /// Refreshed on every reload alongside `rows` — the strip and the
     /// table always describe the same snapshot.
     census: WorkerCensus,
+    /// Provider account windows rendered by [`Self::draw_account_strip`]
+    /// (issue #242), projected from the same snapshot as `rows`.
+    accounts: Vec<AccountWindow>,
     /// Per-molecule state dir, so detail artifacts can be resolved for the
     /// selected row whether we're in single-project or `--all` mode.
     row_state_dirs: std::collections::HashMap<String, std::path::PathBuf>,
@@ -1367,6 +1376,7 @@ impl App {
             refresh: Duration::from_millis(args.refresh_ms.max(250)),
             rows: Vec::new(),
             census: WorkerCensus::default(),
+            accounts: Vec::new(),
             row_state_dirs: std::collections::HashMap::new(),
             lease_missions: std::collections::BTreeSet::new(),
             expanded: std::collections::HashSet::new(),
@@ -1421,7 +1431,8 @@ impl App {
         )?;
         let rows = snapshot_to_rows(&snapshot);
         let census = worker_census(&snapshot);
-        self.apply_reload(rows, state_dirs, census);
+        let accounts = super::peek::snapshot_accounts(&snapshot, Utc::now());
+        self.apply_reload(rows, state_dirs, census, accounts);
         Ok(())
     }
 
@@ -1444,10 +1455,12 @@ impl App {
         mut rows: Vec<RowView>,
         state_dirs: std::collections::HashMap<String, std::path::PathBuf>,
         census: WorkerCensus,
+        accounts: Vec<AccountWindow>,
     ) {
         self.row_state_dirs = state_dirs;
         self.lease_missions = lease_missions_for(&self.state_dir, &self.row_state_dirs);
         self.census = census;
+        self.accounts = accounts;
         let selected_id = self
             .table_state
             .selected()
@@ -1817,10 +1830,12 @@ impl App {
             ) {
                 let rows = snapshot_to_rows(&snapshot);
                 let census = worker_census(&snapshot);
+                let accounts = super::peek::snapshot_accounts(&snapshot, Utc::now());
                 let _ = tx.send(BgReloadResult {
                     rows,
                     state_dirs,
                     census,
+                    accounts,
                 });
             }
             // I/O error — silently skip this tick. The TUI retains
@@ -1837,7 +1852,12 @@ impl App {
         match self.bg_rx.try_recv() {
             Ok(result) => {
                 self.bg_pending = false;
-                self.apply_reload(result.rows, result.state_dirs, result.census);
+                self.apply_reload(
+                    result.rows,
+                    result.state_dirs,
+                    result.census,
+                    result.accounts,
+                );
                 true
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
@@ -2634,6 +2654,10 @@ impl App {
         // Header, then the worker strip. The strip has no `show_*` gate:
         // it is a reading, not a query, so it is always on.
         let mut constraints = vec![Constraint::Length(1), Constraint::Length(1)];
+        let account_lines = self.account_strip_height();
+        if account_lines > 0 {
+            constraints.push(Constraint::Length(account_lines));
+        }
         if show_presence {
             constraints.push(Constraint::Length(1));
         }
@@ -2650,6 +2674,10 @@ impl App {
         idx += 1;
         self.draw_worker_strip(f, chunks[idx]);
         idx += 1;
+        if account_lines > 0 {
+            self.draw_account_strip(f, chunks[idx]);
+            idx += 1;
+        }
         if show_presence {
             self.draw_presence_strip(f, chunks[idx]);
             idx += 1;
@@ -3034,6 +3062,66 @@ impl App {
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
+    /// Lines the account strip takes: one per account window, at most
+    /// [`MAX_ACCOUNT_LINES`] (the last one then counts the rest), none when
+    /// no worker reported a rate limit.
+    fn account_strip_height(&self) -> u16 {
+        u16::try_from(self.accounts.len().min(MAX_ACCOUNT_LINES)).unwrap_or(0)
+    }
+
+    /// Provider accounts under the fleet header (issue #242), one line per
+    /// account window, so the allowance never crowds a molecule row:
+    ///
+    /// ```text
+    ///  account openai 7d: 50% left · resets in 5d 5h · 25% in deficit, runs out in 1d 17h · …
+    /// ```
+    ///
+    /// Highlighted when the reading needs a look: stale, contradictory, or on
+    /// a pace that exhausts the window before it resets. Worker shares are in
+    /// `cs peek --no-tui` and `--json`, where there is room for them.
+    fn draw_account_strip(&self, f: &mut Frame, area: Rect) {
+        let mut lines: Vec<Line> = Vec::new();
+        let overflow = self.accounts.len() > MAX_ACCOUNT_LINES;
+        let shown = if overflow {
+            MAX_ACCOUNT_LINES - 1
+        } else {
+            self.accounts.len()
+        };
+        for account in self.accounts.iter().take(shown) {
+            let attention = account.conflicting_readings
+                || account.freshness == cosmon_core::usage::Freshness::Stale
+                || matches!(
+                    account.pace,
+                    cosmon_observability::account_usage::Pace::Known {
+                        runs_out_at: Some(_),
+                        ..
+                    }
+                );
+            let style = if attention {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    " account {}",
+                    cosmon_observability::account_usage::format_account_window(account)
+                ),
+                style,
+            )));
+        }
+        if overflow {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    " +{} more accounts · cs peek --no-tui",
+                    self.accounts.len() - shown
+                ),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        f.render_widget(Paragraph::new(lines), area);
+    }
+
     /// One-line strip listing every live Claude session. Compact, wheat-paste
     /// over `.cosmon/state/presence/*.json` (C-PRESENCE-CORE's on-disk
     /// contract; see [`presence_reader`]). Truncates to a count + ellipsis at
@@ -3361,14 +3449,35 @@ impl App {
                 let health_style = molecule_health_style(health);
                 let (temp_glyph_s, temp_style) = temp_token(&r.tags);
                 let (whisper_glyph_s, whisper_style) = whisper_token(r.whisper_fresh);
-                let energy = format_energy(
-                    r.energy_in,
-                    r.energy_cached,
-                    r.energy_out,
-                    r.energy_reasoning,
-                    (r.context_window, r.latest_turn_input_tokens),
-                    &r.energy_cost,
-                    &r.usage,
+                let energy = r.agy_receipt.as_ref().map_or_else(
+                    || {
+                        format_energy(
+                            r.energy_in,
+                            r.energy_cached,
+                            r.energy_out,
+                            r.energy_reasoning,
+                            (r.context_window, r.latest_turn_input_tokens),
+                            &r.energy_cost,
+                            &r.usage,
+                        )
+                    },
+                    |receipt| {
+                        let counters = receipt.usage.unwrap_or_default().columns(|n| {
+                            if n == 0 {
+                                "0".to_owned()
+                            } else {
+                                humanize_tokens(n)
+                            }
+                        });
+                        let api =
+                            cosmon_observability::usage_projection::format_api_equivalent(&r.usage);
+                        let mut text = format!("     · {counters}\n{api}");
+                        if let Some(stop) = &receipt.quota_stop {
+                            use std::fmt::Write as _;
+                            let _ = write!(text, "\n{stop}");
+                        }
+                        text
+                    },
                 );
                 let is_expanded = self.expanded.contains(&r.mol_id);
                 // Tree-view indicator: ▾ when expanded, ▸ when collapsed.
@@ -4432,9 +4541,21 @@ pub(crate) fn snapshot_to_rows(snap: &FleetSnapshot) -> Vec<RowView> {
         }
     }
 
+    let agy_workers: HashMap<_, _> = snap
+        .workers()
+        .filter(|w| w.energy.agy_receipt.is_some())
+        .filter_map(|w| w.molecule_id.as_deref().map(|id| (id, &w.energy)))
+        .collect();
     for m in snap.molecules() {
         let id = m.id.to_string();
-        if by_mol.contains_key(&id) {
+        let agy_energy = agy_workers.get(id.as_str());
+        if let Some(row) = by_mol.get_mut(&id) {
+            if row.agy_receipt.is_none() {
+                if let Some(energy) = agy_energy {
+                    row.agy_receipt.clone_from(&energy.agy_receipt);
+                    row.usage.extend(energy.usage.clone());
+                }
+            }
             continue;
         }
         let heartbeat = if super::peek::PhaseFilter::is_harvestable(m.status, m.archived) {
@@ -4461,7 +4582,11 @@ pub(crate) fn snapshot_to_rows(snap: &FleetSnapshot) -> Vec<RowView> {
                 energy_out: 0,
                 energy_reasoning: 0,
                 energy_cost: cosmon_observability::EnergyCost::Unknown,
-                usage: Vec::new(),
+                usage: agy_energy
+                    .and_then(|energy| energy.usage.clone())
+                    .into_iter()
+                    .collect(),
+                agy_receipt: agy_energy.and_then(|energy| energy.agy_receipt.clone()),
                 context_window: None,
                 latest_turn_input_tokens: None,
                 session: None,
@@ -4522,6 +4647,9 @@ fn merge_row(
         .saturating_add(fresh.energy_reasoning);
     merge_energy_cost(&mut existing.energy_cost, fresh.energy_cost);
     existing.usage.extend(fresh.usage);
+    if existing.agy_receipt.is_none() {
+        existing.agy_receipt = fresh.agy_receipt;
+    }
     let deduplicated =
         cosmon_observability::usage_projection::deduplicate_histories(existing.usage.iter())
             .into_iter()
@@ -4667,6 +4795,7 @@ fn row_view_from(
         energy_reasoning: energy.reasoning_output_tokens,
         energy_cost: energy.cost,
         usage: energy.usage.into_iter().collect(),
+        agy_receipt: energy.agy_receipt,
         context_window: energy.context_window,
         latest_turn_input_tokens: energy.latest_turn_input_tokens,
         session: Some(s.name.clone()),
@@ -5149,6 +5278,7 @@ fn populate_snapshot(
                     api_equivalent: e.api_equivalent.clone(),
                     subscription: e.subscription.clone(),
                     usage: e.usage.clone(),
+                    agy_receipt: e.agy_receipt.clone(),
                     context_window: e.context_window,
                     latest_turn_input_tokens: e.latest_turn_input_tokens,
                 }
@@ -5367,6 +5497,7 @@ impl App {
             lease_missions: std::collections::BTreeSet::new(),
             rows,
             census: WorkerCensus::default(),
+            accounts: Vec::new(),
             row_state_dirs,
             expanded: std::collections::HashSet::new(),
             table_state: TableState::default(),
@@ -6090,6 +6221,7 @@ mod tests {
             energy_reasoning: 0,
             energy_cost: cosmon_observability::EnergyCost::Unknown,
             usage: Vec::new(),
+            agy_receipt: None,
             context_window: None,
             latest_turn_input_tokens: None,
             session: None,
@@ -6696,6 +6828,7 @@ mod tests {
                 api_equivalent: None,
                 subscription: None,
                 usage: None,
+                agy_receipt: None,
                 context_window: None,
                 latest_turn_input_tokens: None,
             },
@@ -6835,6 +6968,7 @@ mod tests {
                     api_equivalent: None,
                     subscription: None,
                     usage: None,
+                    agy_receipt: None,
                     context_window: Some(1_000_000),
                     latest_turn_input_tokens: None,
                 },
@@ -6854,6 +6988,7 @@ mod tests {
                     api_equivalent: None,
                     subscription: None,
                     usage: None,
+                    agy_receipt: None,
                     context_window: Some(1_000_000),
                     latest_turn_input_tokens: None,
                 },
@@ -7823,6 +7958,128 @@ mod tests {
             rendered, " workers: 4 registered · 4 attached · 0 phantom",
             "a clean roster still reports, without advising a no-op purge"
         );
+    }
+
+    /// A seven-day Codex account window, 50 % used, 25 points ahead of an
+    /// even pace and running out in 1 d 17 h, read 3 minutes ago.
+    fn account_window(provider: &str) -> AccountWindow {
+        AccountWindow {
+            provider: Some(provider.to_owned()),
+            meter: "primary".to_owned(),
+            window_minutes: Some(10_080),
+            resets_at: None,
+            resets_in_secs: Some(126 * 3600 - 180),
+            used_percent: 50.0,
+            left_percent: Some(50.0),
+            observed_at: None,
+            age_secs: Some(180),
+            freshness: cosmon_core::usage::Freshness::Fresh,
+            pace: cosmon_observability::account_usage::Pace::Known {
+                even_use_percent: 25.0,
+                deficit_percent: 25.0,
+                runs_out_at: Some(Utc::now()),
+                runs_out_in_secs: Some(42 * 3600 - 180),
+            },
+            credits: None,
+            conflicting_readings: false,
+            share_basis: cosmon_observability::account_usage::SHARE_BASIS,
+            workers: Vec::new(),
+        }
+    }
+
+    /// Render the whole frame and return its text, one line per row.
+    fn rendered_frame(app: &mut App, height: u16) -> Vec<String> {
+        let backend = ratatui::backend::TestBackend::new(140, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf.cell((x, y)).map_or(" ", ratatui::buffer::Cell::symbol))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The account line sits under the fleet header and the worker strip,
+    /// on its own line, so the allowance never crowds a molecule row.
+    #[test]
+    fn draw_puts_each_account_window_on_its_own_line_under_the_header() {
+        let mut app = App::for_test(Vec::new(), std::collections::HashMap::new());
+        app.accounts = vec![account_window("openai")];
+        let lines = rendered_frame(&mut app, 12);
+        assert!(lines[0].contains("cs peek — fleet watchdog"), "{lines:#?}");
+        assert!(lines[1].starts_with(" workers:"), "{lines:#?}");
+        assert_eq!(
+            lines[2],
+            " account openai 7d: 50% left · resets in 5d 5h · 25% in deficit, \
+             runs out in 1d 17h · seen 3m ago",
+        );
+    }
+
+    /// The strip's colour of its first cell for one account.
+    fn account_strip_colour(account: AccountWindow) -> Option<Color> {
+        let mut app = App::for_test(Vec::new(), std::collections::HashMap::new());
+        app.accounts = vec![account];
+        let backend = ratatui::backend::TestBackend::new(140, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| app.draw_account_strip(f, f.area()))
+            .unwrap();
+        terminal.backend().buffer().cell((2, 0)).map(|c| c.fg)
+    }
+
+    /// The line is quiet while the reading is fresh and the window lasts;
+    /// it turns yellow when it is stale, contradictory, or on course to run
+    /// out before the reset.
+    #[test]
+    fn draw_account_strip_highlights_only_readings_that_need_a_look() {
+        let mut lasting = account_window("openai");
+        lasting.pace = cosmon_observability::account_usage::Pace::Known {
+            even_use_percent: 25.0,
+            deficit_percent: -15.0,
+            runs_out_at: None,
+            runs_out_in_secs: None,
+        };
+        assert_eq!(account_strip_colour(lasting.clone()), Some(Color::DarkGray));
+        assert_eq!(
+            account_strip_colour(account_window("openai")),
+            Some(Color::Yellow),
+            "runs out before the reset"
+        );
+        let mut stale = lasting.clone();
+        stale.freshness = cosmon_core::usage::Freshness::Stale;
+        assert_eq!(account_strip_colour(stale), Some(Color::Yellow));
+        let mut conflicting = lasting;
+        conflicting.conflicting_readings = true;
+        assert_eq!(account_strip_colour(conflicting), Some(Color::Yellow));
+    }
+
+    /// No rate-limit reading, no account line: the table moves up rather
+    /// than showing an account at zero.
+    #[test]
+    fn draw_has_no_account_line_without_a_reading() {
+        let mut app = App::for_test(Vec::new(), std::collections::HashMap::new());
+        let lines = rendered_frame(&mut app, 12);
+        assert!(
+            lines.iter().all(|line| !line.contains("account ")),
+            "{lines:#?}"
+        );
+    }
+
+    /// Past three windows the strip stops growing and counts the rest.
+    #[test]
+    fn draw_caps_the_account_strip_and_counts_the_rest() {
+        let mut app = App::for_test(Vec::new(), std::collections::HashMap::new());
+        app.accounts = (0..5).map(|_| account_window("anthropic")).collect();
+        let lines = rendered_frame(&mut app, 14);
+        assert!(lines[2].starts_with(" account anthropic 7d"), "{lines:#?}");
+        assert!(lines[3].starts_with(" account anthropic 7d"), "{lines:#?}");
+        assert_eq!(lines[4], " +3 more accounts · cs peek --no-tui");
+        assert!(!lines[5].contains("account"), "{lines:#?}");
     }
 
     /// End-to-end honest fold: write a real `events.jsonl` for a molecule

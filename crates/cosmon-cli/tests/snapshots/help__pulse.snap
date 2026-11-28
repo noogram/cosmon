@@ -74,4 +74,8 @@ Traffic light (first-match wins):
 Voyant strip: scheduler / drainage / propel / heal / fuel / workers
 A dead subsystem serializes 'off' (red-class) — never silently absent.
 
+Provider accounts: the account lines and accounts[] that `cs peek` shows,
+from the same reader (allowance left, reset, pace, credits, age, worker
+shares). Not on the --swiftbar face.
+
 Exit code: always 0 (read-only, non-blocking — callers use --json state).

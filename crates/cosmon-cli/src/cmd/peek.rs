@@ -24,13 +24,19 @@
 //! this with label `watch` for backward compatibility during the deprecation
 //! grace window.
 
+use std::collections::{BTreeMap, HashMap};
 use std::io::{IsTerminal, Write as _};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
 use colored::Colorize;
+use cosmon_core::id::MoleculeId;
 use cosmon_core::molecule::{MoleculeStatus, Phase};
+use cosmon_core::run_state::GhostKind;
 use cosmon_filestore::FileStore;
+use cosmon_observability::account_usage::AccountWindow;
+use cosmon_observability::agy::{AgyReceipt, AgyTokenCounts};
 use cosmon_state::{MoleculeFilter, StateStore};
 use cosmon_transport::TmuxBackend;
 
@@ -755,6 +761,15 @@ struct PeekMoleculeJson {
     /// Histories are deduplicated before publication; an empty array means
     /// no source observation, never measured zero.
     usage: Vec<cosmon_core::usage::UsageRecord>,
+    /// Antigravity's counters before canonical usage normalization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agy_usage: Option<AgyTokenCounts>,
+    /// Provider quota evidence for a stopped worker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ghost: Option<GhostKind>,
+    /// The delay announced by the provider at refusal time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quota_reset_delay: Option<String>,
 }
 
 /// The `cs peek --json` document.
@@ -810,6 +825,95 @@ struct PeekJson {
     /// machine consumer wants a stable order, and the TUI's is deliberately
     /// unstable, since it re-sorts as workers breathe.
     molecules: Vec<PeekMoleculeJson>,
+    /// Provider account windows read from every fleet worker's usage
+    /// (issue #242): allowance left, reset, pace, credits, observation age
+    /// and each worker's share. A fleet-level fact, so it lives beside
+    /// `molecules` rather than on any row, and it is not narrowed by
+    /// `filter`: an account is shared by workers of every phase. An empty
+    /// array means no worker reported a rate limit, never an account at
+    /// zero. `cs pulse --json` publishes the same objects.
+    accounts: Vec<AccountWindow>,
+}
+
+/// Every fleet worker's usage record in `snap`, projected into provider
+/// account windows at `now` (issue #242).
+///
+/// Workers rather than rows: a row exists per molecule and only carries the
+/// usage of a worker bound to a live session, whereas an account is shared
+/// by every worker the energy probe could read.
+pub(crate) fn snapshot_accounts(
+    snap: &cosmon_observability::FleetSnapshot,
+    now: DateTime<Utc>,
+) -> Vec<AccountWindow> {
+    let records: Vec<_> = snap
+        .workers()
+        .filter_map(|worker| worker.energy.usage.clone())
+        .collect();
+    cosmon_observability::account_usage::project_accounts(&records, now)
+}
+
+/// The same projection for a surface that has no snapshot (`--no-tui`,
+/// `cs pulse`): read the fleet's workers through the energy probe, then
+/// project. One reader and one projection, so every surface publishes the
+/// same figures for the same state.
+pub(crate) fn energy_accounts<'a>(
+    energy: impl IntoIterator<Item = &'a crate::energy_probe::WorkerEnergy>,
+    now: DateTime<Utc>,
+) -> Vec<AccountWindow> {
+    let records: Vec<_> = energy
+        .into_iter()
+        .filter_map(|worker| worker.usage.clone())
+        .collect();
+    cosmon_observability::account_usage::project_accounts(&records, now)
+}
+
+/// Read the fleet in `state_dir` and project its accounts at `now`.
+pub(crate) fn live_accounts(
+    state_dir: &Path,
+    backends: &[TmuxBackend],
+    now: DateTime<Utc>,
+) -> Vec<AccountWindow> {
+    let Ok(fleet) = FileStore::new(state_dir).load_fleet() else {
+        return Vec::new();
+    };
+    let energy = crate::energy_probe::load_worker_energy(state_dir, backends, &fleet);
+    energy_accounts(energy.values(), now)
+}
+
+/// Human lines for `accounts`: one `account …` line per window, followed by
+/// its worker shares when any worker carries it.
+pub(crate) fn account_lines(accounts: &[AccountWindow]) -> Vec<String> {
+    use cosmon_observability::account_usage::{format_account_window, format_worker_shares};
+    let mut lines = Vec::new();
+    for account in accounts {
+        lines.push(format!("account {}", format_account_window(account)));
+        let shares = format_worker_shares(account);
+        if !shares.is_empty() {
+            lines.push(format!("  {shares}"));
+        }
+    }
+    lines
+}
+
+/// What makes two account readings different for the follow stream: the
+/// age and countdowns move every second and are not news.
+fn account_fingerprint(accounts: &[AccountWindow]) -> Vec<String> {
+    accounts
+        .iter()
+        .map(|a| {
+            format!(
+                "{:?}|{}|{:?}|{}|{:?}|{}|{:?}|{:?}",
+                a.provider,
+                a.meter,
+                a.resets_at,
+                a.used_percent,
+                a.freshness,
+                a.conflicting_readings,
+                a.credits,
+                a.workers,
+            )
+        })
+        .collect()
 }
 
 /// The harvest-queue facts `--phase harvestable` shares with `cs status`
@@ -890,6 +994,10 @@ fn snapshot_to_json(
             // nothing behind it. It is not a molecule and has no status to
             // report, so it is not one of `molecules[]`.
             let mol = by_id.get(&row.mol_id)?;
+            let quota = row
+                .agy_receipt
+                .as_ref()
+                .and_then(|receipt| receipt.quota_stop.as_ref());
             Some(PeekMoleculeJson {
                 id: row.mol_id.clone(),
                 project: row.project.clone(),
@@ -898,7 +1006,10 @@ fn snapshot_to_json(
                 heartbeat: row.heartbeat,
                 last_activity: row.last_activity,
                 updated_at: mol.updated_at,
-                usage: row.usage.clone(),
+                usage: row.usage,
+                agy_usage: row.agy_receipt.as_ref().and_then(|receipt| receipt.usage),
+                ghost: quota.map(|_| GhostKind::QuotaExhausted),
+                quota_reset_delay: quota.and_then(|stop| stop.reset_delay.clone()),
             })
         })
         .collect();
@@ -911,6 +1022,7 @@ fn snapshot_to_json(
     PeekJson {
         filter: phase_filter.label(),
         molecules,
+        accounts: snapshot_accounts(snap, Utc::now()),
     }
 }
 
@@ -965,6 +1077,61 @@ fn run_canonical_snapshot(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Track only changed receipts in the plaintext follow stream.
+struct AgyReceiptWatch {
+    fold: crate::energy_probe::JournalFold,
+    previous: HashMap<MoleculeId, AgyReceipt>,
+}
+
+impl AgyReceiptWatch {
+    fn new(state_dir: &Path) -> Self {
+        Self {
+            fold: crate::energy_probe::JournalFold::new(state_dir),
+            previous: HashMap::new(),
+        }
+    }
+
+    fn print_changes(
+        &mut self,
+        state_dir: &Path,
+        snapshot: &Snapshot,
+        phase: PhaseFilter,
+        stdout: &mut std::io::Stdout,
+        tty: bool,
+    ) -> std::io::Result<()> {
+        self.fold.catch_up();
+        let mut current = HashMap::new();
+        let adapters: BTreeMap<_, _> = self.fold.last_adapters().into_iter().collect();
+        for (id, adapter) in adapters {
+            if adapter != "agy"
+                || !snapshot
+                    .molecules
+                    .get(&id)
+                    .is_some_and(|row| phase.matches_molecule(row.status, row.archived))
+            {
+                continue;
+            }
+            let receipt = crate::energy_probe::read_agy_receipt(state_dir, &id);
+            if self.previous.get(&id) != Some(&receipt) {
+                clear_line(stdout, tty)?;
+                let counters = receipt
+                    .usage
+                    .unwrap_or_default()
+                    .columns(|count| count.to_string());
+                write!(stdout, "~ {id} agy IN/CACHED/OUT/RSN {counters}")?;
+                if let Some(stop) = &receipt.quota_stop {
+                    write!(stdout, "  {stop}")?;
+                }
+                writeln!(stdout)?;
+                stdout.flush()?;
+            }
+            current.insert(id, receipt);
+        }
+        self.previous = current;
+        Ok(())
+    }
+}
+
 /// Shared `--no-tui` loop, also invoked by the deprecated `cs watch` alias.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_no_tui(ctx: &Context, opts: &NoTuiOptions) -> anyhow::Result<()> {
@@ -995,7 +1162,31 @@ pub(crate) fn run_no_tui(ctx: &Context, opts: &NoTuiOptions) -> anyhow::Result<(
         }
     };
     print_baseline(&mut stdout, tty, Utc::now(), &baseline)?;
+    let mut agy_receipts = (opts.label == "peek").then(|| AgyReceiptWatch::new(&state_dir));
+    if let Some(receipts) = &mut agy_receipts {
+        receipts.print_changes(
+            &state_dir,
+            &baseline.snapshot,
+            opts.phase_filter,
+            &mut stdout,
+            tty,
+        )?;
+    }
     prev = Some(baseline.snapshot);
+
+    // Provider accounts (issue #242): printed with the baseline, then again
+    // on an energy tick whenever a reading changes.
+    let account_backends = if opts.no_tmux {
+        Vec::new()
+    } else {
+        crate::energy_probe::discover_fleet_backends(&state_dir, &super::tmux_socket_name(ctx))
+    };
+    let mut last_accounts = Vec::new();
+    if opts.label == "peek" {
+        let accounts = live_accounts(&state_dir, &account_backends, Utc::now());
+        print_account_lines(&mut stdout, tty, &accounts)?;
+        last_accounts = account_fingerprint(&accounts);
+    }
 
     let propel_events = propel_pass(&store, backend.as_ref(), opts.stale_after)?;
     print_events(&mut stdout, tty, Utc::now(), &propel_events)?;
@@ -1069,6 +1260,15 @@ pub(crate) fn run_no_tui(ctx: &Context, opts: &NoTuiOptions) -> anyhow::Result<(
             Tier::Poll => {
                 let outcome = poll_and_diff(&store, prev.as_ref())?;
                 print_events(&mut stdout, tty, Utc::now(), &outcome.events)?;
+                if let Some(receipts) = &mut agy_receipts {
+                    receipts.print_changes(
+                        &state_dir,
+                        &outcome.snapshot,
+                        opts.phase_filter,
+                        &mut stdout,
+                        tty,
+                    )?;
+                }
                 prev = Some(outcome.snapshot);
                 deadlines.poll = Instant::now() + poll_interval;
             }
@@ -1081,7 +1281,7 @@ pub(crate) fn run_no_tui(ctx: &Context, opts: &NoTuiOptions) -> anyhow::Result<(
 
         if let Some(iv) = energy_tick_interval {
             if last_energy_tick.elapsed() >= iv {
-                emit_energy_ticks(
+                let energy = emit_energy_ticks(
                     &store,
                     &events_path,
                     &state_dir,
@@ -1090,6 +1290,14 @@ pub(crate) fn run_no_tui(ctx: &Context, opts: &NoTuiOptions) -> anyhow::Result<(
                     tty,
                     &mut last_energy,
                 );
+                if opts.label == "peek" {
+                    let accounts = energy_accounts(energy.values(), Utc::now());
+                    let fingerprint = account_fingerprint(&accounts);
+                    if fingerprint != last_accounts {
+                        print_account_lines(&mut stdout, tty, &accounts)?;
+                        last_accounts = fingerprint;
+                    }
+                }
                 last_energy_tick = Instant::now();
             }
         }
@@ -1106,14 +1314,14 @@ fn emit_energy_ticks(
     stdout: &mut std::io::Stdout,
     tty: bool,
     last_energy: &mut std::collections::HashMap<String, cosmon_core::usage::UsageRecord>,
-) {
+) -> HashMap<cosmon_core::id::WorkerId, crate::energy_probe::WorkerEnergy> {
     let Ok(fleet) = store.load_fleet() else {
-        return;
+        return HashMap::new();
     };
     let backends = crate::energy_probe::discover_fleet_backends(state_dir, socket);
     let energy = crate::energy_probe::load_worker_energy(state_dir, &backends, &fleet);
     if energy.is_empty() {
-        return;
+        return energy;
     }
 
     clear_line(stdout, tty).ok();
@@ -1155,6 +1363,9 @@ fn emit_energy_ticks(
         last_energy.insert(wid_s.clone(), usage.clone());
 
         let _ = cosmon_state::event_log::emit_one(events_path, event, None);
+        if e.agy_receipt.is_some() {
+            continue;
+        }
 
         let cost_delta = delta_cost.map_or_else(
             || "API equiv. unavailable".to_owned(),
@@ -1170,6 +1381,24 @@ fn emit_energy_ticks(
         let _ = stdout.write_all(line.as_bytes());
         let _ = stdout.flush();
     }
+    energy
+}
+
+/// Write [`account_lines`] to the follow stream.
+fn print_account_lines(
+    stdout: &mut std::io::Stdout,
+    tty: bool,
+    accounts: &[AccountWindow],
+) -> std::io::Result<()> {
+    let lines = account_lines(accounts);
+    if lines.is_empty() {
+        return Ok(());
+    }
+    clear_line(stdout, tty)?;
+    for line in lines {
+        writeln!(stdout, "{line}")?;
+    }
+    stdout.flush()
 }
 
 /// Construct the canonical durable event only when a cumulative observation

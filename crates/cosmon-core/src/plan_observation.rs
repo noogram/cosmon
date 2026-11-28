@@ -13,8 +13,8 @@ use crate::{
     id::WorkerId,
     usage::{
         AllowanceWindow, Availability, Freshness, NonNegativeFinite, ObservationProvenance,
-        ObservationScope, PlanApplicability, PlanUsage, PlanWindowObservation, SourceUtilization,
-        UnavailableReason, Utilization, UtilizationUnit,
+        ObservationScope, PlanApplicability, PlanCredits, PlanUsage, PlanWindowObservation,
+        SourceUtilization, UnavailableReason, Utilization, UtilizationUnit,
     },
 };
 
@@ -162,6 +162,7 @@ pub fn codex_plan(content: &str, captured_at: DateTime<Utc>) -> PlanObservation 
         UnavailableReason::NotObserved,
     );
     let mut buckets = BTreeMap::new();
+    let mut credits = None;
     for line in content.lines() {
         let Ok(root) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -177,6 +178,9 @@ pub fn codex_plan(content: &str, captured_at: DateTime<Utc>) -> PlanObservation 
         else {
             continue;
         };
+        // The newest rate-limit object speaks for the account's credits; a
+        // reading without them makes the balance unknown again.
+        credits = codex_credits(limits.get("credits"));
         let observed = root
             .get("timestamp")
             .and_then(Value::as_str)
@@ -215,8 +219,27 @@ pub fn codex_plan(content: &str, captured_at: DateTime<Utc>) -> PlanObservation 
                 .extend(reading.unavailable_windows);
         }
         classify_applicability(&mut sample);
+        sample.plan.credits = credits;
     }
     sample
+}
+
+/// Parse Codex's `credits` object. Each flag and the balance are read
+/// independently, so one malformed member does not discard the others; a
+/// missing, `null` or non-object value yields no credits observation.
+fn codex_credits(value: Option<&Value>) -> Option<PlanCredits> {
+    let object = value.filter(|v| v.is_object())?;
+    // Codex writes the balance as a decimal string; any other shape is
+    // unknown rather than guessed at.
+    let balance = object
+        .get("balance")
+        .and_then(Value::as_str)
+        .and_then(|text| text.trim().parse::<f64>().ok());
+    Some(PlanCredits {
+        has_credits: object.get("has_credits").and_then(Value::as_bool),
+        unlimited: object.get("unlimited").and_then(Value::as_bool),
+        balance: balance.and_then(|b| NonNegativeFinite::new(b, "plan credits balance").ok()),
+    })
 }
 
 fn parse_windows(
@@ -235,6 +258,7 @@ fn parse_windows(
             worker_attributed: Availability::Unavailable {
                 reason: UnavailableReason::MissingAttributionEvidence,
             },
+            credits: None,
         },
         unavailable_windows: Vec::new(),
     };

@@ -91,6 +91,9 @@ pub struct EnergyBudget {
     /// deprecated projection for existing JSON consumers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<UsageRecord>,
+    /// Antigravity's receipt counters and any provider quota stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agy_receipt: Option<crate::agy::AgyReceipt>,
     /// Context window size, if known.
     pub context_window: Option<u64>,
     /// Input tokens in the latest turn, including cached input.
@@ -147,6 +150,7 @@ impl EnergyBudget {
             api_equivalent: Some(api_equivalent),
             subscription: None,
             usage: None,
+            agy_receipt: None,
             context_window: None,
             latest_turn_input_tokens: log.turns.last().and_then(|turn| {
                 turn.input_tokens
@@ -292,6 +296,7 @@ mod tests {
             api_equivalent: None,
             subscription: None,
             usage: None,
+            agy_receipt: None,
             context_window: Some(200_000),
             latest_turn_input_tokens: None,
         };

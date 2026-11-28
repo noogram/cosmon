@@ -288,11 +288,21 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     if args.swiftbar {
         print_swiftbar(&mut out, &pulse, &gate_slots)?;
-    } else if want_json {
-        print_json(&mut out, &pulse, &gate_slots)?;
     } else {
-        print_human(&mut out, &pulse, window_secs)?;
-        print_gate_slots(&mut out, &gate_slots)?;
+        // Provider accounts (issue #242), from the same reader and projection
+        // as `cs peek`. Not on the menubar face, which refreshes every few
+        // seconds and has no room for them.
+        let backends = crate::energy_probe::discover_fleet_backends(&state_dir, &project_socket);
+        let accounts = super::peek::live_accounts(&state_dir, &backends, now);
+        if want_json {
+            print_json(&mut out, &pulse, &gate_slots, &accounts)?;
+        } else {
+            print_human(&mut out, &pulse, window_secs)?;
+            print_gate_slots(&mut out, &gate_slots)?;
+            for line in super::peek::account_lines(&accounts) {
+                writeln!(out, "  {line}")?;
+            }
+        }
     }
 
     Ok(())
@@ -812,14 +822,28 @@ fn measured_token_count(value: &Value) -> Option<u64> {
 // Rendering
 // ---------------------------------------------------------------------------
 
-fn print_json(out: &mut impl Write, pulse: &Pulse, gate_slots: &GateSlots) -> anyhow::Result<()> {
+fn print_json(
+    out: &mut impl Write,
+    pulse: &Pulse,
+    gate_slots: &GateSlots,
+    accounts: &[cosmon_observability::account_usage::AccountWindow],
+) -> anyhow::Result<()> {
     #[derive(Serialize)]
     struct Reading<'a> {
         #[serde(flatten)]
         pulse: &'a Pulse,
         gate_slots: &'a GateSlots,
+        /// The account windows `cs peek --json` publishes, same objects.
+        accounts: &'a [cosmon_observability::account_usage::AccountWindow],
     }
-    serde_json::to_writer(&mut *out, &Reading { pulse, gate_slots })?;
+    serde_json::to_writer(
+        &mut *out,
+        &Reading {
+            pulse,
+            gate_slots,
+            accounts,
+        },
+    )?;
     writeln!(out)?;
     Ok(())
 }

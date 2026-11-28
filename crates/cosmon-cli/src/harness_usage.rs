@@ -367,6 +367,7 @@ impl HarnessUsageRecorder {
                 worker_attributed: Availability::Unavailable {
                     reason: UnavailableReason::NotObserved,
                 },
+                credits: None,
             },
         };
         record.validate()?;

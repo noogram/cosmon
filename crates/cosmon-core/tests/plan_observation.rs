@@ -366,3 +366,50 @@ fn codex_reads_quota_only_from_token_count_event_messages() {
         .collect();
     assert_eq!(values, [0.40]);
 }
+
+/// Codex reports a credit balance beside the rate limits (issue #242). A
+/// balance of `"0"` is a measured zero; a missing or unparseable balance and a
+/// `null` credits object stay unknown, never zero.
+#[test]
+fn codex_credits_keep_a_measured_zero_apart_from_unknown() {
+    let now = time("2026-11-27T09:00:00Z");
+    let line = |credits: &str| {
+        format!(
+            r#"{{"timestamp":"2026-11-27T08:52:10.067Z","type":"event_msg","payload":{{"type":"token_count","rate_limits":{{"limit_id":"codex","primary":{{"used_percent":56.0,"window_minutes":10080,"resets_at":1796296597}},"secondary":null,"credits":{credits},"plan_type":"pro"}}}}}}"#
+        )
+    };
+    let zero = codex_plan(
+        &line(r#"{"has_credits":false,"unlimited":false,"balance":"0"}"#),
+        now,
+    );
+    let credits = zero.plan.credits.expect("credits observed");
+    assert_eq!(credits.has_credits, Some(false));
+    assert_eq!(credits.unlimited, Some(false));
+    assert_eq!(credits.balance.map(|b| b.get()), Some(0.0));
+
+    let funded = codex_plan(
+        &line(r#"{"has_credits":true,"unlimited":false,"balance":"12.5"}"#),
+        now,
+    );
+    assert_eq!(
+        funded.plan.credits.and_then(|c| c.balance).map(|b| b.get()),
+        Some(12.5)
+    );
+
+    let garbled = codex_plan(
+        &line(r#"{"has_credits":true,"unlimited":true,"balance":"lots"}"#),
+        now,
+    );
+    let credits = garbled.plan.credits.expect("flags still observed");
+    assert_eq!(credits.unlimited, Some(true));
+    assert_eq!(credits.balance, None);
+
+    assert_eq!(codex_plan(&line("null"), now).plan.credits, None);
+    // Claude sources expose no credits at all.
+    let claude = claude_plan(
+        r#"{"rate_limits":{"seven_day":{"used_percentage":11}}}"#,
+        PlanSource::ClaudeStatusLine,
+        now,
+    );
+    assert_eq!(claude.plan.credits, None);
+}
