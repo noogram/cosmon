@@ -860,7 +860,7 @@ mod tests {
         let mut config = fake_agy(dir.path(), "exit 0");
         std::fs::write(
             &config.program,
-            "#!/bin/sh\nread -r line\necho 'error: quota' >&2\nexit 3\n",
+            "#!/bin/sh\nread -r line\nprintf 'error: quota' >&2\nexit 3\n",
         )
         .unwrap();
         config.prompt = "brief".into();
@@ -869,6 +869,9 @@ mod tests {
         let code = run(&config, terminal, out.clone(), None).unwrap();
         assert_eq!(code, 3);
         assert!(out.text().contains("error: quota\n"));
+        // A last line without its newline is still a whole receipt line.
+        let receipt = std::fs::read_to_string(dir.path().join(RECEIPT_FILE)).unwrap();
+        assert!(receipt.ends_with("error: quota\n"), "{receipt:?}");
         assert_eq!(
             std::fs::read_to_string(dir.path().join(EXIT_CODE_FILE)).unwrap(),
             "3\n"
