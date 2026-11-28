@@ -343,7 +343,7 @@ pub struct Args {
     /// - `claude` → `--<key> <value>` per entry, e.g. `--harness effort=xhigh`;
     /// - `agy` → `--<key> <value>` per entry, e.g. `--harness effort=high`.
     ///   agy refuses at launch an `--effort` that contradicts the effort
-    ///   suffix of the pinned model id (`--model gemini-4-neon-high` with
+    ///   suffix of the pinned model id (`--model gemini-3.8-flash-high` with
     ///   `effort=low`); it applies neither;
     /// - any other adapter → the dispatch **fails at launch, naming the
     ///   adapter**. A setting is never silently dropped.
