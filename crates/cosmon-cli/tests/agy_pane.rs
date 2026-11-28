@@ -623,3 +623,27 @@ fn a_formula_step_harness_pin_reaches_agy() {
     assert_eq!(words[at + 1], "xhigh");
     assert_eq!(words[at + 2], "--dangerously-skip-permissions");
 }
+
+/// A brief may begin with a hyphen (a Markdown list, a flag-like word); the
+/// driver must take it as the brief, not as one of its own options.
+#[test]
+fn a_brief_beginning_with_a_hyphen_is_the_first_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let record = tmp.path().join("record");
+    let agy = fake_agy(&tmp.path().join("bin"), &record, 0, None);
+    let brief = "- first item\n--not-a-flag";
+    let out = agy_pane(tmp.path(), brief, &agy)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        stdin_messages(&record),
+        vec![json!({"event":"user","message":{"content": brief}})]
+    );
+}

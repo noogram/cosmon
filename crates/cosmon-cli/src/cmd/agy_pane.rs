@@ -17,8 +17,9 @@ pub struct Args {
     /// Canonical molecule directory: receives the receipt and the exit code.
     #[arg(long)]
     pub molecule_dir: PathBuf,
-    /// The brief, sent as the session's first message.
-    #[arg(long)]
+    /// The brief, sent as the session's first message. It may begin with a
+    /// hyphen (a Markdown list), so it is never parsed as an option.
+    #[arg(long, allow_hyphen_values = true)]
     pub prompt: Option<String>,
     /// The agy executable followed by its arguments, after `--`.
     #[arg(last = true, required = true)]
