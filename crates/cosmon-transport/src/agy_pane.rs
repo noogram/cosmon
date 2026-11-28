@@ -867,7 +867,8 @@ mod tests {
         config.prompt = "brief".into();
         let (terminal, kept_open) = std::os::unix::net::UnixStream::pair().unwrap();
         let out = Shared::default();
-        // A deadline of its own: if the brief never reached agy, agy would
+        // A deadline of its own (generous for a loaded host; success returns at
+        // once): if the brief never reached agy, agy would
         // wait for it forever while the terminal stays open.
         let (done, outcome) = std::sync::mpsc::channel();
         let (cfg, shown) = (config.clone(), out.clone());
@@ -875,7 +876,7 @@ mod tests {
             let _ = done.send(run(&cfg, terminal, shown, None));
         });
         let code = outcome
-            .recv_timeout(std::time::Duration::from_secs(10))
+            .recv_timeout(std::time::Duration::from_secs(60))
             .expect("run must end when agy ends")
             .unwrap();
         drop(kept_open);

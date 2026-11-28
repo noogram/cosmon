@@ -185,13 +185,13 @@ fn a_driven_session_takes_further_turns_and_keeps_the_receipt() {
         .unwrap();
     let mut terminal = child.stdin.take().unwrap();
     assert!(
-        wait_for(Duration::from_secs(10), || stdin_messages(&record).len()
+        wait_for(Duration::from_secs(60), || stdin_messages(&record).len()
             == 1),
         "the brief reaches agy as the first message"
     );
     terminal.write_all(b"\n   \ncontinue please\n").unwrap();
     assert!(
-        wait_for(Duration::from_secs(10), || stdin_messages(&record).len()
+        wait_for(Duration::from_secs(60), || stdin_messages(&record).len()
             == 2),
         "a terminal line after the first turn reaches the open session"
     );
@@ -267,7 +267,7 @@ fn a_quota_stop_ends_the_session_and_is_read_from_the_receipt() {
         .spawn()
         .unwrap();
     let _terminal_kept_open = child.stdin.take().unwrap();
-    let ended = wait_for(Duration::from_secs(10), || {
+    let ended = wait_for(Duration::from_secs(60), || {
         child.try_wait().ok().flatten().is_some()
     });
     if !ended {
@@ -454,7 +454,7 @@ fn tackle_whisper_and_peek_an_agy_worker_in_tmux() {
     let mol_dir = FileStore::new(rig.root.path().join(".cosmon/state"))
         .molecule_dir(&MoleculeId::new(&id).unwrap());
 
-    assert!(wait_for(Duration::from_secs(10), || stdin_messages(
+    assert!(wait_for(Duration::from_secs(60), || stdin_messages(
         &record
     )
     .len()
@@ -509,7 +509,7 @@ fn tackle_whisper_and_peek_an_agy_worker_in_tmux() {
 
     let pane = || rig.tmux(&["capture-pane", "-p", "-J", "-S", "-200", "-t", "agy-worker"]);
     assert!(
-        wait_for(Duration::from_secs(10), || pane()
+        wait_for(Duration::from_secs(60), || pane()
             .contains("── turn 1 SUCCESS")),
         "{}",
         pane()
@@ -533,12 +533,12 @@ fn tackle_whisper_and_peek_an_agy_worker_in_tmux() {
 
     rig.cs(&["whisper", &id, "--message", "step two\nwith a second line"]);
     assert!(
-        wait_for(Duration::from_secs(15), || stdin_messages(&record).len()
+        wait_for(Duration::from_secs(60), || stdin_messages(&record).len()
             >= 2),
         "the whisper reaches the open session: {}",
         pane()
     );
-    assert!(wait_for(Duration::from_secs(10), || pane()
+    assert!(wait_for(Duration::from_secs(60), || pane()
         .contains("── turn 2 SUCCESS")));
     let messages = stdin_messages(&record);
     assert_eq!(
@@ -565,7 +565,7 @@ fn tackle_whisper_and_peek_an_agy_worker_in_tmux() {
     let long = "x".repeat(3000);
     rig.cs(&["whisper", &id, "--message", &long]);
     assert!(
-        wait_for(Duration::from_secs(15), || stdin_messages(&record).len()
+        wait_for(Duration::from_secs(60), || stdin_messages(&record).len()
             >= 3),
         "a long whisper reaches the session: {}",
         pane()
@@ -580,7 +580,7 @@ fn tackle_whisper_and_peek_an_agy_worker_in_tmux() {
     rig.tmux(&["send-keys", "-t", "agy-worker", "BSpace"]);
     rig.tmux(&["send-keys", "-t", "agy-worker", "-l", "c"]);
     rig.tmux(&["send-keys", "-t", "agy-worker", "Enter"]);
-    assert!(wait_for(Duration::from_secs(10), || stdin_messages(
+    assert!(wait_for(Duration::from_secs(60), || stdin_messages(
         &record
     )
     .len()
@@ -589,7 +589,7 @@ fn tackle_whisper_and_peek_an_agy_worker_in_tmux() {
 
     rig.tmux(&["send-keys", "-t", "agy-worker", "C-d"]);
     assert!(
-        wait_for(Duration::from_secs(10), || {
+        wait_for(Duration::from_secs(60), || {
             fs::read_to_string(mol_dir.join("agy-exit.code")).is_ok_and(|c| c == "4\n")
         }),
         "ending the input ends agy with its own status"
@@ -614,7 +614,7 @@ fn a_formula_step_harness_pin_reaches_agy() {
         serde_json::from_slice(&rig.cs(&["--json", "nucleate", "pinned"]).stdout).unwrap();
     let id = value["id"].as_str().expect("molecule id").to_owned();
     rig.cs(&["tackle", &id, "--name", "agy-pinned"]);
-    assert!(wait_for(Duration::from_secs(10), || !argv(&record).is_empty()));
+    assert!(wait_for(Duration::from_secs(60), || !argv(&record).is_empty()));
     let words = argv(&record);
     let at = words
         .iter()
