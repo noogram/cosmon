@@ -49,6 +49,18 @@ pub use crate::spawn::AdapterTelemetry;
 /// opencode transport emits.
 pub const ADAPTER_NAME: &str = "opencode";
 
+/// Per-molecule binding from an `OpenCode` worker to its session lookup title.
+pub const SESSION_BINDING_FILE: &str = "opencode-session.json";
+
+/// Local usage binding written by the dispatcher and consumed by the reader.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct OpencodeSessionBinding {
+    /// The cognition worker that owns the session.
+    pub worker_id: WorkerId,
+    /// A fresh title passed to `OpenCode` on this launch.
+    pub title: String,
+}
+
 /// Error type for opencode adapter operations.
 #[derive(Debug, thiserror::Error)]
 pub enum OpencodeError {
@@ -101,6 +113,8 @@ pub struct OpencodeSessionConfig {
     /// cosmon holds no provider mapping, so a bare id is passed as given and
     /// opencode's own resolution decides whether it names a model.
     pub model: Option<String>,
+    /// Per-launch title used to match this worker to its native session.
+    pub session_title: Option<String>,
     /// Optional IFBDD telemetry context.
     pub telemetry: Option<AdapterTelemetry>,
     /// Optional pre-existing worker the spawn path detected.
@@ -164,7 +178,7 @@ pub fn spawn_opencode_session_witnessed(
 
 /// Build the shell command line [`spawn_opencode_session`] hands to tmux.
 ///
-/// Shape: `opencode run [--model <model>] ['<prompt>']`. Split out as a pure
+/// Shape: `opencode run [--title <title>] [--model <model>] ['<prompt>']`. Split out as a pure
 /// function so the realized argv — not the `ModelSelected` event, which is
 /// emitted whether or not the process was told — is what a test asserts.
 /// The model flag precedes the positional message so a prompt starting with
@@ -173,6 +187,10 @@ pub fn spawn_opencode_session_witnessed(
 pub fn build_opencode_command(config: &OpencodeSessionConfig) -> String {
     let mut cmd = shell_escape(&config.binary.to_string_lossy());
     cmd.push_str(" run");
+    if let Some(title) = &config.session_title {
+        cmd.push_str(" --title ");
+        cmd.push_str(&shell_escape(title));
+    }
     if let Some(ref model) = config.model {
         cmd.push_str(" --model ");
         cmd.push_str(&shell_escape(model));
@@ -375,6 +393,7 @@ mod tests {
             binary: PathBuf::from("opencode"),
             prompt: Some("hello".into()),
             model: None,
+            session_title: None,
             telemetry: None,
             pre_existing_worker: None,
             environment: Vec::new(),
@@ -392,6 +411,7 @@ mod tests {
             binary: PathBuf::from("opencode"),
             prompt: Some("do it".into()),
             model: model.map(str::to_owned),
+            session_title: None,
             telemetry: None,
             pre_existing_worker: None,
             environment: Vec::new(),

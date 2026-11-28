@@ -131,6 +131,7 @@ mod tests {
             energy_cost: cosmon_observability::EnergyCost::Unknown,
             usage: Vec::new(),
             agy_receipt: None,
+            opencode: None,
             context_window: None,
             latest_turn_input_tokens: None,
             session: None,

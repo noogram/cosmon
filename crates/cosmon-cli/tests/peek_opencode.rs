@@ -151,7 +151,10 @@ fn an_unbound_worker_does_not_borrow_a_session() -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;
     seed(tmp.path(), &serde_json::from_str(ASSISTANT)?, false)?;
     let text = cs(tmp.path(), &["peek", "--no-tui", "--once", "--no-tmux"])?;
-    assert!(text.contains("opencode IN/CACHED/OUT/RSN -/-/-/-"), "{text}");
+    assert!(
+        text.contains("opencode IN/CACHED/OUT/RSN -/-/-/-"),
+        "{text}"
+    );
     let doc: Value = serde_json::from_str(&cs(tmp.path(), &["peek", "--json"])?)?;
     assert_eq!(doc["molecules"][0]["usage"], json!([]), "{doc}");
     Ok(())
@@ -178,5 +181,20 @@ fn a_terminal_rate_refusal_is_visible_without_inventing_usage() -> anyhow::Resul
     let pulse: Value = serde_json::from_str(&cs(tmp.path(), &["pulse", "--json"])?)?;
     assert_eq!(pulse["worker_usage"][0]["opencode"], row["opencode"]);
     assert!(pulse["worker_usage"][0]["usage"].is_null());
+    Ok(())
+}
+
+#[test]
+fn ambiguous_titles_fail_closed_even_with_a_valid_binding() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    seed(tmp.path(), &serde_json::from_str(ASSISTANT)?, true)?;
+    let db = Connection::open(tmp.path().join("opencode.db"))?;
+    db.execute(
+        "INSERT INTO session_v2 VALUES ('duplicate', ?1, NULL)",
+        [TITLE],
+    )?;
+    let doc: Value = serde_json::from_str(&cs(tmp.path(), &["peek", "--json"])?)?;
+    assert_eq!(doc["molecules"][0]["usage"], json!([]), "{doc}");
+    assert_eq!(doc["molecules"][0]["opencode"], json!({}), "{doc}");
     Ok(())
 }

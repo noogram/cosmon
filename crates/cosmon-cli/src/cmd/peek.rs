@@ -31,12 +31,13 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
 use colored::Colorize;
-use cosmon_core::id::MoleculeId;
+use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::molecule::{MoleculeStatus, Phase};
 use cosmon_core::run_state::GhostKind;
 use cosmon_filestore::FileStore;
 use cosmon_observability::account_usage::AccountWindow;
 use cosmon_observability::agy::{AgyReceipt, AgyTokenCounts};
+use cosmon_observability::opencode::{OpencodeRefusalKind, OpencodeStatus};
 use cosmon_state::{MoleculeFilter, StateStore};
 use cosmon_transport::TmuxBackend;
 
@@ -764,6 +765,9 @@ struct PeekMoleculeJson {
     /// Antigravity's counters before canonical usage normalization.
     #[serde(skip_serializing_if = "Option::is_none")]
     agy_usage: Option<AgyTokenCounts>,
+    /// `OpenCode`'s observed provider/model and any terminal refusal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    opencode: Option<OpencodeStatus>,
     /// Provider quota evidence for a stopped worker.
     #[serde(skip_serializing_if = "Option::is_none")]
     ghost: Option<GhostKind>,
@@ -867,17 +871,15 @@ pub(crate) fn energy_accounts<'a>(
     cosmon_observability::account_usage::project_accounts(&records, now)
 }
 
-/// Read the fleet in `state_dir` and project its accounts at `now`.
-pub(crate) fn live_accounts(
+/// Read the fleet in `state_dir` through the shared adapter energy probe.
+pub(crate) fn live_worker_energy(
     state_dir: &Path,
     backends: &[TmuxBackend],
-    now: DateTime<Utc>,
-) -> Vec<AccountWindow> {
+) -> HashMap<WorkerId, crate::energy_probe::WorkerEnergy> {
     let Ok(fleet) = FileStore::new(state_dir).load_fleet() else {
-        return Vec::new();
+        return HashMap::new();
     };
-    let energy = crate::energy_probe::load_worker_energy(state_dir, backends, &fleet);
-    energy_accounts(energy.values(), now)
+    crate::energy_probe::load_worker_energy(state_dir, backends, &fleet)
 }
 
 /// Human lines for `accounts`: one `account …` line per window, followed by
@@ -998,6 +1000,11 @@ fn snapshot_to_json(
                 .agy_receipt
                 .as_ref()
                 .and_then(|receipt| receipt.quota_stop.as_ref());
+            let opencode_quota = row
+                .opencode
+                .as_ref()
+                .and_then(|status| status.refusal)
+                .is_some_and(|refusal| refusal.kind == OpencodeRefusalKind::QuotaExhausted);
             Some(PeekMoleculeJson {
                 id: row.mol_id.clone(),
                 project: row.project.clone(),
@@ -1008,7 +1015,8 @@ fn snapshot_to_json(
                 updated_at: mol.updated_at,
                 usage: row.usage,
                 agy_usage: row.agy_receipt.as_ref().and_then(|receipt| receipt.usage),
-                ghost: quota.map(|_| GhostKind::QuotaExhausted),
+                opencode: row.opencode,
+                ghost: (quota.is_some() || opencode_quota).then_some(GhostKind::QuotaExhausted),
                 quota_reset_delay: quota.and_then(|stop| stop.reset_delay.clone()),
             })
         })
@@ -1077,17 +1085,19 @@ fn run_canonical_snapshot(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Track only changed receipts in the plaintext follow stream.
-struct AgyReceiptWatch {
+/// Track only changed adapter readings in the plaintext follow stream.
+struct ReceiptWatch {
     fold: crate::energy_probe::JournalFold,
     previous: HashMap<MoleculeId, AgyReceipt>,
+    previous_opencode: HashMap<MoleculeId, String>,
 }
 
-impl AgyReceiptWatch {
+impl ReceiptWatch {
     fn new(state_dir: &Path) -> Self {
         Self {
             fold: crate::energy_probe::JournalFold::new(state_dir),
             previous: HashMap::new(),
+            previous_opencode: HashMap::new(),
         }
     }
 
@@ -1101,14 +1111,33 @@ impl AgyReceiptWatch {
     ) -> std::io::Result<()> {
         self.fold.catch_up();
         let mut current = HashMap::new();
+        let mut current_opencode = HashMap::new();
         let adapters: BTreeMap<_, _> = self.fold.last_adapters().into_iter().collect();
         for (id, adapter) in adapters {
-            if adapter != "agy"
-                || !snapshot
-                    .molecules
-                    .get(&id)
-                    .is_some_and(|row| phase.matches_molecule(row.status, row.archived))
-            {
+            let Some(row) = snapshot
+                .molecules
+                .get(&id)
+                .filter(|row| phase.matches_molecule(row.status, row.archived))
+            else {
+                continue;
+            };
+            if adapter == "opencode" {
+                if let Some(worker) = &row.assigned_worker {
+                    let energy =
+                        crate::energy_probe::read_opencode_worker_energy(state_dir, &id, worker);
+                    let status = energy.opencode.unwrap_or_default();
+                    let line =
+                        status.format_usage(energy.usage.as_ref(), |count| count.to_string(), "  ");
+                    if self.previous_opencode.get(&id) != Some(&line) {
+                        clear_line(stdout, tty)?;
+                        writeln!(stdout, "~ {id} opencode IN/CACHED/OUT/RSN {line}")?;
+                        stdout.flush()?;
+                    }
+                    current_opencode.insert(id, line);
+                }
+                continue;
+            }
+            if adapter != "agy" {
                 continue;
             }
             let receipt = crate::energy_probe::read_agy_receipt(state_dir, &id);
@@ -1128,6 +1157,7 @@ impl AgyReceiptWatch {
             current.insert(id, receipt);
         }
         self.previous = current;
+        self.previous_opencode = current_opencode;
         Ok(())
     }
 }
@@ -1162,8 +1192,8 @@ pub(crate) fn run_no_tui(ctx: &Context, opts: &NoTuiOptions) -> anyhow::Result<(
         }
     };
     print_baseline(&mut stdout, tty, Utc::now(), &baseline)?;
-    let mut agy_receipts = (opts.label == "peek").then(|| AgyReceiptWatch::new(&state_dir));
-    if let Some(receipts) = &mut agy_receipts {
+    let mut receipts_watch = (opts.label == "peek").then(|| ReceiptWatch::new(&state_dir));
+    if let Some(receipts) = &mut receipts_watch {
         receipts.print_changes(
             &state_dir,
             &baseline.snapshot,
@@ -1183,7 +1213,8 @@ pub(crate) fn run_no_tui(ctx: &Context, opts: &NoTuiOptions) -> anyhow::Result<(
     };
     let mut last_accounts = Vec::new();
     if opts.label == "peek" {
-        let accounts = live_accounts(&state_dir, &account_backends, Utc::now());
+        let energy = live_worker_energy(&state_dir, &account_backends);
+        let accounts = energy_accounts(energy.values(), Utc::now());
         print_account_lines(&mut stdout, tty, &accounts)?;
         last_accounts = account_fingerprint(&accounts);
     }
@@ -1260,7 +1291,7 @@ pub(crate) fn run_no_tui(ctx: &Context, opts: &NoTuiOptions) -> anyhow::Result<(
             Tier::Poll => {
                 let outcome = poll_and_diff(&store, prev.as_ref())?;
                 print_events(&mut stdout, tty, Utc::now(), &outcome.events)?;
-                if let Some(receipts) = &mut agy_receipts {
+                if let Some(receipts) = &mut receipts_watch {
                     receipts.print_changes(
                         &state_dir,
                         &outcome.snapshot,
@@ -1363,7 +1394,7 @@ fn emit_energy_ticks(
         last_energy.insert(wid_s.clone(), usage.clone());
 
         let _ = cosmon_state::event_log::emit_one(events_path, event, None);
-        if e.agy_receipt.is_some() {
+        if e.agy_receipt.is_some() || e.opencode.is_some() {
             continue;
         }
 

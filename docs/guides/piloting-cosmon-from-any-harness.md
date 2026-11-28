@@ -258,6 +258,21 @@ The native home. Two things make it the richest aperture:
 
 ---
 
+### OpenCode 2
+
+OpenCode can run a pilot interactively through its own TUI. With version
+2.2.5, shell tools run on the OpenCode service. The client can forward its
+launch environment to that service, but the service uses the native session
+ID internally and does not pass it to the shell. A launch marker would
+identify the terminal client, even when it switches between native sessions.
+Cosmon therefore leaves OpenCode out of `cs sessions launch` until it can
+bind tool calls and callbacks to the active native session. A pilot can
+still invoke the CLI and MCP tools from OpenCode using the manual workflow
+above.
+
+[OpenCode 2.2.5 interactive session setup](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/cli/src/mini.ts)
+and [shell process environment](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/core/src/shell.ts).
+
 ### 3.6 agy (Google Antigravity CLI)
 
 Cosmon launches `agy` as a pilot through `cs sessions launch agy -- <ARGS>`,
