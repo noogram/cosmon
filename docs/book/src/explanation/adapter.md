@@ -150,7 +150,9 @@ Further points:
 
 - **Interaction.** The session stays open after the brief's turn, like a
   claude or codex worker. Type into the pane (`cs peek`, then attach) or use
-  `cs whisper <id> --message …`. The worker ends its molecule with
+  `cs whisper <id> --message …`. A line sent while agy is in a turn is run
+  after that turn ends, not injected into it (measured on agy 1.5.19). The
+  worker ends its molecule with
   `cs complete`; the pane stays open until `cs done` ends the session. Ctrl-D
   in the pane closes agy's input, and agy exits after its current turn.
 - **Effort.** `--harness effort=<low|medium|high|xhigh|max>` renders
