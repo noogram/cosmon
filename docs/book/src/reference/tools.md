@@ -1527,9 +1527,8 @@ Refuses unless the target pane's foreground command has an allowed pane
 signature. Built-in signatures: claude, claude*, node, <version>, codex,
 codex*, agy, and cs (an agy worker's pane runs the `cs agy-pane` driver, which
 sends each submitted line to agy as the next turn). A money-stake marker or a
-recognised unknown confirmation/menu widget
-refuses with exit 5; unknown means the widget is real but its choice is not
-safe to infer. Ordinary output without those signals is delivered. Routine
+recognised unknown confirmation/menu widget refuses with exit 5; unknown means
+the widget is real but its choice is not safe to infer. Ordinary output without those signals is delivered. Routine
 permission prompts remain deliverable. A refusal prints the matching rule and
 pane tail lines so the operator can inspect the choice. If no tmux session
 of the recorded name exists (killed or renamed), it refuses with exit 6
