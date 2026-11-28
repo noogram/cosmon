@@ -193,9 +193,15 @@ fn install_stub_harnesses(project_root: &Path) -> std::path::PathBuf {
     fs::create_dir_all(&bin_dir).unwrap();
     for (name, banner) in [("aider", "Aider v0.0.0"), ("opencode", "OpenCode v0.0.0")] {
         let path = bin_dir.join(name);
+        let capture_title = if name == "opencode" {
+            r#"if [ "$1:$2" = 'run:--title' ]; then printf '%s' "$3" > opencode-title; fi
+"#
+        } else {
+            ""
+        };
         fs::write(
             &path,
-            format!("#!/bin/sh\nprintf '{banner}\\n'\nexec sleep 600\n"),
+            format!("#!/bin/sh\n{capture_title}printf '{banner}\\n'\nexec sleep 600\n"),
         )
         .unwrap();
         let mut permissions = fs::metadata(&path).unwrap().permissions();
@@ -512,6 +518,18 @@ fn tackle_honours_durable_molecule_adapter_pin_and_explicit_override() {
             String::from_utf8_lossy(&tackled.stderr)
         );
         assert_eq!(process_adapter(&state_dir, mol_id), expected);
+        if expected == "opencode" {
+            let dir = state_dir.join("fleets/default/molecules").join(mol_id);
+            let state: serde_json::Value =
+                serde_json::from_slice(&fs::read(dir.join("state.json")).unwrap()).unwrap();
+            let binding: serde_json::Value =
+                serde_json::from_slice(&fs::read(dir.join("opencode-session.json")).unwrap())
+                    .unwrap();
+            assert_eq!(binding["worker_id"], state["assigned_worker"]);
+            let sent = fs::read_to_string(tmp.path().join("opencode-title")).unwrap();
+            assert_eq!(binding["title"], sent);
+            assert!(!sent.is_empty());
+        }
         let event = single_adapter_selected_event(&state_dir, mol_id);
         let expected_source = if explicit.is_some() {
             "cli"

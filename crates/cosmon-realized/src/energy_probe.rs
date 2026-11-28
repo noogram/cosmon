@@ -38,14 +38,20 @@ use cosmon_core::model_realization::{
 use cosmon_core::plan_observation::{PlanObservationStore, PlanSource};
 use cosmon_core::price_manifest::{bundled_price_manifest, value_model_segments};
 use cosmon_core::usage::{
-    ApiEquivalent, Availability, ModelUsageSegment, ObservationProvenance, ObservationScope,
-    PlanApplicability, PlanUsage, TokenCount as UsageTokenCount, TokenUsage, UnavailableReason,
-    UsageHistory, UsageObservationId, UsageRecord, UsageSubject, CURRENT_USAGE_SCHEMA_VERSION,
+    ApiEquivalent, Availability, ModelUsageSegment, NonNegativeFinite, ObservationProvenance,
+    ObservationScope, PlanApplicability, PlanUsage, PricingBasis, PricingCoverage,
+    TokenCount as UsageTokenCount, TokenUsage, UnavailableReason, UsageHistory, UsageObservationId,
+    UsageRecord, UsageSubject, CURRENT_USAGE_SCHEMA_VERSION,
 };
 use cosmon_observability::agy::{parse_agy_receipt, AgyReceipt, AgyTokenCounts};
+use cosmon_observability::opencode::{OpencodeReading, OpencodeStatus};
 use cosmon_state::events::worker_spawn::ModelAssessmentSnapshot;
 use cosmon_state::plan_observation::FilePlanObservationStore;
 use sha2::{Digest as _, Sha256};
+
+// The CLI's binary unit tests include this module by path.
+#[path = "opencode.rs"]
+mod opencode;
 
 /// Per-worker aggregated energy values.
 #[derive(Clone, Debug, Default)]
@@ -69,6 +75,8 @@ pub struct WorkerEnergy {
     pub usage: Option<UsageRecord>,
     /// Raw Antigravity counters and quota information for the display.
     pub agy_receipt: Option<AgyReceipt>,
+    /// Native `OpenCode` model and terminal refusal, when this is an `OpenCode` worker.
+    pub opencode: Option<OpencodeStatus>,
     /// Model context-window capacity, when the adapter reports it.
     pub context_window: Option<u64>,
     /// Input tokens in the last reported turn, including cached input.
@@ -425,6 +433,11 @@ pub fn load_worker_energy_with_adapters<S: std::hash::BuildHasher>(
                 .get(worker_id)
                 .and_then(|(cwd, _)| codex_sessions.get(cwd.to_string_lossy().as_ref()))
                 .and_then(|session| read_codex_worker_energy(session, worker_id))
+        } else if adapter == Some("opencode") {
+            data.current_molecule
+                .as_ref()
+                .filter(|_| data.worker_role == cosmon_core::worker::WorkerRole::Cognition)
+                .map(|molecule| read_opencode_worker_energy(state_dir, molecule, worker_id))
         } else if adapter == Some("agy") {
             data.current_molecule
                 .as_ref()
@@ -675,6 +688,7 @@ fn read_claude_worker_energy(
         subscription: None,
         usage: canonical_usage,
         agy_receipt: None,
+        opencode: None,
         context_window: None,
         latest_turn_input_tokens: session_log.turns.last().and_then(|turn| {
             turn.input_tokens
@@ -765,6 +779,7 @@ fn read_codex_worker_energy(session_path: &Path, worker_id: &WorkerId) -> Option
         subscription: snapshot.subscription,
         usage: canonical_usage,
         agy_receipt: None,
+        opencode: None,
         context_window: snapshot.model_context_window,
         latest_turn_input_tokens: snapshot.latest_turn_input_tokens,
     })
@@ -872,12 +887,97 @@ fn agy_usage_record(
     history_digest.update(init_count.to_le_bytes());
     finalize_usage_record(
         worker_id,
+        "google",
         history_digest.finalize(),
         tokens,
         api_equivalent,
         unavailable_plan(),
         |history_id, api, plan| serde_json::to_vec(&(history_id, counts, api, plan)),
     )
+}
+
+/// Read the `OpenCode` worker's exact session binding without a tmux pane.
+#[must_use]
+pub fn read_opencode_worker_energy(
+    state_dir: &Path,
+    molecule: &MoleculeId,
+    worker: &WorkerId,
+) -> WorkerEnergy {
+    let mut energy = WorkerEnergy {
+        opencode: Some(OpencodeStatus::default()),
+        ..WorkerEnergy::default()
+    };
+    let Some(session) = opencode::read_session(state_dir, molecule, worker) else {
+        return energy;
+    };
+    let OpencodeReading {
+        totals,
+        provider,
+        status,
+    } = session.reading;
+    energy.opencode = Some(status);
+    let Some(totals) = totals else {
+        return energy;
+    };
+    let measured = |value: Option<u64>| {
+        value.map_or(
+            UsageTokenCount::Unavailable {
+                reason: UnavailableReason::NotObserved,
+            },
+            |tokens| UsageTokenCount::Measured { tokens },
+        )
+    };
+    let provenance = ObservationProvenance {
+        source: "opencode_session_message".to_owned(),
+        provider,
+        observed_at: None,
+        captured_at: None,
+        scope: ObservationScope::UsageHistory,
+    };
+    let tokens = TokenUsage {
+        input_tokens: measured(totals.input),
+        cached_input_tokens: measured(totals.cache_read),
+        cache_write_tokens: measured(totals.cache_write),
+        output_tokens: measured(totals.output),
+        reasoning_output_tokens: measured(totals.reasoning),
+        model_segments: Availability::Unavailable {
+            reason: UnavailableReason::NotObserved,
+        },
+        provenance: provenance.clone(),
+    };
+    let api_equivalent = totals
+        .cost_usd
+        .and_then(|usd| NonNegativeFinite::new(usd, "opencode cost").ok())
+        .map_or(
+            ApiEquivalent::Unavailable {
+                reason: UnavailableReason::NotObserved,
+            },
+            |amount_usd| ApiEquivalent::Estimated {
+                amount_usd,
+                coverage: PricingCoverage::LegacyUnknown,
+                basis: PricingBasis::LegacyUnknown,
+                provenance,
+            },
+        );
+    let mut history_digest = Sha256::new();
+    history_digest.update(session.db_path.as_os_str().as_encoded_bytes());
+    history_digest.update([0]);
+    history_digest.update(session.session_key.as_bytes());
+    energy.usage = finalize_usage_record(
+        worker,
+        "opencode",
+        history_digest.finalize(),
+        tokens,
+        api_equivalent.clone(),
+        unavailable_plan(),
+        |history_id, api, plan| serde_json::to_vec(&(history_id, totals, api, plan)),
+    );
+    energy.input = TokenCount::new(totals.input.unwrap_or_default());
+    energy.cached_input = TokenCount::new(totals.cache_read.unwrap_or_default());
+    energy.output = TokenCount::new(totals.output.unwrap_or_default());
+    energy.reasoning_output = TokenCount::new(totals.reasoning.unwrap_or_default());
+    energy.api_equivalent = Some(api_equivalent);
+    energy
 }
 
 fn unavailable_plan() -> PlanUsage {
@@ -954,6 +1054,7 @@ fn build_usage_record(
     };
     finalize_usage_record(
         worker_id,
+        provider,
         Sha256::digest(history_path.as_os_str().as_encoded_bytes()),
         tokens,
         api_equivalent,
@@ -975,6 +1076,7 @@ fn build_usage_record(
 
 fn finalize_usage_record(
     worker_id: &WorkerId,
+    history_namespace: &str,
     history_digest: sha2::digest::Output<Sha256>,
     tokens: TokenUsage,
     api_equivalent: ApiEquivalent,
@@ -982,8 +1084,7 @@ fn finalize_usage_record(
     identity: impl FnOnce(&str, &ApiEquivalent, &PlanUsage) -> serde_json::Result<Vec<u8>>,
 ) -> Option<UsageRecord> {
     let core_worker = cosmon_core::id::WorkerId::new(worker_id.as_str()).ok()?;
-    let provider = tokens.provenance.provider.as_deref()?;
-    let history_id = format!("{provider}-{history_digest:x}");
+    let history_id = format!("{history_namespace}-{history_digest:x}");
     let mut identity_plan = plan.clone();
     for window in &mut identity_plan.windows {
         window.provenance.captured_at = None;
@@ -2787,6 +2888,7 @@ mod tests {
             subscription: None,
             usage: None,
             agy_receipt: None,
+            opencode: None,
             context_window: Some(1_000),
             latest_turn_input_tokens: Some(80),
         };

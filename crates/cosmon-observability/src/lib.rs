@@ -38,6 +38,7 @@ pub mod agy;
 pub mod event;
 pub mod fixture;
 pub mod molecule;
+pub mod opencode;
 pub mod render;
 pub mod replay;
 pub mod sensorium;

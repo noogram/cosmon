@@ -15,6 +15,7 @@ cosmon-filestore.workspace = true
 cosmon-observability.workspace = true
 cosmon-state.workspace = true
 cosmon-transport.workspace = true
+rusqlite.workspace = true
 sha2.workspace = true
 serde_json.workspace = true
 

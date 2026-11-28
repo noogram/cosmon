@@ -19,6 +19,7 @@ this stage.
 
 ## [Unreleased]
 
+- `cs peek` and `cs pulse --json` show OpenCode 2 worker tokens, reported cost, provider/model, and terminal rate-limit or quota refusals (#243).
 - `cs peek` shows agy token usage and quota stops with the provider's reset delay. The existing usage event stream supplies agy totals to `cs pulse` (#241).
 - An agy worker's pane is readable and stays open after the brief: agy runs in its multi-turn print mode under a hidden `cs agy-pane` driver, a line typed into the pane or sent with `cs whisper` is the next turn, and the raw stream is still appended to `agy-stream.jsonl`, so `cs peek` keeps reading usage and quota stops. The pane ends when agy exits, with agy's exit status in the pane and in `agy-exit.code` (#240).
 - `cs tackle --harness` and a formula step's `[steps.harness]` reach agy as `--<key> <value>`, e.g. `--harness effort=high`; agy refuses at launch an effort that contradicts the pinned model id's effort suffix (#245).
