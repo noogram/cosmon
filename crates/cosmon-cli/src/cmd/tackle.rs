@@ -5222,6 +5222,7 @@ pub(super) fn spawn_and_prompt(
             prompt,
             adapter_entry,
             preferred_model,
+            &harness_argv(harness_args),
             &mut terminal,
         )
         .map(|()| SpawnOutcome::default()),
@@ -7989,6 +7990,8 @@ fn opencode_session_config(
     }
 }
 
+// The launch inputs travel as one flat argument list, like the opencode sibling.
+#[allow(clippy::too_many_arguments)]
 fn agy_session_config(
     socket: &str,
     session_name: &str,
@@ -7996,14 +7999,18 @@ fn agy_session_config(
     prompt: &str,
     environment: Vec<(String, String)>,
     preferred_model: Option<&str>,
+    harness_args: &[String],
+    driver: std::path::PathBuf,
 ) -> cosmon_transport::agy::AgySessionConfig {
     cosmon_transport::agy::AgySessionConfig {
         socket: socket.to_owned(),
         session_name: session_name.to_owned(),
         work_dir: worktree_path.to_string_lossy().into_owned(),
         binary: std::path::PathBuf::from("agy"),
+        driver,
         prompt: Some(prompt.to_owned()),
         model: preferred_model.map(str::to_owned),
+        harness_args: harness_args.to_vec(),
         telemetry: None,
         pre_existing_worker: None,
         environment,
@@ -8113,6 +8120,7 @@ fn spawn_agy_and_prompt(
     prompt: &str,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
+    harness_args: &[String],
     terminal: &mut Option<cosmon_core::terminal::TerminalIdentity>,
 ) -> anyhow::Result<()> {
     use cosmon_transport::agy;
@@ -8126,6 +8134,10 @@ fn spawn_agy_and_prompt(
         |value| Some(value.model.clone()),
     );
     let environment = gateway.map_or_else(Vec::new, |value| value.environment);
+    // The pane runs this same `cs` binary's hidden `agy-pane` driver (#240).
+    let driver = std::env::current_exe().map_err(|e| {
+        anyhow::anyhow!("cs tackle: cannot locate the cs binary for the agy pane driver: {e}")
+    })?;
     let config = agy_session_config(
         backend.socket(),
         session_name,
@@ -8133,6 +8145,8 @@ fn spawn_agy_and_prompt(
         prompt,
         environment,
         effective_model.as_deref(),
+        harness_args,
+        driver,
     );
 
     *terminal = agy::spawn_agy_session_witnessed(&config, mol_dir)
