@@ -891,6 +891,7 @@ fn unavailable_plan_for(reason: UnavailableReason) -> PlanUsage {
         worker_attributed: Availability::Unavailable {
             reason: UnavailableReason::MissingAttributionEvidence,
         },
+        credits: None,
     }
 }
 

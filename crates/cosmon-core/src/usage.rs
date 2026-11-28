@@ -472,6 +472,26 @@ pub struct WorkerPlanConsumption {
     pub provenance: ObservationProvenance,
 }
 
+/// Credit balance a provider reports beside its rate limits.
+///
+/// It exists because an exhausted window is not the end of the story when the
+/// account can draw on credits (issue #242). Every field is independently
+/// optional: a flag or balance the source omits stays unknown, and a balance
+/// of zero is a measured zero.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanCredits {
+    /// Whether the account holds credits, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_credits: Option<bool>,
+    /// Whether the account's credits are unlimited, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlimited: Option<bool>,
+    /// Remaining balance in the provider's own credit unit, when reported
+    /// and parseable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance: Option<NonNegativeFinite>,
+}
+
 /// Plan applicability, account context, and independent worker attribution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanUsage {
@@ -482,6 +502,11 @@ pub struct PlanUsage {
     pub windows: Vec<PlanWindowObservation>,
     /// Worker-attributed consumption, separate from account occupancy.
     pub worker_attributed: Availability<WorkerPlanConsumption>,
+    /// Account credits reported beside the windows; absent means unknown.
+    /// Omitted from the wire when absent so records written before this
+    /// field existed keep their bytes and their observation ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<PlanCredits>,
 }
 
 /// Versioned canonical usage record.
@@ -988,6 +1013,7 @@ fn unknown_plan(reason: UnavailableReason) -> PlanUsage {
         applicability: PlanApplicability::Unknown { reason },
         windows: Vec::new(),
         worker_attributed: Availability::Unavailable { reason },
+        credits: None,
     }
 }
 
@@ -1075,6 +1101,7 @@ fn legacy_cost_components(
                             UnavailableReason::MissingAttributionEvidence
                         },
                     },
+                    credits: None,
                 },
             )
         }

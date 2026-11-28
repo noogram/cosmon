@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod account_usage;
 pub mod aggregate;
 pub mod agy;
 pub mod event;

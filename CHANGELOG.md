@@ -20,6 +20,7 @@ this stage.
 ## [Unreleased]
 
 - `cs peek` shows agy token usage and quota stops with the provider's reset delay. The existing usage event stream supplies agy totals to `cs pulse` (#241).
+- `cs peek` (TUI, `--no-tui`, `--json`) and `cs pulse` show each codex and claude account window: allowance left, time to reset, pace and projected exhaustion, credits when reported, reading age with stale and reset states, and each worker's token share; unknown stays unknown (#242).
 
 - Integration tests locate prebuilt `cs` and `trunk_lock_holder` artifacts when Cargo uses a separate build directory.
 

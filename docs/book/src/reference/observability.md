@@ -36,6 +36,14 @@ the raw counters in agy_usage alongside the canonical usage record, whose
 input total includes cache reads. Quota refusals show quota-exhausted with
 the reset delay the provider announced, when available.
 
+Provider accounts (codex, claude) appear as account lines under the worker
+strip, in --no-tui output and as accounts[] in --json: allowance left per
+window, time to reset, pace against an even spread (in deficit or in
+reserve, and when the allowance runs out at the current rate), credits when
+the provider reports them, and the reading's age, marked stale after ten
+minutes. --no-tui and JSON add each worker's share of uncached input plus
+output tokens. No rate-limit reading means no account line, never 0%.
+
 The selected dependent's blocked-by detail names a collapsed or frozen
 blocker and the operator gesture that can release or replace the edge.
 
@@ -192,6 +200,10 @@ Traffic light (first-match wins):
 
 Voyant strip: scheduler / drainage / propel / heal / fuel / workers
 A dead subsystem serializes 'off' (red-class) — never silently absent.
+
+Provider accounts: the account lines and accounts[] that `cs peek` shows,
+from the same reader (allowance left, reset, pace, credits, age, worker
+shares). Not on the --swiftbar face.
 
 Exit code: always 0 (read-only, non-blocking — callers use --json state).
 
